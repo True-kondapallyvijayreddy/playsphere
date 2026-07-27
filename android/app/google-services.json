@@ -1,0 +1,40 @@
+{
+  "project_info": {
+    "project_number": "877469780732",
+    "firebase_url": "https://playsphere-aacfb-default-rtdb.firebaseio.com",
+    "project_id": "playsphere-aacfb",
+    "storage_bucket": "playsphere-aacfb.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:877469780732:android:6d048b25265ce26587a579",
+        "android_client_info": {
+          "package_name": "com.company.playsphere"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "877469780732-jh780sprsnaqn59sol95a4fl4aet6hsk.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBgeiFm_fTqTlAReGK3pQFhdNhs_jgj93E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "877469780732-jh780sprsnaqn59sol95a4fl4aet6hsk.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
