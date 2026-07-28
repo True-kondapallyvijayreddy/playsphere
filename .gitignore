@@ -54,3 +54,6 @@ ui-debug.log
 # installed toolchain and the emulator's scratch data are not.
 node_modules/
 test/security/package-lock.json
+
+# Firestore emulator data snapshots (local test data only)
+.emulator-data/

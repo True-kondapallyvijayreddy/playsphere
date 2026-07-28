@@ -24,7 +24,13 @@ android {
         applicationId = "com.company.playsphere"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        // Firebase Auth 23.x declares minSdk 23, so Flutter's default of 21
+        // fails the manifest merge and the Android app cannot be built at all.
+        // Pinned explicitly rather than tracking flutter.minSdkVersion: this
+        // floor is set by our Firebase dependency, not by the Flutter SDK, and
+        // a Flutter upgrade must not silently move it back down.
+        // API 23 (Android 6.0) is ~99% of active devices.
+        minSdk = 23
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
