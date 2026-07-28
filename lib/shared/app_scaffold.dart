@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../core/errors/app_exception.dart';
 import '../core/layout/responsive.dart';
 import '../core/permissions/capability.dart';
 import '../core/providers.dart';
@@ -329,7 +330,7 @@ class AsyncView<T> extends StatelessWidget {
       error: (error, _) => EmptyState(
         icon: Icons.error_outline,
         title: 'Could not load this',
-        message: error.toString(),
+        message: errorMessage(error),
         action: onRetry == null
             ? null
             : FilledButton.tonal(
@@ -341,13 +342,26 @@ class AsyncView<T> extends StatelessWidget {
   }
 }
 
-/// Shows an [AppException]'s message, or a generic fallback for anything
-/// unexpected, without ever leaking a stack trace to a user.
+/// The sentence to show a user for any failure.
+///
+/// [AppException] exists precisely so this is a field access rather than
+/// string surgery. The previous implementation split `toString()` on ': ',
+/// which meant a raw FirebaseException — anything reaching the UI without
+/// passing through `guard`, such as a rules rejection on a direct write —
+/// was rendered to the user as
+/// "[cloud_firestore/permission-denied] The caller does not have permission",
+/// the exact leak the class was introduced to prevent.
+String errorMessage(Object error) {
+  if (error is AppException) return error.message;
+  // Anything else is a bug rather than a condition we modelled, so the user
+  // gets a sentence they can act on and the detail goes to the log.
+  debugPrint('[PlaySphere] unmapped error surfaced to UI: $error');
+  return 'Something went wrong. Please try again.';
+}
+
+/// Shows a failure to the user without ever leaking internals.
 void showError(BuildContext context, Object error) {
-  final message = error is Exception && error.toString().contains(': ')
-      ? error.toString().split(': ').skip(1).join(': ')
-      : 'Something went wrong. Please try again.';
   ScaffoldMessenger.of(context)
     ..hideCurrentSnackBar()
-    ..showSnackBar(SnackBar(content: Text(message)));
+    ..showSnackBar(SnackBar(content: Text(errorMessage(error))));
 }

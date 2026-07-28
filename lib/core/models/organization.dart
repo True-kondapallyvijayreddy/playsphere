@@ -156,6 +156,60 @@ class Organization {
   }
 }
 
+/// What an invite code resolves to, at `inviteCodes/{CODE}`.
+///
+/// Deliberately a separate, tiny, publicly-gettable document rather than a
+/// query over `orgs`. An unlisted club is unreadable to someone who is not yet
+/// a member, so a query could never resolve a code for exactly the people the
+/// code was given to. This carries only what the join card needs to show.
+class InviteTarget {
+  const InviteTarget({
+    required this.code,
+    required this.orgId,
+    required this.orgName,
+    required this.orgType,
+    required this.requiresApprovalToJoin,
+    this.city,
+  });
+
+  final String code;
+  final String orgId;
+  final String orgName;
+  final OrgType orgType;
+
+  /// Drives what the join button says and whether membership is immediate.
+  final bool requiresApprovalToJoin;
+
+  final String? city;
+
+  factory InviteTarget.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
+    final d = doc.data() ?? const {};
+    return InviteTarget(
+      code: doc.id,
+      orgId: Fs.str(d['orgId']),
+      orgName: Fs.str(d['orgName'], 'Unnamed organization'),
+      orgType: OrgType.fromWire(Fs.str(d['orgType'])),
+      requiresApprovalToJoin: Fs.boolean(d['requiresApprovalToJoin'], true),
+      city: Fs.strOrNull(d['city']),
+    );
+  }
+
+  static Map<String, Object?> payload({
+    required String code,
+    required String orgId,
+    required Organization org,
+  }) =>
+      {
+        'code': code,
+        'orgId': orgId,
+        'orgName': org.name,
+        'orgType': org.orgType.wire,
+        'requiresApprovalToJoin': org.requiresApprovalToJoin,
+        'city': org.city,
+        'createdAt': FieldValue.serverTimestamp(),
+      };
+}
+
 /// A person's role inside one organization, at `orgs/{orgId}/members/{uid}`.
 ///
 /// The document id is the uid, which makes "one membership per person per

@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/layout/responsive.dart';
+import '../../core/models/enums.dart';
 import '../../core/models/organization.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
@@ -17,7 +18,7 @@ class JoinOrgScreen extends ConsumerStatefulWidget {
 
 class _JoinOrgScreenState extends ConsumerState<JoinOrgScreen> {
   final _code = TextEditingController();
-  Organization? _found;
+  InviteTarget? _found;
   bool _busy = false;
   String? _notFound;
 
@@ -53,22 +54,28 @@ class _JoinOrgScreenState extends ConsumerState<JoinOrgScreen> {
   }
 
   Future<void> _join() async {
-    final org = _found;
+    final target = _found;
     final user = ref.read(currentUserProvider).valueOrNull;
-    if (org == null || user == null) return;
+    if (target == null || user == null) return;
 
     setState(() => _busy = true);
     try {
-      await ref
-          .read(orgRepositoryProvider)
-          .requestToJoin(orgId: org.id, user: user);
+      // The repository reports the status actually written. The screen used to
+      // announce "You have joined" purely from the club's setting while the
+      // membership was written as pending regardless — the user walked away
+      // believing they were in.
+      final status = await ref.read(orgRepositoryProvider).requestToJoin(
+            orgId: target.orgId,
+            user: user,
+            requiresApproval: target.requiresApprovalToJoin,
+          );
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            org.requiresApprovalToJoin
-                ? 'Request sent. An admin at ${org.name} will approve you.'
-                : 'You have joined ${org.name}.',
+            status == MembershipStatus.active
+                ? 'You have joined ${target.orgName}.'
+                : 'Request sent. An admin at ${target.orgName} will review it.',
           ),
         ),
       );
@@ -82,7 +89,7 @@ class _JoinOrgScreenState extends ConsumerState<JoinOrgScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final org = _found;
+    final target = _found;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Join an organization')),
@@ -132,7 +139,7 @@ class _JoinOrgScreenState extends ConsumerState<JoinOrgScreen> {
                 },
               ),
               const SizedBox(height: 16),
-              if (org == null)
+              if (target == null)
                 FilledButton(
                   onPressed: _busy ? null : _lookup,
                   style: FilledButton.styleFrom(
@@ -144,13 +151,15 @@ class _JoinOrgScreenState extends ConsumerState<JoinOrgScreen> {
                 Card(
                   child: ListTile(
                     leading: CircleAvatar(
-                      child: Text(org.name.characters.first.toUpperCase()),
+                      child: Text(
+                        target.orgName.characters.first.toUpperCase(),
+                      ),
                     ),
-                    title: Text(org.name),
+                    title: Text(target.orgName),
                     subtitle: Text(
                       [
-                        org.orgType.label,
-                        if (org.city != null) org.city!,
+                        target.orgType.label,
+                        if (target.city != null) target.city!,
                       ].join(' · '),
                     ),
                   ),
@@ -164,7 +173,7 @@ class _JoinOrgScreenState extends ConsumerState<JoinOrgScreen> {
                   child: Text(
                     _busy
                         ? 'Sending…'
-                        : org.requiresApprovalToJoin
+                        : target.requiresApprovalToJoin
                             ? 'Request to join'
                             : 'Join',
                   ),

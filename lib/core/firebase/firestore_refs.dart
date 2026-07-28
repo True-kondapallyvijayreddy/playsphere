@@ -23,6 +23,14 @@ class Refs {
   static CollectionReference<Map<String, dynamic>> get orgs =>
       db.collection('orgs');
 
+  /// Public lookup table mapping an invite code to the club it opens.
+  ///
+  /// Exists because resolving a code by querying `orgs` cannot work for an
+  /// unlisted club: the org read rule requires membership the applicant does
+  /// not yet have. Readable by document id only — never listable.
+  static DocumentReference<Map<String, dynamic>> inviteCode(String code) =>
+      db.collection('inviteCodes').doc(code.trim().toUpperCase());
+
   static DocumentReference<Map<String, dynamic>> org(String orgId) =>
       orgs.doc(orgId);
 

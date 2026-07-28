@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/layout/responsive.dart';
+import '../../core/errors/app_exception.dart';
 import '../../core/models/app_user.dart';
 import '../../core/models/enums.dart';
 import '../../core/providers.dart';
@@ -54,7 +55,7 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
     if (_dateOfBirth == null) {
-      showError(context, Exception(': Please enter your date of birth.'));
+      showError(context, const ValidationException('Please enter your date of birth.'));
       return;
     }
 

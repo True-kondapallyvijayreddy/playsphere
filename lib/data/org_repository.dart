@@ -101,6 +101,16 @@ class OrgRepository {
         final batch = Refs.db.batch();
 
         batch.set(orgRef, org.toCreate());
+        // The public code -> club lookup, written atomically with the club so
+        // a code can never point at an organization that does not exist.
+        batch.set(
+          Refs.inviteCode(org.inviteCode),
+          InviteTarget.payload(
+            code: org.inviteCode.toUpperCase(),
+            orgId: orgRef.id,
+            org: org,
+          ),
+        );
         batch.set(
           Refs.member(orgRef.id, founder.uid),
           Membership(
@@ -120,46 +130,92 @@ class OrgRepository {
   Future<void> updateOrganization(Organization org) =>
       guard(() => Refs.org(org.id).update(org.toUpdate()));
 
-  /// Finds an org by its shareable invite code.
+  /// Resolves a shareable invite code to the club it opens.
   ///
-  /// Codes are stored uppercase and compared uppercase, because they get
-  /// typed by hand off a whiteboard and half of those will be lowercase.
-  Future<Organization?> findByInviteCode(String code) => guard(() async {
-        final snap = await Refs.orgs
-            .where('inviteCode', isEqualTo: code.trim().toUpperCase())
-            .limit(1)
-            .get();
-        if (snap.docs.isEmpty) return null;
-        return Organization.fromDoc(snap.docs.first);
+  /// Reads the public `inviteCodes/{CODE}` document rather than querying
+  /// `orgs`. The query could never work for an unlisted club: the org read
+  /// rule requires the caller to be public-visible or already a member, so
+  /// the people who most needed the code — invitees of a private community —
+  /// were told "no organization uses that code".
+  ///
+  /// Codes are uppercased on both write and read: they get typed by hand off
+  /// a whiteboard and half of those will be lowercase.
+  Future<InviteTarget?> findByInviteCode(String code) => guard(() async {
+        final doc = await Refs.inviteCode(code).get();
+        if (!doc.exists) return null;
+        return InviteTarget.fromDoc(doc);
       });
 
-  /// Requests membership. Lands as `pending` unless the org has opted out of
-  /// approval, in which case the rules still write `pending` and an admin's
-  /// auto-approval is expected — a client can never mint itself `active`.
-  Future<void> requestToJoin({
+  /// Joins a club, or applies to.
+  ///
+  /// Returns the status the caller actually ended up in, so the UI can tell
+  /// the truth rather than guessing. Previously this always wrote `pending`
+  /// while the join screen announced "You have joined" whenever the club had
+  /// approval switched off — the user was in fact sitting invisibly in a
+  /// queue nobody was reviewing.
+  ///
+  /// A club that does not require approval grants membership immediately; the
+  /// invite code is the authorization. The security rules enforce both paths
+  /// independently, and neither can mint a role above `member`.
+  Future<MembershipStatus> requestToJoin({
     required String orgId,
     required AppUser user,
+    required bool requiresApproval,
   }) =>
       guard(() async {
+        final status = requiresApproval
+            ? MembershipStatus.pending
+            : MembershipStatus.active;
+
         final existing = await Refs.member(orgId, user.uid).get();
         if (existing.exists) {
           final m = Membership.fromDoc(existing);
+          // Someone declined by mistake must be able to apply again. Their row
+          // is kept for the audit trail, so re-applying is an update back to
+          // pending rather than a fresh create.
+          if (m.status == MembershipStatus.removed) {
+            await Refs.member(orgId, user.uid).update({
+              'status': MembershipStatus.pending.wire,
+              'role': MembershipRole.member.wire,
+              'displayName': user.displayName,
+              'photoUrl': user.photoUrl,
+              'reappliedAt': FieldValue.serverTimestamp(),
+            });
+            return MembershipStatus.pending;
+          }
           throw ValidationException(
-            m.isPending
-                ? 'You have already applied to join. An admin will review it.'
-                : 'You are already a member of this organization.',
+            switch (m.status) {
+              MembershipStatus.pending =>
+                'You have already applied to join. An admin will review it.',
+              MembershipStatus.suspended =>
+                'Your membership here is suspended. Contact an admin.',
+              _ => 'You are already a member of this organization.',
+            },
           );
         }
-        await Refs.member(orgId, user.uid).set(
+
+        final batch = Refs.db.batch();
+        batch.set(
+          Refs.member(orgId, user.uid),
           Membership(
             uid: user.uid,
             orgId: orgId,
             role: MembershipRole.member,
-            status: MembershipStatus.pending,
+            status: status,
             displayName: user.displayName,
             photoUrl: user.photoUrl,
           ).toCreate(),
         );
+        // Joining without approval takes effect immediately, so the roster
+        // count must move with it — the approval path increments on approval
+        // instead.
+        if (status == MembershipStatus.active) {
+          batch.update(Refs.org(orgId), {
+            'memberCount': FieldValue.increment(1),
+          });
+        }
+        await batch.commit();
+        return status;
       });
 
   Future<void> decideMembership({
@@ -197,11 +253,20 @@ class OrgRepository {
     required String uid,
   }) =>
       guard(() async {
+        // Only an active member was ever counted. Decrementing for a pending
+        // applicant drove memberCount below the number of actual members and,
+        // with enough declines, below zero.
+        final doc = await Refs.member(orgId, uid).get();
+        final wasActive = doc.exists &&
+            Membership.fromDoc(doc).status == MembershipStatus.active;
+
         final batch = Refs.db.batch();
         batch.delete(Refs.member(orgId, uid));
-        batch.update(Refs.org(orgId), {
-          'memberCount': FieldValue.increment(-1),
-        });
+        if (wasActive) {
+          batch.update(Refs.org(orgId), {
+            'memberCount': FieldValue.increment(-1),
+          });
+        }
         await batch.commit();
       });
 

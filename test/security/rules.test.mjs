@@ -21,8 +21,10 @@ import {
   initializeTestEnvironment,
 } from '@firebase/rules-unit-testing';
 import {
+  collection,
   collectionGroup,
   doc,
+  getDoc,
   getDocs,
   query,
   setDoc,
@@ -189,6 +191,153 @@ describe('P0-1: organization creation', () => {
       setDoc(
         doc(db, 'orgs', PUBLIC_ORG, 'members', OUTSIDER),
         membership(OUTSIDER, PUBLIC_ORG, 'member', 'pending'),
+      ),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Joining a club — invite codes, auto-approval, re-applying
+// ---------------------------------------------------------------------------
+describe('joining a club', () => {
+  const inviteCode = (orgId, requiresApproval) => ({
+    code: 'ABC234',
+    orgId,
+    orgName: 'Test Organization',
+    orgType: 'school',
+    requiresApprovalToJoin: requiresApproval,
+    city: 'Hyderabad',
+    createdAt: serverTimestamp(),
+  });
+
+  it('lets a founder create the club and its invite code in one batch', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+    batch.set(doc(db, 'inviteCodes', 'ABC234'), inviteCode(PUBLIC_ORG, true));
+    batch.set(
+      doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER),
+      membership(OWNER, PUBLIC_ORG, 'owner'),
+    );
+    await assertSucceeds(batch.commit());
+  });
+
+  it('resolves a code for an UNLISTED club — the case that was broken', async () => {
+    // Querying /orgs by inviteCode could never work here: the org read rule
+    // requires membership the applicant does not yet have.
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PRIVATE_ORG), organization(OWNER, 'unlisted'));
+      await setDoc(doc(db, 'inviteCodes', 'ABC234'), inviteCode(PRIVATE_ORG, true));
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    const snap = await assertSucceeds(getDoc(doc(db, 'inviteCodes', 'ABC234')));
+    assert.equal(snap.data().orgId, PRIVATE_ORG);
+  });
+
+  it('refuses listing every invite code', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'inviteCodes', 'ABC234'), inviteCode(PUBLIC_ORG, true));
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(getDocs(collection(db, 'inviteCodes')));
+  });
+
+  it('grants membership immediately when the club does not require approval', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), {
+        ...organization(OWNER, 'public'),
+        requiresApprovalToJoin: false,
+      });
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertSucceeds(
+      setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OUTSIDER),
+        membership(OUTSIDER, PUBLIC_ORG, 'member', 'active'),
+      ),
+    );
+  });
+
+  it('still refuses self-activation when the club DOES require approval', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OUTSIDER),
+        membership(OUTSIDER, PUBLIC_ORG, 'member', 'active'),
+      ),
+    );
+  });
+
+  it('refuses self-joining at a role above member even with approval off', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), {
+        ...organization(OWNER, 'public'),
+        requiresApprovalToJoin: false,
+      });
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OUTSIDER),
+        membership(OUTSIDER, PUBLIC_ORG, 'admin', 'active'),
+      ),
+    );
+  });
+
+  it('lets someone declined by mistake apply again', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OUTSIDER),
+        membership(OUTSIDER, PUBLIC_ORG, 'member', 'removed'),
+      );
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertSucceeds(
+      setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OUTSIDER),
+        { status: 'pending', role: 'member' },
+        { merge: true },
+      ),
+    );
+  });
+
+  it('does not let re-applying restore a role that was taken away', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OUTSIDER),
+        membership(OUTSIDER, PUBLIC_ORG, 'member', 'removed'),
+      );
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OUTSIDER),
+        { status: 'pending', role: 'admin' },
+        { merge: true },
+      ),
+    );
+  });
+
+  it('does not let an ACTIVE member rewrite their own row to pending tricks', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OUTSIDER),
+        membership(OUTSIDER, PUBLIC_ORG, 'member', 'active'),
+      );
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    // Only a `removed` row may be re-applied; self-editing otherwise stays shut.
+    await assertFails(
+      setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OUTSIDER),
+        { role: 'admin' },
+        { merge: true },
       ),
     );
   });

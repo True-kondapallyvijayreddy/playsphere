@@ -109,6 +109,40 @@ service cloud.firestore {
     }
 
     // -------------------------------------------------------------------
+    // Invite codes.
+    //
+    // A club is joined by typing a six-character code. Resolving that code by
+    // QUERYING /orgs cannot work: the org read rule requires the org to be
+    // public or the caller to already be a member, so an unlisted club — the
+    // default for a private community — returned "no organization uses that
+    // code" to the very people it had invited.
+    //
+    // This is a tiny public lookup table instead: code -> just enough to
+    // render the join card. `get` only, never `list`, so the codes cannot be
+    // enumerated; guessing one of 31^6 combinations is not a practical
+    // attack, and the payload reveals nothing beyond a club's name and type.
+    // -------------------------------------------------------------------
+    match /inviteCodes/{code} {
+      allow get: if isSignedIn();
+      allow list: if false;
+
+      // Written in the same batch as the organization, so the owner check
+      // must look at the post-commit state.
+      allow create: if isSignedIn()
+        && request.resource.data.code == code
+        && request.resource.data.orgId is string
+        && getAfter(
+             /databases/$(database)/documents/orgs/$(request.resource.data.orgId)
+           ).data.ownerUid == uid();
+
+      allow update: if canManageMembers(resource.data.orgId)
+        && unchanged('orgId')
+        && unchanged('code');
+
+      allow delete: if canManageOrg(resource.data.orgId);
+    }
+
+    // -------------------------------------------------------------------
     // User profiles
     // -------------------------------------------------------------------
     match /users/{userId} {
@@ -207,6 +241,18 @@ service cloud.firestore {
               && request.resource.data.status == 'pending'
             )
             || (
+              // The club has opted out of approving joiners, so the code
+              // itself is the authorization and membership is immediate.
+              // Without this the app wrote `pending` regardless and told the
+              // user "You have joined" — they were in fact invisible in a
+              // queue nobody was reviewing. Still `member`: a code can never
+              // mint anything above the lowest role.
+              memberUid == uid()
+              && request.resource.data.role == 'member'
+              && request.resource.data.status == 'active'
+              && orgDoc(orgId).requiresApprovalToJoin == false
+            )
+            || (
               memberUid == uid()
               && request.resource.data.role == 'owner'
               && request.resource.data.status == 'active'
@@ -229,16 +275,38 @@ service cloud.firestore {
             )
           );
 
-        allow update: if canManageMembers(orgId)
-          && unchanged('uid')
-          && unchanged('orgId')
-          && unchanged('joinedAt')
-          // Only the owner may create another owner. An admin promoting
-          // themselves to owner is the classic privilege-escalation path.
-          && (request.resource.data.role != 'owner' || canManageOrg(orgId))
-          // Nobody may edit their own role — not even the owner, because
-          // that is how an org accidentally ends up with zero owners.
-          && memberUid != uid();
+        allow update: if (
+            canManageMembers(orgId)
+            && unchanged('uid')
+            && unchanged('orgId')
+            && unchanged('joinedAt')
+            // Only the owner may create another owner. An admin promoting
+            // themselves to owner is the classic privilege-escalation path.
+            && (request.resource.data.role != 'owner' || canManageOrg(orgId))
+            // Nobody may edit their own role — not even the owner, because
+            // that is how an org accidentally ends up with zero owners.
+            && memberUid != uid()
+          )
+          || (
+            // Re-applying after being declined.
+            //
+            // Declining writes status `removed` rather than deleting the row,
+            // which is right for the audit trail — but it also meant the
+            // applicant could never apply again: the client saw an existing
+            // document and refused with "you are already a member". Someone
+            // declined by mistake was locked out of their own club forever.
+            //
+            // Only their own row, only back to `pending`, and only at
+            // `member`, so this cannot be used to regain a role that was
+            // taken away.
+            memberUid == uid()
+            && unchanged('uid')
+            && unchanged('orgId')
+            && unchanged('joinedAt')
+            && resource.data.status == 'removed'
+            && request.resource.data.status == 'pending'
+            && request.resource.data.role == 'member'
+          );
 
         allow delete: if canManageMembers(orgId)
           && memberUid != uid()
