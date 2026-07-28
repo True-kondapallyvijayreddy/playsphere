@@ -210,7 +210,16 @@ service cloud.firestore {
               memberUid == uid()
               && request.resource.data.role == 'owner'
               && request.resource.data.status == 'active'
-              && orgDoc(orgId).ownerUid == uid()
+              // getAfter() rather than get(): the founder's owner row is
+              // written in the SAME batch as the org document, and get()
+              // only ever sees committed state — so it would read a
+              // non-existent org and deny the write that creates the
+              // organization at all. getAfter() sees the post-commit state
+              // of the batch, which is exactly the invariant we want:
+              // "you may mint yourself owner of an org you are creating and
+              // are named the owner of".
+              && getAfter(/databases/$(database)/documents/orgs/$(orgId))
+                   .data.ownerUid == uid()
             )
             || (
               // Admin directly adding/inviting someone, but never at a rank
@@ -425,6 +434,31 @@ service cloud.firestore {
     // -------------------------------------------------------------------
     match /{path=**}/members/{memberUid} {
       allow read: if isSignedIn() && memberUid == uid();
+    }
+
+    // -------------------------------------------------------------------
+    // Collection-group query over fixtures, powering "what is live right
+    // now in this org" and "what am I scoring today".
+    //
+    // A rule written at the nested fixtures path does NOT apply to a
+    // collectionGroup('fixtures') query — collection-group reads only match
+    // a rule whose path begins with the recursive wildcard. Without this
+    // block both queries fail with permission-denied even though the
+    // composite indexes for them already exist.
+    //
+    // The recursive wildcard must be the FINAL segment of a match path, so
+    // this cannot be scoped under /orgs/{orgId}. The tenant check therefore
+    // reads the orgId that every fixture already denormalizes.
+    //
+    // Order matters: the scorer check is a pure field comparison, so an
+    // assigned scorer short-circuits before any get(), while the spectator
+    // path falls through to the org visibility read. Firestore caches
+    // repeated access to the same document, so a query over one org's live
+    // fixtures costs one org read, not one per fixture.
+    // -------------------------------------------------------------------
+    match /{path=**}/fixtures/{fixtureId} {
+      allow read: if (isSignedIn() && uid() in resource.data.scorerUids)
+        || orgIsReadable(resource.data.orgId);
     }
 
     // -------------------------------------------------------------------
