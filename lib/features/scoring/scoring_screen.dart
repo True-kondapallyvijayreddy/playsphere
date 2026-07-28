@@ -11,7 +11,9 @@ import '../../core/models/fixture.dart';
 import '../../core/providers.dart';
 import '../../domain/scoring/scoring_plugin.dart';
 import '../../domain/scoring/scoring_registry.dart';
+import '../../core/models/match_player.dart';
 import '../../shared/app_scaffold.dart';
+import 'match_setup.dart';
 
 /// The scoring pad.
 ///
@@ -74,8 +76,74 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
     super.dispose();
   }
 
+  /// Actions the engines cannot apply without knowing which people are
+  /// involved. The pad asks, rather than the plugin guessing — a delivery that
+  /// names nobody is refused by design.
+  static const _needsPlayers = {'open', 'new_batter', 'new_bowler'};
+
+  /// Asks who fills each role, returning the payload to merge into the action.
+  /// Null means the scorer backed out.
+  Future<Map<String, dynamic>?> _askPlayers(
+    Fixture fixture,
+    ScoreAction action,
+  ) async {
+    final ctx = fixture.scoringContext();
+    // Which side is batting is plugin state, so it is read from the projection
+    // rather than assumed: after the innings break the sides swap over.
+    final innings = (fixture.scoreState['innings'] as List?) ?? const [];
+    final idx = (fixture.scoreState['inningsIndex'] as num?)?.toInt() ?? 0;
+    final battingSide = idx < innings.length
+        ? Side.fromWire((innings[idx] as Map)['battingSide'] as String?)
+        : Side.a;
+    final bowlingSide = battingSide.opposite;
+
+    List<MatchPlayer> forRole(String role) => role == 'bowler'
+        ? ctx.lineupFor(bowlingSide)
+        : ctx.lineupFor(battingSide);
+
+    final roles = switch (action.type) {
+      'open' => {
+          'striker': 'On strike',
+          'nonStriker': 'Non-striker',
+          'bowler': 'Bowling',
+        },
+      'new_batter' => {'playerId': 'Incoming batter'},
+      'new_bowler' => {'playerId': 'Next bowler'},
+      _ => <String, String>{},
+    };
+
+    return showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (_) => PlayerPicker(
+        title: switch (action.type) {
+          'open' => 'Opening the innings',
+          'new_batter' => 'Next batter in',
+          _ => 'Change of bowler',
+        },
+        roles: roles,
+        candidatesFor: (role) =>
+            role == 'playerId' && action.type == 'new_bowler'
+                ? ctx.lineupFor(bowlingSide)
+                : forRole(role),
+      ),
+    );
+  }
+
   Future<void> _submit(Fixture fixture, ScoreAction action) async {
     if (_busy) return;
+
+    var resolved = action;
+    if (_needsPlayers.contains(action.type)) {
+      final payload = await _askPlayers(fixture, action);
+      if (payload == null) return; // cancelled
+      resolved = ScoreAction(
+        type: action.type,
+        side: action.side,
+        payload: {...action.payload, ...payload},
+      );
+    }
+    action = resolved;
+
     setState(() => _busy = true);
 
     // The config is frozen on the fixture at draw time, so the pad scores
@@ -131,6 +199,25 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
               icon: Icons.lock_outline,
               title: 'You are not assigned to score this match',
               message: 'An event manager can add you as a scorer.',
+            );
+          }
+
+          // A match cannot be scored until the engine knows who is playing.
+          // Offering the pad first would only produce rejections.
+          if (!fixture.hasLineups) {
+            return EmptyState(
+              icon: Icons.groups_outlined,
+              title: 'Set the line-ups first',
+              message: 'Scoring records who did what, so both sides need '
+                  'their players before the first ball.',
+              action: FilledButton.icon(
+                onPressed: () => showDialog<void>(
+                  context: context,
+                  builder: (_) => LineupEditor(fixture: fixture),
+                ),
+                icon: const Icon(Icons.person_add_alt),
+                label: const Text('Choose players'),
+              ),
             );
           }
 
@@ -207,6 +294,7 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
                         ),
                       ],
                       const SizedBox(height: 24),
+                      _MatchDayActions(fixture: fixture),
                       _AdminActions(fixture: fixture),
                     ],
                   ),
@@ -401,6 +489,59 @@ class _PendingBanner extends ConsumerWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// Toss and line-ups: the two things that happen before the first ball.
+class _MatchDayActions extends ConsumerWidget {
+  const _MatchDayActions({required this.fixture});
+  final Fixture fixture;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final toss = fixture.tossWonByEntrantId;
+    final tossName = toss == null
+        ? null
+        : (toss == fixture.entrantAId
+            ? fixture.entrantAName
+            : fixture.entrantBName);
+
+    return Card(
+      child: Column(
+        children: [
+          ListTile(
+            leading: const Icon(Icons.casino_outlined),
+            title: Text(
+              toss == null
+                  ? 'Record the toss'
+                  : '$tossName won the toss and chose to '
+                      '${fixture.tossDecision ?? ""}',
+            ),
+            subtitle: toss == null
+                ? const Text('Decides which side starts')
+                : null,
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => showDialog<void>(
+              context: context,
+              builder: (_) => TossDialog(fixture: fixture),
+            ),
+          ),
+          const Divider(height: 1),
+          ListTile(
+            leading: const Icon(Icons.groups_outlined),
+            title: const Text('Line-ups'),
+            subtitle: Text(
+              '${fixture.lineupA.length} and ${fixture.lineupB.length} players',
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => showDialog<void>(
+              context: context,
+              builder: (_) => LineupEditor(fixture: fixture),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

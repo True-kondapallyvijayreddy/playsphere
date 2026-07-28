@@ -44,6 +44,8 @@ class Fixture {
     this.scoringConfig = const {},
     this.lineupA = const [],
     this.lineupB = const [],
+    this.tossWonByEntrantId,
+    this.tossDecision,
     this.feedsWinnerToFixtureId,
     this.feedsWinnerToSlot,
     this.startedAt,
@@ -118,6 +120,16 @@ class Fixture {
 
   bool get hasLineups => lineupA.isNotEmpty && lineupB.isNotEmpty;
 
+  /// Who won the toss, and what they chose — 'bat' or 'field'.
+  ///
+  /// Every match starts with one, and until now the app simply assumed side A
+  /// batted first. Recording it makes the scorecard honest and is what a
+  /// cricket engine needs to know which innings belongs to whom.
+  final String? tossWonByEntrantId;
+  final String? tossDecision;
+
+  bool get tossDone => tossWonByEntrantId != null;
+
   /// The context needed to render or score this fixture, built from the
   /// fixture alone. One definition, so a score can never read differently on
   /// the scoring pad than it does for a spectator.
@@ -172,6 +184,8 @@ class Fixture {
       scoringConfig: Fs.map(d['scoringConfig']),
       lineupA: MatchPlayer.listFrom(d['lineupA']),
       lineupB: MatchPlayer.listFrom(d['lineupB']),
+      tossWonByEntrantId: Fs.strOrNull(d['tossWonByEntrantId']),
+      tossDecision: Fs.strOrNull(d['tossDecision']),
       feedsWinnerToFixtureId: Fs.strOrNull(d['feedsWinnerToFixtureId']),
       feedsWinnerToSlot: Fs.strOrNull(d['feedsWinnerToSlot']),
       startedAt: Fs.dateOrNull(d['startedAt']),
@@ -203,6 +217,8 @@ class Fixture {
         'scoringConfig': scoringConfig,
         'lineupA': MatchPlayer.listTo(lineupA),
         'lineupB': MatchPlayer.listTo(lineupB),
+        'tossWonByEntrantId': tossWonByEntrantId,
+        'tossDecision': tossDecision,
         'feedsWinnerToFixtureId': feedsWinnerToFixtureId,
         'feedsWinnerToSlot': feedsWinnerToSlot,
         'createdAt': FieldValue.serverTimestamp(),
@@ -251,6 +267,8 @@ class Fixture {
       scoringConfig: scoringConfig,
       lineupA: lineupA,
       lineupB: lineupB,
+      tossWonByEntrantId: tossWonByEntrantId,
+      tossDecision: tossDecision,
       feedsWinnerToFixtureId: feedsWinnerToFixtureId,
       feedsWinnerToSlot: feedsWinnerToSlot,
       startedAt: startedAt,

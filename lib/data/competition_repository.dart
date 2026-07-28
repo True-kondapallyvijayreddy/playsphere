@@ -6,6 +6,7 @@ import '../core/models/app_user.dart';
 import '../core/models/competition.dart';
 import '../core/models/enums.dart';
 import '../core/models/fixture.dart';
+import '../core/models/match_player.dart';
 import '../domain/draw/fixture_generator.dart';
 import '../domain/scoring/scoring_plugin.dart';
 import '../domain/scoring/scoring_registry.dart';
@@ -330,6 +331,47 @@ class CompetitionRepository {
   }) =>
       guard(() => Refs.fixture(orgId, compId, fixtureId).update({
             'scorerUids': scorerUids,
+          }));
+
+  /// Records who is playing, per side.
+  ///
+  /// Set before the first ball. The scoring engines refuse a delivery that
+  /// names nobody, so this is what makes a match scorable at all for any sport
+  /// that tracks players.
+  Future<void> setLineups({
+    required String orgId,
+    required String compId,
+    required String fixtureId,
+    required List<MatchPlayer> lineupA,
+    required List<MatchPlayer> lineupB,
+  }) =>
+      guard(() => Refs.fixture(orgId, compId, fixtureId).update({
+            'lineupA': MatchPlayer.listTo(lineupA),
+            'lineupB': MatchPlayer.listTo(lineupB),
+          }));
+
+  /// Records the toss, and who chose what.
+  ///
+  /// Cricket needs it to know which side bats first; every other sport uses it
+  /// to decide who starts. It is written onto the fixture and into the frozen
+  /// scoring config, because "who batted first" is part of how the match reads
+  /// forever after and must not be recomputed later from anything mutable.
+  Future<void> recordToss({
+    required String orgId,
+    required String compId,
+    required String fixtureId,
+    required String wonByEntrantId,
+    required String decision,
+    required String battingFirstSide,
+    required Map<String, dynamic> scoringConfig,
+  }) =>
+      guard(() => Refs.fixture(orgId, compId, fixtureId).update({
+            'tossWonByEntrantId': wonByEntrantId,
+            'tossDecision': decision,
+            'scoringConfig': {
+              ...scoringConfig,
+              'battingFirst': battingFirstSide,
+            },
           }));
 
   Future<void> rescheduleFixture({

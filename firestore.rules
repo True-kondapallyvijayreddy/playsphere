@@ -432,7 +432,26 @@ service cloud.firestore {
               // forward, so a stale client cannot overwrite a newer score.
               && request.resource.data.lastSeq > resource.data.lastSeq
             )
-            // (c) A scorer advancing their winner into the next round of a
+            // (c) The assigned scorer recording who is playing and who won
+            //     the toss, before the first ball. Both are prerequisites for
+            //     scoring at all — the engines refuse a delivery that names
+            //     nobody — so the scorer must be able to set them without
+            //     needing an organizer present at the ground. Restricted to a
+            //     match that has not started: once a ball is bowled the
+            //     line-up is part of the record.
+            || (
+              canScore(orgId)
+              && uid() in resource.data.scorerUids
+              && unchanged('compId')
+              && unchanged('orgId')
+              && unchanged('entrantAId')
+              && unchanged('entrantBId')
+              && unchanged('scorerUids')
+              && resource.data.lastSeq == 0
+              && request.resource.data.lastSeq == 0
+              && request.resource.data.status == resource.data.status
+            )
+            // (d) A scorer advancing their winner into the next round of a
             //     knockout. This has to be a distinct branch because path (b)
             //     deliberately forbids touching entrant ids — a scorer must
             //     never be able to swap who is playing the match they are
