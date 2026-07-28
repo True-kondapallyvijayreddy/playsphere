@@ -1,5 +1,6 @@
 import '../../core/models/enums.dart';
 import 'plugins/cricket_plugin.dart';
+import 'plugins/football_plugin.dart';
 import 'plugins/goal_based_plugin.dart';
 import 'plugins/set_based_plugin.dart';
 import 'plugins/simple_points_plugin.dart';
@@ -123,7 +124,7 @@ class SportCatalog {
     SportSpec(
       id: 'football',
       name: 'Football',
-      pluginKey: GoalBasedPlugin.pluginKey,
+      pluginKey: FootballPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
       defaultEntrantType: EntrantType.team,
       icon: '⚽',
@@ -270,6 +271,7 @@ class ScoringRegistry {
     SetBasedPlugin.pluginKey: SetBasedPlugin(),
     GoalBasedPlugin.pluginKey: GoalBasedPlugin(),
     CricketPlugin.pluginKey: CricketPlugin(),
+    FootballPlugin.pluginKey: FootballPlugin(),
   };
 
   static ScoringPlugin resolve(String? key) => _plugins[key] ?? _fallback;

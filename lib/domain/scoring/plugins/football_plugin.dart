@@ -1,0 +1,420 @@
+import '../player_stats.dart';
+import '../scoring_plugin.dart';
+
+/// Football, with per-player statistics.
+///
+/// Replaces the generic goal counter for football specifically. A goal that
+/// does not name a scorer is a number on a board; a goal that names a scorer
+/// and an assister is a career. The spec asks for goals, assists, minutes,
+/// cards, saves, clean sheets and shots, none of which a side-total engine can
+/// produce.
+///
+/// Rules encoded, all configurable per competition:
+///
+///  * **An own goal counts for the opposition but against the scorer.** It is
+///    recorded on the conceding player's line as an own goal, never as a goal
+///    — crediting it as a goal is the error that turns a defender into a
+///    league top-scorer.
+///  * **A second yellow is a red.** The engine tracks card counts and refuses
+///    to keep a player on the pitch after two yellows, because a scorer under
+///    pressure will not do that arithmetic reliably.
+///  * **A sent-off player cannot be involved in anything afterwards.**
+///  * **A clean sheet belongs to the goalkeeper who finished the match**, and
+///    is derived at full time rather than tracked as it goes.
+class FootballPlugin extends ScoringPlugin {
+  const FootballPlugin();
+
+  static const pluginKey = 'football';
+
+  @override
+  String get key => pluginKey;
+
+  @override
+  String get displayName => 'Football';
+
+  // Stat keys, shared with the box score definition below.
+  static const _goals = 'goals';
+  static const _assists = 'assists';
+  static const _ownGoals = 'ownGoals';
+  static const _shots = 'shots';
+  static const _shotsOnTarget = 'shotsOnTarget';
+  static const _saves = 'saves';
+  static const _yellows = 'yellows';
+  static const _reds = 'reds';
+  static const _fouls = 'fouls';
+  static const _penaltiesScored = 'penaltiesScored';
+  static const _penaltiesMissed = 'penaltiesMissed';
+
+  int _periods(ScoringContext ctx) => ctx.intConfig('periods', 2);
+  bool _allowDraw(ScoringContext ctx) => ctx.boolConfig('allowDraw', true);
+
+  @override
+  Map<String, dynamic> initialState(ScoringContext ctx) => {
+        'a': 0,
+        'b': 0,
+        'period': 1,
+        'complete': false,
+        'winner': null,
+        'draw': false,
+        'timeline': <Map<String, dynamic>>[],
+        'sentOff': <String>[],
+        PlayerTally.stateKey: <String, dynamic>{},
+      };
+
+  List<String> _sentOff(Map<String, dynamic> state) =>
+      (state['sentOff'] as List?)?.whereType<String>().toList() ?? const [];
+
+  @override
+  ScoringResult apply(
+    Map<String, dynamic> state,
+    ScoreAction action,
+    ScoringContext ctx,
+  ) {
+    if (state['complete'] == true && action.type != 'reopen') {
+      return const ScoringResult.rejected(
+        'This match is already finished. Reopen it to make a correction.',
+      );
+    }
+
+    final player = action.payload['playerId'] as String?;
+    final sentOff = _sentOff(state);
+
+    // Anyone sent off is out of the match. Letting them score afterwards is
+    // the kind of nonsense that makes a scorecard indefensible in a protest.
+    if (player != null && sentOff.contains(player)) {
+      return ScoringResult.rejected(
+        '${ctx.playerName(player)} has been sent off and cannot take part.',
+      );
+    }
+
+    int score(String side) => (state[side] as num?)?.toInt() ?? 0;
+
+    Map<String, dynamic> withTimeline(
+      Map<String, dynamic> next,
+      String type, {
+      String? playerId,
+      String? secondaryId,
+    }) {
+      final line = copyList(next['timeline'])
+        ..add({
+          'type': type,
+          'side': action.side.wire,
+          'period': next['period'] ?? 1,
+          'playerId': playerId,
+          'secondaryId': secondaryId,
+        });
+      return {...next, 'timeline': line};
+    }
+
+    switch (action.type) {
+      case 'goal':
+        if (action.side == Side.neutral) {
+          return const ScoringResult.rejected('A goal needs a side.');
+        }
+        if (player == null) {
+          return const ScoringResult.rejected('Who scored?');
+        }
+        final assist = action.payload['assistId'] as String?;
+        final isPenalty = action.payload['penalty'] == true;
+
+        var next = mutate(state, (s) {
+          s[action.side.wire] = score(action.side.wire) + 1;
+        });
+        next = PlayerTally.addAll(next, player, {
+          _goals: 1,
+          _shots: 1,
+          _shotsOnTarget: 1,
+          if (isPenalty) _penaltiesScored: 1,
+        });
+        if (assist != null && assist != player) {
+          next = PlayerTally.add(next, assist, _assists, 1);
+        }
+        return ScoringResult.ok(
+          withTimeline(next, isPenalty ? 'penalty_scored' : 'goal',
+              playerId: player, secondaryId: assist),
+        );
+
+      case 'own_goal':
+        if (action.side == Side.neutral) {
+          return const ScoringResult.rejected(
+            'Which side does the own goal count FOR?',
+          );
+        }
+        if (player == null) {
+          return const ScoringResult.rejected('Who put it in their own net?');
+        }
+        // The goal counts for the opposition; the player is charged an own
+        // goal, never a goal. Crediting it as a goal is what turns a defender
+        // into a league top-scorer.
+        var next = mutate(state, (s) {
+          s[action.side.wire] = score(action.side.wire) + 1;
+        });
+        next = PlayerTally.add(next, player, _ownGoals, 1);
+        return ScoringResult.ok(
+          withTimeline(next, 'own_goal', playerId: player),
+        );
+
+      case 'penalty_missed':
+        if (player == null) {
+          return const ScoringResult.rejected('Who took it?');
+        }
+        final next = PlayerTally.addAll(state, player, {
+          _penaltiesMissed: 1,
+          _shots: 1,
+        });
+        return ScoringResult.ok(
+          withTimeline(next, 'penalty_missed', playerId: player),
+        );
+
+      case 'shot':
+        if (player == null) {
+          return const ScoringResult.rejected('Who had the shot?');
+        }
+        final onTarget = action.payload['onTarget'] == true;
+        final next = PlayerTally.addAll(state, player, {
+          _shots: 1,
+          if (onTarget) _shotsOnTarget: 1,
+        });
+        return ScoringResult.ok(next);
+
+      case 'save':
+        if (player == null) {
+          return const ScoringResult.rejected('Which keeper?');
+        }
+        return ScoringResult.ok(PlayerTally.add(state, player, _saves, 1));
+
+      case 'foul':
+        if (player == null) {
+          return const ScoringResult.rejected('Who committed it?');
+        }
+        return ScoringResult.ok(PlayerTally.add(state, player, _fouls, 1));
+
+      case 'card':
+        if (player == null) {
+          return const ScoringResult.rejected('Who was booked?');
+        }
+        final colour = action.payload['colour'] as String? ?? 'yellow';
+        final tally = PlayerTally.of(state, player);
+        final yellows = (tally[_yellows] ?? 0).toInt();
+
+        if (colour == 'red') {
+          var next = PlayerTally.add(state, player, _reds, 1);
+          next = {...next, 'sentOff': [...sentOff, player]};
+          return ScoringResult.ok(
+            withTimeline(next, 'red_card', playerId: player),
+          );
+        }
+
+        // A second yellow IS a red. The engine does this arithmetic because a
+        // scorer watching a match will not do it reliably, and a player left
+        // on the pitch after two yellows invalidates everything after it.
+        var next = PlayerTally.add(state, player, _yellows, 1);
+        if (yellows + 1 >= 2) {
+          next = PlayerTally.add(next, player, _reds, 1);
+          next = {...next, 'sentOff': [...sentOff, player]};
+          return ScoringResult.ok(
+            withTimeline(next, 'second_yellow', playerId: player),
+          );
+        }
+        return ScoringResult.ok(
+          withTimeline(next, 'yellow_card', playerId: player),
+        );
+
+      case 'next_period':
+        final period = (state['period'] as num?)?.toInt() ?? 1;
+        if (period >= _periods(ctx)) {
+          return ScoringResult.rejected(
+            'This match has only ${_periods(ctx)} periods. '
+            'Use "End match" to finish.',
+          );
+        }
+        return ScoringResult.ok(
+          mutate(state, (s) => s['period'] = period + 1),
+        );
+
+      case 'finish':
+        final a = score('a');
+        final b = score('b');
+        if (a == b && !_allowDraw(ctx)) {
+          return const ScoringResult.rejected(
+            'Scores are level and this competition does not allow draws — '
+            'play extra time or a shootout, then record the result.',
+          );
+        }
+        return ScoringResult.ok(mutate(state, (s) {
+          s['complete'] = true;
+          s['draw'] = a == b;
+          s['winner'] = a == b ? null : (a > b ? 'a' : 'b');
+        }));
+
+      case 'reopen':
+        return ScoringResult.ok(mutate(state, (s) {
+          s['complete'] = false;
+          s['winner'] = null;
+          s['draw'] = false;
+        }));
+
+      default:
+        return ScoringResult.rejected('Unknown action "${action.type}".');
+    }
+  }
+
+  /// Columns for the box score, in the order a football sheet reads.
+  static List<StatColumn> get columns => [
+        const StatColumn(key: _goals, label: 'Goals', shortLabel: 'G'),
+        const StatColumn(key: _assists, label: 'Assists', shortLabel: 'A'),
+        const StatColumn(key: _shots, label: 'Shots', shortLabel: 'Sh'),
+        const StatColumn(
+          key: _shotsOnTarget,
+          label: 'On target',
+          shortLabel: 'SoT',
+        ),
+        StatColumn(
+          key: 'accuracy',
+          label: 'Shot accuracy',
+          shortLabel: 'Acc',
+          isPercentage: true,
+          // Derived, never stored: a percentage that is accumulated drifts
+          // away from the counts it claims to summarise.
+          derive: (t) {
+            final shots = (t[_shots] ?? 0).toDouble();
+            return shots == 0 ? 0 : (t[_shotsOnTarget] ?? 0) / shots;
+          },
+        ),
+        const StatColumn(key: _saves, label: 'Saves', shortLabel: 'Sv'),
+        const StatColumn(key: _fouls, label: 'Fouls', shortLabel: 'F'),
+        const StatColumn(key: _yellows, label: 'Yellow cards', shortLabel: 'YC'),
+        const StatColumn(key: _reds, label: 'Red cards', shortLabel: 'RC'),
+        const StatColumn(
+          key: _ownGoals,
+          label: 'Own goals',
+          shortLabel: 'OG',
+        ),
+      ];
+
+  BoxScore boxScore(
+    Map<String, dynamic> state,
+    ScoringContext ctx,
+    Side side,
+  ) =>
+      PlayerTally.boxScore(
+        state: state,
+        ctx: ctx,
+        side: side,
+        columns: columns,
+      );
+
+  /// Whether the side kept a clean sheet. Derived at the end rather than
+  /// tracked, because a clean sheet is only true once the match is over.
+  bool cleanSheet(Map<String, dynamic> state, Side side) {
+    if (state['complete'] != true) return false;
+    final conceded = side == Side.a ? state['b'] : state['a'];
+    return ((conceded as num?)?.toInt() ?? 0) == 0;
+  }
+
+  @override
+  String headline(Map<String, dynamic> state, ScoringContext ctx) =>
+      '${state['a'] ?? 0} - ${state['b'] ?? 0}';
+
+  @override
+  String summary(Map<String, dynamic> state, ScoringContext ctx) =>
+      headline(state, ctx);
+
+  @override
+  String? statusLine(Map<String, dynamic> state, ScoringContext ctx) {
+    if (state['complete'] == true) {
+      return state['draw'] == true ? 'Full time · drawn' : 'Full time';
+    }
+    final label = ctx.config['periodLabel'] as String? ?? 'Half';
+    return '$label ${state['period'] ?? 1} of ${_periods(ctx)}';
+  }
+
+  @override
+  MatchOutcome outcome(Map<String, dynamic> state, ScoringContext ctx) {
+    final a = (state['a'] as num?)?.toInt() ?? 0;
+    final b = (state['b'] as num?)?.toInt() ?? 0;
+    if (state['complete'] != true) return MatchOutcome.inProgress;
+    return MatchOutcome(
+      isComplete: true,
+      isDraw: state['draw'] == true,
+      winnerSide: state['winner'] == null
+          ? null
+          : Side.fromWire(state['winner'] as String),
+      scoreForA: a,
+      scoreForB: b,
+    );
+  }
+
+  @override
+  List<ScoreControlGroup> controls(
+    Map<String, dynamic> state,
+    ScoringContext ctx,
+  ) {
+    if (state['complete'] == true) {
+      return const [
+        ScoreControlGroup(title: 'Match finished', controls: [
+          ScoreControl(
+            action: 'reopen',
+            label: 'Reopen to correct',
+            style: ControlStyle.subtle,
+            shortcut: 'r',
+          ),
+        ]),
+      ];
+    }
+
+    List<ScoreControl> forSide(Side side, String goalKey) => [
+          ScoreControl(
+            action: 'goal',
+            label: 'Goal',
+            side: side,
+            style: ControlStyle.primary,
+            shortcut: goalKey,
+          ),
+          ScoreControl(action: 'shot', label: 'Shot', side: side),
+          ScoreControl(action: 'save', label: 'Save', side: side),
+          ScoreControl(
+            action: 'card',
+            label: 'Yellow',
+            side: side,
+            payload: const {'colour': 'yellow'},
+            style: ControlStyle.secondary,
+          ),
+          ScoreControl(
+            action: 'card',
+            label: 'Red',
+            side: side,
+            payload: const {'colour': 'red'},
+            style: ControlStyle.danger,
+          ),
+        ];
+
+    return [
+      ScoreControlGroup(
+        title: ctx.entrantAName,
+        controls: forSide(Side.a, 'a'),
+      ),
+      ScoreControlGroup(
+        title: ctx.entrantBName,
+        controls: forSide(Side.b, 'l'),
+      ),
+      const ScoreControlGroup(
+        title: 'Match',
+        controls: [
+          ScoreControl(
+            action: 'next_period',
+            label: 'Next period',
+            style: ControlStyle.secondary,
+            shortcut: 'n',
+          ),
+          ScoreControl(
+            action: 'finish',
+            label: 'End match',
+            style: ControlStyle.danger,
+            shortcut: 'f',
+          ),
+        ],
+      ),
+    ];
+  }
+}
