@@ -431,6 +431,24 @@ service cloud.firestore {
               // Monotonic sequence: the projection may only ever move
               // forward, so a stale client cannot overwrite a newer score.
               && request.resource.data.lastSeq > resource.data.lastSeq
+            )
+            // (c) A scorer advancing their winner into the next round of a
+            //     knockout. This has to be a distinct branch because path (b)
+            //     deliberately forbids touching entrant ids — a scorer must
+            //     never be able to swap who is playing the match they are
+            //     scoring. Here they are filling a placeholder in a DIFFERENT,
+            //     unstarted fixture, and only a side that is still empty:
+            //     an entrant already present can never be replaced.
+            || (
+              canScore(orgId)
+              && unchanged('compId')
+              && unchanged('orgId')
+              && unchanged('scorerUids')
+              && resource.data.status == 'scheduled'
+              && resource.data.lastSeq == 0
+              && request.resource.data.lastSeq == 0
+              && (resource.data.entrantAId == '' || unchanged('entrantAId'))
+              && (resource.data.entrantBId == '' || unchanged('entrantBId'))
             );
 
           allow delete: if canManageCompetitions(orgId)

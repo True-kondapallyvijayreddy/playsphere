@@ -12,6 +12,7 @@ class PlannedFixture {
     this.entrantA,
     this.entrantB,
     this.feedsWinnerToIndex,
+    this.feedsWinnerToSlot,
   });
 
   final int round;
@@ -25,6 +26,14 @@ class PlannedFixture {
 
   /// Index into the generated list where this match's winner advances.
   final int? feedsWinnerToIndex;
+
+  /// Which side of that match the winner occupies — 'a' or 'b'.
+  ///
+  /// Recorded explicitly rather than derived from [matchIndex] parity, because
+  /// matchIndex counts across the whole bracket while pairing is within a
+  /// round: with an odd number of first-round matches the two would disagree
+  /// and winners would overwrite each other.
+  final String? feedsWinnerToSlot;
 
   bool get isBye => entrantA == null || entrantB == null;
 }
@@ -159,6 +168,7 @@ class FixtureGenerator {
         entrantA: placed[i * 2],
         entrantB: placed[i * 2 + 1],
         feedsWinnerToIndex: firstRoundCount + (i ~/ 2),
+        feedsWinnerToSlot: i.isEven ? 'a' : 'b',
       ));
     }
 
@@ -175,6 +185,8 @@ class FixtureGenerator {
           roundLabel: _roundLabel(round, totalRounds),
           feedsWinnerToIndex:
               matchesInRound == 1 ? null : nextRoundStart + (i ~/ 2),
+          feedsWinnerToSlot:
+              matchesInRound == 1 ? null : (i.isEven ? 'a' : 'b'),
         ));
       }
       indexOfRoundStart = nextRoundStart;

@@ -42,6 +42,7 @@ class Fixture {
     this.scoringPluginKey = 'simple_points',
     this.scoringConfig = const {},
     this.feedsWinnerToFixtureId,
+    this.feedsWinnerToSlot,
     this.startedAt,
     this.completedAt,
   });
@@ -116,6 +117,10 @@ class Fixture {
   /// For knockout draws: where this match's winner advances to.
   final String? feedsWinnerToFixtureId;
 
+  /// Which side of that fixture the winner fills — 'a' or 'b'. Set by the
+  /// draw generator so advancement never has to guess.
+  final String? feedsWinnerToSlot;
+
   final DateTime? startedAt;
   final DateTime? completedAt;
 
@@ -151,6 +156,7 @@ class Fixture {
       scoringPluginKey: Fs.str(d['scoringPluginKey'], 'simple_points'),
       scoringConfig: Fs.map(d['scoringConfig']),
       feedsWinnerToFixtureId: Fs.strOrNull(d['feedsWinnerToFixtureId']),
+      feedsWinnerToSlot: Fs.strOrNull(d['feedsWinnerToSlot']),
       startedAt: Fs.dateOrNull(d['startedAt']),
       completedAt: Fs.dateOrNull(d['completedAt']),
     );
@@ -179,6 +185,7 @@ class Fixture {
         'scoringPluginKey': scoringPluginKey,
         'scoringConfig': scoringConfig,
         'feedsWinnerToFixtureId': feedsWinnerToFixtureId,
+        'feedsWinnerToSlot': feedsWinnerToSlot,
         'createdAt': FieldValue.serverTimestamp(),
       };
 
@@ -224,6 +231,7 @@ class Fixture {
       scoringPluginKey: scoringPluginKey,
       scoringConfig: scoringConfig,
       feedsWinnerToFixtureId: feedsWinnerToFixtureId,
+      feedsWinnerToSlot: feedsWinnerToSlot,
       startedAt: startedAt,
       completedAt: completedAt,
     );

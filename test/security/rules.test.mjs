@@ -553,6 +553,70 @@ describe('scoring writes', () => {
     await assertFails(scoreBatch(db, 1).commit());
   });
 
+  it('lets a scorer advance a winner into an EMPTY slot of the next round', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'final'),
+        {
+          ...fixture(PUBLIC_ORG, 'comp1', [SCORER], 'scheduled'),
+          entrantAId: '',
+          entrantAName: 'To be decided',
+          entrantBId: '',
+          entrantBName: 'To be decided',
+        },
+      );
+    });
+    const db = testEnv.authenticatedContext(SCORER).firestore();
+    await assertSucceeds(
+      setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'final'),
+        { entrantAId: 'entrant_a', entrantAName: 'Alice' },
+        { merge: true },
+      ),
+    );
+  });
+
+  it('refuses replacing an entrant already placed in the next round', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'final'),
+        { ...fixture(PUBLIC_ORG, 'comp1', [SCORER], 'scheduled') },
+      );
+    });
+    const db = testEnv.authenticatedContext(SCORER).firestore();
+    // Both sides are already filled — a scorer must never be able to swap who
+    // is playing.
+    await assertFails(
+      setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'final'),
+        { entrantAId: 'someone_else', entrantAName: 'Impostor' },
+        { merge: true },
+      ),
+    );
+  });
+
+  it('refuses advancing into a match that has already been scored', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'final'),
+        {
+          ...fixture(PUBLIC_ORG, 'comp1', [SCORER], 'scheduled'),
+          entrantAId: '',
+          entrantAName: 'To be decided',
+          lastSeq: 4,
+        },
+      );
+    });
+    const db = testEnv.authenticatedContext(SCORER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'final'),
+        { entrantAId: 'entrant_a', entrantAName: 'Alice' },
+        { merge: true },
+      ),
+    );
+  });
+
   it('never allows a scoring event to be rewritten', async () => {
     const db = testEnv.authenticatedContext(SCORER).firestore();
     await assertSucceeds(scoreBatch(db, 1).commit());

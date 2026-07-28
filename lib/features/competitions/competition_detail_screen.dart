@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/layout/responsive.dart';
 import '../../core/models/competition.dart';
 import '../../core/models/enums.dart';
+import '../../core/models/fixture.dart';
 import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
@@ -62,7 +63,7 @@ class CompetitionDetailScreen extends ConsumerWidget {
                     _Entries(competition: comp, canManage: canManage),
                     const SizedBox(height: 24),
                     _StandingsTable(competition: comp),
-                    _Fixtures(competition: comp),
+                    _Fixtures(competition: comp, canManage: canManage),
                   ],
                 ),
               ),
@@ -473,9 +474,107 @@ class _StandingsTable extends ConsumerWidget {
   }
 }
 
+/// Picks who may score a match.
+///
+/// Without this the only person who could ever score was whoever pressed
+/// "Generate the draw" — `assignScorers` existed in the repository with no
+/// caller, so the judge/scorer role could be granted but never used, and the
+/// "an event manager can add you as a scorer" empty state pointed at a screen
+/// that did not exist.
+class _AssignScorersDialog extends ConsumerStatefulWidget {
+  const _AssignScorersDialog({required this.fixture});
+  final Fixture fixture;
+
+  @override
+  ConsumerState<_AssignScorersDialog> createState() =>
+      _AssignScorersDialogState();
+}
+
+class _AssignScorersDialogState extends ConsumerState<_AssignScorersDialog> {
+  late final Set<String> _selected = {...widget.fixture.scorerUids};
+  bool _busy = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final members =
+        ref.watch(orgMembersProvider(widget.fixture.orgId)).valueOrNull ??
+            const [];
+    // Only roles that carry the scoring capability. Offering a plain member
+    // would let an organizer assign someone the rules will then reject.
+    final eligible = members
+        .where((m) =>
+            m.isActive &&
+            PermissionMatrix.can(m.role, Capability.scoreMatches))
+        .toList();
+
+    return AlertDialog(
+      title: const Text('Who can score this match?'),
+      content: SizedBox(
+        width: 400,
+        child: eligible.isEmpty
+            ? const Text(
+                'Nobody in this organization holds the scoring role yet. '
+                'Give someone the Judge / Scorer role on the Members screen '
+                'first.',
+              )
+            : ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final m in eligible)
+                    CheckboxListTile(
+                      value: _selected.contains(m.uid),
+                      onChanged: (on) => setState(() {
+                        if (on == true) {
+                          _selected.add(m.uid);
+                        } else {
+                          _selected.remove(m.uid);
+                        }
+                      }),
+                      title: Text(m.displayName),
+                      subtitle: Text(m.role.label),
+                      dense: true,
+                    ),
+                ],
+              ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _busy || eligible.isEmpty
+              ? null
+              : () async {
+                  setState(() => _busy = true);
+                  try {
+                    await ref
+                        .read(competitionRepositoryProvider)
+                        .assignScorers(
+                          orgId: widget.fixture.orgId,
+                          compId: widget.fixture.compId,
+                          fixtureId: widget.fixture.id,
+                          scorerUids: _selected.toList(),
+                        );
+                    if (context.mounted) Navigator.pop(context);
+                  } catch (e) {
+                    if (context.mounted) {
+                      setState(() => _busy = false);
+                      showError(context, e);
+                    }
+                  }
+                },
+          child: Text(_busy ? 'Saving…' : 'Save'),
+        ),
+      ],
+    );
+  }
+}
+
 class _Fixtures extends ConsumerWidget {
-  const _Fixtures({required this.competition});
+  const _Fixtures({required this.competition, required this.canManage});
   final Competition competition;
+  final bool canManage;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -499,18 +598,42 @@ class _Fixtures extends ConsumerWidget {
         for (final f in fixtures)
           Padding(
             padding: const EdgeInsets.only(bottom: 10),
-            child: LiveScoreCard(
-              fixture: f,
-              dense: true,
-              onTap: () {
-                final canScore =
-                    myUid != null && f.canBeScoredBy(myUid);
-                context.go(
-                  canScore
-                      ? Routes.scoring(c.orgId, c.id, f.id)
-                      : Routes.watch(c.orgId, c.id, f.id),
-                );
-              },
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Expanded(
+                  child: LiveScoreCard(
+                    fixture: f,
+                    dense: true,
+                    onTap: () {
+                      final canScore = myUid != null && f.canBeScoredBy(myUid);
+                      context.go(
+                        canScore
+                            ? Routes.scoring(c.orgId, c.id, f.id)
+                            : Routes.watch(c.orgId, c.id, f.id),
+                      );
+                    },
+                  ),
+                ),
+                if (canManage)
+                  IconButton(
+                    tooltip: f.scorerUids.isEmpty
+                        ? 'No scorer assigned'
+                        : '${f.scorerUids.length} scorer(s) assigned',
+                    icon: Icon(
+                      f.scorerUids.isEmpty
+                          ? Icons.person_off_outlined
+                          : Icons.how_to_reg_outlined,
+                      color: f.scorerUids.isEmpty
+                          ? Theme.of(context).colorScheme.error
+                          : null,
+                    ),
+                    onPressed: () => showDialog<void>(
+                      context: context,
+                      builder: (_) => _AssignScorersDialog(fixture: f),
+                    ),
+                  ),
+              ],
             ),
           ),
       ],

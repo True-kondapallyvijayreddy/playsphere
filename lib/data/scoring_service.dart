@@ -163,6 +163,34 @@ class ScoringService {
       },
     );
 
+    // A knockout winner advances into the next round in the SAME batch as the
+    // result that produced them. Doing it afterwards would leave a window
+    // where the semi-final is decided but the final still reads "To be
+    // decided", and any failure in between would strand the bracket there
+    // permanently — which is exactly what happened before: the generator
+    // recorded where a winner should go and nothing ever read it.
+    if (outcome.isComplete &&
+        !outcome.isDraw &&
+        fixture.feedsWinnerToFixtureId != null &&
+        fixture.feedsWinnerToSlot != null &&
+        updated.winnerEntrantId != null) {
+      final slot = fixture.feedsWinnerToSlot == 'a' ? 'A' : 'B';
+      final winnerName = updated.winnerEntrantId == fixture.entrantAId
+          ? fixture.entrantAName
+          : fixture.entrantBName;
+      batch.update(
+        Refs.fixture(
+          fixture.orgId,
+          fixture.compId,
+          fixture.feedsWinnerToFixtureId!,
+        ),
+        {
+          'entrant${slot}Id': updated.winnerEntrantId,
+          'entrant${slot}Name': winnerName,
+        },
+      );
+    }
+
     // Record the action in our durable queue BEFORE the write leaves, so a
     // process kill between the local write and the server acknowledgement
     // cannot lose a delivery. `reconcileQueue` drops entries the server has

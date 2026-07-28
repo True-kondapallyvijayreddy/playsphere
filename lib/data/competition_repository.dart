@@ -298,6 +298,7 @@ class CompetitionRepository {
             feedsWinnerToFixtureId: p.feedsWinnerToIndex == null
                 ? null
                 : refs[p.feedsWinnerToIndex!].id,
+            feedsWinnerToSlot: p.feedsWinnerToSlot,
           );
 
           batch.set(refs[i], fixture.toCreate());
