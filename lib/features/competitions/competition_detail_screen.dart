@@ -61,6 +61,7 @@ class CompetitionDetailScreen extends ConsumerWidget {
                     const SizedBox(height: 16),
                     _Entries(competition: comp, canManage: canManage),
                     const SizedBox(height: 24),
+                    _StandingsTable(competition: comp),
                     _Fixtures(competition: comp),
                   ],
                 ),
@@ -362,6 +363,113 @@ class _Entries extends ConsumerWidget {
     } catch (e) {
       if (context.mounted) showError(context, e);
     }
+  }
+}
+
+/// The league table.
+///
+/// Shown only for formats where a table means something. A knockout bracket
+/// has no standings — presenting one implies a league that is not being
+/// played, and an organizer reading it would draw the wrong conclusion.
+class _StandingsTable extends ConsumerWidget {
+  const _StandingsTable({required this.competition});
+  final Competition competition;
+
+  static const _tableFormats = {
+    CompetitionFormat.roundRobin,
+    CompetitionFormat.leagueTable,
+    CompetitionFormat.swiss,
+    CompetitionFormat.groupThenKnockout,
+  };
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (!_tableFormats.contains(competition.format)) {
+      return const SizedBox.shrink();
+    }
+
+    final table = ref.watch(
+      standingsProvider(CompRef(competition.orgId, competition.id)),
+    );
+    if (table.isEmpty) return const SizedBox.shrink();
+
+    final theme = Theme.of(context);
+    final anyPlayed = table.any((r) => r.played > 0);
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Table', style: theme.textTheme.titleMedium),
+          const SizedBox(height: 4),
+          Text(
+            anyPlayed
+                ? 'Points, then score difference, then wins.'
+                : 'Updates automatically as results come in.',
+            style: theme.textTheme.bodySmall,
+          ),
+          const SizedBox(height: 10),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              // A table is genuinely wide content, so it scrolls inside its own
+              // box rather than making the whole page scroll sideways on a
+              // phone.
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: DataTable(
+                  headingRowHeight: 40,
+                  dataRowMinHeight: 42,
+                  dataRowMaxHeight: 48,
+                  columnSpacing: 18,
+                  columns: const [
+                    DataColumn(label: Text('#')),
+                    DataColumn(label: Text('Entrant')),
+                    DataColumn(label: Text('P'), numeric: true),
+                    DataColumn(label: Text('W'), numeric: true),
+                    DataColumn(label: Text('D'), numeric: true),
+                    DataColumn(label: Text('L'), numeric: true),
+                    DataColumn(label: Text('+/−'), numeric: true),
+                    DataColumn(label: Text('Pts'), numeric: true),
+                  ],
+                  rows: [
+                    for (final row in table)
+                      DataRow(
+                        cells: [
+                          DataCell(Text('${row.rank}')),
+                          DataCell(
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 180),
+                              child: Text(
+                                row.displayName,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ),
+                          DataCell(Text('${row.played}')),
+                          DataCell(Text('${row.won}')),
+                          DataCell(Text('${row.drawn}')),
+                          DataCell(Text('${row.lost}')),
+                          DataCell(Text(
+                            row.scoreDifference > 0
+                                ? '+${row.scoreDifference}'
+                                : '${row.scoreDifference}',
+                          )),
+                          DataCell(Text(
+                            '${row.points}',
+                            style: const TextStyle(fontWeight: FontWeight.w800),
+                          )),
+                        ],
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

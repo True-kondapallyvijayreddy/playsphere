@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../data/competition_repository.dart';
 import '../data/org_repository.dart';
 import '../data/scoring_service.dart';
+import '../domain/standings/standings_calculator.dart';
 import 'auth/auth_service.dart';
 import 'models/app_user.dart';
 import 'models/competition.dart';
@@ -188,6 +189,24 @@ final matchEventsProvider =
   return ref
       .watch(scoringServiceProvider)
       .watchEvents(key.orgId, key.compId, key.fixtureId);
+});
+
+/// The league table, derived from the fixtures already being streamed.
+///
+/// Computed rather than stored: a standings row is a pure function of the
+/// results behind it, so deriving it means the table can never disagree with
+/// the matches it summarises, and it costs no extra reads.
+final standingsProvider =
+    Provider.family<List<Standing>, CompRef>((ref, key) {
+  final competition = ref.watch(competitionProvider(key)).valueOrNull;
+  if (competition == null) return const [];
+  final entrants = ref.watch(entrantsProvider(key)).valueOrNull ?? const [];
+  final fixtures = ref.watch(fixturesProvider(key)).valueOrNull ?? const [];
+  return const StandingsCalculator().compute(
+    competition: competition,
+    entrants: entrants,
+    fixtures: fixtures,
+  );
 });
 
 /// Everything currently being played in an organization — the screen a remote
