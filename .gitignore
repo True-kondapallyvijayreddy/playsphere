@@ -47,3 +47,10 @@ app.*.map.json
 # Firebase local artifacts
 .firebase/
 firebase-debug.log
+firestore-debug.log
+ui-debug.log
+
+# Security-rules test harness (Node). The test sources are tracked; the
+# installed toolchain and the emulator's scratch data are not.
+node_modules/
+test/security/package-lock.json
