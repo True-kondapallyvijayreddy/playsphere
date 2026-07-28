@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import '../../domain/scoring/scoring_plugin.dart';
 import 'enums.dart';
 import 'firestore_codec.dart';
 
@@ -39,6 +40,7 @@ class Fixture {
     this.isDraw = false,
     this.rulesetVersion = 1,
     this.scoringPluginKey = 'simple_points',
+    this.scoringConfig = const {},
     this.feedsWinnerToFixtureId,
     this.startedAt,
     this.completedAt,
@@ -88,6 +90,29 @@ class Fixture {
   final int rulesetVersion;
   final String scoringPluginKey;
 
+  /// The sport's scoring configuration, frozen onto the fixture when the draw
+  /// was generated — points per set, overs per innings, whether draws are
+  /// allowed.
+  ///
+  /// It lives here rather than being looked up from the sport catalogue at
+  /// render time for two reasons. It is what the competition was actually
+  /// played under, so improving a catalogue default next season cannot
+  /// retroactively change how a finished match reads. And every surface that
+  /// renders a score — the spectator screen, the live card in a list — can
+  /// then do so from the fixture alone, with no second read. Without it those
+  /// surfaces silently fell back to plugin defaults and showed a volleyball
+  /// set as "to 21" instead of "to 25".
+  final Map<String, dynamic> scoringConfig;
+
+  /// The context needed to render or score this fixture, built from the
+  /// fixture alone. One definition, so a score can never read differently on
+  /// the scoring pad than it does for a spectator.
+  ScoringContext scoringContext() => ScoringContext(
+        entrantAName: entrantAName,
+        entrantBName: entrantBName,
+        config: scoringConfig,
+      );
+
   /// For knockout draws: where this match's winner advances to.
   final String? feedsWinnerToFixtureId;
 
@@ -124,6 +149,7 @@ class Fixture {
       isDraw: Fs.boolean(d['isDraw']),
       rulesetVersion: Fs.integer(d['rulesetVersion'], 1),
       scoringPluginKey: Fs.str(d['scoringPluginKey'], 'simple_points'),
+      scoringConfig: Fs.map(d['scoringConfig']),
       feedsWinnerToFixtureId: Fs.strOrNull(d['feedsWinnerToFixtureId']),
       startedAt: Fs.dateOrNull(d['startedAt']),
       completedAt: Fs.dateOrNull(d['completedAt']),
@@ -151,16 +177,23 @@ class Fixture {
         'isDraw': false,
         'rulesetVersion': rulesetVersion,
         'scoringPluginKey': scoringPluginKey,
+        'scoringConfig': scoringConfig,
         'feedsWinnerToFixtureId': feedsWinnerToFixtureId,
         'createdAt': FieldValue.serverTimestamp(),
       };
 
+  /// [clearWinner] exists because `winnerEntrantId ?? this.winnerEntrantId`
+  /// cannot express "there is no longer a winner". Reopening a finished match
+  /// to correct it passed null and silently kept the old winner, so the
+  /// fixture went back to live still flagged as won — and the spectator card
+  /// bolded a winner's name mid-match.
   Fixture copyWith({
     FixtureStatus? status,
     Map<String, dynamic>? scoreState,
     String? summary,
     int? lastSeq,
     String? winnerEntrantId,
+    bool clearWinner = false,
     bool? isDraw,
     List<String>? scorerUids,
     DateTime? scheduledAt,
@@ -184,10 +217,12 @@ class Fixture {
       scoreState: scoreState ?? this.scoreState,
       summary: summary ?? this.summary,
       lastSeq: lastSeq ?? this.lastSeq,
-      winnerEntrantId: winnerEntrantId ?? this.winnerEntrantId,
+      winnerEntrantId:
+          clearWinner ? null : (winnerEntrantId ?? this.winnerEntrantId),
       isDraw: isDraw ?? this.isDraw,
       rulesetVersion: rulesetVersion,
       scoringPluginKey: scoringPluginKey,
+      scoringConfig: scoringConfig,
       feedsWinnerToFixtureId: feedsWinnerToFixtureId,
       startedAt: startedAt,
       completedAt: completedAt,

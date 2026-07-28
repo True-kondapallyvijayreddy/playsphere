@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 
 import '../../../core/models/enums.dart';
 import '../../../core/models/fixture.dart';
-import '../../../domain/scoring/scoring_plugin.dart';
 import '../../../domain/scoring/scoring_registry.dart';
 
 /// Compact live scoreboard.
@@ -27,10 +26,7 @@ class LiveScoreCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final plugin = ScoringRegistry.resolve(fixture.scoringPluginKey);
-    final ctx = ScoringContext(
-      entrantAName: fixture.entrantAName,
-      entrantBName: fixture.entrantBName,
-    );
+    final ctx = fixture.scoringContext();
 
     final headline = plugin.headline(fixture.scoreState, ctx);
     final status = plugin.statusLine(fixture.scoreState, ctx);

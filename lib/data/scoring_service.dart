@@ -128,6 +128,10 @@ class ScoringService {
       winnerEntrantId: outcome.isComplete
           ? _entrantIdForSide(fixture, outcome.winnerSide)
           : null,
+      // An action that takes a finished match back to in-progress — a
+      // correction after a reopen — must drop the recorded winner, not
+      // quietly keep it.
+      clearWinner: !outcome.isComplete,
       isDraw: outcome.isDraw,
     );
 

@@ -78,19 +78,9 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
     if (_busy) return;
     setState(() => _busy = true);
 
-    final competition = ref
-        .read(competitionProvider(CompRef(widget.orgId, widget.compId)))
-        .valueOrNull;
-
-    final sport = competition == null
-        ? null
-        : SportCatalog.byId(competition.sportId);
-
-    final ctx = ScoringContext(
-      entrantAName: fixture.entrantAName,
-      entrantBName: fixture.entrantBName,
-      config: sport?.config ?? const {},
-    );
+    // The config is frozen on the fixture at draw time, so the pad scores
+    // under exactly the rules a spectator sees it scored under.
+    final ctx = fixture.scoringContext();
 
     try {
       await ref.read(scoringServiceProvider).submit(
@@ -144,14 +134,7 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
             );
           }
 
-          final sport = competition == null
-              ? null
-              : SportCatalog.byId(competition.sportId);
-          final ctx = ScoringContext(
-            entrantAName: fixture.entrantAName,
-            entrantBName: fixture.entrantBName,
-            config: sport?.config ?? const {},
-          );
+          final ctx = fixture.scoringContext();
           final plugin = ScoringRegistry.resolve(fixture.scoringPluginKey);
           final groups = plugin.controls(fixture.scoreState, ctx);
 

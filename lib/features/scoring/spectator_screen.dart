@@ -5,7 +5,6 @@ import 'package:intl/intl.dart';
 import '../../core/layout/responsive.dart';
 import '../../core/models/fixture.dart';
 import '../../core/providers.dart';
-import '../../domain/scoring/scoring_plugin.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
 
@@ -59,10 +58,7 @@ class SpectatorScreen extends ConsumerWidget {
           }
 
           final plugin = ScoringRegistry.resolve(fixture.scoringPluginKey);
-          final ctx = ScoringContext(
-            entrantAName: fixture.entrantAName,
-            entrantBName: fixture.entrantBName,
-          );
+          final ctx = fixture.scoringContext();
 
           final board = _BigScoreboard(
             fixture: fixture,

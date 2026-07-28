@@ -290,6 +290,9 @@ class CompetitionRepository {
             scorerUids: defaultScorerUids,
             scoringPluginKey: competition.scoringPluginKey,
             rulesetVersion: competition.rulesetVersion,
+            // Frozen here so every surface that renders this match reads the
+            // rules it was actually played under, without a second read.
+            scoringConfig: sport.config,
             scoreState: ScoringRegistry.resolve(competition.scoringPluginKey)
                 .initialState(_contextFor(p, sport)),
             feedsWinnerToFixtureId: p.feedsWinnerToIndex == null
