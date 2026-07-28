@@ -8,6 +8,8 @@ import 'plugins/kho_kho_plugin.dart';
 import 'plugins/set_based_plugin.dart';
 import 'plugins/volleyball_plugin.dart';
 import 'plugins/simple_points_plugin.dart';
+import 'plugins/table_tennis_plugin.dart';
+import 'plugins/tennis_plugin.dart';
 import 'scoring_plugin.dart';
 
 /// One sport in the platform catalogue.
@@ -90,7 +92,7 @@ class SportCatalog {
     SportSpec(
       id: 'table_tennis',
       name: 'Table Tennis',
-      pluginKey: SetBasedPlugin.pluginKey,
+      pluginKey: TableTennisPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
       icon: '🏓',
       // 11 a game, best of five, win by two, no cap.
@@ -118,10 +120,16 @@ class SportCatalog {
     SportSpec(
       id: 'tennis',
       name: 'Tennis',
-      pluginKey: SetBasedPlugin.pluginKey,
+      pluginKey: TennisPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
       icon: '🎾',
-      config: {'pointsPerSet': 6, 'setsToWin': 2, 'winBy': 2, 'hardCap': 7},
+      config: {
+        'setsToWin': 2,
+        'gamesPerSet': 6,
+        'tiebreakTo': 7,
+        'noAd': false,
+        'decidingSetTiebreak': false,
+      },
     ),
 
     // --- Field / court, goal scoring --------------------------------------
@@ -294,6 +302,8 @@ class ScoringRegistry {
     KabaddiPlugin.pluginKey: KabaddiPlugin(),
     VolleyballPlugin.pluginKey: VolleyballPlugin(),
     KhoKhoPlugin.pluginKey: KhoKhoPlugin(),
+    TennisPlugin.pluginKey: TennisPlugin(),
+    TableTennisPlugin.pluginKey: TableTennisPlugin(),
   };
 
   static ScoringPlugin resolve(String? key) => _plugins[key] ?? _fallback;
