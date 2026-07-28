@@ -7,6 +7,12 @@ import '../core/permissions/capability.dart';
 import '../core/providers.dart';
 import '../core/router/app_router.dart';
 
+/// Width of the extended navigation rail.
+///
+/// Shared between the rail itself and its leading widget so the two cannot
+/// drift apart — the leading slot needs a definite width to lay out at all.
+const double _railExtendedWidth = 208;
+
 /// One navigation destination, filtered by capability.
 class NavItem {
   const NavItem({
@@ -139,25 +145,37 @@ class AppScaffold extends ConsumerWidget {
             onDestinationSelected: go,
             // A laptop has the room to label things; a tablet does not.
             extended: window.isExpanded,
-            minExtendedWidth: 208,
+            minExtendedWidth: _railExtendedWidth,
             labelType: window.isExpanded
                 ? NavigationRailLabelType.none
                 : NavigationRailLabelType.all,
             leading: window.isExpanded
                 ? Padding(
                     padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.sports_score, size: 22),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            org?.name ?? 'PlaySphere',
-                            style: Theme.of(context).textTheme.titleSmall,
-                            overflow: TextOverflow.ellipsis,
+                    // The explicit width is load-bearing, not cosmetic. A Row
+                    // lays out its non-flex children with an UNBOUNDED main
+                    // axis constraint, so the rail — and everything in its
+                    // leading slot — is measured unbounded. An Expanded under
+                    // an unbounded width throws in performLayout, which takes
+                    // out the whole render tree and renders as a blank page.
+                    // Giving the Row a definite width restores a bounded
+                    // constraint, so Expanded is legal and the name can
+                    // ellipsize instead of overflowing.
+                    child: SizedBox(
+                      width: _railExtendedWidth - 24, // minus the padding above
+                      child: Row(
+                        children: [
+                          const Icon(Icons.sports_score, size: 22),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              org?.name ?? 'PlaySphere',
+                              style: Theme.of(context).textTheme.titleSmall,
+                              overflow: TextOverflow.ellipsis,
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   )
                 : null,
