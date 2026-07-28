@@ -1,7 +1,9 @@
 import '../../core/models/enums.dart';
+import 'plugins/basketball_plugin.dart';
 import 'plugins/cricket_plugin.dart';
 import 'plugins/football_plugin.dart';
 import 'plugins/goal_based_plugin.dart';
+import 'plugins/kabaddi_plugin.dart';
 import 'plugins/set_based_plugin.dart';
 import 'plugins/simple_points_plugin.dart';
 import 'scoring_plugin.dart';
@@ -133,29 +135,30 @@ class SportCatalog {
     SportSpec(
       id: 'basketball',
       name: 'Basketball',
-      pluginKey: GoalBasedPlugin.pluginKey,
+      pluginKey: BasketballPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
       defaultEntrantType: EntrantType.team,
       icon: '🏀',
       config: {
         'periods': 4,
         'periodLabel': 'Quarter',
-        'allowDraw': false,
-        'scoreValues': [1, 2, 3],
+        'foulOutAt': 5,
       },
     ),
     SportSpec(
       id: 'kabaddi',
       name: 'Kabaddi',
-      pluginKey: GoalBasedPlugin.pluginKey,
+      pluginKey: KabaddiPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
       defaultEntrantType: EntrantType.team,
       icon: '🤼',
       config: {
         'periods': 2,
         'periodLabel': 'Half',
-        'allowDraw': true,
-        'scoreValues': [1, 2],
+        'playersOnCourt': 7,
+        'bonusMinDefenders': 6,
+        'superTackleMaxDefenders': 3,
+        'superRaidPoints': 3,
       },
     ),
     SportSpec(
@@ -272,6 +275,8 @@ class ScoringRegistry {
     GoalBasedPlugin.pluginKey: GoalBasedPlugin(),
     CricketPlugin.pluginKey: CricketPlugin(),
     FootballPlugin.pluginKey: FootballPlugin(),
+    BasketballPlugin.pluginKey: BasketballPlugin(),
+    KabaddiPlugin.pluginKey: KabaddiPlugin(),
   };
 
   static ScoringPlugin resolve(String? key) => _plugins[key] ?? _fallback;
