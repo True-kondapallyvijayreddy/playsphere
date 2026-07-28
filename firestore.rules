@@ -430,10 +430,22 @@ service cloud.firestore {
 
     // -------------------------------------------------------------------
     // Collection-group query over memberships, powering "which orgs do I
-    // belong to". Scoped so a caller can only ever match their OWN rows.
+    // belong to" — the screen every signed-in user lands on.
+    //
+    // This MUST match on the `uid` field rather than the {memberUid}
+    // document id. In a collection-group query Firestore does not bind the
+    // document-id wildcard when it evaluates the rule, so `memberUid` is
+    // null and comparing it to a string aborts the whole query with
+    // "Null value error", not a plain denial. Matching the field works
+    // because the query itself is constrained by `where('uid', ==, me)`, so
+    // every document the query can return satisfies the rule.
+    //
+    // The doc id is still the uid — that invariant is enforced on write in
+    // the members rule above — so this is the same guarantee expressed
+    // against data the query engine can actually see.
     // -------------------------------------------------------------------
     match /{path=**}/members/{memberUid} {
-      allow read: if isSignedIn() && memberUid == uid();
+      allow read: if isSignedIn() && resource.data.uid == uid();
     }
 
     // -------------------------------------------------------------------

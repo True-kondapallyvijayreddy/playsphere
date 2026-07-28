@@ -195,6 +195,56 @@ describe('P0-1: organization creation', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Collection-group query over memberships — the landing screen's only query
+// ---------------------------------------------------------------------------
+describe('my memberships collection-group query', () => {
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(doc(db, 'orgs', PRIVATE_ORG), organization(OWNER, 'unlisted'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER),
+        membership(OWNER, PUBLIC_ORG, 'owner'),
+      );
+      await setDoc(
+        doc(db, 'orgs', PRIVATE_ORG, 'members', OWNER),
+        membership(OWNER, PRIVATE_ORG, 'admin'),
+      );
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', ADMIN),
+        membership(ADMIN, PUBLIC_ORG, 'admin'),
+      );
+    });
+  });
+
+  it('lets a user list their own memberships across every org', async () => {
+    // Regression: this rule originally matched on the {memberUid} document
+    // id. Firestore does not bind that wildcard when evaluating a
+    // collection-group query, so it was null and the query died with
+    // "Null value error" — the landing screen could never load.
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    const snap = await assertSucceeds(
+      getDocs(
+        query(collectionGroup(db, 'members'), where('uid', '==', OWNER)),
+      ),
+    );
+    assert.equal(snap.size, 2);
+  });
+
+  it('refuses an unconstrained collection-group read of every membership', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(getDocs(query(collectionGroup(db, 'members'))));
+  });
+
+  it('refuses reading somebody else\'s memberships', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      getDocs(query(collectionGroup(db, 'members'), where('uid', '==', OWNER))),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // P0-2 — collection-group queries over fixtures
 // ---------------------------------------------------------------------------
 describe('P0-2: fixtures collection-group queries', () => {
