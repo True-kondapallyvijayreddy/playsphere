@@ -1,0 +1,120 @@
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+
+import '../errors/app_exception.dart';
+
+/// Google Sign-In, with the platform difference contained here and nowhere
+/// else.
+///
+/// The two paths are genuinely different mechanisms, not a style choice:
+///
+///  * **Web** must use `signInWithPopup`. The native Google Sign-In SDK has no
+///    web equivalent that returns a Firebase credential, and a redirect flow
+///    loses in-memory state — which on a school laptop means a half-scored
+///    match disappears.
+///  * **Android / iOS** must use the native SDK, because it reuses the account
+///    already on the device. A popup on mobile would force the user to type a
+///    password that the phone already knows.
+///
+/// Callers never branch on platform; they call [signInWithGoogle].
+class AuthService {
+  AuthService({FirebaseAuth? auth, GoogleSignIn? googleSignIn})
+      : _auth = auth ?? FirebaseAuth.instance,
+        _googleSignIn = googleSignIn ?? GoogleSignIn(scopes: const ['email']);
+
+  final FirebaseAuth _auth;
+  final GoogleSignIn _googleSignIn;
+
+  /// Emits on every sign-in, sign-out and token refresh. This is the single
+  /// source of truth for "is anyone signed in" — never a local bool.
+  Stream<User?> authStateChanges() => _auth.authStateChanges();
+
+  User? get currentUser => _auth.currentUser;
+
+  Future<UserCredential> signInWithGoogle() async {
+    try {
+      if (kIsWeb) {
+        final provider = GoogleAuthProvider()
+          ..addScope('email')
+          // Always show the chooser. On a shared school or college laptop,
+          // silently reusing the last account signs the next teacher in as
+          // the previous one — which would attribute their scoring actions
+          // to the wrong person in the audit log.
+          ..setCustomParameters({'prompt': 'select_account'});
+        return await _auth.signInWithPopup(provider);
+      }
+
+      final googleUser = await _googleSignIn.signIn();
+      if (googleUser == null) {
+        throw const AuthCancelledException();
+      }
+      final googleAuth = await googleUser.authentication;
+      final credential = GoogleAuthProvider.credential(
+        accessToken: googleAuth.accessToken,
+        idToken: googleAuth.idToken,
+      );
+      return await _auth.signInWithCredential(credential);
+    } on FirebaseAuthException catch (e) {
+      throw _translate(e);
+    }
+  }
+
+  Future<void> signOut() async {
+    // Sign out of Google as well as Firebase on mobile, otherwise the next
+    // sign-in silently reuses the same account and "switch user" appears
+    // broken to anyone sharing a device.
+    if (!kIsWeb) {
+      try {
+        await _googleSignIn.signOut();
+      } catch (_) {
+        // A failure to clear the Google session must not block the Firebase
+        // sign-out — the user asked to leave, so leaving takes priority.
+      }
+    }
+    await _auth.signOut();
+  }
+
+  /// Deleting an account requires a recent sign-in. Surfacing that as a
+  /// distinct, actionable error avoids the generic "something went wrong"
+  /// that leaves a user unable to exercise their deletion right.
+  Future<void> deleteAccount() async {
+    final user = _auth.currentUser;
+    if (user == null) throw const UnauthorizedException();
+    try {
+      await user.delete();
+    } on FirebaseAuthException catch (e) {
+      if (e.code == 'requires-recent-login') {
+        throw const ReauthenticationRequiredException();
+      }
+      throw _translate(e);
+    }
+  }
+
+  AppException _translate(FirebaseAuthException e) {
+    return switch (e.code) {
+      'network-request-failed' => const NetworkException(
+          'No connection. Check your network and try again.',
+        ),
+      'popup-closed-by-user' ||
+      'cancelled-popup-request' =>
+        const AuthCancelledException(),
+      'popup-blocked' => const AuthException(
+          'Your browser blocked the sign-in popup. Allow popups for this '
+          'site and try again.',
+        ),
+      'account-exists-with-different-credential' => const AuthException(
+          'An account already exists with this email using a different '
+          'sign-in method.',
+        ),
+      'user-disabled' => const AuthException(
+          'This account has been disabled. Contact your organization admin.',
+        ),
+      'operation-not-allowed' => const AuthException(
+          'Google Sign-In is not enabled for this project yet. An administrator '
+          'must switch it on in the Firebase console.',
+        ),
+      _ => AuthException(e.message ?? 'Sign-in failed. Please try again.'),
+    };
+  }
+}

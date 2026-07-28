@@ -1,179 +1,219 @@
+
+
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../../features/analytics/presentation/screens/analytics_dashboard_screen.dart';
-import '../../features/auth/presentation/screens/login_screen.dart';
-import '../../features/auth/presentation/screens/splash_screen.dart';
-import '../../features/discovery/presentation/screens/talent_discovery_screen.dart';
-import '../../features/events/presentation/screens/event_detail_screen.dart';
-import '../../features/events/presentation/screens/event_list_screen.dart';
-import '../../features/fixtures/presentation/screens/fixture_board_screen.dart';
-import '../../features/governance/presentation/screens/government_dashboard_screen.dart';
-import '../../features/live_ops/presentation/screens/live_dashboard_screen.dart';
-import '../../features/members/presentation/screens/member_profile_screen.dart';
-import '../../features/officials/presentation/screens/officials_directory_screen.dart';
-import '../../features/organization/presentation/screens/organization_home_screen.dart';
-import '../../features/registration/presentation/screens/registration_form_screen.dart';
-import '../../features/venue/presentation/screens/venue_management_screen.dart';
+import '../../features/auth/profile_setup_screen.dart';
+import '../../features/auth/sign_in_screen.dart';
+import '../../features/competitions/competition_detail_screen.dart';
+import '../../features/competitions/create_competition_screen.dart';
+import '../../features/orgs/create_org_screen.dart';
+import '../../features/orgs/join_org_screen.dart';
+import '../../features/orgs/members_screen.dart';
+import '../../features/orgs/org_home_screen.dart';
+import '../../features/orgs/org_picker_screen.dart';
+import '../../features/scoring/live_matches_screen.dart';
+import '../../features/scoring/scoring_screen.dart';
+import '../../features/scoring/spectator_screen.dart';
+import '../providers.dart';
 
-import '../../features/events/presentation/screens/create_activity_wizard_screen.dart';
-import '../../features/organization/presentation/screens/create_club_screen.dart';
-import '../../features/organization/presentation/screens/join_club_screen.dart';
-import '../../features/organization/presentation/screens/my_scoring_assignments_screen.dart';
-import '../../features/organization/presentation/screens/org_settings_screen.dart';
-import '../../features/organization/presentation/screens/participant_home_screen.dart';
+class Routes {
+  const Routes._();
 
-class AppRoutes {
-  AppRoutes._();
+  static const signIn = '/sign-in';
+  static const profileSetup = '/welcome';
+  static const orgs = '/orgs';
+  static const createOrg = '/orgs/new';
+  static const joinOrg = '/orgs/join';
 
-  static const splash = '/splash';
-  static const login = '/login';
-  static const orgHome = '/org/:orgId';
-  static const orgSettings = '/org/:orgId/settings';
-  static const participantHome = '/org/:orgId/participant';
-  static const scoringAssignments = '/org/:orgId/scoring-assignments';
-  static const events = '/org/:orgId/events';
-  static const createActivity = '/org/:orgId/create-activity';
-  static const createClub = '/org/:orgId/create-club';
-  static const joinClub = '/org/:orgId/join-club';
-  static const eventDetail = '/org/:orgId/events/:eventId';
-  static const registration = '/org/:orgId/events/:eventId/register';
-  static const fixtures = '/org/:orgId/events/:eventId/fixtures';
-  static const liveOps = '/org/:orgId/events/:eventId/live';
-  static const memberProfile = '/org/:orgId/members/:memberId';
-  static const analytics = '/org/:orgId/analytics';
-  static const discovery = '/org/:orgId/discovery';
-  static const venues = '/org/:orgId/venues';
-  static const officials = '/org/:orgId/officials';
-  static const governance = '/org/:orgId/governance';
+  static String org(String orgId) => '/org/$orgId';
+  static String members(String orgId) => '/org/$orgId/members';
+  static String live(String orgId) => '/org/$orgId/live';
+  static String createCompetition(String orgId) => '/org/$orgId/new-event';
+  static String competition(String orgId, String compId) =>
+      '/org/$orgId/event/$compId';
+  static String scoring(String orgId, String compId, String fixtureId) =>
+      '/org/$orgId/event/$compId/score/$fixtureId';
+  static String watch(String orgId, String compId, String fixtureId) =>
+      '/org/$orgId/event/$compId/watch/$fixtureId';
+}
+
+/// Routes a signed-out visitor may still open.
+///
+/// Spectating is deliberately public: the entire point of the product is that
+/// a parent at work or a class on a laptop can follow a match. Forcing a sign
+/// in to watch would defeat it.
+bool _isPublicRoute(String location) {
+  if (location.startsWith(Routes.signIn)) return true;
+  return RegExp(r'^/org/[^/]+/event/[^/]+/watch/').hasMatch(location);
 }
 
 final appRouterProvider = Provider<GoRouter>((ref) {
+  final refresh = _AuthRefresh(ref);
+  ref.onDispose(refresh.dispose);
+
   return GoRouter(
-    initialLocation: '/org/maram-homes', // Skip login by default
-    debugLogDiagnostics: true,
+    initialLocation: Routes.orgs,
+    refreshListenable: refresh,
+    debugLogDiagnostics: false,
+
+    // Every authority decision happens here rather than inside widgets, so a
+    // deep link pasted into a browser is subject to exactly the same checks
+    // as a tap inside the app.
+    redirect: (context, state) {
+      final location = state.uri.path;
+      final authState = ref.read(authStateProvider);
+
+      // Hold still until Firebase has restored the session, otherwise a
+      // refresh on the web bounces a signed-in user to the sign-in screen.
+      if (authState.isLoading) return null;
+
+      final signedIn = authState.valueOrNull != null;
+
+      if (!signedIn) {
+        return _isPublicRoute(location) ? null : Routes.signIn;
+      }
+
+      // Signed in, but we still need the details Google never gives us —
+      // principally a date of birth, without which no age category can be
+      // judged. Everything is blocked until that is supplied.
+      final profile = ref.read(currentUserProvider);
+      if (profile.isLoading) return null;
+
+      final complete = profile.valueOrNull?.profileComplete ?? false;
+      if (!complete && location != Routes.profileSetup) {
+        return Routes.profileSetup;
+      }
+      if (complete && location == Routes.profileSetup) {
+        return Routes.orgs;
+      }
+      if (location == Routes.signIn) return Routes.orgs;
+
+      return null;
+    },
+
+    errorBuilder: (context, state) => _NotFoundScreen(location: state.uri.path),
+
     routes: [
       GoRoute(
-        path: AppRoutes.splash,
-        builder: (context, state) => const SplashScreen(),
+        path: Routes.signIn,
+        builder: (_, __) => const SignInScreen(),
       ),
       GoRoute(
-        path: AppRoutes.login,
-        builder: (context, state) => const LoginScreen(),
+        path: Routes.profileSetup,
+        builder: (_, __) => const ProfileSetupScreen(),
       ),
       GoRoute(
-        path: AppRoutes.orgHome,
-        builder: (context, state) => OrganizationHomeScreen(
-          orgId: state.pathParameters['orgId']!,
-        ),
+        path: Routes.orgs,
+        builder: (_, __) => const OrgPickerScreen(),
+        routes: [
+          GoRoute(
+            path: 'new',
+            builder: (_, __) => const CreateOrgScreen(),
+          ),
+          GoRoute(
+            path: 'join',
+            builder: (_, __) => const JoinOrgScreen(),
+          ),
+        ],
       ),
       GoRoute(
-        path: AppRoutes.orgSettings,
-        builder: (context, state) => OrgSettingsScreen(
-          orgId: state.pathParameters['orgId']!,
-        ),
-      ),
-      GoRoute(
-        path: AppRoutes.participantHome,
-        builder: (context, state) => ParticipantHomeScreen(
-          orgId: state.pathParameters['orgId']!,
-        ),
-      ),
-      GoRoute(
-        path: AppRoutes.scoringAssignments,
-        builder: (context, state) => MyScoringAssignmentsScreen(
-          orgId: state.pathParameters['orgId']!,
-        ),
-      ),
-      GoRoute(
-        path: AppRoutes.events,
-        builder: (context, state) => EventListScreen(
-          orgId: state.pathParameters['orgId']!,
-        ),
-      ),
-      GoRoute(
-        path: AppRoutes.createActivity,
-        builder: (context, state) => CreateActivityWizardScreen(
-          orgId: state.pathParameters['orgId']!,
-        ),
-      ),
-      GoRoute(
-        path: AppRoutes.createClub,
-        builder: (context, state) => CreateClubScreen(
-          orgId: state.pathParameters['orgId']!,
-        ),
-      ),
-      GoRoute(
-        path: AppRoutes.joinClub,
-        builder: (context, state) => JoinClubScreen(
-          orgId: state.pathParameters['orgId']!,
-        ),
-      ),
-      GoRoute(
-        path: AppRoutes.eventDetail,
-        builder: (context, state) => EventDetailScreen(
-          orgId: state.pathParameters['orgId']!,
-          eventId: state.pathParameters['eventId']!,
-        ),
-      ),
-      GoRoute(
-        path: AppRoutes.registration,
-        builder: (context, state) => RegistrationFormScreen(
-          orgId: state.pathParameters['orgId']!,
-          eventId: state.pathParameters['eventId']!,
-        ),
-      ),
-      GoRoute(
-        path: AppRoutes.fixtures,
-        builder: (context, state) => FixtureBoardScreen(
-          orgId: state.pathParameters['orgId']!,
-          eventId: state.pathParameters['eventId']!,
-        ),
-      ),
-      GoRoute(
-        path: AppRoutes.liveOps,
-        builder: (context, state) => LiveDashboardScreen(
-          orgId: state.pathParameters['orgId']!,
-          eventId: state.pathParameters['eventId']!,
-        ),
-      ),
-      GoRoute(
-        path: AppRoutes.memberProfile,
-        builder: (context, state) => MemberProfileScreen(
-          orgId: state.pathParameters['orgId']!,
-          memberId: state.pathParameters['memberId']!,
-        ),
-      ),
-      GoRoute(
-        path: AppRoutes.analytics,
-        builder: (context, state) => AnalyticsDashboardScreen(
-          orgId: state.pathParameters['orgId']!,
-        ),
-      ),
-      GoRoute(
-        path: AppRoutes.discovery,
-        builder: (context, state) => TalentDiscoveryScreen(
-          orgId: state.pathParameters['orgId']!,
-        ),
-      ),
-      GoRoute(
-        path: AppRoutes.venues,
-        builder: (context, state) => VenueManagementScreen(
-          orgId: state.pathParameters['orgId']!,
-        ),
-      ),
-      GoRoute(
-        path: AppRoutes.officials,
-        builder: (context, state) => OfficialsDirectoryScreen(
-          orgId: state.pathParameters['orgId']!,
-        ),
-      ),
-      GoRoute(
-        path: AppRoutes.governance,
-        builder: (context, state) => GovernmentDashboardScreen(
-          orgId: state.pathParameters['orgId']!,
-        ),
+        path: '/org/:orgId',
+        builder: (_, state) =>
+            OrgHomeScreen(orgId: state.pathParameters['orgId']!),
+        routes: [
+          GoRoute(
+            path: 'members',
+            builder: (_, state) =>
+                MembersScreen(orgId: state.pathParameters['orgId']!),
+          ),
+          GoRoute(
+            path: 'live',
+            builder: (_, state) =>
+                LiveMatchesScreen(orgId: state.pathParameters['orgId']!),
+          ),
+          GoRoute(
+            path: 'new-event',
+            builder: (_, state) =>
+                CreateCompetitionScreen(orgId: state.pathParameters['orgId']!),
+          ),
+          GoRoute(
+            path: 'event/:compId',
+            builder: (_, state) => CompetitionDetailScreen(
+              orgId: state.pathParameters['orgId']!,
+              compId: state.pathParameters['compId']!,
+            ),
+            routes: [
+              GoRoute(
+                path: 'score/:fixtureId',
+                builder: (_, state) => ScoringScreen(
+                  orgId: state.pathParameters['orgId']!,
+                  compId: state.pathParameters['compId']!,
+                  fixtureId: state.pathParameters['fixtureId']!,
+                ),
+              ),
+              GoRoute(
+                path: 'watch/:fixtureId',
+                builder: (_, state) => SpectatorScreen(
+                  orgId: state.pathParameters['orgId']!,
+                  compId: state.pathParameters['compId']!,
+                  fixtureId: state.pathParameters['fixtureId']!,
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     ],
   );
 });
+
+/// Nudges GoRouter to re-run [GoRouter.redirect] when the session or the
+/// profile changes, so signing in or completing a profile navigates without
+/// the user having to touch anything.
+class _AuthRefresh extends ChangeNotifier {
+  _AuthRefresh(this._ref) {
+    _subs.add(_ref.listen(authStateProvider, (_, __) => notifyListeners()));
+    _subs.add(_ref.listen(currentUserProvider, (_, __) => notifyListeners()));
+  }
+
+  final Ref _ref;
+  final List<ProviderSubscription> _subs = [];
+
+  @override
+  void dispose() {
+    for (final s in _subs) {
+      s.close();
+    }
+    super.dispose();
+  }
+}
+
+class _NotFoundScreen extends StatelessWidget {
+  const _NotFoundScreen({required this.location});
+  final String location;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.explore_off_outlined, size: 48),
+            const SizedBox(height: 12),
+            Text('Nothing here', style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 4),
+            Text(location, style: Theme.of(context).textTheme.bodySmall),
+            const SizedBox(height: 20),
+            FilledButton(
+              onPressed: () => context.go(Routes.orgs),
+              child: const Text('Back to my organizations'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

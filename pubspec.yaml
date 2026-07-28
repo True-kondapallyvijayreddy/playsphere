@@ -1,10 +1,9 @@
 name: playsphere
 description: >
-  PlaySphere - Event & Competition Operating System.
-  Multi-tenant platform for organizations to create, manage, execute,
-  analyze, and archive events and competitions.
+  PlaySphere — a sports operating system for schools, colleges, communities
+  and associations. One codebase for Android, iOS and the web.
 publish_to: "none"
-version: 0.1.0+1
+version: 1.0.0+1
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
@@ -17,45 +16,32 @@ dependencies:
 
   # State management
   flutter_riverpod: ^2.5.1
-  riverpod_annotation: ^2.3.5
 
   # Routing
   go_router: ^14.2.0
 
-  # Networking
-  dio: ^5.4.3
-  retrofit: ^4.1.0
-
-  # Realtime / Backend services
+  # Firebase — the entire backend.
   firebase_core: ^3.1.0
-  firebase_messaging: ^15.0.0
+  firebase_auth: ^5.1.0
   cloud_firestore: ^5.0.0
-  supabase_flutter: ^2.5.6
 
-  # Models / serialization
-  freezed_annotation: ^2.4.1
-  json_annotation: ^4.9.0
+  # Google Sign-In. On the web `firebase_auth` handles the popup itself, so
+  # this package is only exercised on Android and iOS — see
+  # core/auth/auth_service.dart for the platform split.
+  google_sign_in: ^6.2.1
 
-  # Local storage / caching
+  # Connectivity, so the scoring pad knows when it is queueing offline rather
+  # than guessing from failed writes.
+  connectivity_plus: ^6.0.3
+
+  # Durable offline scoring queue. A match scored on a ground with no signal
+  # must survive the app being killed before it reconnects.
   shared_preferences: ^2.2.3
-  hive_flutter: ^1.1.0
 
-  # QR / scanning (check-in, digital ID, certificates)
-  qr_flutter: ^4.1.0
-  mobile_scanner: ^5.1.1
-
-  # Media
-  image_picker: ^1.1.2
-  cached_network_image: ^3.3.1
-  video_player: ^2.9.1
-
-  # Charts (analytics dashboards)
+  # Presentation
   fl_chart: ^0.68.0
-
-  # Utilities
+  cached_network_image: ^3.3.1
   intl: ^0.19.0
-  equatable: ^2.0.5
-  logger: ^2.4.0
 
   cupertino_icons: ^1.0.8
 
@@ -64,21 +50,8 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: ^4.0.0
 
-  build_runner: ^2.4.11
-  freezed: ^2.5.2
-  json_serializable: ^6.8.0
-  riverpod_generator: ^2.4.0
-  retrofit_generator: ^8.1.0
-
 flutter:
   uses-material-design: true
   assets:
     - assets/images/
     - assets/icons/
-    - assets/data/
-  # fonts:
-  #   - family: Poppins
-  #     fonts:
-  #       - asset: assets/fonts/Poppins-Regular.ttf
-  #       - asset: assets/fonts/Poppins-Bold.ttf
-  #         weight: 700

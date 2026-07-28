@@ -1,0 +1,437 @@
+rules_version = '2';
+
+// =============================================================================
+// PlaySphere — Firestore Security Rules
+// =============================================================================
+// This file is the ONLY real security boundary in the product. Client-side
+// permission checks (lib/core/permissions/) exist to grey out buttons; they
+// prevent nothing. Assume every client is hostile and rooted.
+//
+// Design rules followed throughout:
+//   1. Deny by default. The final `match /{document=**}` denies everything
+//      not explicitly allowed above it.
+//   2. Role always comes from a server-side document read of the caller's
+//      membership, never from a client-supplied field or a custom claim the
+//      client could stale-cache.
+//   3. Match events are append-only and immutable. Nothing may ever update
+//      or delete a scoring event — a correction is a new compensating event.
+//   4. Document IDs carry meaning where it buys us a constraint for free:
+//      members/{uid} makes "one membership per user per org" structural, and
+//      events/{paddedSeq} makes duplicate sequence numbers impossible without
+//      any read-modify-write race.
+// =============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // -------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function uid() {
+      return request.auth.uid;
+    }
+
+    function memberPath(orgId) {
+      return /databases/$(database)/documents/orgs/$(orgId)/members/$(uid());
+    }
+
+    function isMember(orgId) {
+      return isSignedIn() && exists(memberPath(orgId));
+    }
+
+    function membership(orgId) {
+      return get(memberPath(orgId)).data;
+    }
+
+    // An `active` membership. `pending` members have applied but not been
+    // approved; they can see the org exists and nothing else.
+    function isActive(orgId) {
+      return isMember(orgId) && membership(orgId).status == 'active';
+    }
+
+    function roleIn(orgId, roles) {
+      return isActive(orgId) && membership(orgId).role in roles;
+    }
+
+    // Capability groups. These mirror lib/core/permissions/capability.dart —
+    // if you change one, change both. The Dart side is advisory; this is law.
+    function canManageOrg(orgId) {
+      return roleIn(orgId, ['owner']);
+    }
+
+    function canManageMembers(orgId) {
+      return roleIn(orgId, ['owner', 'admin']);
+    }
+
+    function canManageCompetitions(orgId) {
+      return roleIn(orgId, ['owner', 'admin', 'event_manager']);
+    }
+
+    function canScore(orgId) {
+      return roleIn(orgId, ['owner', 'admin', 'event_manager', 'judge_scorer']);
+    }
+
+    function orgDoc(orgId) {
+      return get(/databases/$(database)/documents/orgs/$(orgId)).data;
+    }
+
+    // Public orgs are world-readable so a parent in an office can follow a
+    // live match without an account. Unlisted orgs require membership.
+    function orgIsReadable(orgId) {
+      return orgDoc(orgId).visibility == 'public' || isActive(orgId);
+    }
+
+    function isNotDeleted(data) {
+      return !('deletedAt' in data) || data.deletedAt == null;
+    }
+
+    // Guards against a client stamping its own timestamps to forge history.
+    function serverTimed(field) {
+      return request.resource.data[field] == request.time;
+    }
+
+    function unchanged(field) {
+      return request.resource.data[field] == resource.data[field];
+    }
+
+    // -------------------------------------------------------------------
+    // Platform sport catalogue — curated, read-only to every client.
+    // Written only by an admin SDK / console, never by the app.
+    // -------------------------------------------------------------------
+    match /sports/{sportId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // -------------------------------------------------------------------
+    // User profiles
+    // -------------------------------------------------------------------
+    match /users/{userId} {
+      // A user always reads their own profile. Others may read it only if
+      // the owner made it public AND they are an adult — a minor's profile
+      // is never world-readable regardless of their own setting, which is
+      // the hard floor required by the guardian model.
+      allow read: if isSignedIn() && (
+        userId == uid()
+        || (resource.data.profileVisibility == 'public'
+            && resource.data.isMinor == false)
+      );
+
+      allow create: if isSignedIn()
+        && userId == uid()
+        && request.resource.data.uid == uid()
+        && serverTimed('createdAt')
+        // Date of birth drives every age-category and minor-safety rule, so
+        // it must be present and sane from the very first write.
+        && request.resource.data.dateOfBirth is timestamp
+        && request.resource.data.dateOfBirth < request.time;
+
+      allow update: if isSignedIn()
+        && userId == uid()
+        && request.resource.data.uid == uid()
+        // Date of birth is write-once. Letting a user edit it after
+        // registering would make every age-category result contestable —
+        // this is the single most abused field in junior sport. Changing it
+        // requires an admin correction path, not a self-service edit.
+        && unchanged('dateOfBirth')
+        && unchanged('createdAt');
+
+      allow delete: if false; // Soft-delete only, for audit integrity.
+    }
+
+    // -------------------------------------------------------------------
+    // Organizations (clubs, schools, colleges, associations)
+    // -------------------------------------------------------------------
+    match /orgs/{orgId} {
+
+      allow read: if isNotDeleted(resource.data)
+        && (resource.data.visibility == 'public' || isMember(orgId));
+
+      // Anyone signed in may found an org. They must name themselves owner —
+      // they cannot create an org already owned by someone else.
+      allow create: if isSignedIn()
+        && request.resource.data.ownerUid == uid()
+        && request.resource.data.createdBy == uid()
+        && serverTimed('createdAt')
+        && request.resource.data.name is string
+        && request.resource.data.name.size() >= 3
+        && request.resource.data.name.size() <= 120
+        && request.resource.data.memberCount == 1
+        && request.resource.data.deletedAt == null;
+
+      allow update: if canManageOrg(orgId)
+        // Ownership transfer is a deliberate, separate flow that must also
+        // rewrite the members subcollection; it may not happen as a side
+        // effect of editing the org name here.
+        && unchanged('ownerUid')
+        && unchanged('createdAt')
+        && unchanged('createdBy')
+        || (
+          // Admins may edit descriptive fields but not governance fields.
+          canManageMembers(orgId)
+          && unchanged('ownerUid')
+          && unchanged('visibility')
+          && unchanged('orgType')
+          && unchanged('createdAt')
+          && unchanged('createdBy')
+        );
+
+      allow delete: if false; // Soft-delete by setting deletedAt.
+
+      // -----------------------------------------------------------------
+      // Memberships. Doc id IS the uid, which makes duplicate membership
+      // structurally impossible.
+      // -----------------------------------------------------------------
+      match /members/{memberUid} {
+
+        allow read: if isActive(orgId) || memberUid == uid();
+
+        // Two legitimate creation paths:
+        //  (a) self-join — always lands as a `member` awaiting approval, so
+        //      a stranger can never mint themselves an admin seat;
+        //  (b) the founder's own first membership, created in the same batch
+        //      as the org itself, which is the only way an owner row exists.
+        allow create: if isSignedIn()
+          && request.resource.data.uid == memberUid
+          && request.resource.data.orgId == orgId
+          && serverTimed('joinedAt')
+          && (
+            (
+              memberUid == uid()
+              && request.resource.data.role == 'member'
+              && request.resource.data.status == 'pending'
+            )
+            || (
+              memberUid == uid()
+              && request.resource.data.role == 'owner'
+              && request.resource.data.status == 'active'
+              && orgDoc(orgId).ownerUid == uid()
+            )
+            || (
+              // Admin directly adding/inviting someone, but never at a rank
+              // above their own.
+              canManageMembers(orgId)
+              && request.resource.data.role != 'owner'
+            )
+          );
+
+        allow update: if canManageMembers(orgId)
+          && unchanged('uid')
+          && unchanged('orgId')
+          && unchanged('joinedAt')
+          // Only the owner may create another owner. An admin promoting
+          // themselves to owner is the classic privilege-escalation path.
+          && (request.resource.data.role != 'owner' || canManageOrg(orgId))
+          // Nobody may edit their own role — not even the owner, because
+          // that is how an org accidentally ends up with zero owners.
+          && memberUid != uid();
+
+        allow delete: if canManageMembers(orgId)
+          && memberUid != uid()
+          && resource.data.role != 'owner';
+      }
+
+      // -----------------------------------------------------------------
+      // Competitions (what the product calls "events")
+      // -----------------------------------------------------------------
+      match /competitions/{compId} {
+
+        allow read: if orgIsReadable(orgId);
+
+        allow create: if canManageCompetitions(orgId)
+          && request.resource.data.orgId == orgId
+          && request.resource.data.createdBy == uid()
+          && serverTimed('createdAt')
+          && request.resource.data.status == 'draft'
+          && request.resource.data.name is string
+          && request.resource.data.name.size() >= 3;
+
+        allow update: if canManageCompetitions(orgId)
+          && unchanged('orgId')
+          && unchanged('createdAt')
+          && unchanged('createdBy')
+          // A finished competition is a historical record. Reopening it
+          // would silently rewrite standings and ratings that participants
+          // have already been told are final.
+          && resource.data.status != 'completed';
+
+        allow delete: if canManageCompetitions(orgId)
+          && resource.data.status == 'draft';
+
+        // ---------------------------------------------------------------
+        // Registrations. Doc id is the entrant's uid for individual events,
+        // giving us "one registration per person per competition" for free.
+        // ---------------------------------------------------------------
+        match /registrations/{regId} {
+
+          allow read: if orgIsReadable(orgId) || regId == uid();
+
+          // Self-registration. Always lands `pending`; only an organizer can
+          // confirm it. The competition must actually be open — a closed
+          // competition cannot be back-filled by a client that kept the
+          // screen open.
+          allow create: if isActive(orgId)
+            && regId == uid()
+            && request.resource.data.uid == uid()
+            && request.resource.data.status == 'pending'
+            && serverTimed('createdAt')
+            && get(/databases/$(database)/documents/orgs/$(orgId)/competitions/$(compId))
+                 .data.status == 'registration_open';
+
+          // Organizers approve/reject/waitlist. Participants may only
+          // withdraw themselves, and only from a non-final state.
+          allow update: if (
+              canManageCompetitions(orgId)
+              && unchanged('uid')
+              && unchanged('createdAt')
+            ) || (
+              regId == uid()
+              && request.resource.data.status == 'withdrawn'
+              && resource.data.status != 'rejected'
+              && unchanged('uid')
+              && unchanged('createdAt')
+            );
+
+          allow delete: if false; // Withdrawals are a status, not a deletion.
+        }
+
+        // ---------------------------------------------------------------
+        // Entrants — the confirmed starting field, created by organizers
+        // when they close registration.
+        // ---------------------------------------------------------------
+        match /entrants/{entrantId} {
+          allow read: if orgIsReadable(orgId);
+          allow create, update: if canManageCompetitions(orgId);
+          allow delete: if canManageCompetitions(orgId)
+            && get(/databases/$(database)/documents/orgs/$(orgId)/competitions/$(compId))
+                 .data.status != 'in_progress';
+        }
+
+        // ---------------------------------------------------------------
+        // Fixtures. The fixture document carries a denormalized projection
+        // of the live score so that a spectator anywhere in the world holds
+        // exactly ONE listener open to follow a match. That is what makes
+        // remote viewing cheap enough to be free.
+        // ---------------------------------------------------------------
+        match /fixtures/{fixtureId} {
+
+          // World-readable for public orgs — the office/college spectator
+          // case works without an account.
+          allow read: if orgIsReadable(orgId);
+
+          allow create: if canManageCompetitions(orgId)
+            && request.resource.data.compId == compId
+            && request.resource.data.orgId == orgId
+            && request.resource.data.lastSeq == 0;
+
+          // Two distinct update paths with different authority:
+          allow update: if
+            // (a) Organizers may reschedule, assign officials, or force a
+            //     status such as walkover/abandoned/disputed.
+            (
+              canManageCompetitions(orgId)
+              && unchanged('compId')
+              && unchanged('orgId')
+            )
+            // (b) The assigned scorer may only advance the live projection.
+            //     They cannot move the fixture to a different competition,
+            //     rewrite history backwards, or reopen a finished match.
+            || (
+              canScore(orgId)
+              && uid() in resource.data.scorerUids
+              && unchanged('compId')
+              && unchanged('orgId')
+              && unchanged('entrantAId')
+              && unchanged('entrantBId')
+              && unchanged('scorerUids')
+              && resource.data.status in ['scheduled', 'live']
+              && request.resource.data.status in ['live', 'completed']
+              // Monotonic sequence: the projection may only ever move
+              // forward, so a stale client cannot overwrite a newer score.
+              && request.resource.data.lastSeq > resource.data.lastSeq
+            );
+
+          allow delete: if canManageCompetitions(orgId)
+            && resource.data.lastSeq == 0;
+
+          // -------------------------------------------------------------
+          // Match events — the append-only ledger that IS the match.
+          //
+          // Doc id is the zero-padded sequence number. Because Firestore
+          // `create` fails when the document already exists, two scorers
+          // racing on the same ball cannot both succeed: the loser gets
+          // PERMISSION_DENIED/ALREADY_EXISTS and re-syncs. This is our
+          // concurrency guard, and it costs nothing.
+          // -------------------------------------------------------------
+          match /events/{seq} {
+
+            allow read: if orgIsReadable(orgId);
+
+            allow create: if canScore(orgId)
+              && uid() in get(
+                   /databases/$(database)/documents/orgs/$(orgId)/competitions/$(compId)/fixtures/$(fixtureId)
+                 ).data.scorerUids
+              && request.resource.data.byUid == uid()
+              && serverTimed('at')
+              && request.resource.data.seq is int
+              && request.resource.data.seq > 0
+              // Idempotency key, so an offline queue replaying after a
+              // reconnect cannot double-count a delivery.
+              && request.resource.data.clientEventId is string;
+
+            // Immutable, forever. A mistake is corrected by appending a
+            // reversal event, which keeps the audit trail honest.
+            allow update, delete: if false;
+          }
+        }
+
+        // ---------------------------------------------------------------
+        // Standings & performance attempts — derived data. Organizers write
+        // them; everyone who can see the competition can read them.
+        // ---------------------------------------------------------------
+        match /standings/{entrantId} {
+          allow read: if orgIsReadable(orgId);
+          allow write: if canScore(orgId);
+        }
+
+        match /attempts/{attemptId} {
+          allow read: if orgIsReadable(orgId);
+          allow create, update: if canScore(orgId);
+          allow delete: if false;
+        }
+      }
+
+      // -----------------------------------------------------------------
+      // Audit log — append-only. Readable by governance roles so an
+      // association can answer "who changed this result, and when".
+      // -----------------------------------------------------------------
+      match /auditLogs/{logId} {
+        allow read: if canManageMembers(orgId);
+        allow create: if isActive(orgId)
+          && request.resource.data.actorUid == uid()
+          && serverTimed('at');
+        allow update, delete: if false;
+      }
+    }
+
+    // -------------------------------------------------------------------
+    // Collection-group query over memberships, powering "which orgs do I
+    // belong to". Scoped so a caller can only ever match their OWN rows.
+    // -------------------------------------------------------------------
+    match /{path=**}/members/{memberUid} {
+      allow read: if isSignedIn() && memberUid == uid();
+    }
+
+    // -------------------------------------------------------------------
+    // Default deny.
+    // -------------------------------------------------------------------
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
