@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:playsphere/core/models/match_player.dart';
 import 'package:playsphere/domain/scoring/plugins/cricket_plugin.dart';
 import 'package:playsphere/domain/scoring/plugins/goal_based_plugin.dart';
 import 'package:playsphere/domain/scoring/plugins/set_based_plugin.dart';
@@ -230,14 +231,36 @@ void main() {
 
   group('CricketPlugin', () {
     const plugin = CricketPlugin();
-    const t20 = ScoringContext(
+
+    // The engine now records who batted and who bowled, so every scenario
+    // needs a squad and an opening pair. A delivery that names nobody is
+    // refused by design: a total that belongs to no player is a total no
+    // scorecard can explain. See cricket_scorecard_test.dart for the
+    // player-level assertions; these tests stay focused on legality and
+    // settlement.
+    final t20 = ScoringContext(
       entrantAName: 'A',
       entrantBName: 'B',
-      config: {
+      config: const {
         'oversPerInnings': 2,
         'ballsPerOver': 6,
         'playersPerTeam': 11,
       },
+      lineupA: [
+        for (var n = 1; n <= 11; n++)
+          MatchPlayer(id: 'A$n', name: 'A Player $n'),
+      ],
+      lineupB: [
+        for (var n = 1; n <= 11; n++)
+          MatchPlayer(id: 'B$n', name: 'B Player $n'),
+      ],
+    );
+
+    /// Names the opening pair and the bowler. Every cricket scenario starts
+    /// here now.
+    const openA = ScoreAction(
+      type: 'open',
+      payload: {'striker': 'A1', 'nonStriker': 'A2', 'bowler': 'B1'},
     );
 
     Map<String, dynamic> innings(Map<String, dynamic> state, [int index = 0]) =>
@@ -245,6 +268,7 @@ void main() {
 
     test('a wide adds a run but does NOT consume a delivery', () {
       final state = run(plugin, t20, [
+        openA,
         const ScoreAction(type: 'wide'),
       ]);
       final i = innings(state);
@@ -256,6 +280,7 @@ void main() {
     test('a no-ball adds a run, does not consume a ball, and sets a free hit',
         () {
       final state = run(plugin, t20, [
+        openA,
         const ScoreAction(type: 'no_ball'),
       ]);
       expect(innings(state)['runs'], 1);
@@ -265,7 +290,7 @@ void main() {
 
     test('on a free hit only a run out is allowed', () {
       final afterNoBall =
-          run(plugin, t20, [const ScoreAction(type: 'no_ball')]);
+          run(plugin, t20, [openA, const ScoreAction(type: 'no_ball')]);
 
       final bowled = plugin.apply(
         afterNoBall,
@@ -285,6 +310,7 @@ void main() {
 
     test('byes are extras but DO consume a delivery', () {
       final state = run(plugin, t20, [
+        openA,
         const ScoreAction(type: 'bye', payload: {'runs': 2}),
       ]);
       final i = innings(state);
@@ -296,6 +322,7 @@ void main() {
     test('the innings closes after the configured number of overs', () {
       // 2 overs = 12 legal deliveries.
       final state = run(plugin, t20, [
+        openA,
         for (var i = 0; i < 12; i++)
           const ScoreAction(type: 'runs', payload: {'runs': 1}),
       ]);
@@ -306,6 +333,7 @@ void main() {
 
     test('a chase ends the moment the target is passed', () {
       var state = run(plugin, t20, [
+        openA,
         for (var i = 0; i < 6; i++)
           const ScoreAction(type: 'runs', payload: {'runs': 1}),
         const ScoreAction(type: 'end_innings'),
@@ -314,6 +342,7 @@ void main() {
 
       // Chasing side reaches 7 on the third ball — the match must end there.
       state = run(plugin, t20, [
+        openA,
         const ScoreAction(type: 'runs', payload: {'runs': 3}),
         const ScoreAction(type: 'runs', payload: {'runs': 3}),
         const ScoreAction(type: 'runs', payload: {'runs': 1}),
@@ -325,12 +354,14 @@ void main() {
 
     test('levelling the target is a tie, not a win', () {
       var state = run(plugin, t20, [
+        openA,
         for (var i = 0; i < 6; i++)
           const ScoreAction(type: 'runs', payload: {'runs': 1}),
         const ScoreAction(type: 'end_innings'),
       ]);
       // Target is 7; the chase makes exactly 6 then runs out of overs.
       state = run(plugin, t20, [
+        openA,
         for (var i = 0; i < 6; i++)
           const ScoreAction(type: 'runs', payload: {'runs': 1}),
         const ScoreAction(type: 'end_innings'),
@@ -343,6 +374,7 @@ void main() {
 
     test('overs read correctly with wides interleaved', () {
       final state = run(plugin, t20, [
+        openA,
         const ScoreAction(type: 'runs', payload: {'runs': 1}),
         const ScoreAction(type: 'wide'),
         const ScoreAction(type: 'runs', payload: {'runs': 1}),

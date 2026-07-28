@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../domain/scoring/scoring_plugin.dart';
 import 'enums.dart';
 import 'firestore_codec.dart';
+import 'match_player.dart';
 
 /// One scheduled contest between two entrants, at
 /// `orgs/{orgId}/competitions/{compId}/fixtures/{fixtureId}`.
@@ -41,6 +42,8 @@ class Fixture {
     this.rulesetVersion = 1,
     this.scoringPluginKey = 'simple_points',
     this.scoringConfig = const {},
+    this.lineupA = const [],
+    this.lineupB = const [],
     this.feedsWinnerToFixtureId,
     this.feedsWinnerToSlot,
     this.startedAt,
@@ -105,6 +108,16 @@ class Fixture {
   /// set as "to 21" instead of "to 25".
   final Map<String, dynamic> scoringConfig;
 
+  /// Who is playing, per side.
+  ///
+  /// Set before the first ball. Every player-level statistic the spec calls
+  /// for — batting figures, goal scorers, raid points — depends on the engine
+  /// being able to name people, and this is where the names live.
+  final List<MatchPlayer> lineupA;
+  final List<MatchPlayer> lineupB;
+
+  bool get hasLineups => lineupA.isNotEmpty && lineupB.isNotEmpty;
+
   /// The context needed to render or score this fixture, built from the
   /// fixture alone. One definition, so a score can never read differently on
   /// the scoring pad than it does for a spectator.
@@ -112,6 +125,8 @@ class Fixture {
         entrantAName: entrantAName,
         entrantBName: entrantBName,
         config: scoringConfig,
+        lineupA: lineupA,
+        lineupB: lineupB,
       );
 
   /// For knockout draws: where this match's winner advances to.
@@ -155,6 +170,8 @@ class Fixture {
       rulesetVersion: Fs.integer(d['rulesetVersion'], 1),
       scoringPluginKey: Fs.str(d['scoringPluginKey'], 'simple_points'),
       scoringConfig: Fs.map(d['scoringConfig']),
+      lineupA: MatchPlayer.listFrom(d['lineupA']),
+      lineupB: MatchPlayer.listFrom(d['lineupB']),
       feedsWinnerToFixtureId: Fs.strOrNull(d['feedsWinnerToFixtureId']),
       feedsWinnerToSlot: Fs.strOrNull(d['feedsWinnerToSlot']),
       startedAt: Fs.dateOrNull(d['startedAt']),
@@ -184,6 +201,8 @@ class Fixture {
         'rulesetVersion': rulesetVersion,
         'scoringPluginKey': scoringPluginKey,
         'scoringConfig': scoringConfig,
+        'lineupA': MatchPlayer.listTo(lineupA),
+        'lineupB': MatchPlayer.listTo(lineupB),
         'feedsWinnerToFixtureId': feedsWinnerToFixtureId,
         'feedsWinnerToSlot': feedsWinnerToSlot,
         'createdAt': FieldValue.serverTimestamp(),
@@ -230,6 +249,8 @@ class Fixture {
       rulesetVersion: rulesetVersion,
       scoringPluginKey: scoringPluginKey,
       scoringConfig: scoringConfig,
+      lineupA: lineupA,
+      lineupB: lineupB,
       feedsWinnerToFixtureId: feedsWinnerToFixtureId,
       feedsWinnerToSlot: feedsWinnerToSlot,
       startedAt: startedAt,

@@ -1,24 +1,31 @@
 import '../scoring_plugin.dart';
+import 'cricket_scorecard.dart';
 
-/// Ball-by-ball limited-overs cricket.
+/// Ball-by-ball limited-overs cricket, with player-level statistics.
 ///
-/// The rules below are the ones that separate a real scoring app from a
-/// counter with a cricket label on it, and every one of them is a bug that
-/// naive implementations ship:
+/// Benchmarked on CricHeroes, per the spec. Every delivery names a striker, a
+/// non-striker and a bowler, which is what makes a scorecard, batting figures,
+/// bowling figures and net run rate possible at all. An engine that only
+/// tracks a team total can show a score; it cannot show a career.
 ///
-///  * **Wides and no-balls do not consume a legal delivery.** If the ball
-///    counter increments on a wide, every over ends early and the innings
-///    finishes several overs short. This is the single most common cricket
-///    scoring bug in existence.
-///  * **A no-ball grants a free hit**, on which the batter cannot be bowled or
-///    caught out — only run out. Recording a normal dismissal there produces
-///    a wicket that did not happen.
-///  * **Byes and leg-byes are extras but DO consume a delivery**, which is the
-///    exact opposite of a wide, and is why they cannot share one code path.
-///  * **A chase ends the instant the target is passed** — not at the end of
-///    the over. Continuing to score afterwards fabricates runs.
-///  * **Levelling the target is a tie, not a win.** Off-by-one here decides
-///    matches wrongly.
+/// The rules encoded here are the ones naive implementations get wrong, and
+/// each is a result-changing error rather than a cosmetic one:
+///
+///  * **Wides and no-balls are not legal deliveries.** If the ball counter
+///    increments on them, every over ends early and an innings finishes
+///    several overs short. This is the single most common cricket scoring bug.
+///  * **Balls faced includes no-balls but excludes wides.** The batter had a
+///    chance to play a no-ball; on a wide they did not.
+///  * **A no-ball grants a free hit**, on which only a run-out is possible.
+///  * **Byes and leg-byes are extras that DO consume a delivery** — the exact
+///    opposite of a wide — and are charged to neither batter nor bowler.
+///  * **Runs conceded excludes byes and leg-byes** but includes wides and
+///    no-balls. Charging byes to the bowler is how amateur figures go wrong.
+///  * **A run-out is not credited to the bowler.**
+///  * **A chase ends the instant the target is passed**, mid-over.
+///  * **Levelling the target is a tie, not a win.**
+///  * **Overs are decimalised by balls/6.** 47.2 overs is 47.333, never 47.4 —
+///    get this wrong and every net run rate in the table is wrong.
 class CricketPlugin extends ScoringPlugin {
   const CricketPlugin();
 
@@ -28,7 +35,12 @@ class CricketPlugin extends ScoringPlugin {
   String get key => pluginKey;
 
   @override
-  String get displayName => 'Cricket (limited overs)';
+  String get displayName => 'Cricket (ball by ball)';
+
+  int _ballsPerOver(ScoringContext ctx) => ctx.intConfig('ballsPerOver', 6);
+  int _overs(ScoringContext ctx) => ctx.intConfig('oversPerInnings', 20);
+  int _wicketsAllowed(ScoringContext ctx) =>
+      ctx.intConfig('playersPerTeam', 11) - 1;
 
   @override
   Map<String, dynamic> initialState(ScoringContext ctx) {
@@ -51,12 +63,35 @@ class CricketPlugin extends ScoringPlugin {
         'legalBalls': 0,
         'extras': {'wide': 0, 'noBall': 0, 'bye': 0, 'legBye': 0},
         'closed': false,
+        'striker': null,
+        'nonStriker': null,
+        'bowler': null,
+        'batting': <String, dynamic>{},
+        'bowling': <String, dynamic>{},
+        'fow': <Map<String, dynamic>>[],
+        // Runs conceded by the current bowler in the over in progress, used
+        // only to decide whether it was a maiden.
+        'overRuns': 0,
       };
 
-  int _ballsPerOver(ScoringContext ctx) => ctx.intConfig('ballsPerOver', 6);
-  int _overs(ScoringContext ctx) => ctx.intConfig('oversPerInnings', 20);
-  int _wicketsAllowed(ScoringContext ctx) =>
-      ctx.intConfig('playersPerTeam', 11) - 1;
+  static Map<String, dynamic> _newBatting() => {
+        'runs': 0,
+        'balls': 0,
+        'fours': 0,
+        'sixes': 0,
+        'out': false,
+        'dismissal': null,
+        'battedYet': true,
+      };
+
+  static Map<String, dynamic> _newBowling() => {
+        'balls': 0,
+        'runs': 0,
+        'wickets': 0,
+        'maidens': 0,
+        'wides': 0,
+        'noBalls': 0,
+      };
 
   Map<String, dynamic> _current(Map<String, dynamic> state) {
     final innings = copyList(state['innings']);
@@ -64,6 +99,10 @@ class CricketPlugin extends ScoringPlugin {
     if (idx < innings.length) return innings[idx];
     return _newInnings('a');
   }
+
+  // -------------------------------------------------------------------------
+  // Reducer
+  // -------------------------------------------------------------------------
 
   @override
   ScoringResult apply(
@@ -77,92 +116,282 @@ class CricketPlugin extends ScoringPlugin {
       );
     }
 
+    if (action.type == 'reopen') {
+      // Reopening must also unclose the innings, otherwise the very next
+      // action settles the match again and the correction is impossible.
+      final innings = copyList(state['innings']);
+      final idx = (state['inningsIndex'] as num?)?.toInt() ?? 0;
+      if (idx < innings.length) {
+        innings[idx] = {...innings[idx], 'closed': false};
+      }
+      return ScoringResult.ok(mutate(state, (s) {
+        s['innings'] = innings;
+        s['complete'] = false;
+        s['winner'] = null;
+        s['tie'] = false;
+      }));
+    }
+
     final innings = copyList(state['innings']);
     final idx = (state['inningsIndex'] as num?)?.toInt() ?? 0;
     if (idx >= innings.length) {
       return const ScoringResult.rejected('No innings in progress.');
     }
+
     final cur = Map<String, dynamic>.from(innings[idx]);
     final extras = Map<String, dynamic>.from(cur['extras'] as Map? ?? {});
+    final batting = Map<String, dynamic>.from(cur['batting'] as Map? ?? {});
+    final bowling = Map<String, dynamic>.from(cur['bowling'] as Map? ?? {});
+    final fow = copyList(cur['fow']);
     final freeHit = state['freeHit'] == true;
+    final perOver = _ballsPerOver(ctx);
 
-    int runs() => (cur['runs'] as num?)?.toInt() ?? 0;
-    int balls() => (cur['legalBalls'] as num?)?.toInt() ?? 0;
-    int wickets() => (cur['wickets'] as num?)?.toInt() ?? 0;
+    int i(Object? v) => (v as num?)?.toInt() ?? 0;
 
+    // --- opening and personnel changes -----------------------------------
+
+    switch (action.type) {
+      case 'open':
+        final striker = action.payload['striker'] as String?;
+        final nonStriker = action.payload['nonStriker'] as String?;
+        final bowler = action.payload['bowler'] as String?;
+        if (striker == null || nonStriker == null || bowler == null) {
+          return const ScoringResult.rejected(
+            'Choose both batters and the bowler before the first ball.',
+          );
+        }
+        if (striker == nonStriker) {
+          return const ScoringResult.rejected(
+            'The same player cannot be on strike and at the other end.',
+          );
+        }
+        batting[striker] = batting[striker] ?? _newBatting();
+        batting[nonStriker] = batting[nonStriker] ?? _newBatting();
+        bowling[bowler] = bowling[bowler] ?? _newBowling();
+        cur
+          ..['striker'] = striker
+          ..['nonStriker'] = nonStriker
+          ..['bowler'] = bowler
+          ..['batting'] = batting
+          ..['bowling'] = bowling;
+        innings[idx] = cur;
+        return ScoringResult.ok(mutate(state, (s) => s['innings'] = innings));
+
+      case 'new_batter':
+        final who = action.payload['playerId'] as String?;
+        if (who == null) {
+          return const ScoringResult.rejected('Choose the incoming batter.');
+        }
+        if (cur['striker'] != null) {
+          return const ScoringResult.rejected(
+            'There is already a batter on strike.',
+          );
+        }
+        if ((batting[who] as Map?)?['out'] == true) {
+          return const ScoringResult.rejected(
+            'That batter is already out.',
+          );
+        }
+        batting[who] = batting[who] ?? _newBatting();
+        cur
+          ..['striker'] = who
+          ..['batting'] = batting;
+        innings[idx] = cur;
+        return ScoringResult.ok(mutate(state, (s) => s['innings'] = innings));
+
+      case 'new_bowler':
+        final who = action.payload['playerId'] as String?;
+        if (who == null) {
+          return const ScoringResult.rejected('Choose the next bowler.');
+        }
+        bowling[who] = bowling[who] ?? _newBowling();
+        cur
+          ..['bowler'] = who
+          ..['bowling'] = bowling
+          ..['overRuns'] = 0;
+        innings[idx] = cur;
+        return ScoringResult.ok(mutate(state, (s) => s['innings'] = innings));
+
+      case 'swap_strike':
+        final s1 = cur['striker'];
+        cur
+          ..['striker'] = cur['nonStriker']
+          ..['nonStriker'] = s1;
+        innings[idx] = cur;
+        return ScoringResult.ok(mutate(state, (s) => s['innings'] = innings));
+
+      case 'end_innings':
+        cur['closed'] = true;
+        innings[idx] = cur;
+        return ScoringResult.ok(
+          _settle(mutate(state, (s) => s['innings'] = innings), ctx),
+        );
+    }
+
+    // --- deliveries -------------------------------------------------------
+    //
+    // Everything below needs someone on strike and someone bowling. Scoring a
+    // delivery with nobody named would produce a total that no scorecard can
+    // account for, which is precisely the state this engine exists to prevent.
+
+    final striker = cur['striker'] as String?;
+    final bowler = cur['bowler'] as String?;
+    if (striker == null || bowler == null) {
+      return const ScoringResult.rejected(
+        'Set the batters and bowler before scoring a delivery.',
+      );
+    }
+
+    final bat = Map<String, dynamic>.from(batting[striker] as Map? ?? _newBatting());
+    final bowl = Map<String, dynamic>.from(bowling[bowler] as Map? ?? _newBowling());
+
+    var legalDelivery = false;
+    var runsThisBall = 0; // for strike rotation
     var nextFreeHit = false;
+    var wicketFell = false;
 
     switch (action.type) {
       case 'runs':
-        final r = (action.payload['runs'] as num?)?.toInt() ?? 0;
+        final r = i(action.payload['runs']);
         if (r < 0 || r > 8) {
           return const ScoringResult.rejected('Runs off a ball must be 0-8.');
         }
-        cur['runs'] = runs() + r;
-        cur['legalBalls'] = balls() + 1;
+        cur['runs'] = i(cur['runs']) + r;
+        bat['runs'] = i(bat['runs']) + r;
+        bat['balls'] = i(bat['balls']) + 1;
+        if (r == 4) bat['fours'] = i(bat['fours']) + 1;
+        if (r == 6) bat['sixes'] = i(bat['sixes']) + 1;
+        bowl['runs'] = i(bowl['runs']) + r;
+        cur['overRuns'] = i(cur['overRuns']) + r;
+        legalDelivery = true;
+        runsThisBall = r;
+
+      case 'wide':
+        // Penalty run plus anything run. Not a legal delivery, and the batter
+        // faced nothing — so no ball is added to their tally. Does not clear
+        // an existing free hit.
+        final extra = i(action.payload['runs']);
+        final total = 1 + extra;
+        cur['runs'] = i(cur['runs']) + total;
+        extras['wide'] = i(extras['wide']) + total;
+        bowl['runs'] = i(bowl['runs']) + total;
+        bowl['wides'] = i(bowl['wides']) + 1;
+        cur['overRuns'] = i(cur['overRuns']) + total;
+        nextFreeHit = freeHit;
+        runsThisBall = extra;
+
+      case 'no_ball':
+        // Penalty plus runs off the bat. Not a legal delivery, but the batter
+        // did face it, so it counts as a ball faced and the runs are theirs.
+        final offBat = i(action.payload['runs']);
+        cur['runs'] = i(cur['runs']) + 1 + offBat;
+        extras['noBall'] = i(extras['noBall']) + 1;
+        bat['runs'] = i(bat['runs']) + offBat;
+        bat['balls'] = i(bat['balls']) + 1;
+        if (offBat == 4) bat['fours'] = i(bat['fours']) + 1;
+        if (offBat == 6) bat['sixes'] = i(bat['sixes']) + 1;
+        bowl['runs'] = i(bowl['runs']) + 1 + offBat;
+        bowl['noBalls'] = i(bowl['noBalls']) + 1;
+        cur['overRuns'] = i(cur['overRuns']) + 1 + offBat;
+        nextFreeHit = true;
+        runsThisBall = offBat;
+
+      case 'bye':
+      case 'leg_bye':
+        final r = i(action.payload['runs']) == 0 ? 1 : i(action.payload['runs']);
+        if (r <= 0) {
+          return const ScoringResult.rejected('Byes must be at least 1 run.');
+        }
+        cur['runs'] = i(cur['runs']) + r;
+        extras[action.type == 'bye' ? 'bye' : 'legBye'] =
+            i(extras[action.type == 'bye' ? 'bye' : 'legBye']) + r;
+        // The batter faced it, so it is a ball faced — but the runs are the
+        // team's, not theirs, and the bowler is NOT charged.
+        bat['balls'] = i(bat['balls']) + 1;
+        legalDelivery = true;
+        runsThisBall = r;
 
       case 'wicket':
-        final isRunOut = action.payload['runOut'] == true;
+        final isRunOut = action.payload['runOut'] == true ||
+            action.payload['type'] == 'run_out';
         if (freeHit && !isRunOut) {
           return const ScoringResult.rejected(
             'Free hit — the batter can only be run out on this delivery.',
           );
         }
-        if (wickets() >= _wicketsAllowed(ctx)) {
+        if (i(cur['wickets']) >= _wicketsAllowed(ctx)) {
           return const ScoringResult.rejected('All out already.');
         }
-        cur['wickets'] = wickets() + 1;
-        cur['legalBalls'] = balls() + 1;
-        // Runs completed before a run-out still count.
-        final withRuns = (action.payload['runs'] as num?)?.toInt() ?? 0;
-        if (withRuns > 0) cur['runs'] = runs() + withRuns;
-
-      case 'wide':
-        // Penalty run plus any runs actually run. Does NOT count as a ball,
-        // and does not clear an existing free hit.
-        final extra = (action.payload['runs'] as num?)?.toInt() ?? 0;
-        final total = 1 + extra;
-        cur['runs'] = runs() + total;
-        extras['wide'] = ((extras['wide'] as num?)?.toInt() ?? 0) + total;
-        nextFreeHit = freeHit;
-
-      case 'no_ball':
-        // Penalty run plus runs off the bat. Does NOT count as a ball, and
-        // grants a free hit on the next delivery.
-        final offBat = (action.payload['runs'] as num?)?.toInt() ?? 0;
-        cur['runs'] = runs() + 1 + offBat;
-        extras['noBall'] = ((extras['noBall'] as num?)?.toInt() ?? 0) + 1;
-        nextFreeHit = true;
-
-      case 'bye':
-      case 'leg_bye':
-        final r = (action.payload['runs'] as num?)?.toInt() ?? 1;
-        if (r <= 0) {
-          return const ScoringResult.rejected('Byes must be at least 1 run.');
+        final withRuns = i(action.payload['runs']);
+        if (withRuns > 0) {
+          cur['runs'] = i(cur['runs']) + withRuns;
+          bat['runs'] = i(bat['runs']) + withRuns;
+          bowl['runs'] = i(bowl['runs']) + withRuns;
+          cur['overRuns'] = i(cur['overRuns']) + withRuns;
         }
-        cur['runs'] = runs() + r;
-        final field = action.type == 'bye' ? 'bye' : 'legBye';
-        extras[field] = ((extras[field] as num?)?.toInt() ?? 0) + r;
-        cur['legalBalls'] = balls() + 1;
-
-      case 'end_innings':
-        cur['closed'] = true;
-
-      case 'reopen':
-        return ScoringResult.ok(mutate(state, (s) {
-          s['complete'] = false;
-          s['winner'] = null;
-          s['tie'] = false;
-        }));
+        bat['balls'] = i(bat['balls']) + 1;
+        bat['out'] = true;
+        bat['dismissal'] = _dismissalText(action, ctx);
+        cur['wickets'] = i(cur['wickets']) + 1;
+        // A run-out is not the bowler's wicket.
+        if (!isRunOut) bowl['wickets'] = i(bowl['wickets']) + 1;
+        legalDelivery = true;
+        wicketFell = true;
+        runsThisBall = withRuns;
 
       default:
         return ScoringResult.rejected('Unknown action "${action.type}".');
     }
 
-    cur['extras'] = extras;
+    // A legal delivery counts against the bowler's over as well as the
+    // innings. Byes and leg-byes count here too: the bowler still bowled the
+    // ball, they simply are not charged the runs.
+    if (legalDelivery) {
+      bowl['balls'] = i(bowl['balls']) + 1;
+      cur['legalBalls'] = i(cur['legalBalls']) + 1;
+    }
+
+    batting[striker] = bat;
+    bowling[bowler] = bowl;
+
+    if (wicketFell) {
+      fow.add({
+        'n': i(cur['wickets']),
+        'runs': i(cur['runs']),
+        'balls': i(cur['legalBalls']),
+        'playerId': striker,
+      });
+      // The crease is empty until a replacement is named. `new_batter` fills
+      // it; scoring another delivery first is refused above.
+      cur['striker'] = null;
+    } else if (runsThisBall.isOdd) {
+      // Odd runs put the other batter on strike.
+      final s1 = cur['striker'];
+      cur['striker'] = cur['nonStriker'];
+      cur['nonStriker'] = s1;
+    }
+
+    // End of over: strike rotates, the bowler must change, and a maiden is
+    // recorded if nothing at all was conceded.
+    if (legalDelivery && i(cur['legalBalls']) % perOver == 0) {
+      if (i(cur['overRuns']) == 0) {
+        bowl['maidens'] = i(bowl['maidens']) + 1;
+        bowling[bowler] = bowl;
+      }
+      cur['overRuns'] = 0;
+      final s1 = cur['striker'];
+      cur['striker'] = cur['nonStriker'];
+      cur['nonStriker'] = s1;
+    }
+
+    cur
+      ..['extras'] = extras
+      ..['batting'] = batting
+      ..['bowling'] = bowling
+      ..['fow'] = fow;
     innings[idx] = cur;
 
-    var next = mutate(state, (s) {
+    final next = mutate(state, (s) {
       s['innings'] = innings;
       s['freeHit'] = nextFreeHit;
     });
@@ -170,7 +399,33 @@ class CricketPlugin extends ScoringPlugin {
     return ScoringResult.ok(_settle(next, ctx));
   }
 
-  /// Closes the innings and the match at the correct moments.
+  String _dismissalText(ScoreAction action, ScoringContext ctx) {
+    final type = action.payload['type'] as String? ??
+        (action.payload['runOut'] == true ? 'run_out' : 'bowled');
+    final fielder = ctx.player(action.payload['fielder'] as String?)?.name;
+    return switch (type) {
+      'bowled' => 'b ${_bowlerName(action, ctx)}',
+      'lbw' => 'lbw b ${_bowlerName(action, ctx)}',
+      'caught' => fielder == null
+          ? 'c & b ${_bowlerName(action, ctx)}'
+          : 'c $fielder b ${_bowlerName(action, ctx)}',
+      'stumped' => fielder == null
+          ? 'st b ${_bowlerName(action, ctx)}'
+          : 'st $fielder b ${_bowlerName(action, ctx)}',
+      'run_out' => fielder == null ? 'run out' : 'run out ($fielder)',
+      'hit_wicket' => 'hit wicket b ${_bowlerName(action, ctx)}',
+      'retired' => 'retired',
+      _ => type,
+    };
+  }
+
+  String _bowlerName(ScoreAction action, ScoringContext ctx) =>
+      ctx.playerName(action.payload['bowler'] as String?, 'bowler');
+
+  // -------------------------------------------------------------------------
+  // Settlement
+  // -------------------------------------------------------------------------
+
   Map<String, dynamic> _settle(Map<String, dynamic> state, ScoringContext ctx) {
     final innings = copyList(state['innings']);
     final idx = (state['inningsIndex'] as num?)?.toInt() ?? 0;
@@ -200,7 +455,6 @@ class CricketPlugin extends ScoringPlugin {
     innings[idx] = cur;
 
     if (!isSecondInnings) {
-      // Start the chase. Target is one more than what was set.
       final battingFirst = cur['battingSide'] as String? ?? 'a';
       final chasingSide = battingFirst == 'a' ? 'b' : 'a';
       innings.add(_newInnings(chasingSide));
@@ -212,7 +466,6 @@ class CricketPlugin extends ScoringPlugin {
       });
     }
 
-    // Second innings finished — decide the match.
     final chasingSide = cur['battingSide'] as String? ?? 'b';
     final defendingSide = chasingSide == 'a' ? 'b' : 'a';
     final t = target ?? 0;
@@ -236,6 +489,120 @@ class CricketPlugin extends ScoringPlugin {
     });
   }
 
+  // -------------------------------------------------------------------------
+  // Projections
+  // -------------------------------------------------------------------------
+
+  /// The full card for one innings — the thing a player screenshots.
+  InningsCard? card(
+    Map<String, dynamic> state,
+    ScoringContext ctx, {
+    int? inningsIndex,
+  }) {
+    final innings = copyList(state['innings']);
+    final idx = inningsIndex ?? ((state['inningsIndex'] as num?)?.toInt() ?? 0);
+    if (idx >= innings.length) return null;
+    final inn = innings[idx];
+    final perOver = _ballsPerOver(ctx);
+
+    int i(Object? v) => (v as num?)?.toInt() ?? 0;
+
+    final battingSide = Side.fromWire(inn['battingSide'] as String?);
+    final battingMap = Map<String, dynamic>.from(inn['batting'] as Map? ?? {});
+    final bowlingMap = Map<String, dynamic>.from(inn['bowling'] as Map? ?? {});
+
+    // The batting side's whole squad appears, so a player who did not bat is
+    // shown as "did not bat" rather than being silently missing.
+    final squad = ctx.lineupFor(battingSide);
+    final batting = <BattingLine>[];
+    for (final p in squad) {
+      final b = battingMap[p.id] as Map?;
+      batting.add(BattingLine(
+        playerId: p.id,
+        name: p.name,
+        runs: i(b?['runs']),
+        balls: i(b?['balls']),
+        fours: i(b?['fours']),
+        sixes: i(b?['sixes']),
+        isOut: b?['out'] == true,
+        battedYet: b != null,
+        dismissal: b?['dismissal'] as String?,
+      ));
+    }
+    // Anyone who batted but is not in the recorded squad — a late substitute —
+    // must still appear.
+    for (final entry in battingMap.entries) {
+      if (squad.any((p) => p.id == entry.key)) continue;
+      final b = Map<String, dynamic>.from(entry.value as Map);
+      batting.add(BattingLine(
+        playerId: entry.key,
+        name: ctx.playerName(entry.key),
+        runs: i(b['runs']),
+        balls: i(b['balls']),
+        fours: i(b['fours']),
+        sixes: i(b['sixes']),
+        isOut: b['out'] == true,
+        battedYet: true,
+        dismissal: b['dismissal'] as String?,
+      ));
+    }
+
+    final bowling = [
+      for (final entry in bowlingMap.entries)
+        BowlingLine(
+          playerId: entry.key,
+          name: ctx.playerName(entry.key),
+          legalBalls: i((entry.value as Map)['balls']),
+          runsConceded: i((entry.value as Map)['runs']),
+          wickets: i((entry.value as Map)['wickets']),
+          maidens: i((entry.value as Map)['maidens']),
+          wides: i((entry.value as Map)['wides']),
+          noBalls: i((entry.value as Map)['noBalls']),
+          ballsPerOver: perOver,
+        ),
+    ];
+
+    final fow = [
+      for (final f in copyList(inn['fow']))
+        FallOfWicket(
+          wicketNumber: i(f['n']),
+          runs: i(f['runs']),
+          legalBalls: i(f['balls']),
+          playerId: _asId(f['playerId']),
+          name: ctx.playerName(f['playerId'] as String?),
+          ballsPerOver: perOver,
+        ),
+    ];
+
+    final extrasRaw = Map<String, dynamic>.from(inn['extras'] as Map? ?? {});
+
+    return InningsCard(
+      battingSide: battingSide,
+      runs: i(inn['runs']),
+      wickets: i(inn['wickets']),
+      legalBalls: i(inn['legalBalls']),
+      ballsPerOver: perOver,
+      extras: {for (final e in extrasRaw.entries) e.key: i(e.value)},
+      batting: batting,
+      bowling: bowling,
+      fallOfWickets: fow,
+      isClosed: inn['closed'] == true,
+    );
+  }
+
+  static String _asId(Object? v) => v is String ? v : '';
+
+  /// Bowling figures need the bowler's balls; batting needs the striker's.
+  /// Both are already on the card, so this is just a convenience for callers
+  /// that want every innings at once.
+  List<InningsCard> allCards(Map<String, dynamic> state, ScoringContext ctx) {
+    final count = copyList(state['innings']).length;
+    return [
+      for (var n = 0; n < count; n++)
+        if (card(state, ctx, inningsIndex: n) case final c?) c,
+    ];
+  }
+
   String _oversText(int legalBalls, ScoringContext ctx) {
     final per = _ballsPerOver(ctx);
     return '${legalBalls ~/ per}.${legalBalls % per}';
@@ -252,11 +619,12 @@ class CricketPlugin extends ScoringPlugin {
   @override
   String summary(Map<String, dynamic> state, ScoringContext ctx) {
     final innings = copyList(state['innings']);
-    return innings.map((i) {
-      final runs = (i['runs'] as num?)?.toInt() ?? 0;
-      final wkts = (i['wickets'] as num?)?.toInt() ?? 0;
-      final balls = (i['legalBalls'] as num?)?.toInt() ?? 0;
-      final side = i['battingSide'] == 'a' ? ctx.entrantAName : ctx.entrantBName;
+    return innings.map((inn) {
+      final runs = (inn['runs'] as num?)?.toInt() ?? 0;
+      final wkts = (inn['wickets'] as num?)?.toInt() ?? 0;
+      final balls = (inn['legalBalls'] as num?)?.toInt() ?? 0;
+      final side =
+          inn['battingSide'] == 'a' ? ctx.entrantAName : ctx.entrantBName;
       return '$side $runs/$wkts (${_oversText(balls, ctx)})';
     }).join('  ·  ');
   }
@@ -266,26 +634,22 @@ class CricketPlugin extends ScoringPlugin {
     if (state['complete'] == true) {
       if (state['tie'] == true) return 'Match tied';
       final w = state['winner'];
-      if (w is String) {
-        return '${ctx.nameFor(Side.fromWire(w))} won';
-      }
+      if (w is String) return '${ctx.nameFor(Side.fromWire(w))} won';
       return 'Final';
     }
 
     final cur = _current(state);
     final balls = (cur['legalBalls'] as num?)?.toInt() ?? 0;
-    final overs = _oversText(balls, ctx);
-    final maxOvers = _overs(ctx);
-    final parts = <String>['$overs / $maxOvers ov'];
+    final parts = <String>['${_oversText(balls, ctx)} / ${_overs(ctx)} ov'];
 
+    if (cur['striker'] == null) parts.add('NEW BATTER');
     if (state['freeHit'] == true) parts.add('FREE HIT');
 
     final target = (state['target'] as num?)?.toInt();
     if (target != null && (state['inningsIndex'] as num?)?.toInt() == 1) {
       final runs = (cur['runs'] as num?)?.toInt() ?? 0;
-      final need = target - runs;
       final ballsLeft = _overs(ctx) * _ballsPerOver(ctx) - balls;
-      parts.add('need $need off $ballsLeft');
+      parts.add('need ${target - runs} off $ballsLeft');
     }
     return parts.join(' · ');
   }
@@ -296,9 +660,9 @@ class CricketPlugin extends ScoringPlugin {
     final innings = copyList(state['innings']);
     var runsA = 0;
     var runsB = 0;
-    for (final i in innings) {
-      final r = (i['runs'] as num?)?.toInt() ?? 0;
-      if (i['battingSide'] == 'a') {
+    for (final inn in innings) {
+      final r = (inn['runs'] as num?)?.toInt() ?? 0;
+      if (inn['battingSide'] == 'a') {
         runsA += r;
       } else {
         runsB += r;
@@ -307,8 +671,9 @@ class CricketPlugin extends ScoringPlugin {
     return MatchOutcome(
       isComplete: true,
       isDraw: state['tie'] == true,
-      winnerSide:
-          state['winner'] == null ? null : Side.fromWire(state['winner'] as String),
+      winnerSide: state['winner'] == null
+          ? null
+          : Side.fromWire(state['winner'] as String),
       scoreForA: runsA,
       scoreForB: runsB,
     );
@@ -332,6 +697,26 @@ class CricketPlugin extends ScoringPlugin {
       ];
     }
 
+    final cur = _current(state);
+
+    // The pad refuses to offer a delivery until it knows who is involved.
+    // Offering runs with nobody on strike is how a total ends up belonging to
+    // no one, which no scorecard can then explain.
+    if (cur['striker'] == null || cur['bowler'] == null) {
+      return const [
+        ScoreControlGroup(
+          title: 'Who is playing?',
+          controls: [
+            ScoreControl(
+              action: 'open',
+              label: 'Choose batters and bowler',
+              style: ControlStyle.primary,
+            ),
+          ],
+        ),
+      ];
+    }
+
     final freeHit = state['freeHit'] == true;
 
     return [
@@ -352,16 +737,14 @@ class CricketPlugin extends ScoringPlugin {
           ScoreControl(
             action: 'wide',
             label: 'Wide',
-            style: ControlStyle.secondary,
             shortcut: 'd',
-            tooltip: 'One penalty run. Does not count as a ball.',
+            tooltip: 'One penalty run. Not a legal delivery.',
           ),
           ScoreControl(
             action: 'no_ball',
             label: 'No ball',
-            style: ControlStyle.secondary,
             shortcut: 'n',
-            tooltip: 'One penalty run, free hit next delivery, not a ball.',
+            tooltip: 'One penalty run, free hit next, not a legal delivery.',
           ),
           ScoreControl(
             action: 'bye',
@@ -369,6 +752,7 @@ class CricketPlugin extends ScoringPlugin {
             payload: {'runs': 1},
             style: ControlStyle.subtle,
             shortcut: 'b',
+            tooltip: 'Team runs only. Consumes a delivery.',
           ),
           ScoreControl(
             action: 'leg_bye',
@@ -386,7 +770,7 @@ class CricketPlugin extends ScoringPlugin {
             action: 'wicket',
             label: freeHit ? 'Run out only' : 'Wicket',
             style: ControlStyle.danger,
-            payload: freeHit ? const {'runOut': true} : const {},
+            payload: freeHit ? const {'type': 'run_out'} : const {},
             shortcut: 'w',
             tooltip: freeHit
                 ? 'Free hit — only a run out is allowed.'
@@ -395,8 +779,19 @@ class CricketPlugin extends ScoringPlugin {
         ],
       ),
       const ScoreControlGroup(
-        title: 'Innings',
+        title: 'Match',
         controls: [
+          ScoreControl(
+            action: 'swap_strike',
+            label: 'Swap strike',
+            style: ControlStyle.subtle,
+            shortcut: 's',
+          ),
+          ScoreControl(
+            action: 'new_bowler',
+            label: 'Change bowler',
+            style: ControlStyle.secondary,
+          ),
           ScoreControl(
             action: 'end_innings',
             label: 'End innings',

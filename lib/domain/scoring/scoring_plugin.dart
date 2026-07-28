@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import '../../core/models/match_player.dart';
+
 /// Which side of the match a control or event belongs to.
 enum Side {
   a('a'),
@@ -136,10 +138,41 @@ class ScoringContext {
     required this.entrantAName,
     required this.entrantBName,
     this.config = const {},
+    this.lineupA = const [],
+    this.lineupB = const [],
   });
 
   final String entrantAName;
   final String entrantBName;
+
+  /// Who is available to play for each side.
+  ///
+  /// Engines that record player-level facts — every one of them, per the
+  /// spec — resolve ids to names through these. Empty for a sport or a match
+  /// where nobody has entered a line-up, in which case an engine records
+  /// side-level totals only and no scorecard can be produced.
+  final List<MatchPlayer> lineupA;
+  final List<MatchPlayer> lineupB;
+
+  List<MatchPlayer> lineupFor(Side side) =>
+      side == Side.a ? lineupA : (side == Side.b ? lineupB : const []);
+
+  /// Resolves a player id from either side. Returns null for an unknown id
+  /// rather than throwing: a replay of an old log must never crash because a
+  /// player was later removed from a squad.
+  MatchPlayer? player(String? id) {
+    if (id == null) return null;
+    for (final p in lineupA) {
+      if (p.id == id) return p;
+    }
+    for (final p in lineupB) {
+      if (p.id == id) return p;
+    }
+    return null;
+  }
+
+  String playerName(String? id, [String fallback = 'Player']) =>
+      player(id)?.name ?? fallback;
 
   /// Per-competition overrides: overs per innings, points per set, match
   /// duration. Frozen onto the fixture at generation time so changing the
