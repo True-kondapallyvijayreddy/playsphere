@@ -4,7 +4,9 @@ import 'plugins/cricket_plugin.dart';
 import 'plugins/football_plugin.dart';
 import 'plugins/goal_based_plugin.dart';
 import 'plugins/kabaddi_plugin.dart';
+import 'plugins/kho_kho_plugin.dart';
 import 'plugins/set_based_plugin.dart';
+import 'plugins/volleyball_plugin.dart';
 import 'plugins/simple_points_plugin.dart';
 import 'scoring_plugin.dart';
 
@@ -101,7 +103,7 @@ class SportCatalog {
     SportSpec(
       id: 'volleyball',
       name: 'Volleyball',
-      pluginKey: SetBasedPlugin.pluginKey,
+      pluginKey: VolleyballPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
       defaultEntrantType: EntrantType.team,
       icon: '🏐',
@@ -173,11 +175,24 @@ class SportCatalog {
     SportSpec(
       id: 'kho_kho',
       name: 'Kho Kho',
-      pluginKey: GoalBasedPlugin.pluginKey,
+      pluginKey: KhoKhoPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
       defaultEntrantType: EntrantType.team,
       icon: '🏃',
-      config: {'periods': 4, 'periodLabel': 'Turn', 'allowDraw': true},
+      // Ultimate Kho Kho season-2 style values. Every one is overridable —
+      // they differ between UKK seasons and KKFI-aligned rulesets, and an
+      // engine that hard-coded them would be wrong for whichever league it
+      // was not written against.
+      config: {
+        'tagPoints': 2,
+        'poleDivePoints': 2,
+        'skyDivePoints': 2,
+        'allOutBonus': 4,
+        'batchSize': 3,
+        'turnsPerInnings': 2,
+        'dreamRunAfterSeconds': 180,
+        'dreamRunEverySeconds': 30,
+      },
     ),
     SportSpec(
       id: 'throwball',
@@ -277,6 +292,8 @@ class ScoringRegistry {
     FootballPlugin.pluginKey: FootballPlugin(),
     BasketballPlugin.pluginKey: BasketballPlugin(),
     KabaddiPlugin.pluginKey: KabaddiPlugin(),
+    VolleyballPlugin.pluginKey: VolleyballPlugin(),
+    KhoKhoPlugin.pluginKey: KhoKhoPlugin(),
   };
 
   static ScoringPlugin resolve(String? key) => _plugins[key] ?? _fallback;
