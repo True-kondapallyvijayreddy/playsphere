@@ -5,6 +5,15 @@
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
   <meta name="description" content="PlaySphere Sports Operating System">
+
+  <!-- Web OAuth client for Google Sign-In.
+       Firebase Auth's signInWithPopup does not need this, but the
+       google_sign_in_web plugin asserts a client ID is present the moment it
+       initialises. Declaring it here means the plugin can never abort startup
+       even if something touches it. Public by design: an OAuth client ID is
+       not a secret and ships in every web client. -->
+  <meta name="google-signin-client_id"
+        content="178810835926-c3bijks5k6f7t9lcms0op4igq1sdesuq.apps.googleusercontent.com">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <meta name="apple-mobile-web-app-title" content="playsphere">

@@ -21,10 +21,31 @@ import '../errors/app_exception.dart';
 class AuthService {
   AuthService({FirebaseAuth? auth, GoogleSignIn? googleSignIn})
       : _auth = auth ?? FirebaseAuth.instance,
-        _googleSignIn = googleSignIn ?? GoogleSignIn(scopes: const ['email']);
+        _injectedGoogleSignIn = googleSignIn;
 
   final FirebaseAuth _auth;
-  final GoogleSignIn _googleSignIn;
+
+  final GoogleSignIn? _injectedGoogleSignIn;
+  GoogleSignIn? _lazyGoogleSignIn;
+
+  /// Built on first use, and never on the web.
+  ///
+  /// `google_sign_in_web` asserts that a client ID is configured as soon as it
+  /// initialises. Constructing this eagerly therefore threw during app
+  /// startup on the web and took the whole widget tree down before anything
+  /// rendered — a blank page, with the real cause only visible in the browser
+  /// console. Nothing on the web path needs this object anyway: [
+  /// signInWithGoogle] uses `signInWithPopup` there, and [signOut] already
+  /// skips it. Keeping it lazy means the web build never touches the plugin.
+  GoogleSignIn get _googleSignIn {
+    assert(
+      !kIsWeb,
+      'The native Google Sign-In SDK must not be used on the web — '
+      'signInWithGoogle uses signInWithPopup there.',
+    );
+    return _injectedGoogleSignIn ??
+        (_lazyGoogleSignIn ??= GoogleSignIn(scopes: const ['email']));
+  }
 
   /// Emits on every sign-in, sign-out and token refresh. This is the single
   /// source of truth for "is anyone signed in" — never a local bool.
