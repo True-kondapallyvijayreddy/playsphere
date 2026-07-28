@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -43,6 +44,20 @@ class ScoringService {
 
   Future<SharedPreferences> get _store async =>
       _prefs ??= await SharedPreferences.getInstance();
+
+  final StreamController<AppException> _failures =
+      StreamController<AppException>.broadcast();
+
+  /// Failures that happen *after* [submit] has returned.
+  ///
+  /// The commit is deliberately not awaited (see [submit]), so a rejected
+  /// write — a lost race for a sequence number, or a rules rejection —
+  /// cannot be delivered by throwing. The pad listens here instead and tells
+  /// the scorer, which is the only honest way to report it without freezing
+  /// the screen until the server answers.
+  Stream<AppException> get writeFailures => _failures.stream;
+
+  void dispose() => _failures.close();
 
   // --- Reads ------------------------------------------------------------
 
@@ -144,25 +159,48 @@ class ScoringService {
       },
     );
 
-    try {
-      await batch.commit();
-      return updated;
-    } on FirebaseException catch (e) {
-      if (e.code == 'already-exists' || e.code == 'permission-denied') {
-        // Either another scorer took this sequence number, or our projection
-        // is behind and the monotonic-sequence rule rejected the write. Both
-        // are resolved the same way: re-read and replay.
-        throw const ConflictException();
-      }
-      if (e.code == 'unavailable' || e.code == 'deadline-exceeded') {
-        // Offline. The Firestore SDK has already persisted the write locally
-        // and will flush it on reconnect; we additionally record it in our
-        // own durable queue so it survives the app being killed.
-        await _enqueue(fixture, action, byUid, nextSeq, clientEventId);
-        return updated;
-      }
-      rethrow;
+    // Record the action in our durable queue BEFORE the write leaves, so a
+    // process kill between the local write and the server acknowledgement
+    // cannot lose a delivery. `reconcileQueue` drops entries the server has
+    // since confirmed.
+    await _enqueue(fixture, action, byUid, nextSeq, clientEventId);
+
+    // Deliberately NOT awaited.
+    //
+    // With offline persistence enabled — and it is, because matches are
+    // scored on grounds with no signal — Firestore applies the write to the
+    // local cache immediately but does not complete this Future until the
+    // server acknowledges it. Offline that is never. Awaiting here froze the
+    // scoring pad for the remainder of the match, which is the exact failure
+    // the offline design exists to prevent.
+    //
+    // The local write has already applied, so the scorer's own listener
+    // shows the new score at once and the SDK flushes to the server on
+    // reconnect. Failures arrive asynchronously on [writeFailures].
+    unawaited(
+      batch.commit().then((_) => _dequeue(clientEventId)).catchError(
+        (Object error) {
+          _failures.add(_translateWriteFailure(error));
+        },
+      ),
+    );
+
+    return updated;
+  }
+
+  AppException _translateWriteFailure(Object error) {
+    if (error is! FirebaseException) {
+      return const ValidationException('That score could not be saved.');
     }
+    return switch (error.code) {
+      // Either another scorer took this sequence number, or our projection
+      // was behind and the monotonic-sequence rule rejected the write. Both
+      // resolve the same way: the fixture listener delivers the winning
+      // state and the pad re-renders from it.
+      'already-exists' || 'permission-denied' => const ConflictException(),
+      'unavailable' || 'deadline-exceeded' => const NetworkException(),
+      _ => ValidationException(error.message ?? 'That score could not be saved.'),
+    };
   }
 
   /// Rebuilds a fixture's score from its event log.
@@ -244,6 +282,25 @@ class ScoringService {
       'clientEventId': clientEventId,
     }));
     await store.setStringList(_queueKey, queue);
+  }
+
+  /// Drops one entry once the server has acknowledged its write.
+  Future<void> _dequeue(String clientEventId) async {
+    final store = await _store;
+    final queue = store.getStringList(_queueKey) ?? <String>[];
+    if (queue.isEmpty) return;
+    final remaining = queue.where((raw) {
+      try {
+        return (jsonDecode(raw) as Map<String, dynamic>)['clientEventId'] !=
+            clientEventId;
+      } catch (_) {
+        // Unparseable entry: keep it, `reconcileQueue` will deal with it.
+        return true;
+      }
+    }).toList();
+    if (remaining.length != queue.length) {
+      await store.setStringList(_queueKey, remaining);
+    }
   }
 
   /// Clears queue entries the server has since confirmed.

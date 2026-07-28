@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -44,18 +46,30 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
   final _focusNode = FocusNode();
   bool _busy = false;
 
+  StreamSubscription<AppException>? _failureSub;
+
   @override
   void initState() {
     super.initState();
     // Reconcile anything queued from a previous offline session as soon as
     // the pad opens, so the pending badge is honest.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(scoringServiceProvider).reconcileQueue();
+      final service = ref.read(scoringServiceProvider);
+      service.reconcileQueue();
+      // Writes are not awaited, so a rejected one cannot surface as a thrown
+      // exception from _submit. It arrives here instead.
+      _failureSub = service.writeFailures.listen((error) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(error.message)),
+        );
+      });
     });
   }
 
   @override
   void dispose() {
+    _failureSub?.cancel();
     _focusNode.dispose();
     super.dispose();
   }
@@ -88,12 +102,6 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
       // Haptic confirmation matters when the scorer is looking at the pitch
       // rather than the screen.
       unawaitedHaptic();
-    } on ConflictException catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.message)),
-        );
-      }
     } catch (e) {
       if (mounted) showError(context, e);
     } finally {
@@ -188,7 +196,10 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
                         summary: plugin.summary(fixture.scoreState, ctx),
                       ),
                       const SizedBox(height: 8),
-                      const _PendingBanner(),
+                      // Keyed on the sequence number so the count is
+                      // recomputed after every scoring action rather than
+                      // showing whatever it was when the pad opened.
+                      _PendingBanner(key: ValueKey(fixture.lastSeq)),
                       const SizedBox(height: 16),
                       for (final group in groups) ...[
                         Padding(
@@ -385,7 +396,7 @@ class _ControlRow extends StatelessWidget {
 }
 
 class _PendingBanner extends ConsumerWidget {
-  const _PendingBanner();
+  const _PendingBanner({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
