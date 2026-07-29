@@ -3,6 +3,7 @@ import 'plugins/basketball_plugin.dart';
 import 'plugins/cricket_plugin.dart';
 import 'plugins/football_plugin.dart';
 import 'plugins/goal_based_plugin.dart';
+import 'plugins/hockey_plugin.dart';
 import 'plugins/kabaddi_plugin.dart';
 import 'plugins/kho_kho_plugin.dart';
 import 'plugins/set_based_plugin.dart';
@@ -174,7 +175,7 @@ class SportCatalog {
     SportSpec(
       id: 'hockey',
       name: 'Hockey',
-      pluginKey: GoalBasedPlugin.pluginKey,
+      pluginKey: HockeyPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
       defaultEntrantType: EntrantType.team,
       icon: '🏑',
@@ -304,6 +305,7 @@ class ScoringRegistry {
     KhoKhoPlugin.pluginKey: KhoKhoPlugin(),
     TennisPlugin.pluginKey: TennisPlugin(),
     TableTennisPlugin.pluginKey: TableTennisPlugin(),
+    HockeyPlugin.pluginKey: HockeyPlugin(),
   };
 
   static ScoringPlugin resolve(String? key) => _plugins[key] ?? _fallback;
