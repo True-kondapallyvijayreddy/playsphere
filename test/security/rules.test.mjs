@@ -29,6 +29,7 @@ import {
   query,
   setDoc,
   serverTimestamp,
+  updateDoc,
   where,
   writeBatch,
 } from 'firebase/firestore';
@@ -686,5 +687,595 @@ describe('user profiles', () => {
     await assertFails(
       setDoc(doc(db, 'users', OWNER), profile(OWNER, new Date('2005-04-11'))),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Minor safety — profile visibility MUST derive from the immutable
+// dateOfBirth, never from the client-mirrored `isMinor` boolean.
+// ---------------------------------------------------------------------------
+describe('minor safety: profile visibility derives from dateOfBirth', () => {
+  const MINOR_UID = 'uid_minor_profile';
+  const ADULT_UID = 'uid_adult_profile';
+
+  const publicProfile = (uid, dob, forgedIsMinor, visibility = 'public') => ({
+    uid,
+    displayName: 'Test Person',
+    email: 'test@example.com',
+    dateOfBirth: dob,
+    gender: 'female',
+    photoUrl: null,
+    phone: null,
+    profileVisibility: visibility,
+    profileComplete: true,
+    isMinor: forgedIsMinor,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+
+  it('refuses a stranger reading a MINOR profile even when isMinor is forged to false', async () => {
+    await seed(async (db) => {
+      // ~16 years old as of "today" — a real minor — but the client-owned
+      // isMinor field lies and claims the owner is an adult.
+      await setDoc(
+        doc(db, 'users', MINOR_UID),
+        publicProfile(MINOR_UID, new Date('2010-01-01'), false),
+      );
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(getDoc(doc(db, 'users', MINOR_UID)));
+  });
+
+  it('still lets a stranger read a genuinely ADULT public profile', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'users', ADULT_UID),
+        publicProfile(ADULT_UID, new Date('1990-01-01'), false),
+      );
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertSucceeds(getDoc(doc(db, 'users', ADULT_UID)));
+  });
+
+  it('lets the minor read their own profile regardless of visibility', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'users', MINOR_UID),
+        publicProfile(MINOR_UID, new Date('2010-01-01'), true, 'private'),
+      );
+    });
+    const db = testEnv.authenticatedContext(MINOR_UID).firestore();
+    await assertSucceeds(getDoc(doc(db, 'users', MINOR_UID)));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Guardian consent records (§2.7 MUST) — the only channel that may reveal a
+// minor's profile to a scout, and only while an unrevoked record exists.
+// ---------------------------------------------------------------------------
+describe('guardian consent records', () => {
+  const MINOR_UID = 'uid_minor_consent';
+  const GUARDIAN = 'uid_guardian';
+  const SCOUT = 'uid_scout';
+
+  const scoutPath = (scoutUid) => ['users', MINOR_UID, 'guardianConsents', scoutUid];
+
+  const minorProfile = (guardianUid) => ({
+    uid: MINOR_UID,
+    displayName: 'Young Player',
+    email: 'minor@example.com',
+    dateOfBirth: new Date('2012-01-01'),
+    gender: 'male',
+    photoUrl: null,
+    phone: null,
+    profileVisibility: 'private',
+    profileComplete: true,
+    isMinor: true,
+    guardianUid: guardianUid ?? null,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+
+  const consent = (overrides = {}) => ({
+    guardianUid: GUARDIAN,
+    minorUid: MINOR_UID,
+    scoutUid: SCOUT,
+    consentedTo: ['profile_visibility'],
+    revoked: false,
+    revokedAt: null,
+    grantedAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  it('lets a self-declared guardian create a consent record for a scout', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', MINOR_UID), minorProfile(null));
+    });
+    const db = testEnv.authenticatedContext(GUARDIAN).firestore();
+    await assertSucceeds(setDoc(doc(db, ...scoutPath(SCOUT)), consent()));
+  });
+
+  it('refuses a scout minting their own consent record', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', MINOR_UID), minorProfile(null));
+    });
+    const db = testEnv.authenticatedContext(SCOUT).firestore();
+    await assertFails(
+      setDoc(doc(db, ...scoutPath(SCOUT)), consent({ guardianUid: SCOUT })),
+    );
+  });
+
+  it('refuses the minor consenting for themselves', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', MINOR_UID), minorProfile(null));
+    });
+    const db = testEnv.authenticatedContext(MINOR_UID).firestore();
+    await assertFails(
+      setDoc(doc(db, ...scoutPath(SCOUT)), consent({ guardianUid: MINOR_UID })),
+    );
+  });
+
+  it('refuses a creator whose uid does not match the profile\'s linked guardian', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', MINOR_UID), minorProfile(GUARDIAN));
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(doc(db, ...scoutPath(SCOUT)), consent({ guardianUid: OUTSIDER })),
+    );
+  });
+
+  it('a scout with a valid unrevoked consent can read the minor\'s profile', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', MINOR_UID), minorProfile(null));
+      await setDoc(doc(db, ...scoutPath(SCOUT)), consent());
+    });
+    const db = testEnv.authenticatedContext(SCOUT).firestore();
+    await assertSucceeds(getDoc(doc(db, 'users', MINOR_UID)));
+  });
+
+  it('refuses the same scout when no consent record exists at all', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', MINOR_UID), minorProfile(null));
+    });
+    const db = testEnv.authenticatedContext(SCOUT).firestore();
+    await assertFails(getDoc(doc(db, 'users', MINOR_UID)));
+  });
+
+  it('lets the guardian revoke their own consent, after which the scout loses access', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', MINOR_UID), minorProfile(null));
+      await setDoc(doc(db, ...scoutPath(SCOUT)), consent());
+    });
+    const guardianDb = testEnv.authenticatedContext(GUARDIAN).firestore();
+    // Only the revocation is sent. Re-writing the whole record would carry a
+    // fresh `grantedAt`, which the rules freeze on purpose — a consent whose
+    // grant date can be moved is a consent whose expiry can be moved.
+    await assertSucceeds(
+      updateDoc(
+        doc(guardianDb, ...scoutPath(SCOUT)),
+        { revoked: true, revokedAt: serverTimestamp() },
+      ),
+    );
+    const scoutDb = testEnv.authenticatedContext(SCOUT).firestore();
+    await assertFails(getDoc(doc(scoutDb, 'users', MINOR_UID)));
+  });
+
+  it('refuses anyone other than the granting guardian revoking it', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', MINOR_UID), minorProfile(null));
+      await setDoc(doc(db, ...scoutPath(SCOUT)), consent());
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, ...scoutPath(SCOUT)),
+        { ...consent(), revoked: true, revokedAt: serverTimestamp() },
+      ),
+    );
+  });
+
+  it('refuses editing what was consented to after the record is granted', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', MINOR_UID), minorProfile(null));
+      await setDoc(doc(db, ...scoutPath(SCOUT)), consent());
+    });
+    const db = testEnv.authenticatedContext(GUARDIAN).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, ...scoutPath(SCOUT)),
+        { ...consent(), consentedTo: ['profile_visibility', 'contact_info'] },
+      ),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ratings & career stats — must no longer be world-writable.
+// ---------------------------------------------------------------------------
+describe('ratings & career_stats: write-lockdown', () => {
+  const PLAYER = 'uid_rating_player';
+  const OTHER_PLAYER = 'uid_rating_other_player';
+
+  const ratingDoc = (overrides = {}) => ({
+    rating: 1500,
+    deviation: 350,
+    volatility: 0.06,
+    gamesPlayed: 0,
+    ...overrides,
+  });
+
+  it('lets a signed-in user write their own first rating doc', async () => {
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertSucceeds(
+      setDoc(doc(db, 'users', PLAYER, 'ratings', 'cricket'), ratingDoc({ gamesPlayed: 1 })),
+    );
+  });
+
+  it('lets a match settler write a DIFFERENT player\'s first rating doc (the documented client-settlement flow)', async () => {
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertSucceeds(
+      setDoc(
+        doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
+        ratingDoc({ gamesPlayed: 1 }),
+      ),
+    );
+  });
+
+  it('refuses a rating write carrying an unrecognized extra field', async () => {
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
+        { ...ratingDoc({ gamesPlayed: 1 }), note: 'hacked' },
+      ),
+    );
+  });
+
+  it('refuses an absurd out-of-range rating value', async () => {
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
+        ratingDoc({ rating: 999999, gamesPlayed: 1 }),
+      ),
+    );
+  });
+
+  it('refuses gamesPlayed jumping by more than one in a single write', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'), ratingDoc({ gamesPlayed: 1 }));
+    });
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(
+      setDoc(doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'), ratingDoc({ gamesPlayed: 50 })),
+    );
+  });
+
+  it('refuses a single write catapulting the rating by an implausible amount', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
+        ratingDoc({ rating: 1500, gamesPlayed: 1 }),
+      );
+    });
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
+        ratingDoc({ rating: 3000, gamesPlayed: 2 }),
+      ),
+    );
+  });
+
+  it('lets a follow-up write advance gamesPlayed by exactly one with a bounded rating delta', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
+        ratingDoc({ rating: 1500, gamesPlayed: 1 }),
+      );
+    });
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertSucceeds(
+      setDoc(
+        doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
+        ratingDoc({ rating: 1516, gamesPlayed: 2 }),
+      ),
+    );
+  });
+
+  const careerDoc = (uid, sportId, overrides = {}) => ({
+    uid,
+    sportId,
+    matchesPlayed: 1,
+    lastPlayedAt: new Date(),
+    tally: { runsScored: 42 },
+    ...overrides,
+  });
+
+  it('lets a match settler write a career_stats doc whose identity fields match its own path', async () => {
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertSucceeds(
+      setDoc(doc(db, 'users', OTHER_PLAYER, 'career_stats', 'cricket'), careerDoc(OTHER_PLAYER, 'cricket')),
+    );
+  });
+
+  it('refuses a career_stats write whose uid field does not match the document\'s owner', async () => {
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(
+      // uid spoofed to the writer instead of the doc's own owner.
+      setDoc(doc(db, 'users', OTHER_PLAYER, 'career_stats', 'cricket'), careerDoc(PLAYER, 'cricket')),
+    );
+  });
+
+  it('refuses a future-dated lastPlayedAt', async () => {
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'users', OTHER_PLAYER, 'career_stats', 'cricket'),
+        careerDoc(OTHER_PLAYER, 'cricket', { lastPlayedAt: new Date('2099-01-01') }),
+      ),
+    );
+  });
+
+  it('refuses an extra field being smuggled into career_stats', async () => {
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'users', OTHER_PLAYER, 'career_stats', 'cricket'),
+        { ...careerDoc(OTHER_PLAYER, 'cricket'), verified: true },
+      ),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Inter-club challenges — accept/decline/reschedule requires club admin.
+// ---------------------------------------------------------------------------
+describe('inter-club challenges', () => {
+  const FROM_ORG = 'org_challenge_from';
+  const TO_ORG = 'org_challenge_to';
+
+  const challengeDoc = (overrides = {}) => ({
+    fromOrgId: FROM_ORG,
+    toOrgId: TO_ORG,
+    fromOrgName: 'From Club',
+    toOrgName: 'To Club',
+    sportId: 'cricket',
+    status: 'pending',
+    proposedSlots: [],
+    venue: null,
+    createdFixtureId: null,
+    createdAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', FROM_ORG), organization(OWNER, 'public'));
+      await setDoc(doc(db, 'orgs', TO_ORG), organization(ADMIN, 'public'));
+      await setDoc(
+        doc(db, 'orgs', FROM_ORG, 'members', OWNER),
+        membership(OWNER, FROM_ORG, 'owner'),
+      );
+      await setDoc(
+        doc(db, 'orgs', TO_ORG, 'members', ADMIN),
+        membership(ADMIN, TO_ORG, 'admin'),
+      );
+      await setDoc(
+        doc(db, 'orgs', FROM_ORG, 'members', OUTSIDER),
+        membership(OUTSIDER, FROM_ORG, 'member'),
+      );
+    });
+  });
+
+  it('lets an admin of the FROM club issue a challenge', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(setDoc(doc(db, 'challenges', 'ch1'), challengeDoc()));
+  });
+
+  it('refuses a plain member of the FROM club issuing a challenge', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(setDoc(doc(db, 'challenges', 'ch1'), challengeDoc()));
+  });
+
+  it('refuses a total stranger issuing a challenge', async () => {
+    const db = testEnv.authenticatedContext(SCORER).firestore();
+    await assertFails(setDoc(doc(db, 'challenges', 'ch1'), challengeDoc()));
+  });
+
+  it('lets an admin of the TO club accept the challenge', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'challenges', 'ch1'), challengeDoc());
+    });
+    const db = testEnv.authenticatedContext(ADMIN).firestore();
+    await assertSucceeds(
+      updateDoc(doc(db, 'challenges', 'ch1'), { status: 'accepted' }),
+    );
+  });
+
+  it('lets an admin of the FROM club reschedule the challenge', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'challenges', 'ch1'), challengeDoc());
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      updateDoc(doc(db, 'challenges', 'ch1'), { status: 'rescheduled' }),
+    );
+  });
+
+  it('refuses a total stranger accepting/declining another club\'s challenge', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'challenges', 'ch1'), challengeDoc());
+    });
+    const db = testEnv.authenticatedContext(SCORER).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'challenges', 'ch1'), { status: 'declined' }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// lookingForPosts — the author field can never be reassigned by an editor.
+// ---------------------------------------------------------------------------
+describe('lookingForPosts: author cannot be reassigned', () => {
+  const POST_ID = 'post1';
+  const postDoc = (authorUid, overrides = {}) => ({
+    authorUid,
+    sportId: 'football',
+    type: 'player',
+    message: 'Looking for a striker',
+    orgId: null,
+    createdAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  it('lets the author create their own post', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(setDoc(doc(db, 'lookingForPosts', POST_ID), postDoc(OWNER)));
+  });
+
+  it('lets the real author edit their own post', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'lookingForPosts', POST_ID), postDoc(OWNER));
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      setDoc(doc(db, 'lookingForPosts', POST_ID), postDoc(OWNER, { message: 'Updated' })),
+    );
+  });
+
+  it('refuses a stranger stamping themselves in as the new author to take over the post', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'lookingForPosts', POST_ID), postDoc(OWNER));
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(doc(db, 'lookingForPosts', POST_ID), postDoc(OUTSIDER, { message: 'Hijacked' })),
+    );
+  });
+
+  it('refuses a stranger editing the post even while leaving authorUid alone', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'lookingForPosts', POST_ID), postDoc(OWNER));
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(doc(db, 'lookingForPosts', POST_ID), postDoc(OWNER, { message: 'Vandalized' })),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fixtures — the organizer branch must not be able to silently overwrite the
+// live/final score projection of a fixture.
+// ---------------------------------------------------------------------------
+describe('fixtures: organizer branch cannot silently overwrite the score', () => {
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', ADMIN),
+        membership(ADMIN, PUBLIC_ORG, 'admin'),
+      );
+    });
+  });
+
+  const fixturePath = (id) => ['orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', id];
+
+  it('refuses an admin rewriting the score of a COMPLETED fixture', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, ...fixturePath('done')), {
+        ...fixture(PUBLIC_ORG, 'comp1', [SCORER], 'completed'),
+        lastSeq: 5,
+        scoreState: { currentA: 21, currentB: 15 },
+        summary: '21-15',
+        winnerEntrantId: 'entrant_a',
+        isDraw: false,
+      });
+    });
+    const db = testEnv.authenticatedContext(ADMIN).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, ...fixturePath('done')),
+        { scoreState: { currentA: 0, currentB: 21 }, summary: '0-21', winnerEntrantId: 'entrant_b' },
+        { merge: true },
+      ),
+    );
+  });
+
+  it('still lets an admin edit a non-score field of a COMPLETED fixture', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, ...fixturePath('done')), {
+        ...fixture(PUBLIC_ORG, 'comp1', [SCORER], 'completed'),
+        lastSeq: 5,
+        scoreState: { currentA: 21, currentB: 15 },
+        summary: '21-15',
+        winnerEntrantId: 'entrant_a',
+        isDraw: false,
+      });
+    });
+    const db = testEnv.authenticatedContext(ADMIN).firestore();
+    await assertSucceeds(
+      setDoc(doc(db, ...fixturePath('done')), { venue: 'Ground 2' }, { merge: true }),
+    );
+  });
+
+  it('refuses an admin rewinding lastSeq on a LIVE fixture', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, ...fixturePath('live')), {
+        ...fixture(PUBLIC_ORG, 'comp1', [SCORER], 'live'),
+        lastSeq: 3,
+      });
+    });
+    const db = testEnv.authenticatedContext(ADMIN).firestore();
+    await assertFails(
+      setDoc(doc(db, ...fixturePath('live')), { lastSeq: 1 }, { merge: true }),
+    );
+  });
+
+  it('still lets an admin force a status change on a LIVE fixture without touching the score', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, ...fixturePath('live')), {
+        ...fixture(PUBLIC_ORG, 'comp1', [SCORER], 'live'),
+        lastSeq: 3,
+      });
+    });
+    const db = testEnv.authenticatedContext(ADMIN).firestore();
+    await assertSucceeds(
+      setDoc(doc(db, ...fixturePath('live')), { status: 'abandoned' }, { merge: true }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Standings — writing a competition's points table requires the organizer
+// tier, not merely being assigned to score one fixture in the org.
+// ---------------------------------------------------------------------------
+describe('standings: write requires organizer role, not just any scorer', () => {
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', ADMIN),
+        membership(ADMIN, PUBLIC_ORG, 'admin'),
+      );
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', SCORER),
+        membership(SCORER, PUBLIC_ORG, 'judge_scorer'),
+      );
+    });
+  });
+
+  const standingsPath = ['orgs', PUBLIC_ORG, 'competitions', 'comp1', 'standings', 'entrant_a'];
+
+  it('refuses a bare judge_scorer writing a standings row', async () => {
+    const db = testEnv.authenticatedContext(SCORER).firestore();
+    await assertFails(setDoc(doc(db, ...standingsPath), { points: 9, played: 3 }));
+  });
+
+  it('lets an event organizer write a standings row', async () => {
+    const db = testEnv.authenticatedContext(ADMIN).firestore();
+    await assertSucceeds(setDoc(doc(db, ...standingsPath), { points: 9, played: 3 }));
   });
 });

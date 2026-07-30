@@ -99,6 +99,39 @@ service cloud.firestore {
       return request.resource.data[field] == resource.data[field];
     }
 
+    // Like unchanged(), but safe for a field that may not have existed on
+    // the prior document at all (a field being introduced after launch).
+    // The first write that adds it is allowed through; every write after
+    // that must keep it identical — i.e. write-once, without requiring the
+    // field to have been present from day one.
+    function unchangedIfPresent(field) {
+      return !(field in resource.data)
+        || (field in request.resource.data
+            && request.resource.data[field] == resource.data[field]);
+    }
+
+    // True age check for minor-safety gates. Deliberately reads the
+    // IMMUTABLE `dateOfBirth` and computes against `request.time` rather
+    // than trusting a client-mirrored `isMinor` boolean, which is
+    // recomputed and rewritten by the client on every profile save and is
+    // therefore trivially forgeable. ~6575 days (18 * 365.25, rounded up)
+    // errs a few days toward "still a minor" rather than a few days toward
+    // "adult", which is the safe direction for this check.
+    function isAdult(dob) {
+      return dob is timestamp && dob + duration.value(6575, 'd') <= request.time;
+    }
+
+    // The score-bearing fields of a fixture's live projection. Used to
+    // freeze a fixture's recorded result once the match is `completed`, and
+    // to compare against for the monotonic-sequence guard.
+    function scoreFieldsUnchanged() {
+      return unchanged('lastSeq')
+        && unchanged('scoreState')
+        && unchanged('summary')
+        && unchanged('winnerEntrantId')
+        && unchanged('isDraw');
+    }
+
     // -------------------------------------------------------------------
     // Platform sport catalogue — curated, read-only to every client.
     // Written only by an admin SDK / console, never by the app.
@@ -150,10 +183,25 @@ service cloud.firestore {
       // the owner made it public AND they are an adult — a minor's profile
       // is never world-readable regardless of their own setting, which is
       // the hard floor required by the guardian model.
+      //
+      // The adult check is computed from the immutable `dateOfBirth`, NOT
+      // from the client-mirrored `isMinor` boolean (see isAdult() above): a
+      // minor could simply write `isMinor: false` on any profile update and
+      // become world-readable, since `isMinor` is plain client-computed
+      // data with no rule ever validating it against the truth.
+      //
+      // A minor's profile is additionally visible to a specific scout who
+      // holds an unrevoked guardian-consent record for them — see
+      // /guardianConsents below. That is a narrow, consented channel, not a
+      // relaxation of "never world-readable".
       allow read: if isSignedIn() && (
         userId == uid()
-        || (resource.data.profileVisibility == 'public'
-            && resource.data.isMinor == false)
+        || (resource.data.profileVisibility == 'public' && isAdult(resource.data.dateOfBirth))
+        || (
+          !isAdult(resource.data.dateOfBirth)
+          && exists(/databases/$(database)/documents/users/$(userId)/guardianConsents/$(uid()))
+          && get(/databases/$(database)/documents/users/$(userId)/guardianConsents/$(uid())).data.revoked == false
+        )
       );
 
       allow create: if isSignedIn()
@@ -163,7 +211,17 @@ service cloud.firestore {
         // Date of birth drives every age-category and minor-safety rule, so
         // it must be present and sane from the very first write.
         && request.resource.data.dateOfBirth is timestamp
-        && request.resource.data.dateOfBirth < request.time;
+        && request.resource.data.dateOfBirth < request.time
+        // guardianUid is optional and self-declared at signup (there is no
+        // KYC step to independently verify a real-world guardian
+        // relationship — see the guardianConsents comment below for the
+        // residual-risk discussion). A user may not name themselves.
+        && (
+          !('guardianUid' in request.resource.data)
+          || request.resource.data.guardianUid == null
+          || (request.resource.data.guardianUid is string
+              && request.resource.data.guardianUid != uid())
+        );
 
       allow update: if isSignedIn()
         && userId == uid()
@@ -173,9 +231,225 @@ service cloud.firestore {
         // this is the single most abused field in junior sport. Changing it
         // requires an admin correction path, not a self-service edit.
         && unchanged('dateOfBirth')
-        && unchanged('createdAt');
+        && unchanged('createdAt')
+        // guardianUid is write-once too, once set: swapping out a linked
+        // guardian after the fact is exactly how a consent or a revocation
+        // tied to the old guardian would be evaded.
+        && unchangedIfPresent('guardianUid');
 
       allow delete: if false; // Soft-delete only, for audit integrity.
+
+      // -----------------------------------------------------------------
+      // Ratings & portable career statistics subcollections.
+      //
+      // RESIDUAL RISK — read this before touching either rule below.
+      // These are written directly by the client
+      // (lib/data/rating_service.dart) the instant a match completes; there
+      // is no server-side settlement step to trust instead, so this is the
+      // single most valuable data in the product sitting behind a
+      // client-authored write. That is a real, currently-accepted
+      // architectural gap, not an oversight. Full closure requires moving
+      // match settlement into a Cloud Function that reads the fixture and
+      // lineups with admin privilege and computes/writes ratings itself —
+      // at which point these two rules can become read-only to clients.
+      //
+      // Until then, what these rules DO enforce:
+      //   - every field is present, correctly typed, and within a sane
+      //     numeric range, so a write cannot corrupt the document shape or
+      //     plant an absurd value (rating 999999999, deviation -50, a
+      //     string where a number belongs);
+      //   - on ratings/, `gamesPlayed` may only advance by exactly one and
+      //     `rating` may only move by a bounded amount per write, so a
+      //     single write can look, at most, like the outcome of one real
+      //     game rather than an arbitrary overwrite;
+      //   - on career_stats/, the identity fields (`uid`, `sportId`) must
+      //     match the document's own path, and `lastPlayedAt` cannot be
+      //     future-dated;
+      //   - no extra fields can be smuggled into either document.
+      //
+      // What this CANNOT verify, and remains open until settlement moves
+      // server-side: that the caller actually played in a real match
+      // against this specific opponent, that `sportId` is the sport that
+      // was actually played, or that a bounded single-game delta
+      // corresponds to a real result rather than a small self-serving nudge
+      // repeated many times. `matchesPlayed` and `tally.*` on career_stats/
+      // are written via FieldValue.increment(), whose resolved value
+      // security rules cannot reliably see at evaluation time, so those two
+      // fields are deliberately NOT range-validated here.
+      // -----------------------------------------------------------------
+      match /ratings/{sportId} {
+        allow read: if isSignedIn();
+
+        allow write: if isSignedIn()
+          && request.resource.data.keys().hasOnly(['rating', 'deviation', 'volatility', 'gamesPlayed'])
+          && request.resource.data.rating is number
+          && request.resource.data.rating > 0
+          && request.resource.data.rating < 4000
+          && request.resource.data.deviation is number
+          && request.resource.data.deviation > 0
+          && request.resource.data.deviation <= 350
+          && request.resource.data.volatility is number
+          && request.resource.data.volatility > 0
+          && request.resource.data.volatility < 1
+          && request.resource.data.gamesPlayed is int
+          && request.resource.data.gamesPlayed >= 0
+          && (
+            resource == null
+            || (
+              request.resource.data.gamesPlayed == resource.data.gamesPlayed + 1
+              // A generous heuristic bound, not a re-derivation of Glicko-2:
+              // a single real game — even a first game at max deviation
+              // (350) against a very differently-rated opponent — should
+              // never move a rating by this much. It exists to stop a
+              // single hostile write from catapulting or cratering a
+              // rating outright, not to validate the math.
+              && (request.resource.data.rating - resource.data.rating) <= 500
+              && (resource.data.rating - request.resource.data.rating) <= 500
+            )
+          );
+      }
+
+      match /career_stats/{sportId} {
+        allow read: if isSignedIn();
+
+        // See the residual-risk comment above — this is the same
+        // architectural gap, narrowed the same way, for the fields that a
+        // FieldValue.increment()-free write can actually validate.
+        allow write: if isSignedIn()
+          && request.resource.data.keys().hasOnly(['uid', 'sportId', 'matchesPlayed', 'lastPlayedAt', 'tally'])
+          && request.resource.data.uid == userId
+          && request.resource.data.sportId == sportId
+          && request.resource.data.lastPlayedAt is timestamp
+          && request.resource.data.lastPlayedAt <= request.time;
+      }
+
+      // -----------------------------------------------------------------
+      // Guardian consent records (DPDP / §2.7 minor safety).
+      //
+      // Doc id IS the scout's uid, giving "one consent record per scout per
+      // minor" structurally, mirroring the members/{uid} pattern above.
+      // A minor's profile becomes visible to that specific scout only while
+      // an unrevoked record exists here — see the `read` rule on the parent
+      // /users/{userId} document.
+      //
+      // RESIDUAL RISK: there is no KYC step verifying that the uid writing
+      // this record is a real-world guardian of this minor. What IS
+      // enforced structurally: the creator cannot be the minor themselves
+      // or the scout being granted access (closing the most obvious
+      // self-serving bypass, where a scout simply mints their own
+      // "guardian consent"); if the minor's profile has a linked
+      // `guardianUid`, the creator must match it exactly; the record is
+      // immutable once created except for the guardian flipping `revoked`;
+      // and it records what was consented to and when. Real identity
+      // verification of the guardian relationship is out of reach without
+      // an out-of-band verification flow.
+      // -----------------------------------------------------------------
+      match /guardianConsents/{scoutUid} {
+
+        allow read: if isSignedIn() && (
+          uid() == userId
+          || uid() == scoutUid
+          || uid() == resource.data.guardianUid
+        );
+
+        allow create: if isSignedIn()
+          && uid() != userId
+          && uid() != scoutUid
+          && request.resource.data.guardianUid == uid()
+          && request.resource.data.minorUid == userId
+          && request.resource.data.scoutUid == scoutUid
+          && request.resource.data.consentedTo is list
+          && request.resource.data.consentedTo.size() > 0
+          && request.resource.data.revoked == false
+          && request.resource.data.revokedAt == null
+          && serverTimed('grantedAt')
+          && (
+            !('guardianUid' in get(/databases/$(database)/documents/users/$(userId)).data)
+            || get(/databases/$(database)/documents/users/$(userId)).data.guardianUid == null
+            || get(/databases/$(database)/documents/users/$(userId)).data.guardianUid == uid()
+          );
+
+        // The only permitted transition is the guardian revoking their own
+        // consent. Everything else about the record — who consented, for
+        // whom, to what, and when it was granted — is frozen forever.
+        allow update: if isSignedIn()
+          && uid() == resource.data.guardianUid
+          && unchanged('guardianUid')
+          && unchanged('minorUid')
+          && unchanged('scoutUid')
+          && unchanged('consentedTo')
+          && unchanged('grantedAt')
+          && resource.data.revoked == false
+          && request.resource.data.revoked == true
+          && serverTimed('revokedAt');
+
+        allow delete: if false; // Revoke, don't delete — keep the audit trail.
+      }
+    }
+
+    // -------------------------------------------------------------------
+    // Multi-sport Umpires & Referees Registry
+    // -------------------------------------------------------------------
+    match /umpires/{umpireUid} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && umpireUid == uid();
+      allow delete: if false;
+    }
+
+    // -------------------------------------------------------------------
+    // Inter-club challenges (top-level cross-tenant)
+    // -------------------------------------------------------------------
+    match /challenges/{challengeId} {
+      allow read: if isSignedIn();
+
+      // Only an admin of the CHALLENGING club may issue a challenge — it
+      // commits that club to a fixture if accepted, which is a governance
+      // decision, not something any member should be able to trigger.
+      allow create: if isSignedIn()
+        && request.resource.data.fromOrgId is string
+        && request.resource.data.toOrgId is string
+        && request.resource.data.fromOrgId != request.resource.data.toOrgId
+        && canManageCompetitions(request.resource.data.fromOrgId)
+        && request.resource.data.status == 'pending'
+        && serverTimed('createdAt');
+
+      // Accepting, declining or rescheduling is likewise a governance
+      // decision for whichever club is acting — it used to be open to any
+      // signed-in stranger, letting anyone accept/decline another club's
+      // challenge on its behalf.
+      allow update: if isSignedIn()
+        && (canManageCompetitions(resource.data.fromOrgId) || canManageCompetitions(resource.data.toOrgId))
+        && unchanged('fromOrgId')
+        && unchanged('toOrgId')
+        && unchanged('sportId')
+        && unchanged('createdAt');
+
+      allow delete: if false;
+    }
+
+    // -------------------------------------------------------------------
+    // Community Looking-For Board (top-level)
+    // -------------------------------------------------------------------
+    match /lookingForPosts/{postId} {
+      allow read: if true;
+      allow create: if isSignedIn()
+        && request.resource.data.authorUid == uid();
+      // Only the EXISTING author may edit a post. The old condition also
+      // accepted `request.resource.data.authorUid == uid()`, which let
+      // anyone rewrite anyone else's post by simply stamping themselves in
+      // as the new author — an author-takeover, not an author check.
+      allow update: if isSignedIn()
+        && resource.data.authorUid == uid()
+        && unchanged('authorUid');
+      allow delete: if isSignedIn() && resource.data.authorUid == uid();
+    }
+
+    // -------------------------------------------------------------------
+    // Official Rules & Regulations Knowledgebase (ICC, FIFA, FIBA, PKL, FIDE)
+    // -------------------------------------------------------------------
+    match /sportRules/{ruleId} {
+      allow read: if true;
+      allow write: if isSignedIn();
     }
 
     // -------------------------------------------------------------------
@@ -313,6 +587,18 @@ service cloud.firestore {
           && resource.data.role != 'owner';
       }
 
+      // Sub-groups / age & gender sub-teams inside a club
+      match /subgroups/{subgroupId} {
+        allow read: if isActive(orgId);
+        allow create, update, delete: if canManageCompetitions(orgId);
+      }
+
+      // Club Feed & Announcements
+      match /announcements/{announcementId} {
+        allow read: if orgIsReadable(orgId);
+        allow create, update, delete: if canManageCompetitions(orgId);
+      }
+
       // -----------------------------------------------------------------
       // Competitions (what the product calls "events")
       // -----------------------------------------------------------------
@@ -409,11 +695,18 @@ service cloud.firestore {
           // Two distinct update paths with different authority:
           allow update: if
             // (a) Organizers may reschedule, assign officials, or force a
-            //     status such as walkover/abandoned/disputed.
+            //     status such as walkover/abandoned/disputed. They must NOT
+            //     be able to silently overwrite the live score projection
+            //     of any fixture — including a completed one — to whatever
+            //     they like, so this carries the same monotonic-sequence
+            //     guard the scorer branch (b) enforces, plus a hard freeze
+            //     on the score fields once the match is `completed`.
             (
               canManageCompetitions(orgId)
               && unchanged('compId')
               && unchanged('orgId')
+              && request.resource.data.lastSeq >= resource.data.lastSeq
+              && (resource.data.status != 'completed' || scoreFieldsUnchanged())
             )
             // (b) The assigned scorer may only advance the live projection.
             //     They cannot move the fixture to a different competition,
@@ -510,7 +803,13 @@ service cloud.firestore {
         // ---------------------------------------------------------------
         match /standings/{entrantId} {
           allow read: if orgIsReadable(orgId);
-          allow write: if canScore(orgId);
+          // A points table is competition-wide derived data, not the output
+          // of one assigned fixture — canScore(orgId) let ANY judge_scorer
+          // in the org (not just one assigned to this competition) write
+          // any entrant's standings row for any competition. Standings
+          // generation belongs to the organizer tier, same as the fixtures
+          // and entrants that feed it.
+          allow write: if canManageCompetitions(orgId);
         }
 
         match /attempts/{attemptId} {
