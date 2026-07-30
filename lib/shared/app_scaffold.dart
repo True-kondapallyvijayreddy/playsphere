@@ -85,6 +85,12 @@ class AppScaffold extends ConsumerWidget {
         path: Routes.members(orgId),
         requires: Capability.manageMembers,
       ),
+      NavItem(
+        icon: Icons.menu_book_outlined,
+        selectedIcon: Icons.menu_book,
+        label: 'Rules',
+        path: Routes.rules,
+      ),
     ].where((i) => i.requires == null || caps.contains(i.requires)).toList();
 
     final currentPath = GoRouterState.of(context).uri.path;
@@ -109,6 +115,11 @@ class AppScaffold extends ConsumerWidget {
       ),
       actions: [
         ...?actions,
+        IconButton(
+          icon: const Icon(Icons.menu_book_outlined),
+          tooltip: 'Official Rules (ICC, FIFA, FIBA, PKL)',
+          onPressed: () => context.push(Routes.rules),
+        ),
         const _AccountButton(),
         const SizedBox(width: 8),
       ],

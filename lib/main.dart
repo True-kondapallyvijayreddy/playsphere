@@ -4,10 +4,13 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import 'core/l10n/locale_controller.dart';
 import 'core/router/app_router.dart';
 import 'core/theme/app_theme.dart';
 import 'firebase_options.dart';
+import 'l10n/app_localizations.dart';
 
 /// Point the app at a local Firestore emulator instead of the real
 /// `playsphere-os` project:
@@ -87,7 +90,17 @@ Future<void> main() async {
     );
   }
 
-  runApp(const ProviderScope(child: PlaySphereApp()));
+  // Loaded here rather than inside the widget tree so the chosen language is
+  // known before the first frame. Resolving it later makes the app flash
+  // English and then repaint in Telugu, which reads as a bug.
+  final prefs = await SharedPreferences.getInstance();
+
+  runApp(
+    ProviderScope(
+      overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+      child: const PlaySphereApp(),
+    ),
+  );
 }
 
 class PlaySphereApp extends ConsumerWidget {
@@ -100,6 +113,11 @@ class PlaySphereApp extends ConsumerWidget {
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light,
       darkTheme: AppTheme.dark,
+      // Null follows the device language; a user who has picked one overrides
+      // it. Telugu, Hindi and English ship from Phase 1 per CLAUDE.md §2.6.
+      locale: ref.watch(localeControllerProvider),
+      supportedLocales: supportedLocales,
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
       routerConfig: ref.watch(appRouterProvider),
     );
   }

@@ -13,6 +13,7 @@ import '../../features/orgs/join_org_screen.dart';
 import '../../features/orgs/members_screen.dart';
 import '../../features/orgs/org_home_screen.dart';
 import '../../features/orgs/org_picker_screen.dart';
+import '../../features/rules/sport_rules_screen.dart';
 import '../../features/scoring/live_matches_screen.dart';
 import '../../features/scoring/scoring_screen.dart';
 import '../../features/scoring/spectator_screen.dart';
@@ -24,6 +25,7 @@ class Routes {
   static const signIn = '/sign-in';
   static const profileSetup = '/welcome';
   static const orgs = '/orgs';
+  static const rules = '/rules';
   static const createOrg = '/orgs/new';
   static const joinOrg = '/orgs/join';
 
@@ -99,6 +101,10 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.signIn,
         builder: (_, __) => const SignInScreen(),
+      ),
+      GoRoute(
+        path: Routes.rules,
+        builder: (_, __) => const SportRulesScreen(),
       ),
       GoRoute(
         path: Routes.profileSetup,
