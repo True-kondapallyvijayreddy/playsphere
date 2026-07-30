@@ -50,6 +50,11 @@ class Fs {
   static DateTime date(Object? v, DateTime fallback) =>
       dateOrNull(v) ?? fallback;
 
+  static List<DateTime> dateList(Object? v) {
+    if (v is! List) return const [];
+    return v.map(dateOrNull).whereType<DateTime>().toList(growable: false);
+  }
+
   static Timestamp? ts(DateTime? v) => v == null ? null : Timestamp.fromDate(v);
 
   /// Strips keys whose value is null so we never write explicit nulls that

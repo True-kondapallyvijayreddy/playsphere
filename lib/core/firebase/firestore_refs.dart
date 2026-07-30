@@ -20,6 +20,32 @@ class Refs {
   static DocumentReference<Map<String, dynamic>> user(String uid) =>
       users.doc(uid);
 
+  static CollectionReference<Map<String, dynamic>> get umpires =>
+      db.collection('umpires');
+
+  static DocumentReference<Map<String, dynamic>> umpire(String uid) =>
+      umpires.doc(uid);
+
+  static CollectionReference<Map<String, dynamic>> userRatings(String uid) =>
+      user(uid).collection('ratings');
+
+  static DocumentReference<Map<String, dynamic>> userRating(
+    String uid,
+    String sportId,
+  ) =>
+      userRatings(uid).doc(sportId);
+
+  static CollectionReference<Map<String, dynamic>> userCareerStats(
+    String uid,
+  ) =>
+      user(uid).collection('career_stats');
+
+  static DocumentReference<Map<String, dynamic>> userCareerStat(
+    String uid,
+    String sportId,
+  ) =>
+      userCareerStats(uid).doc(sportId);
+
   static CollectionReference<Map<String, dynamic>> get orgs =>
       db.collection('orgs');
 
@@ -33,6 +59,42 @@ class Refs {
 
   static DocumentReference<Map<String, dynamic>> org(String orgId) =>
       orgs.doc(orgId);
+
+  static CollectionReference<Map<String, dynamic>> subGroups(String orgId) =>
+      org(orgId).collection('subgroups');
+
+  static DocumentReference<Map<String, dynamic>> subGroup(
+    String orgId,
+    String subGroupId,
+  ) =>
+      subGroups(orgId).doc(subGroupId);
+
+  static CollectionReference<Map<String, dynamic>> announcements(String orgId) =>
+      org(orgId).collection('announcements');
+
+  static DocumentReference<Map<String, dynamic>> announcement(
+    String orgId,
+    String announcementId,
+  ) =>
+      announcements(orgId).doc(announcementId);
+
+  static CollectionReference<Map<String, dynamic>> get challenges =>
+      db.collection('challenges');
+
+  static DocumentReference<Map<String, dynamic>> challenge(String challengeId) =>
+      challenges.doc(challengeId);
+
+  static CollectionReference<Map<String, dynamic>> get lookingForPosts =>
+      db.collection('lookingForPosts');
+
+  static DocumentReference<Map<String, dynamic>> lookingForPost(String postId) =>
+      lookingForPosts.doc(postId);
+
+  static CollectionReference<Map<String, dynamic>> get sportRules =>
+      db.collection('sportRules');
+
+  static DocumentReference<Map<String, dynamic>> sportRule(String ruleId) =>
+      sportRules.doc(ruleId);
 
   // --- Membership -------------------------------------------------------
 

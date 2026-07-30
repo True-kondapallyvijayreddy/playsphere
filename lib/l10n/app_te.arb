@@ -1,0 +1,83 @@
+{
+  "@@locale": "te",
+
+  "appTitle": "PlaySphere",
+
+  "actionSave": "సేవ్ చేయి",
+  "actionCancel": "రద్దు",
+  "actionRetry": "మళ్లీ ప్రయత్నించండి",
+  "actionDone": "పూర్తయింది",
+  "actionCreate": "సృష్టించు",
+  "actionJoin": "చేరు",
+  "actionShare": "పంచుకో",
+  "actionUndo": "వెనక్కి తీసుకో",
+
+  "signInTitle": "సైన్ ఇన్",
+  "signInWithGoogle": "Google తో కొనసాగించండి",
+  "signOut": "సైన్ అవుట్",
+
+  "profileSetupTitle": "మీ ప్రొఫైల్ పూర్తి చేయండి",
+  "profileName": "పూర్తి పేరు",
+  "profileDateOfBirth": "పుట్టిన తేదీ",
+  "profileGender": "లింగం",
+  "profilePhone": "ఫోన్ నంబర్",
+  "profileDistrict": "జిల్లా",
+  "profileMandal": "మండలం",
+  "profileVillage": "గ్రామం",
+
+  "orgsTitle": "క్లబ్‌లు",
+  "orgCreate": "క్లబ్ సృష్టించండి",
+  "orgJoinByCode": "కోడ్‌తో చేరండి",
+  "orgMembers": "సభ్యులు",
+  "orgFeed": "ఫీడ్",
+  "orgPendingRequests": "{count, plural, =0{పెండింగ్ అభ్యర్థనలు లేవు} =1{1 పెండింగ్ అభ్యర్థన} other{{count} పెండింగ్ అభ్యర్థనలు}}",
+
+  "competitionsTitle": "ఈవెంట్‌లు",
+  "competitionCreate": "ఈవెంట్ సృష్టించండి",
+  "competitionEntrants": "{count, plural, =1{1 పోటీదారు} other{{count} పోటీదారులు}}",
+  "competitionStandings": "పట్టిక",
+  "competitionFixtures": "మ్యాచ్‌లు",
+
+  "standingsPlayed": "ఆ",
+  "standingsWon": "గె",
+  "standingsDrawn": "డ్రా",
+  "standingsLost": "ఓ",
+  "standingsPoints": "పా",
+  "standingsNetRunRate": "NRR",
+
+  "scoringTitle": "స్కోరింగ్",
+  "scoringFinishMatch": "మ్యాచ్ ముగించు",
+  "scoringReopen": "సరిచేయడానికి తిరిగి తెరవండి",
+  "scoringOfflinePending": "{count, plural, =0{అన్ని మార్పులు సేవ్ అయ్యాయి} =1{ఆఫ్‌లైన్ స్కోరింగ్ — 1 ఈవెంట్ పెండింగ్} other{ఆఫ్‌లైన్ స్కోరింగ్ — {count} ఈవెంట్‌లు పెండింగ్}}",
+  "scoringUndoConfirm": "చివరి ఎంట్రీని వెనక్కి తీసుకోవాలా?",
+  "scoringNothingToUndo": "వెనక్కి తీసుకోవడానికి ఇంకా ఏమీ లేదు.",
+
+  "matchSetupTitle": "మ్యాచ్ సెటప్",
+  "matchSetupLineups": "జట్ల జాబితా",
+  "matchSetupToss": "టాస్",
+  "matchSetupTossWonBy": "టాస్ గెలిచినవారు",
+  "matchSetupElectedTo": "ఎంచుకున్నది",
+  "matchSetupBat": "బ్యాటింగ్",
+  "matchSetupField": "ఫీల్డింగ్",
+  "matchSetupBalanceTeams": "జట్లను సమతుల్యం చేయి",
+
+  "spectatorWatching": "ప్రత్యక్ష ప్రసారం",
+  "spectatorNoMatches": "ప్రస్తుతం ఏ మ్యాచ్ ప్రత్యక్షంగా లేదు.",
+
+  "resultWalkover": "వాక్‌ఓవర్",
+  "resultAbandoned": "రద్దు చేయబడింది",
+  "resultDisputed": "వివాదంలో ఉంది",
+  "resultDrawn": "డ్రా",
+  "resultWonBy": "{winner} గెలిచారు",
+
+  "errorGeneric": "ఏదో తప్పు జరిగింది.",
+  "errorNetwork": "కనెక్షన్ లేదు. మీ పని ఈ పరికరంలో సేవ్ అయింది, ఆన్‌లైన్‌కు వచ్చాక సింక్ అవుతుంది.",
+  "errorPermission": "అది చేయడానికి మీకు అనుమతి లేదు.",
+  "errorConflict": "మరొకరు ఆ బంతిని ముందుగా నమోదు చేశారు. స్కోరు రిఫ్రెష్ చేయబడింది.",
+
+  "languageEnglish": "English",
+  "languageTelugu": "తెలుగు",
+  "languageHindi": "हिन्दी",
+  "languageSystemDefault": "పరికర భాష",
+  "languageSettingTitle": "భాష"
+}

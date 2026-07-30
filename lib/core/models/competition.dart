@@ -193,6 +193,7 @@ class Competition {
     this.pointsForWin = 3,
     this.pointsForDraw = 1,
     this.pointsForLoss = 0,
+    this.tiebreakChain,
     this.createdBy,
     this.createdAt,
   });
@@ -231,6 +232,13 @@ class Competition {
   final int pointsForWin;
   final int pointsForDraw;
   final int pointsForLoss;
+
+  /// How this league separates teams level on points, as a list of
+  /// [Tiebreak] wire names. Null means "use the sport's default chain" —
+  /// cricket goes to net run rate, football to goal difference, a Swiss
+  /// chess field to Buchholz.
+  final List<String>? tiebreakChain;
+
   final String? createdBy;
   final DateTime? createdAt;
 
@@ -271,6 +279,8 @@ class Competition {
       pointsForWin: Fs.integer(d['pointsForWin'], 3),
       pointsForDraw: Fs.integer(d['pointsForDraw'], 1),
       pointsForLoss: Fs.integer(d['pointsForLoss']),
+      tiebreakChain:
+          d['tiebreakChain'] is List ? Fs.strList(d['tiebreakChain']) : null,
       createdBy: Fs.strOrNull(d['createdBy']),
       createdAt: Fs.dateOrNull(d['createdAt']),
     );
@@ -301,6 +311,7 @@ class Competition {
         'pointsForWin': pointsForWin,
         'pointsForDraw': pointsForDraw,
         'pointsForLoss': pointsForLoss,
+        'tiebreakChain': tiebreakChain,
         'createdBy': createdBy,
         'createdAt': FieldValue.serverTimestamp(),
       };
@@ -318,6 +329,7 @@ class Competition {
         'pointsForWin': pointsForWin,
         'pointsForDraw': pointsForDraw,
         'pointsForLoss': pointsForLoss,
+        'tiebreakChain': tiebreakChain,
         'updatedAt': FieldValue.serverTimestamp(),
       });
 }

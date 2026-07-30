@@ -1,0 +1,18 @@
+# Generates AppLocalizations from the .arb files in lib/l10n.
+#
+# English is the template: every key is defined there with a description, and
+# the Telugu and Hindi files translate against it. A key missing from a
+# translation falls back to English rather than showing a blank, which is why
+# `untranslated-messages-file` is worth watching in review.
+arb-dir: lib/l10n
+template-arb-file: app_en.arb
+output-localization-file: app_localizations.dart
+output-class: AppLocalizations
+nullable-getter: false
+untranslated-messages-file: lib/l10n/untranslated.json
+
+# Generate into the source tree rather than the synthetic `flutter_gen`
+# package. The synthetic package is deprecated, and a real file under lib/ is
+# navigable, greppable and visible in review.
+synthetic-package: false
+output-dir: lib/l10n

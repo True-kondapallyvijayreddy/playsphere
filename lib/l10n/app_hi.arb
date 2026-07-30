@@ -1,0 +1,83 @@
+{
+  "@@locale": "hi",
+
+  "appTitle": "PlaySphere",
+
+  "actionSave": "सहेजें",
+  "actionCancel": "रद्द करें",
+  "actionRetry": "फिर कोशिश करें",
+  "actionDone": "हो गया",
+  "actionCreate": "बनाएँ",
+  "actionJoin": "शामिल हों",
+  "actionShare": "साझा करें",
+  "actionUndo": "वापस लें",
+
+  "signInTitle": "साइन इन",
+  "signInWithGoogle": "Google से जारी रखें",
+  "signOut": "साइन आउट",
+
+  "profileSetupTitle": "अपनी प्रोफ़ाइल पूरी करें",
+  "profileName": "पूरा नाम",
+  "profileDateOfBirth": "जन्म तिथि",
+  "profileGender": "लिंग",
+  "profilePhone": "फ़ोन नंबर",
+  "profileDistrict": "ज़िला",
+  "profileMandal": "मंडल",
+  "profileVillage": "गाँव",
+
+  "orgsTitle": "क्लब",
+  "orgCreate": "क्लब बनाएँ",
+  "orgJoinByCode": "कोड से शामिल हों",
+  "orgMembers": "सदस्य",
+  "orgFeed": "फ़ीड",
+  "orgPendingRequests": "{count, plural, =0{कोई लंबित अनुरोध नहीं} =1{1 लंबित अनुरोध} other{{count} लंबित अनुरोध}}",
+
+  "competitionsTitle": "आयोजन",
+  "competitionCreate": "आयोजन बनाएँ",
+  "competitionEntrants": "{count, plural, =1{1 प्रतिभागी} other{{count} प्रतिभागी}}",
+  "competitionStandings": "तालिका",
+  "competitionFixtures": "मैच",
+
+  "standingsPlayed": "ख",
+  "standingsWon": "जी",
+  "standingsDrawn": "ड्रॉ",
+  "standingsLost": "हा",
+  "standingsPoints": "अंक",
+  "standingsNetRunRate": "NRR",
+
+  "scoringTitle": "स्कोरिंग",
+  "scoringFinishMatch": "मैच समाप्त करें",
+  "scoringReopen": "सुधार के लिए फिर से खोलें",
+  "scoringOfflinePending": "{count, plural, =0{सभी बदलाव सहेजे गए} =1{ऑफ़लाइन स्कोरिंग — 1 इवेंट लंबित} other{ऑफ़लाइन स्कोरिंग — {count} इवेंट लंबित}}",
+  "scoringUndoConfirm": "अंतिम प्रविष्टि वापस लें?",
+  "scoringNothingToUndo": "वापस लेने के लिए अभी कुछ नहीं है।",
+
+  "matchSetupTitle": "मैच सेटअप",
+  "matchSetupLineups": "टीम सूची",
+  "matchSetupToss": "टॉस",
+  "matchSetupTossWonBy": "टॉस जीता",
+  "matchSetupElectedTo": "चुना",
+  "matchSetupBat": "बल्लेबाज़ी",
+  "matchSetupField": "गेंदबाज़ी",
+  "matchSetupBalanceTeams": "टीमें संतुलित करें",
+
+  "spectatorWatching": "लाइव देख रहे हैं",
+  "spectatorNoMatches": "अभी कोई मैच लाइव नहीं है।",
+
+  "resultWalkover": "वॉकओवर",
+  "resultAbandoned": "रद्द",
+  "resultDisputed": "विवादित",
+  "resultDrawn": "ड्रॉ",
+  "resultWonBy": "{winner} जीता",
+
+  "errorGeneric": "कुछ गड़बड़ हो गई।",
+  "errorNetwork": "कनेक्शन नहीं है। आपका काम इस डिवाइस पर सहेजा गया है और ऑनलाइन होते ही सिंक हो जाएगा।",
+  "errorPermission": "आपके पास ऐसा करने की अनुमति नहीं है।",
+  "errorConflict": "किसी और ने वह गेंद पहले दर्ज कर दी। स्कोर ताज़ा कर दिया गया है।",
+
+  "languageEnglish": "English",
+  "languageTelugu": "తెలుగు",
+  "languageHindi": "हिन्दी",
+  "languageSystemDefault": "डिवाइस की भाषा",
+  "languageSettingTitle": "भाषा"
+}

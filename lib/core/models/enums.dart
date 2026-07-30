@@ -14,6 +14,8 @@ library playsphere_enums;
 
 enum OrgType {
   residentialCommunity('residential_community', 'Residential Community'),
+  village('village', 'Village / Mandal Club'),
+  individual('individual', 'Pickup Group / Individual'),
   school('school', 'School'),
   college('college', 'College / University'),
   academy('academy', 'Sports Academy'),

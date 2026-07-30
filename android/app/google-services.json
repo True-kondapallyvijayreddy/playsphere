@@ -12,7 +12,20 @@
           "package_name": "com.company.playsphere"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "178810835926-ffl2df4ujn8dir6tk33muoe2j2lkojam.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.company.playsphere",
+            "certificate_hash": "7b7a61f58998926536451b9c3062c9f662b7ea5b"
+          }
+        },
+        {
+          "client_id": "178810835926-c3bijks5k6f7t9lcms0op4igq1sdesuq.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyDkktlVR8pL2uEOwgC-GgzDQS_o7Gnhtzc"
@@ -20,7 +33,19 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "178810835926-c3bijks5k6f7t9lcms0op4igq1sdesuq.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "178810835926-tut40cepqj28hpgm2f80iklmhag2f3l1.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.company.playsphere"
+              }
+            }
+          ]
         }
       }
     }

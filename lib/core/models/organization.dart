@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'enums.dart';
 import 'firestore_codec.dart';
+import 'geo.dart';
 
 /// A tenant: a residential community, school, college, academy, club,
 /// district association or state council. Stored at `orgs/{orgId}`.
@@ -23,6 +24,7 @@ class Organization {
     this.description,
     this.district,
     this.city,
+    this.geo = GeoLocation.empty,
     this.logoUrl,
     this.memberCount = 0,
     this.requiresApprovalToJoin = true,
@@ -46,8 +48,20 @@ class Organization {
 
   final String? parentOrgId;
   final String? description;
+
+  /// Legacy flat location fields, kept and still written verbatim so any
+  /// screen still reading `org.district`/`org.city` directly keeps working.
+  /// [geo] is the field to prefer for anything gov-aggregate related — see
+  /// its doc comment for how the two are reconciled on read.
   final String? district;
   final String? city;
+
+  /// State → district → mandal → village, feeding `lib/domain/gov/`. Parsed
+  /// with a fallback to [district]/[city] on [fromDoc] so a pre-existing org
+  /// document (which has never had a `geo` map) still reports a location
+  /// instead of silently dropping off the map the moment this shipped.
+  final GeoLocation geo;
+
   final String? logoUrl;
   final int memberCount;
 
@@ -76,6 +90,11 @@ class Organization {
       description: Fs.strOrNull(d['description']),
       district: Fs.strOrNull(d['district']),
       city: Fs.strOrNull(d['city']),
+      geo: GeoLocation.fromDocData(
+        d,
+        legacyDistrictKey: 'district',
+        legacyVillageKey: 'city',
+      ),
       logoUrl: Fs.strOrNull(d['logoUrl']),
       memberCount: Fs.integer(d['memberCount']),
       requiresApprovalToJoin: Fs.boolean(d['requiresApprovalToJoin'], true),
@@ -96,6 +115,7 @@ class Organization {
         'description': description,
         'district': district,
         'city': city,
+        'geo': geo.toMap(),
         'logoUrl': logoUrl,
         'memberCount': 1,
         'requiresApprovalToJoin': requiresApprovalToJoin,
@@ -110,6 +130,7 @@ class Organization {
         'description': description,
         'district': district,
         'city': city,
+        'geo': geo.toMap(),
         'logoUrl': logoUrl,
         'requiresApprovalToJoin': requiresApprovalToJoin,
         'updatedAt': FieldValue.serverTimestamp(),
@@ -130,6 +151,7 @@ class Organization {
     String? description,
     String? district,
     String? city,
+    GeoLocation? geo,
     String? logoUrl,
     bool? requiresApprovalToJoin,
     OrgVisibility? visibility,
@@ -145,6 +167,7 @@ class Organization {
       description: description ?? this.description,
       district: district ?? this.district,
       city: city ?? this.city,
+      geo: geo ?? this.geo,
       logoUrl: logoUrl ?? this.logoUrl,
       memberCount: memberCount,
       requiresApprovalToJoin:

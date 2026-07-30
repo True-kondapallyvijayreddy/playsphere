@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../domain/scoring/scoring_plugin.dart';
 import 'enums.dart';
 import 'firestore_codec.dart';
+import 'match_official.dart';
 import 'match_player.dart';
 
 /// One scheduled contest between two entrants, at
@@ -34,6 +35,7 @@ class Fixture {
     this.scheduledAt,
     this.venue,
     this.scorerUids = const [],
+    this.officials = const [],
     this.scoreState = const {},
     this.summary = '',
     this.lastSeq = 0,
@@ -41,6 +43,7 @@ class Fixture {
     this.isDraw = false,
     this.rulesetVersion = 1,
     this.scoringPluginKey = 'simple_points',
+    this.sportId,
     this.scoringConfig = const {},
     this.lineupA = const [],
     this.lineupB = const [],
@@ -78,6 +81,9 @@ class Fixture {
   /// on every event write, so an unrelated member cannot alter a score.
   final List<String> scorerUids;
 
+  /// Assigned match officials / umpires / referees.
+  final List<MatchOfficial> officials;
+
   /// Plugin-specific projected state. Opaque here on purpose — the fixture
   /// model must not know how cricket differs from badminton.
   final Map<String, dynamic> scoreState;
@@ -95,6 +101,31 @@ class Fixture {
   final bool isDraw;
   final int rulesetVersion;
   final String scoringPluginKey;
+
+  /// Which catalogue sport this is.
+  ///
+  /// Distinct from [scoringPluginKey] because several sports share an engine:
+  /// badminton and throwball both run the set-based plugin, and swimming and
+  /// both athletics disciplines share the athletics engine. Keying anything
+  /// player-facing on the plugin merges those into one pool — a chess rating
+  /// and a carrom rating are not the same number.
+  ///
+  /// Nullable for fixtures written before this field existed; [sport] falls
+  /// back to the plugin key so old data still resolves to something stable.
+  final String? sportId;
+
+  String get sport => sportId ?? scoringPluginKey;
+
+  /// The key a Glicko-2 rating is stored under.
+  ///
+  /// Chess is rated per time control, per §7.11 — bullet and classical
+  /// measure different skills and merging them makes both meaningless. Every
+  /// other sport rates as itself.
+  String get ratingKey {
+    if (sport != 'chess') return sport;
+    final tc = scoringConfig['timeControl'];
+    return tc is String && tc.isNotEmpty ? 'chess:$tc' : 'chess';
+  }
 
   /// The sport's scoring configuration, frozen onto the fixture when the draw
   /// was generated — points per set, overs per innings, whether draws are
@@ -174,6 +205,7 @@ class Fixture {
       scheduledAt: Fs.dateOrNull(d['scheduledAt']),
       venue: Fs.strOrNull(d['venue']),
       scorerUids: Fs.strList(d['scorerUids']),
+      officials: MatchOfficial.listFrom(d['officials']),
       scoreState: Fs.map(d['scoreState']),
       summary: Fs.str(d['summary']),
       lastSeq: Fs.integer(d['lastSeq']),
@@ -181,6 +213,7 @@ class Fixture {
       isDraw: Fs.boolean(d['isDraw']),
       rulesetVersion: Fs.integer(d['rulesetVersion'], 1),
       scoringPluginKey: Fs.str(d['scoringPluginKey'], 'simple_points'),
+      sportId: Fs.strOrNull(d['sportId']),
       scoringConfig: Fs.map(d['scoringConfig']),
       lineupA: MatchPlayer.listFrom(d['lineupA']),
       lineupB: MatchPlayer.listFrom(d['lineupB']),
@@ -207,6 +240,7 @@ class Fixture {
         'scheduledAt': Fs.ts(scheduledAt),
         'venue': venue,
         'scorerUids': scorerUids,
+        'officials': MatchOfficial.listTo(officials),
         'scoreState': scoreState,
         'summary': summary,
         'lastSeq': 0,
@@ -214,6 +248,7 @@ class Fixture {
         'isDraw': false,
         'rulesetVersion': rulesetVersion,
         'scoringPluginKey': scoringPluginKey,
+        'sportId': sportId,
         'scoringConfig': scoringConfig,
         'lineupA': MatchPlayer.listTo(lineupA),
         'lineupB': MatchPlayer.listTo(lineupB),
@@ -238,6 +273,7 @@ class Fixture {
     bool clearWinner = false,
     bool? isDraw,
     List<String>? scorerUids,
+    List<MatchOfficial>? officials,
     DateTime? scheduledAt,
     String? venue,
   }) {
@@ -256,6 +292,7 @@ class Fixture {
       scheduledAt: scheduledAt ?? this.scheduledAt,
       venue: venue ?? this.venue,
       scorerUids: scorerUids ?? this.scorerUids,
+      officials: officials ?? this.officials,
       scoreState: scoreState ?? this.scoreState,
       summary: summary ?? this.summary,
       lastSeq: lastSeq ?? this.lastSeq,
@@ -264,6 +301,7 @@ class Fixture {
       isDraw: isDraw ?? this.isDraw,
       rulesetVersion: rulesetVersion,
       scoringPluginKey: scoringPluginKey,
+      sportId: sportId,
       scoringConfig: scoringConfig,
       lineupA: lineupA,
       lineupB: lineupB,
@@ -355,6 +393,8 @@ class Standing {
     this.scoreFor = 0,
     this.scoreAgainst = 0,
     this.rank = 0,
+    this.netRunRate,
+    this.buchholz = 0,
   });
 
   final String entrantId;
@@ -367,6 +407,15 @@ class Standing {
   final int scoreFor;
   final int scoreAgainst;
   final int rank;
+
+  /// Cricket only, and null until the entrant has both batted and bowled a
+  /// completed innings. Null is deliberately not zero: a side with no
+  /// completed innings has no rate, and showing 0.000 would rank it above
+  /// every side with a negative one.
+  final double? netRunRate;
+
+  /// Sum of the points of every opponent faced — the standard Swiss tiebreak.
+  final int buchholz;
 
   int get scoreDifference => scoreFor - scoreAgainst;
 
@@ -383,6 +432,8 @@ class Standing {
       scoreFor: Fs.integer(d['scoreFor']),
       scoreAgainst: Fs.integer(d['scoreAgainst']),
       rank: Fs.integer(d['rank']),
+      netRunRate: (d['netRunRate'] as num?)?.toDouble(),
+      buchholz: Fs.integer(d['buchholz']),
     );
   }
 
@@ -397,6 +448,8 @@ class Standing {
         'scoreAgainst': scoreAgainst,
         'scoreDifference': scoreDifference,
         'rank': rank,
+        'netRunRate': netRunRate,
+        'buchholz': buchholz,
         'updatedAt': FieldValue.serverTimestamp(),
       };
 }

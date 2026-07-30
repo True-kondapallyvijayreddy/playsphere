@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'enums.dart';
 import 'firestore_codec.dart';
+import 'geo.dart';
 
 /// A person, globally — one document per real human, at `users/{uid}`.
 ///
@@ -21,6 +22,7 @@ class AppUser {
     this.phone,
     this.profileVisibility = ProfileVisibility.community,
     this.profileComplete = false,
+    this.geo = GeoLocation.empty,
     this.createdAt,
     this.updatedAt,
   });
@@ -38,6 +40,12 @@ class AppUser {
   final String? photoUrl;
   final String? phone;
   final ProfileVisibility profileVisibility;
+
+  /// State → district → mandal → village, feeding the gov aggregates in
+  /// `lib/domain/gov/`. No AppUser document had any location field before
+  /// this, so there is no legacy shape to fall back to here — unlike
+  /// [Organization.geo], a missing `geo` map just means "not captured yet".
+  final GeoLocation geo;
 
   /// Google Sign-In gives us a name, an email and a photo — but never a birth
   /// date. Until the user supplies one we cannot judge age eligibility or
@@ -71,6 +79,7 @@ class AppUser {
       profileVisibility:
           ProfileVisibility.fromWire(Fs.str(d['profileVisibility'])),
       profileComplete: Fs.boolean(d['profileComplete']),
+      geo: GeoLocation.fromDocData(d, legacyDistrictKey: null),
       createdAt: Fs.dateOrNull(d['createdAt']),
       updatedAt: Fs.dateOrNull(d['updatedAt']),
     );
@@ -89,6 +98,7 @@ class AppUser {
         'phone': phone,
         'profileVisibility': profileVisibility.wire,
         'profileComplete': profileComplete,
+        'geo': geo.toMap(),
         'isMinor': isMinor,
         'createdAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
@@ -105,6 +115,7 @@ class AppUser {
         'phone': phone,
         'profileVisibility': profileVisibility.wire,
         'profileComplete': profileComplete,
+        'geo': geo.toMap(),
         'isMinor': isMinor,
         'updatedAt': FieldValue.serverTimestamp(),
       };
@@ -117,6 +128,7 @@ class AppUser {
     DateTime? dateOfBirth,
     ProfileVisibility? profileVisibility,
     bool? profileComplete,
+    GeoLocation? geo,
   }) {
     return AppUser(
       uid: uid,
@@ -128,6 +140,7 @@ class AppUser {
       phone: phone ?? this.phone,
       profileVisibility: profileVisibility ?? this.profileVisibility,
       profileComplete: profileComplete ?? this.profileComplete,
+      geo: geo ?? this.geo,
       createdAt: createdAt,
       updatedAt: updatedAt,
     );

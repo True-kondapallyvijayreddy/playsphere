@@ -14,6 +14,12 @@ dependencies:
   flutter_web_plugins:
     sdk: flutter
 
+  # Telugu, Hindi and English from Phase 1 — CLAUDE.md 2.6 makes this a MUST,
+  # and retrofitting i18n after the UI is built is far more expensive than
+  # carrying it from the start.
+  flutter_localizations:
+    sdk: flutter
+
   # State management
   flutter_riverpod: ^2.5.1
 
@@ -24,6 +30,12 @@ dependencies:
   firebase_core: ^3.1.0
   firebase_auth: ^5.1.0
   cloud_firestore: ^5.0.0
+
+  # Push notifications (CLAUDE.md §6 Module A / §3): event reminders, match
+  # start, results, membership approvals, challenges. WhatsApp/SMS fallback
+  # is a separate abstraction in core/notifications — this package only
+  # carries the FCM leg.
+  firebase_messaging: ^15.1.3
 
   # Google Sign-In. On the web `firebase_auth` handles the popup itself, so
   # this package is only exercised on Android and iOS — see
@@ -46,3 +58,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  # Builds AppLocalizations from lib/l10n/*.arb per l10n.yaml.
+  generate: true
