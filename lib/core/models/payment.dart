@@ -273,7 +273,7 @@ class Payment {
   final DateTime updatedAt;
 
   int get totalRefundedPaise =>
-      refunds.fold(0, (sum, r) => sum + r.amountPaise);
+      refunds.fold(0, (total, r) => total + r.amountPaise);
 
   /// How much of [amountPaise] could still be refunded. Only meaningful once
   /// funds have actually been captured; a payment that was never captured

@@ -35,6 +35,7 @@ class Fixture {
     this.scheduledAt,
     this.venue,
     this.scorerUids = const [],
+    this.participantOrgIds,
     this.officials = const [],
     this.scoreState = const {},
     this.summary = '',
@@ -80,6 +81,18 @@ class Fixture {
   /// Who may score this match. Security rules check membership of this list
   /// on every event write, so an unrelated member cannot alter a score.
   final List<String> scorerUids;
+
+  /// The two organizations contesting an inter-club match, mirrored from the
+  /// parent competition.
+  ///
+  /// Duplicated deliberately: the rules that guard fixtures, events and the
+  /// public spectator view all evaluate per-document, and reaching up to the
+  /// parent competition would cost an extra `get()` on every single score
+  /// event. Copying two ids onto the fixture keeps ball-by-ball writes to one
+  /// document read, which is what makes rural scoring affordable.
+  ///
+  /// Null for ordinary internal fixtures.
+  final List<String>? participantOrgIds;
 
   /// Assigned match officials / umpires / referees.
   final List<MatchOfficial> officials;
@@ -205,6 +218,9 @@ class Fixture {
       scheduledAt: Fs.dateOrNull(d['scheduledAt']),
       venue: Fs.strOrNull(d['venue']),
       scorerUids: Fs.strList(d['scorerUids']),
+      participantOrgIds: d['participantOrgIds'] is List
+          ? Fs.strList(d['participantOrgIds'])
+          : null,
       officials: MatchOfficial.listFrom(d['officials']),
       scoreState: Fs.map(d['scoreState']),
       summary: Fs.str(d['summary']),
@@ -240,6 +256,7 @@ class Fixture {
         'scheduledAt': Fs.ts(scheduledAt),
         'venue': venue,
         'scorerUids': scorerUids,
+        'participantOrgIds': participantOrgIds,
         'officials': MatchOfficial.listTo(officials),
         'scoreState': scoreState,
         'summary': summary,
@@ -292,6 +309,11 @@ class Fixture {
       scheduledAt: scheduledAt ?? this.scheduledAt,
       venue: venue ?? this.venue,
       scorerUids: scorerUids ?? this.scorerUids,
+      // Not a parameter: which two clubs are contesting the match is fixed when
+      // the challenge is accepted. It is carried through explicitly because
+      // `copyWith` runs on every single score event, and dropping it there
+      // would revoke the away club's access somewhere around the first ball.
+      participantOrgIds: participantOrgIds,
       officials: officials ?? this.officials,
       scoreState: scoreState ?? this.scoreState,
       summary: summary ?? this.summary,

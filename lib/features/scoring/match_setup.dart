@@ -92,8 +92,8 @@ class _LineupEditorState extends ConsumerState<LineupEditor> {
   @override
   Widget build(BuildContext context) {
     final f = widget.fixture;
-    final members =
-        ref.watch(orgMembersProvider(f.orgId)).valueOrNull ?? const [];
+    final membersAsync = ref.watch(orgMembersProvider(f.orgId));
+    final members = membersAsync.valueOrNull ?? const [];
     final active = members.where((m) => m.isActive).toList();
     final selectedIds = _current.map((p) => p.id).toSet();
 
@@ -113,6 +113,9 @@ class _LineupEditorState extends ConsumerState<LineupEditor> {
               onSelectionChanged: (s) => setState(() => _tab = s.first),
             ),
             const SizedBox(height: 8),
+            // Without this, a rejected member read leaves an empty checklist
+            // and the scorer concludes the club has no players.
+            AsyncErrorStrip(value: membersAsync, what: 'the member list'),
             Expanded(
               child: ListView(
                 children: [

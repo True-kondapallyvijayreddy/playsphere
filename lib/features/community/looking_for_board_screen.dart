@@ -20,7 +20,10 @@ class LookingForBoardScreen extends ConsumerStatefulWidget {
 
 class _LookingForBoardScreenState
     extends ConsumerState<LookingForBoardScreen> {
-  String _selectedSport = 'all';
+  // Final for now because nothing writes it: the sport filter chips are not
+  // built yet, so the board always shows every sport. Becomes mutable again
+  // when the filter row lands.
+  final String _selectedSport = 'all';
 
   void _showNewPostDialog(BuildContext context) {
     final descCtrl = TextEditingController();
@@ -234,7 +237,8 @@ class _LookingForBoardScreenState
                           ),
                           if (post.district != null)
                             Text(
-                              '📍 ${post.district}${post.mandal != null ? ', ' + post.mandal! : ''}',
+                              '📍 ${post.district}'
+                              '${post.mandal != null ? ', ${post.mandal}' : ''}',
                               style: Theme.of(context).textTheme.bodySmall,
                             ),
                         ],

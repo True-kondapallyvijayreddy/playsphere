@@ -38,7 +38,7 @@ void main() {
     });
 
     test('Fixture includes officials and handles copyWith', () {
-      final fixture = Fixture(
+      const fixture = Fixture(
         id: 'fix_1',
         orgId: 'org_1',
         compId: 'comp_1',
@@ -47,7 +47,7 @@ void main() {
         entrantAName: 'Riders',
         entrantBName: 'Strikers',
         status: FixtureStatus.scheduled,
-        officials: const [
+        officials: [
           MatchOfficial(uid: 'off_1', name: 'Referee John', role: 'referee'),
         ],
       );

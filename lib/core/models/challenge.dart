@@ -18,6 +18,9 @@ class Challenge {
     this.proposedSlots = const [],
     this.venue,
     this.createdFixtureId,
+    this.createdCompId,
+    this.hostOrgId,
+    this.agreedSlot,
     this.createdAt,
   });
 
@@ -33,11 +36,38 @@ class Challenge {
 
   final List<DateTime> proposedSlots;
   final String? venue;
+
+  /// Where the agreed match actually lives once accepted.
+  ///
+  /// A challenge is a negotiation; the match is a real competition and fixture
+  /// under whichever club accepted. Without all three of these ids the club
+  /// that *issued* the challenge has no route to the match it agreed to play —
+  /// which is what "accepted" previously meant in practice.
   final String? createdFixtureId;
+  final String? createdCompId;
+  final String? hostOrgId;
+
+  /// Which of [proposedSlots] the accepting club chose.
+  final DateTime? agreedSlot;
+
   final DateTime? createdAt;
 
   bool get isPending => status == 'pending';
   bool get isAccepted => status == 'accepted';
+  bool get isDeclined => status == 'declined';
+
+  /// True once the match exists and can be opened by either club.
+  bool get hasMatch =>
+      createdFixtureId != null && createdCompId != null && hostOrgId != null;
+
+  /// The opponent's name from [orgId]'s point of view, for list rows that must
+  /// read the same whether you issued the challenge or received it.
+  String opponentNameFor(String orgId) =>
+      orgId == fromOrgId ? toOrgName : fromOrgName;
+
+  /// True when [orgId] is the club being challenged, and therefore the one that
+  /// gets to accept, decline or pick the slot.
+  bool isIncomingFor(String orgId) => orgId == toOrgId;
 
   factory Challenge.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
     final d = doc.data() ?? const {};
@@ -52,6 +82,9 @@ class Challenge {
       proposedSlots: Fs.dateList(d['proposedSlots']),
       venue: Fs.strOrNull(d['venue']),
       createdFixtureId: Fs.strOrNull(d['createdFixtureId']),
+      createdCompId: Fs.strOrNull(d['createdCompId']),
+      hostOrgId: Fs.strOrNull(d['hostOrgId']),
+      agreedSlot: Fs.dateOrNull(d['agreedSlot']),
       createdAt: Fs.dateOrNull(d['createdAt']),
     );
   }
@@ -66,6 +99,9 @@ class Challenge {
         'proposedSlots': proposedSlots.map(Fs.ts).toList(),
         'venue': venue,
         'createdFixtureId': createdFixtureId,
+        'createdCompId': createdCompId,
+        'hostOrgId': hostOrgId,
+        'agreedSlot': Fs.ts(agreedSlot),
         'createdAt': FieldValue.serverTimestamp(),
       };
 }

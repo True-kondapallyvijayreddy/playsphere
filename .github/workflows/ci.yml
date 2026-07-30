@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flutter:
+    name: Analyze & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.27.4
+          cache: true
+
+      - run: flutter pub get
+
+      # Warnings and errors fail the build; the `info`-level lints do not, so
+      # a style nit cannot block a hotfix. Tighten to `--fatal-infos` once the
+      # existing info-level backlog is cleared.
+      - name: Analyze
+        run: flutter analyze --fatal-warnings
+
+      - name: Test
+        run: flutter test --reporter expanded
+
+  rules:
+    name: Firestore security rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The emulator needs a JDK. Pinned to 17 to match the locally pinned
+      # firebase-tools v13 — see test/security/package.json.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install harness
+        working-directory: test/security
+        run: npm install
+
+      - name: Run rules suite against the emulator
+        working-directory: test/security
+        run: npm test

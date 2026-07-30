@@ -326,11 +326,11 @@ class ChessPlugin extends ScoringPlugin {
             shortcut: '1',
             tooltip: '${ctx.entrantAName} wins the board',
           ),
-          ScoreControl(
+          const ScoreControl(
             action: 'result',
             label: '½ - ½',
             style: ControlStyle.secondary,
-            payload: const {'result': 'draw'},
+            payload: {'result': 'draw'},
             shortcut: '5',
             tooltip: 'Draw',
           ),

@@ -149,7 +149,7 @@ void main() {
     test('the interval fires at 11, and at 8 under 3x15', () {
       final classic = ctxFor('badminton');
       var s = play(
-        BadmintonPlugin(),
+        const BadmintonPlugin(),
         classic,
         List.generate(11, (_) => rally(Side.a)),
       );

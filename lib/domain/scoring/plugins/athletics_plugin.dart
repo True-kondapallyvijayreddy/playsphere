@@ -474,16 +474,16 @@ class AthleticsPlugin extends ScoringPlugin {
           ),
         ],
       ),
-      ScoreControlGroup(
+      const ScoreControlGroup(
         title: 'Progression',
         controls: [
-          const ScoreControl(
+          ScoreControl(
             action: 'next_heat',
             label: 'Next heat',
             style: ControlStyle.secondary,
             shortcut: 'h',
           ),
-          const ScoreControl(
+          ScoreControl(
             action: 'set_round',
             label: 'To final',
             style: ControlStyle.secondary,

@@ -24,6 +24,7 @@ import {
   collection,
   collectionGroup,
   doc,
+  deleteDoc,
   getDoc,
   getDocs,
   query,
@@ -1277,5 +1278,458 @@ describe('standings: write requires organizer role, not just any scorer', () => 
   it('lets an event organizer write a standings row', async () => {
     const db = testEnv.authenticatedContext(ADMIN).firestore();
     await assertSucceeds(setDoc(doc(db, ...standingsPath), { points: 9, played: 3 }));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Inter-club challenges — school v school, village v village.
+//
+// This is the flow CLAUDE.md calls the heart of the OS, and until now it had
+// never worked: `acceptChallenge` wrote the fixture into the CHALLENGER's
+// tenant, so the accepting club's admin was always denied, and the UI hid the
+// rejection by rendering failed reads as empty lists.
+//
+// The match is now hosted by the club that accepted, and the visiting club's
+// access comes from `participantOrgIds`. These tests pin both halves: that the
+// accept batch commits, and that the participant grant is not a way in for
+// anybody else.
+// ---------------------------------------------------------------------------
+describe('inter-club challenges', () => {
+  const HOME = 'org_home';        // accepts, and therefore hosts
+  const AWAY = 'org_away';        // issued the challenge
+  const THIRD = 'org_bystander';  // uninvolved
+
+  const HOME_ADMIN = 'uid_home_admin';
+  const AWAY_ADMIN = 'uid_away_admin';
+  const AWAY_SCORER = 'uid_away_scorer';
+  const THIRD_ADMIN = 'uid_third_admin';
+
+  const CHALLENGE = 'chal1';
+  const COMP = 'comp_interclub';
+  const FIX = 'fx_interclub';
+
+  const participants = [AWAY, HOME];
+
+  const interClubCompetition = () => ({
+    orgId: HOME,
+    name: 'Away Village v Home School',
+    nameLower: 'away village v home school',
+    sportId: 'kabaddi',
+    sportName: 'Kabaddi',
+    archetype: 'versus',
+    entrantType: 'team',
+    format: 'knockout',
+    status: 'scheduled',
+    category: { label: 'Open' },
+    scoringPluginKey: 'kabaddi',
+    description: null,
+    venue: 'Home ground',
+    startDate: null,
+    endDate: null,
+    registrationClosesAt: null,
+    maxEntrants: 2,
+    entrantCount: 2,
+    fixtureCount: 1,
+    verificationTier: 'casual',
+    rulesetVersion: 1,
+    pointsForWin: 3,
+    pointsForDraw: 1,
+    pointsForLoss: 0,
+    tiebreakChain: null,
+    participantOrgIds: participants,
+    createdBy: HOME_ADMIN,
+    createdAt: serverTimestamp(),
+  });
+
+  const interClubFixture = (scorerUids = [HOME_ADMIN], status = 'scheduled') => ({
+    ...fixture(HOME, COMP, scorerUids, status),
+    participantOrgIds: participants,
+  });
+
+  // Both clubs unlisted on purpose: if either were public, `orgIsReadable`
+  // would grant the access and these tests would pass without the participant
+  // rule doing any work at all.
+  beforeEach(async () => {
+    await seed(async (db) => {
+      for (const [org, admin] of [[HOME, HOME_ADMIN], [AWAY, AWAY_ADMIN], [THIRD, THIRD_ADMIN]]) {
+        await setDoc(doc(db, 'orgs', org), organization(admin, 'unlisted'));
+        await setDoc(doc(db, 'orgs', org, 'members', admin), membership(admin, org, 'admin'));
+      }
+      await setDoc(
+        doc(db, 'orgs', AWAY, 'members', AWAY_SCORER),
+        membership(AWAY_SCORER, AWAY, 'judge_scorer'),
+      );
+      await setDoc(doc(db, 'challenges', CHALLENGE), {
+        fromOrgId: AWAY,
+        toOrgId: HOME,
+        fromOrgName: 'Away Village',
+        toOrgName: 'Home School',
+        sportId: 'kabaddi',
+        status: 'pending',
+        proposedSlots: [],
+        venue: 'Home ground',
+        createdFixtureId: null,
+        createdCompId: null,
+        hostOrgId: null,
+        agreedSlot: null,
+        createdAt: serverTimestamp(),
+      });
+    });
+  });
+
+  it('lets the accepting club commit the whole accept batch', async () => {
+    const db = testEnv.authenticatedContext(HOME_ADMIN).firestore();
+    const batch = writeBatch(db);
+
+    batch.set(doc(db, 'orgs', HOME, 'competitions', COMP), interClubCompetition());
+    batch.set(
+      doc(db, 'orgs', HOME, 'competitions', COMP, 'fixtures', FIX),
+      interClubFixture(),
+    );
+    batch.update(doc(db, 'challenges', CHALLENGE), {
+      status: 'accepted',
+      createdFixtureId: FIX,
+      createdCompId: COMP,
+      hostOrgId: HOME,
+    });
+
+    // The regression this whole change exists for: this batch used to be
+    // written against the CHALLENGER's org and was denied every time.
+    await assertSucceeds(batch.commit());
+  });
+
+  it('refuses the challenging club creating the match in the host tenant', async () => {
+    const db = testEnv.authenticatedContext(AWAY_ADMIN).firestore();
+    await assertFails(
+      setDoc(doc(db, 'orgs', HOME, 'competitions', COMP), interClubCompetition()),
+    );
+  });
+
+  it('refuses a competition naming two orgs the creator does not own', async () => {
+    // Without the ownership half of interClubShapeValid, a club could create a
+    // match inside its own tenant naming two unrelated orgs — a read grant
+    // minted out of thin air.
+    const db = testEnv.authenticatedContext(THIRD_ADMIN).firestore();
+    await assertFails(
+      setDoc(doc(db, 'orgs', THIRD, 'competitions', COMP), {
+        ...interClubCompetition(),
+        orgId: THIRD,
+        createdBy: THIRD_ADMIN,
+        participantOrgIds: [HOME, AWAY],
+      }),
+    );
+  });
+
+  it('refuses status scheduled on a competition that is not inter-club', async () => {
+    const db = testEnv.authenticatedContext(HOME_ADMIN).firestore();
+    await assertFails(
+      setDoc(doc(db, 'orgs', HOME, 'competitions', 'comp_plain'), {
+        ...interClubCompetition(),
+        participantOrgIds: null,
+      }),
+    );
+  });
+
+  describe('once the match exists', () => {
+    beforeEach(async () => {
+      await seed(async (db) => {
+        await setDoc(doc(db, 'orgs', HOME, 'competitions', COMP), interClubCompetition());
+        await setDoc(
+          doc(db, 'orgs', HOME, 'competitions', COMP, 'fixtures', FIX),
+          interClubFixture([HOME_ADMIN, AWAY_SCORER], 'live'),
+        );
+        await setDoc(
+          doc(db, 'orgs', HOME, 'competitions', COMP, 'fixtures', FIX, 'events', '0000000001'),
+          { seq: 1, byUid: HOME_ADMIN, at: serverTimestamp(), clientEventId: 'c1', type: 'raid' },
+        );
+      });
+    });
+
+    const compRef = (db) => doc(db, 'orgs', HOME, 'competitions', COMP);
+    const fixRef = (db) => doc(db, 'orgs', HOME, 'competitions', COMP, 'fixtures', FIX);
+    const eventRef = (db, seq) =>
+      doc(db, 'orgs', HOME, 'competitions', COMP, 'fixtures', FIX, 'events', seq);
+
+    it('lets the visiting club read the competition it is playing in', async () => {
+      const db = testEnv.authenticatedContext(AWAY_ADMIN).firestore();
+      await assertSucceeds(getDoc(compRef(db)));
+    });
+
+    it('lets the visiting club read the fixture', async () => {
+      const db = testEnv.authenticatedContext(AWAY_ADMIN).firestore();
+      await assertSucceeds(getDoc(fixRef(db)));
+    });
+
+    it('lets the visiting club read the event ledger', async () => {
+      // Without this the away club can see the match but cannot rebuild the
+      // scorecard, which is the same as not having it.
+      const db = testEnv.authenticatedContext(AWAY_ADMIN).firestore();
+      await assertSucceeds(getDoc(eventRef(db, '0000000001')));
+    });
+
+    it('refuses an uninvolved club reading the fixture', async () => {
+      const db = testEnv.authenticatedContext(THIRD_ADMIN).firestore();
+      await assertFails(getDoc(fixRef(db)));
+    });
+
+    it('refuses a signed-out stranger reading an unlisted inter-club fixture', async () => {
+      const db = testEnv.unauthenticatedContext().firestore();
+      await assertFails(getDoc(fixRef(db)));
+    });
+
+    it("lets the visiting club's assigned scorer append an event", async () => {
+      const db = testEnv.authenticatedContext(AWAY_SCORER).firestore();
+      await assertSucceeds(
+        setDoc(eventRef(db, '0000000002'), {
+          seq: 2,
+          byUid: AWAY_SCORER,
+          at: serverTimestamp(),
+          clientEventId: 'c2',
+          type: 'raid',
+        }),
+      );
+    });
+
+    it("refuses the visiting club's admin appending an event they are not assigned to", async () => {
+      // AWAY_ADMIN is an admin of a participating club but is NOT on
+      // scorerUids. The participant grant widens who may be assigned, never
+      // who may score unassigned.
+      const db = testEnv.authenticatedContext(AWAY_ADMIN).firestore();
+      await assertFails(
+        setDoc(eventRef(db, '0000000003'), {
+          seq: 3,
+          byUid: AWAY_ADMIN,
+          at: serverTimestamp(),
+          clientEventId: 'c3',
+          type: 'raid',
+        }),
+      );
+    });
+
+    it("lets the visiting club's scorer advance the live score projection", async () => {
+      const db = testEnv.authenticatedContext(AWAY_SCORER).firestore();
+      await assertSucceeds(
+        updateDoc(fixRef(db), { lastSeq: 1, summary: '4-2', status: 'live' }),
+      );
+    });
+
+    it('refuses anyone rewriting participantOrgIds on the fixture', async () => {
+      // The escalation this guards: stapling your own org onto someone else's
+      // match to read it. Even the host admin cannot do it.
+      const db = testEnv.authenticatedContext(HOME_ADMIN).firestore();
+      await assertFails(
+        updateDoc(fixRef(db), { participantOrgIds: [HOME, THIRD], lastSeq: 1 }),
+      );
+    });
+
+    it('refuses anyone rewriting participantOrgIds on the competition', async () => {
+      const db = testEnv.authenticatedContext(HOME_ADMIN).firestore();
+      await assertFails(
+        updateDoc(compRef(db), { participantOrgIds: [HOME, THIRD] }),
+      );
+    });
+
+    it('refuses an uninvolved admin adding themselves as a participant', async () => {
+      const db = testEnv.authenticatedContext(THIRD_ADMIN).firestore();
+      await assertFails(
+        updateDoc(compRef(db), { participantOrgIds: [HOME, THIRD] }),
+      );
+    });
+
+    it('lets either club accept or decline the challenge doc, but not a bystander', async () => {
+      const away = testEnv.authenticatedContext(AWAY_ADMIN).firestore();
+      const third = testEnv.authenticatedContext(THIRD_ADMIN).firestore();
+      await assertSucceeds(updateDoc(doc(away, 'challenges', CHALLENGE), { status: 'declined' }));
+      await assertFails(updateDoc(doc(third, 'challenges', CHALLENGE), { status: 'accepted' }));
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Memories — the access-controlled reference to a Cloud Storage object.
+//
+// Storage rules cannot read Firestore, so an object is only as private as its
+// path is unguessable and being listed here is the only way to learn that path.
+// That makes these rules the real access control for match media: what they
+// permit is what is discoverable.
+// ---------------------------------------------------------------------------
+describe('match memories', () => {
+  const MEMBER = 'uid_member';
+  const OTHER_MEMBER = 'uid_member2';
+  const COMP = 'comp1';
+  const FIX = 'fx1';
+  const MEM = 'mem1';
+
+  const memoryDoc = (uploaderUid, extra = {}) => ({
+    orgId: PUBLIC_ORG,
+    compId: COMP,
+    fixtureId: FIX,
+    uploaderUid,
+    storagePath: `memories/${PUBLIC_ORG}/${FIX}/${uploaderUid}/${MEM}.jpg`,
+    url: 'https://example.test/a.jpg',
+    kind: 'photo',
+    caption: 'Winning raid',
+    taggedUids: [MEMBER],
+    width: 1600,
+    height: 1200,
+    sizeBytes: 240000,
+    createdAt: serverTimestamp(),
+    ...extra,
+  });
+
+  const memPath = ['orgs', PUBLIC_ORG, 'competitions', COMP, 'fixtures', FIX, 'memories', MEM];
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER), membership(OWNER, PUBLIC_ORG, 'owner'));
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG, 'members', ADMIN), membership(ADMIN, PUBLIC_ORG, 'admin'));
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG, 'members', MEMBER), membership(MEMBER, PUBLIC_ORG, 'member'));
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG, 'members', OTHER_MEMBER), membership(OTHER_MEMBER, PUBLIC_ORG, 'member'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP, 'fixtures', FIX),
+        fixture(PUBLIC_ORG, COMP, [ADMIN]),
+      );
+    });
+  });
+
+  it('lets a plain member add a memory — the camera is not the scorebook', async () => {
+    const db = testEnv.authenticatedContext(MEMBER).firestore();
+    await assertSucceeds(setDoc(doc(db, ...memPath), memoryDoc(MEMBER)));
+  });
+
+  it('refuses uploading under someone else’s uid', async () => {
+    const db = testEnv.authenticatedContext(MEMBER).firestore();
+    await assertFails(setDoc(doc(db, ...memPath), memoryDoc(OTHER_MEMBER)));
+  });
+
+  it('refuses an outsider adding a memory to a public org’s match', async () => {
+    // Readable does not imply writable: a public club's matches are watchable
+    // by anyone, but only members may attach media to them.
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(setDoc(doc(db, ...memPath), memoryDoc(OUTSIDER)));
+  });
+
+  it('refuses a tag list over the cap', async () => {
+    const db = testEnv.authenticatedContext(MEMBER).firestore();
+    const tooMany = Array.from({ length: 31 }, (_, i) => `uid_${i}`);
+    await assertFails(
+      setDoc(doc(db, ...memPath), memoryDoc(MEMBER, { taggedUids: tooMany })),
+    );
+  });
+
+  it('refuses a client-stamped createdAt', async () => {
+    const db = testEnv.authenticatedContext(MEMBER).firestore();
+    await assertFails(
+      setDoc(doc(db, ...memPath), memoryDoc(MEMBER, { createdAt: new Date(2020, 0, 1) })),
+    );
+  });
+
+  it('refuses a memory claiming to belong to a different fixture', async () => {
+    const db = testEnv.authenticatedContext(MEMBER).firestore();
+    await assertFails(
+      setDoc(doc(db, ...memPath), memoryDoc(MEMBER, { fixtureId: 'fx_elsewhere' })),
+    );
+  });
+
+  describe('once a memory exists', () => {
+    beforeEach(async () => {
+      await seed(async (db) => {
+        await setDoc(doc(db, ...memPath), memoryDoc(MEMBER));
+      });
+    });
+
+    it('is readable by anyone for a public org', async () => {
+      const db = testEnv.unauthenticatedContext().firestore();
+      await assertSucceeds(getDoc(doc(db, ...memPath)));
+    });
+
+    it('lets the uploader edit the caption', async () => {
+      const db = testEnv.authenticatedContext(MEMBER).firestore();
+      await assertSucceeds(updateDoc(doc(db, ...memPath), { caption: 'Better words' }));
+    });
+
+    it('refuses another member editing the caption', async () => {
+      const db = testEnv.authenticatedContext(OTHER_MEMBER).firestore();
+      await assertFails(updateDoc(doc(db, ...memPath), { caption: 'Not mine' }));
+    });
+
+    it('refuses the uploader repointing the bytes', async () => {
+      // The whole record would otherwise be able to lie: same caption, same
+      // timestamp, different photo.
+      const db = testEnv.authenticatedContext(MEMBER).firestore();
+      await assertFails(
+        updateDoc(doc(db, ...memPath), { url: 'https://example.test/swapped.jpg' }),
+      );
+    });
+
+    it('lets the uploader delete their own memory', async () => {
+      const db = testEnv.authenticatedContext(MEMBER).firestore();
+      await assertSucceeds(deleteDoc(doc(db, ...memPath)));
+    });
+
+    it('lets an organizer moderate anyone’s memory', async () => {
+      // The subject of an unwanted photo is rarely the person who posted it, so
+      // removal cannot depend on the uploader cooperating.
+      const db = testEnv.authenticatedContext(ADMIN).firestore();
+      await assertSucceeds(deleteDoc(doc(db, ...memPath)));
+    });
+
+    it('refuses an unrelated member deleting it', async () => {
+      const db = testEnv.authenticatedContext(OTHER_MEMBER).firestore();
+      await assertFails(deleteDoc(doc(db, ...memPath)));
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Career stats — now that clubsPlayedFor is actually persisted.
+// ---------------------------------------------------------------------------
+describe('career stats clubsPlayedFor', () => {
+  const PLAYER = 'uid_player';
+  const statPath = ['users', PLAYER, 'career_stats', 'kabaddi'];
+
+  it('accepts the clubs timeline the finalize batch now writes', async () => {
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertSucceeds(
+      setDoc(doc(db, ...statPath), {
+        uid: PLAYER,
+        sportId: 'kabaddi',
+        matchesPlayed: 1,
+        lastPlayedAt: serverTimestamp(),
+        tally: { raidPoints: 7 },
+        clubsPlayedFor: ['org_a'],
+      }),
+    );
+  });
+
+  it('refuses an unbounded clubs list', async () => {
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    const tooMany = Array.from({ length: 201 }, (_, i) => `org_${i}`);
+    await assertFails(
+      setDoc(doc(db, ...statPath), {
+        uid: PLAYER,
+        sportId: 'kabaddi',
+        matchesPlayed: 1,
+        lastPlayedAt: serverTimestamp(),
+        tally: {},
+        clubsPlayedFor: tooMany,
+      }),
+    );
+  });
+
+  it('still refuses a smuggled extra field', async () => {
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(
+      setDoc(doc(db, ...statPath), {
+        uid: PLAYER,
+        sportId: 'kabaddi',
+        matchesPlayed: 1,
+        lastPlayedAt: serverTimestamp(),
+        tally: {},
+        clubsPlayedFor: [],
+        verificationTier: 'association_verified',
+      }),
+    );
   });
 });

@@ -8,7 +8,6 @@ class SportRuleRepository {
   const SportRuleRepository({FirebaseFirestore? firestore}) : _db = firestore;
 
   final FirebaseFirestore? _db;
-  FirebaseFirestore get _firestore => _db ?? Refs.db;
 
   /// Fetches or streams rules filtered by sport and search query.
   Stream<List<SportRule>> watchRules({
@@ -53,7 +52,7 @@ class SportRuleRepository {
   }
 
   /// Official pre-populated rules knowledgebase seed (ICC, FIFA, FIBA, PKL, BWF, FIDE, ITF, ITTF, FIH).
-  static final List<SportRule> _seedRules = const [
+  static const List<SportRule> _seedRules = [
     // CRICKET (ICC Laws)
     SportRule(
       id: 'cricket_no_ball',

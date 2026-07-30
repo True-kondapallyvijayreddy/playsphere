@@ -80,10 +80,81 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/orgs/$(orgId)).data;
     }
 
+    // The parent fixture of an event. Named because the event rules need it
+    // more than once now, and the inline path expression was already the
+    // longest line in this file.
+    function fixtureDoc(orgId, compId, fixtureId) {
+      return get(/databases/$(database)/documents/orgs/$(orgId)/competitions/$(compId)/fixtures/$(fixtureId)).data;
+    }
+
     // Public orgs are world-readable so a parent in an office can follow a
     // live match without an account. Unlisted orgs require membership.
     function orgIsReadable(orgId) {
       return orgDoc(orgId).visibility == 'public' || isActive(orgId);
+    }
+
+    // -------------------------------------------------------------------
+    // Inter-club matches (school v school, village v village).
+    //
+    // A competition or fixture lives under exactly one org in its path, but an
+    // accepted challenge is contested by two. `participantOrgIds` names both,
+    // and these helpers are what grant the *visiting* club access to a match
+    // hosted by the other side — without making the match public.
+    //
+    // Deliberately fixed at two entries and read by index. Firestore rules
+    // cannot loop, so an unbounded list would have to be checked by some
+    // hasAny() trick over data the caller controls. Two ids, two membership
+    // lookups, no ambiguity — and `interClubShapeValid` refuses to let a
+    // longer list be written in the first place, so nobody can create a
+    // three-club match that silently grants only the first two access.
+    // -------------------------------------------------------------------
+    function isInterClub(data) {
+      return 'participantOrgIds' in data
+        && data.participantOrgIds is list
+        && data.participantOrgIds.size() == 2;
+    }
+
+    // An active member of either contesting club may read the match.
+    function isParticipantMember(data) {
+      return isInterClub(data)
+        && (isActive(data.participantOrgIds[0])
+            || isActive(data.participantOrgIds[1]));
+    }
+
+    // A scorer of either contesting club. Always used *in addition to* the
+    // fixture's explicit `scorerUids` list, never instead of it — so this
+    // widens who may be assigned, not who may score unassigned.
+    function isParticipantScorer(data) {
+      return isInterClub(data)
+        && (canScore(data.participantOrgIds[0])
+            || canScore(data.participantOrgIds[1]));
+    }
+
+    // Written shape check for creates: exactly two distinct clubs, one of
+    // which must be the org that owns the path. Without the ownership check a
+    // club could create a match inside its own tenant naming two *unrelated*
+    // orgs and thereby hand itself a read grant it was never given.
+    function interClubShapeValid(data, orgId) {
+      return !('participantOrgIds' in data)
+        || data.participantOrgIds == null
+        || (
+          isInterClub(data)
+          && data.participantOrgIds[0] != data.participantOrgIds[1]
+          && orgId in data.participantOrgIds
+        );
+    }
+
+    // Strict write-once for the participant list: it must be present on both
+    // sides and identical, or absent from both. Deliberately NOT
+    // `unchangedIfPresent`, which permits a first write to introduce a field —
+    // here that would let an admin staple a participant list onto an existing
+    // competition and mint a cross-tenant read grant after the fact.
+    function participantsUnchanged() {
+      return ('participantOrgIds' in resource.data)
+             == ('participantOrgIds' in request.resource.data)
+        && (!('participantOrgIds' in resource.data)
+            || request.resource.data.participantOrgIds
+               == resource.data.participantOrgIds);
     }
 
     function isNotDeleted(data) {
@@ -316,11 +387,21 @@ service cloud.firestore {
         // architectural gap, narrowed the same way, for the fields that a
         // FieldValue.increment()-free write can actually validate.
         allow write: if isSignedIn()
-          && request.resource.data.keys().hasOnly(['uid', 'sportId', 'matchesPlayed', 'lastPlayedAt', 'tally'])
+          && request.resource.data.keys().hasOnly(['uid', 'sportId', 'matchesPlayed', 'lastPlayedAt', 'tally', 'clubsPlayedFor'])
           && request.resource.data.uid == userId
           && request.resource.data.sportId == sportId
           && request.resource.data.lastPlayedAt is timestamp
-          && request.resource.data.lastPlayedAt <= request.time;
+          && request.resource.data.lastPlayedAt <= request.time
+          // The clubs timeline. Written with arrayUnion, so like
+          // `matchesPlayed` its resolved value is not reliably visible here —
+          // only the type and a sane ceiling can be checked. The bound stops
+          // this becoming unbounded storage on a document anyone can write to
+          // their own profile.
+          && (
+            !('clubsPlayedFor' in request.resource.data)
+            || (request.resource.data.clubsPlayedFor is list
+                && request.resource.data.clubsPlayedFor.size() <= 200)
+          );
       }
 
       // -----------------------------------------------------------------
@@ -604,13 +685,24 @@ service cloud.firestore {
       // -----------------------------------------------------------------
       match /competitions/{compId} {
 
-        allow read: if orgIsReadable(orgId);
+        allow read: if orgIsReadable(orgId)
+          || isParticipantMember(resource.data);
 
         allow create: if canManageCompetitions(orgId)
           && request.resource.data.orgId == orgId
           && request.resource.data.createdBy == uid()
           && serverTimed('createdAt')
-          && request.resource.data.status == 'draft'
+          // An ordinary competition starts as a draft so the organizer can
+          // configure it before entries open. A challenge match has nothing
+          // left to configure — the two clubs already agreed sport, slot and
+          // venue — so it may start `scheduled`, but ONLY if it really is an
+          // inter-club match by the shape check below.
+          && (
+            request.resource.data.status == 'draft'
+            || (request.resource.data.status == 'scheduled'
+                && isInterClub(request.resource.data))
+          )
+          && interClubShapeValid(request.resource.data, orgId)
           && request.resource.data.name is string
           && request.resource.data.name.size() >= 3;
 
@@ -618,6 +710,10 @@ service cloud.firestore {
           && unchanged('orgId')
           && unchanged('createdAt')
           && unchanged('createdBy')
+          // Who is contesting the match is settled when the challenge is
+          // accepted. Were this editable, an admin could append their own club
+          // to any match and read a rival's private competition.
+          && participantsUnchanged()
           // A finished competition is a historical record. Reopening it
           // would silently rewrite standings and ratings that participants
           // have already been told are final.
@@ -684,13 +780,18 @@ service cloud.firestore {
         match /fixtures/{fixtureId} {
 
           // World-readable for public orgs — the office/college spectator
-          // case works without an account.
-          allow read: if orgIsReadable(orgId);
+          // case works without an account. The second clause is what lets the
+          // *visiting* club follow a challenge match hosted by an unlisted
+          // opponent; without it "accepted" produced a match one of the two
+          // clubs could not see.
+          allow read: if orgIsReadable(orgId)
+            || isParticipantMember(resource.data);
 
           allow create: if canManageCompetitions(orgId)
             && request.resource.data.compId == compId
             && request.resource.data.orgId == orgId
-            && request.resource.data.lastSeq == 0;
+            && request.resource.data.lastSeq == 0
+            && interClubShapeValid(request.resource.data, orgId);
 
           // Two distinct update paths with different authority:
           allow update: if
@@ -705,6 +806,7 @@ service cloud.firestore {
               canManageCompetitions(orgId)
               && unchanged('compId')
               && unchanged('orgId')
+              && participantsUnchanged()
               && request.resource.data.lastSeq >= resource.data.lastSeq
               && (resource.data.status != 'completed' || scoreFieldsUnchanged())
             )
@@ -712,10 +814,16 @@ service cloud.firestore {
             //     They cannot move the fixture to a different competition,
             //     rewrite history backwards, or reopen a finished match.
             || (
-              canScore(orgId)
+              // A scorer of the hosting club, OR of the visiting club in a
+              // challenge match. Both branches still require the uid to be on
+              // the fixture's own `scorerUids`, so this widens who may be
+              // *assigned* to score an inter-club game — it never lets an
+              // unassigned member of either club touch a score.
+              (canScore(orgId) || isParticipantScorer(resource.data))
               && uid() in resource.data.scorerUids
               && unchanged('compId')
               && unchanged('orgId')
+              && participantsUnchanged()
               && unchanged('entrantAId')
               && unchanged('entrantBId')
               && unchanged('scorerUids')
@@ -752,9 +860,16 @@ service cloud.firestore {
             //     unstarted fixture, and only a side that is still empty:
             //     an entrant already present can never be replaced.
             || (
-              canScore(orgId)
+              // Either club's event managers may name their own players before
+              // the first ball. NOTE: like the pre-existing host-side rule,
+              // this does not require the caller to be on `scorerUids` — the
+              // comment above says "assigned scorer" but the condition has
+              // never enforced it. Left as-is here so this change stays scoped
+              // to inter-club access; see the note in the handover.
+              (canScore(orgId) || isParticipantScorer(resource.data))
               && unchanged('compId')
               && unchanged('orgId')
+              && participantsUnchanged()
               && unchanged('scorerUids')
               && resource.data.status == 'scheduled'
               && resource.data.lastSeq == 0
@@ -777,12 +892,17 @@ service cloud.firestore {
           // -------------------------------------------------------------
           match /events/{seq} {
 
-            allow read: if orgIsReadable(orgId);
+            // The event log is the match. A visiting club that can see the
+            // fixture but not its ledger could not rebuild the scorecard, so
+            // read access has to follow the same participant rule.
+            allow read: if orgIsReadable(orgId)
+              || isParticipantMember(fixtureDoc(orgId, compId, fixtureId));
 
-            allow create: if canScore(orgId)
-              && uid() in get(
-                   /databases/$(database)/documents/orgs/$(orgId)/competitions/$(compId)/fixtures/$(fixtureId)
-                 ).data.scorerUids
+            allow create: if (
+                canScore(orgId)
+                || isParticipantScorer(fixtureDoc(orgId, compId, fixtureId))
+              )
+              && uid() in fixtureDoc(orgId, compId, fixtureId).scorerUids
               && request.resource.data.byUid == uid()
               && serverTimed('at')
               && request.resource.data.seq is int
@@ -794,6 +914,68 @@ service cloud.firestore {
             // Immutable, forever. A mistake is corrected by appending a
             // reversal event, which keeps the audit trail honest.
             allow update, delete: if false;
+          }
+
+          // -------------------------------------------------------------
+          // Memories — the photos and clips attached to a match.
+          //
+          // This document is the access-controlled *reference* to an object
+          // in Cloud Storage. Storage rules cannot read Firestore, so an
+          // object is only as private as its path is unguessable; being
+          // listed here is the only way anyone learns that path. Deleting
+          // the document is therefore what actually retracts a memory, which
+          // is why moderation acts on this collection and not on the bucket.
+          // -------------------------------------------------------------
+          match /memories/{memoryId} {
+
+            // Same audience as the match itself, including the visiting club
+            // of an inter-club fixture.
+            allow read: if orgIsReadable(orgId)
+              || isParticipantMember(fixtureDoc(orgId, compId, fixtureId));
+
+            // Any active member of a participating club may add a memory —
+            // deliberately wider than scoring, because the person with the
+            // camera is rarely the person with the scorebook.
+            allow create: if (
+                isActive(orgId)
+                || isParticipantMember(fixtureDoc(orgId, compId, fixtureId))
+              )
+              && request.resource.data.uploaderUid == uid()
+              && request.resource.data.orgId == orgId
+              && request.resource.data.compId == compId
+              && request.resource.data.fixtureId == fixtureId
+              && request.resource.data.storagePath is string
+              && request.resource.data.url is string
+              && request.resource.data.kind in ['photo', 'video']
+              && request.resource.data.taggedUids is list
+              // A tag puts a named person's face on a discoverable grid, so
+              // the list is bounded. Without a ceiling one upload could tag
+              // every user in the district.
+              && request.resource.data.taggedUids.size() <= 30
+              && serverTimed('createdAt');
+
+            // Only the caption and tags are editable, and only by the
+            // uploader. The bytes, the match it belongs to and who uploaded
+            // it are the record — if those could change, a memory could be
+            // quietly re-pointed at a different moment.
+            allow update: if resource.data.uploaderUid == uid()
+              && unchanged('uploaderUid')
+              && unchanged('orgId')
+              && unchanged('compId')
+              && unchanged('fixtureId')
+              && unchanged('storagePath')
+              && unchanged('url')
+              && unchanged('kind')
+              && unchanged('createdAt')
+              && request.resource.data.taggedUids is list
+              && request.resource.data.taggedUids.size() <= 30;
+
+            // The uploader may retract their own memory; a club organizer may
+            // remove anyone's. Moderation has to be possible without waiting
+            // for the uploader, because the subject of an unwanted photo is
+            // usually not the person who posted it.
+            allow delete: if resource.data.uploaderUid == uid()
+              || canManageCompetitions(orgId);
           }
         }
 

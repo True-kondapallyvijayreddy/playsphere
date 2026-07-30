@@ -31,6 +31,11 @@ dependencies:
   firebase_auth: ^5.1.0
   cloud_firestore: ^5.0.0
 
+  # Memories (CLAUDE.md §6 Module C): photos and short clips attached to a
+  # match. Bucket is playsphere-os.firebasestorage.app in asia-south1, the
+  # same region as Firestore — see storage.rules.
+  firebase_storage: ^12.3.0
+
   # Push notifications (CLAUDE.md §6 Module A / §3): event reminders, match
   # start, results, membership approvals, challenges. WhatsApp/SMS fallback
   # is a separate abstraction in core/notifications — this package only
@@ -45,6 +50,10 @@ dependencies:
   # Durable offline scoring queue. A match scored on a ground with no signal
   # must survive the app being killed before it reconnects.
   shared_preferences: ^2.2.3
+
+  # Picking and downscaling a memory before upload. Rural 4G means the client
+  # must shrink an 8MP camera photo rather than pushing 6MB up the wire.
+  image_picker: ^1.1.2
 
   # Presentation
   intl: ^0.19.0

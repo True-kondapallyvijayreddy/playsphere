@@ -13,6 +13,7 @@ import '../../domain/scoring/scoring_plugin.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../core/models/match_player.dart';
 import '../../shared/app_scaffold.dart';
+import '../profile/widgets/match_memories_section.dart';
 import 'match_setup.dart';
 
 /// The scoring pad.
@@ -167,6 +168,33 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
     }
   }
 
+  /// UNDO — appends a reversal rather than editing the log, so both the mistake
+  /// and its withdrawal survive in the audit trail (CLAUDE.md §2.4). Because a
+  /// reversal is itself an event, an undo can be undone, which is why this asks
+  /// for no confirmation: on a ground, a fast correction beats a safe one.
+  Future<void> _undo(Fixture fixture) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+
+    try {
+      await ref.read(scoringServiceProvider).undo(
+            fixture: fixture,
+            context: fixture.scoringContext(),
+            byUid: ref.read(currentUidProvider) ?? '',
+          );
+      unawaitedHaptic();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Last action withdrawn.')),
+        );
+      }
+    } catch (e) {
+      if (mounted) showError(context, e);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   void unawaitedHaptic() {
     HapticFeedback.selectionClick();
   }
@@ -225,6 +253,12 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
           final plugin = ScoringRegistry.resolve(fixture.scoringPluginKey);
           final groups = plugin.controls(fixture.scoreState, ctx);
 
+          // Nothing to withdraw before the first event, and a completed match
+          // is frozen — the rules reject a scorer write to it either way, so
+          // the button says so rather than letting the tap fail.
+          final canUndo = fixture.lastSeq > 0 &&
+              fixture.status != FixtureStatus.completed;
+
           // Flatten shortcuts so a keypress on a laptop maps to the same code
           // path as a tap on a phone — one behaviour, two input methods.
           final shortcuts = <String, ScoreControl>{
@@ -266,11 +300,20 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
                         summary: plugin.summary(fixture.scoreState, ctx),
                       ),
                       const SizedBox(height: 8),
-                      // Keyed on the sequence number so the count is
-                      // recomputed after every scoring action rather than
-                      // showing whatever it was when the pad opened.
-                      _PendingBanner(key: ValueKey(fixture.lastSeq)),
-                      const SizedBox(height: 16),
+                      const _PendingBanner(),
+                      const SizedBox(height: 8),
+                      // "UNDO always visible" (CLAUDE.md §6). A scorer who
+                      // mis-taps while watching the pitch needs the correction
+                      // in reach, not buried in the admin menu below.
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: FilledButton.tonalIcon(
+                          onPressed: canUndo ? () => _undo(fixture) : null,
+                          icon: const Icon(Icons.undo),
+                          label: const Text('Undo last'),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
                       for (final group in groups) ...[
                         Padding(
                           padding: const EdgeInsets.only(bottom: 8, top: 8),
@@ -293,6 +336,12 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
                           ),
                         ),
                       ],
+                      const SizedBox(height: 24),
+                      // Below the pad on purpose. The scoring controls must be
+                      // the first thing under the scoreboard — a scorer
+                      // watching the pitch should never have to scroll past a
+                      // photo grid to record a delivery.
+                      MatchMemoriesSection(fixture: fixture),
                       const SizedBox(height: 24),
                       _MatchDayActions(fixture: fixture),
                       _AdminActions(fixture: fixture),
@@ -467,28 +516,23 @@ class _ControlRow extends StatelessWidget {
 }
 
 class _PendingBanner extends ConsumerWidget {
-  const _PendingBanner({super.key});
+  const _PendingBanner();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    return FutureBuilder<int>(
-      future: ref.read(scoringServiceProvider).pendingCount(),
-      builder: (context, snapshot) {
-        final count = snapshot.data ?? 0;
-        if (count == 0) return const SizedBox.shrink();
-        return Card(
-          color: Theme.of(context).colorScheme.tertiaryContainer,
-          child: ListTile(
-            dense: true,
-            leading: const Icon(Icons.cloud_queue, size: 20),
-            title: Text(
-              '$count ${count == 1 ? 'action is' : 'actions are'} waiting to '
-              'sync — they are saved and will upload automatically.',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ),
-        );
-      },
+    final count = ref.watch(pendingScoreEventsProvider).valueOrNull ?? 0;
+    if (count == 0) return const SizedBox.shrink();
+    return Card(
+      color: Theme.of(context).colorScheme.tertiaryContainer,
+      child: ListTile(
+        dense: true,
+        leading: const Icon(Icons.cloud_queue, size: 20),
+        title: Text(
+          '$count ${count == 1 ? 'action is' : 'actions are'} waiting to '
+          'sync — they are saved and will upload automatically.',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+      ),
     );
   }
 }

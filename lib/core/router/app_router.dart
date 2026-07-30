@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../features/auth/profile_setup_screen.dart';
 import '../../features/auth/sign_in_screen.dart';
+import '../../features/competitions/challenges_screen.dart';
 import '../../features/competitions/competition_detail_screen.dart';
 import '../../features/competitions/create_competition_screen.dart';
 import '../../features/orgs/create_org_screen.dart';
@@ -13,6 +14,7 @@ import '../../features/orgs/join_org_screen.dart';
 import '../../features/orgs/members_screen.dart';
 import '../../features/orgs/org_home_screen.dart';
 import '../../features/orgs/org_picker_screen.dart';
+import '../../features/profile/career_profile_screen.dart';
 import '../../features/rules/sport_rules_screen.dart';
 import '../../features/scoring/live_matches_screen.dart';
 import '../../features/scoring/scoring_screen.dart';
@@ -29,9 +31,13 @@ class Routes {
   static const createOrg = '/orgs/new';
   static const joinOrg = '/orgs/join';
 
+  static const myProfile = '/me';
+  static String profile(String uid) => '/player/$uid';
+
   static String org(String orgId) => '/org/$orgId';
   static String members(String orgId) => '/org/$orgId/members';
   static String live(String orgId) => '/org/$orgId/live';
+  static String challenges(String orgId) => '/org/$orgId/challenges';
   static String createCompetition(String orgId) => '/org/$orgId/new-event';
   static String competition(String orgId, String compId) =>
       '/org/$orgId/event/$compId';
@@ -124,6 +130,20 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           ),
         ],
       ),
+      // A player's own profile, and anyone else's.
+      //
+      // Two routes rather than one so `/me` is a stable link that survives the
+      // uid being unknown at link-construction time — the account menu does not
+      // have to reach for the session to build it.
+      GoRoute(
+        path: Routes.myProfile,
+        builder: (_, __) => const _MyProfileScreen(),
+      ),
+      GoRoute(
+        path: '/player/:uid',
+        builder: (_, state) =>
+            CareerProfileScreen(uid: state.pathParameters['uid']!),
+      ),
       GoRoute(
         path: '/org/:orgId',
         builder: (_, state) =>
@@ -138,6 +158,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             path: 'live',
             builder: (_, state) =>
                 LiveMatchesScreen(orgId: state.pathParameters['orgId']!),
+          ),
+          GoRoute(
+            path: 'challenges',
+            builder: (_, state) =>
+                ChallengesScreen(orgId: state.pathParameters['orgId']!),
           ),
           GoRoute(
             path: 'new-event',
@@ -193,6 +218,22 @@ class _AuthRefresh extends ChangeNotifier {
       s.close();
     }
     super.dispose();
+  }
+}
+
+/// Resolves `/me` to the signed-in user's profile.
+///
+/// The redirect guard above guarantees a session by the time this builds, but it
+/// still handles the null case rather than asserting — a router invariant is a
+/// poor reason to crash on someone's own profile.
+class _MyProfileScreen extends ConsumerWidget {
+  const _MyProfileScreen();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final uid = ref.watch(currentUidProvider);
+    if (uid == null) return const SignInScreen();
+    return CareerProfileScreen(uid: uid);
   }
 }
 

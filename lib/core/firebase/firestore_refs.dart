@@ -182,6 +182,32 @@ class Refs {
   static Query<Map<String, dynamic>> get allFixturesQuery =>
       db.collectionGroup('fixtures');
 
+  // --- Memories ---------------------------------------------------------
+
+  static CollectionReference<Map<String, dynamic>> memories(
+    String orgId,
+    String compId,
+    String fixtureId,
+  ) =>
+      fixture(orgId, compId, fixtureId).collection('memories');
+
+  static DocumentReference<Map<String, dynamic>> memory(
+    String orgId,
+    String compId,
+    String fixtureId,
+    String memoryId,
+  ) =>
+      memories(orgId, compId, fixtureId).doc(memoryId);
+
+  /// Every memory a player is tagged in, wherever it was taken.
+  ///
+  /// A collectionGroup query is the only way to answer "show me my career" for
+  /// someone who has played for four clubs in three districts — the whole
+  /// premise of a portable lifelong profile. Requires the composite index on
+  /// (`taggedUids` array-contains, `createdAt` desc) in firestore.indexes.json.
+  static Query<Map<String, dynamic>> get allMemoriesQuery =>
+      db.collectionGroup('memories');
+
   // --- Governance -------------------------------------------------------
 
   static CollectionReference<Map<String, dynamic>> auditLogs(String orgId) =>

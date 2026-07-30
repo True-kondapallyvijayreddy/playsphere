@@ -22,12 +22,20 @@ class NavItem {
     required this.label,
     required this.path,
     this.requires,
+    this.badgeCount,
   });
 
   final IconData icon;
   final IconData selectedIcon;
   final String label;
   final String path;
+
+  /// Shown as a count on the icon. Null or zero renders nothing.
+  ///
+  /// Exists for the challenge inbox: an incoming challenge is the one thing in
+  /// this product that expires if nobody looks at it, and a club that never
+  /// notices an invitation reads to the other club as a club that refused.
+  final int? badgeCount;
 
   /// Absent means everyone sees it. Present means it is hidden entirely
   /// unless the caller holds the capability — hidden, not disabled, so a
@@ -79,13 +87,23 @@ class AppScaffold extends ConsumerWidget {
         path: Routes.live(orgId),
       ),
       NavItem(
+        icon: Icons.sports_kabaddi_outlined,
+        selectedIcon: Icons.sports_kabaddi,
+        label: 'Challenges',
+        path: Routes.challenges(orgId),
+        // Any member can watch who their club is playing; only an event
+        // manager sees the accept/decline controls on the screen itself.
+        badgeCount: ref.watch(incomingChallengesProvider(orgId)).valueOrNull
+            ?.length,
+      ),
+      NavItem(
         icon: Icons.groups_outlined,
         selectedIcon: Icons.groups,
         label: 'Members',
         path: Routes.members(orgId),
         requires: Capability.manageMembers,
       ),
-      NavItem(
+      const NavItem(
         icon: Icons.menu_book_outlined,
         selectedIcon: Icons.menu_book,
         label: 'Rules',
@@ -138,8 +156,8 @@ class AppScaffold extends ConsumerWidget {
                 destinations: [
                   for (final i in items)
                     NavigationDestination(
-                      icon: Icon(i.icon),
-                      selectedIcon: Icon(i.selectedIcon),
+                      icon: _NavIcon(item: i, icon: i.icon),
+                      selectedIcon: _NavIcon(item: i, icon: i.selectedIcon),
                       label: i.label,
                     ),
                 ],
@@ -194,8 +212,8 @@ class AppScaffold extends ConsumerWidget {
             destinations: [
               for (final i in items)
                 NavigationRailDestination(
-                  icon: Icon(i.icon),
-                  selectedIcon: Icon(i.selectedIcon),
+                  icon: _NavIcon(item: i, icon: i.icon),
+                  selectedIcon: _NavIcon(item: i, icon: i.selectedIcon),
                   label: Text(i.label),
                 ),
             ],
@@ -239,6 +257,14 @@ class _AccountButton extends ConsumerWidget {
         ),
         const PopupMenuDivider(),
         const PopupMenuItem(
+          value: 'profile',
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.person_outline),
+            title: Text('My career profile'),
+          ),
+        ),
+        const PopupMenuItem(
           value: 'switch',
           child: ListTile(
             contentPadding: EdgeInsets.zero,
@@ -256,12 +282,38 @@ class _AccountButton extends ConsumerWidget {
         ),
       ],
       onSelected: (value) async {
-        if (value == 'switch') {
+        if (value == 'profile') {
+          context.push(Routes.myProfile);
+        } else if (value == 'switch') {
           context.go(Routes.orgs);
         } else if (value == 'signout') {
           await ref.read(authServiceProvider).signOut();
         }
       },
+    );
+  }
+}
+
+/// A navigation icon that carries [NavItem.badgeCount] when there is one.
+///
+/// Also supplies the `semanticLabel` the count needs: a bare red dot conveys
+/// nothing to a screen reader, and the number is the entire point.
+class _NavIcon extends StatelessWidget {
+  const _NavIcon({required this.item, required this.icon});
+
+  final NavItem item;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    final count = item.badgeCount ?? 0;
+    if (count <= 0) return Icon(icon);
+    return Badge.count(
+      count: count,
+      child: Icon(
+        icon,
+        semanticLabel: '${item.label}, $count waiting',
+      ),
     );
   }
 }
@@ -348,6 +400,51 @@ class AsyncView<T> extends StatelessWidget {
                 onPressed: onRetry,
                 child: const Text('Try again'),
               ),
+      ),
+    );
+  }
+}
+
+/// A compact inline failure notice for a *secondary* stream on a screen that
+/// already has a primary [AsyncView].
+///
+/// Screens here composed several streams and defaulted the side ones to
+/// `?? const []`, which meant a rejected read removed a whole section — the
+/// live-matches strip, the pending-approvals prompt — with no trace. An absent
+/// section is indistinguishable from "nothing is happening", so an organizer
+/// could not tell a quiet ground from a broken query.
+///
+/// Renders nothing when [value] has not failed, so it is safe to place
+/// unconditionally above any section it guards.
+class AsyncErrorStrip extends StatelessWidget {
+  const AsyncErrorStrip({super.key, required this.value, required this.what});
+
+  final AsyncValue<Object?> value;
+
+  /// What could not be loaded, lowercase, e.g. `'live matches'`. Named so the
+  /// notice says which section is missing rather than a generic apology.
+  final String what;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!value.hasError) return const SizedBox.shrink();
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Card(
+        color: scheme.errorContainer,
+        child: ListTile(
+          dense: true,
+          leading: Icon(Icons.cloud_off, color: scheme.onErrorContainer),
+          title: Text(
+            'Could not load $what',
+            style: TextStyle(color: scheme.onErrorContainer),
+          ),
+          subtitle: Text(
+            errorMessage(value.error!),
+            style: TextStyle(color: scheme.onErrorContainer),
+          ),
+        ),
       ),
     );
   }

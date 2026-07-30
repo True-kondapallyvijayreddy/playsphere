@@ -7,6 +7,7 @@ import '../../core/models/fixture.dart';
 import '../../core/providers.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../profile/widgets/match_memories_section.dart';
 
 /// The remote viewer's screen — a parent in an office, a class on a laptop.
 ///
@@ -68,6 +69,7 @@ class SpectatorScreen extends ConsumerWidget {
           );
 
           final commentary = _Commentary(fixtureKey: key);
+          final memories = MatchMemoriesSection(fixture: fixture);
 
           // On a laptop the score sits beside the commentary; on a phone the
           // commentary scrolls beneath it. Same data, same code.
@@ -77,7 +79,16 @@ class SpectatorScreen extends ConsumerWidget {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Expanded(flex: 3, child: board),
+                  Expanded(
+                    flex: 3,
+                    child: ListView(
+                      children: [
+                        board,
+                        const SizedBox(height: 24),
+                        memories,
+                      ],
+                    ),
+                  ),
                   const SizedBox(width: 24),
                   Expanded(flex: 2, child: commentary),
                 ],
@@ -95,6 +106,8 @@ class SpectatorScreen extends ConsumerWidget {
                     board,
                     const SizedBox(height: 20),
                     commentary,
+                    const SizedBox(height: 28),
+                    memories,
                   ],
                 ),
               ),

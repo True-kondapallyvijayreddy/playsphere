@@ -282,6 +282,14 @@ class RatingService {
         'sportId': sportId,
         'matchesPlayed': FieldValue.increment(1),
         'lastPlayedAt': Timestamp.fromDate(c.playedAt),
+        // The clubs timeline on a career profile. `CareerStats` has always had
+        // a `clubsPlayedFor` field and the aggregator has always computed it,
+        // but this write path never persisted it — so the one thing that makes
+        // a profile *portable* ("played for these four clubs across ten
+        // years") was silently dropped on every finalize. arrayUnion is
+        // idempotent, which matters because a replayed finalize must not
+        // duplicate a club.
+        'clubsPlayedFor': FieldValue.arrayUnion([c.orgId]),
       };
       for (final entry in c.tally.entries) {
         fields['tally.${entry.key}'] = FieldValue.increment(entry.value);

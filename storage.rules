@@ -1,0 +1,102 @@
+rules_version = '2';
+
+// Cloud Storage rules for PlaySphere media — profile photos, club logos and
+// match memories.
+//
+// ## The shape of the problem
+//
+// Storage rules cannot read Firestore. Everything Firestore knows — who is an
+// active member of which club, who scored a match, whether a guardian has
+// consented — is invisible here. So authorization has to come from the path
+// itself plus the uploader's uid, and anything finer has to be enforced on the
+// Firestore side by the document that *references* the file.
+//
+// The consequence, stated plainly so nobody assumes otherwise later: an object
+// under `memories/{orgId}/...` is readable by any signed-in user who knows the
+// path. It is the accompanying Firestore `memories` document that is properly
+// access-controlled, and that document is the only way to discover the path.
+// Unguessable ids are therefore load-bearing — never construct a media path
+// from user-supplied or sequential values.
+//
+// Minor safety (CLAUDE.md §2.7, §12.8) is enforced where the *reference* lives,
+// in firestore.rules. A photo of a junior match is not made discoverable by
+// this file; only by a memory document that the Firestore rules gate.
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // --- Shared predicates ------------------------------------------------
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isSelf(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // Images only, and small enough that a 2GB phone on rural 4G can actually
+    // finish the upload. 8 MB comfortably holds a photo from a mid-range
+    // Android camera after the client-side downscale.
+    function isImageUnder(mb) {
+      return request.resource != null
+        && request.resource.contentType.matches('image/(jpeg|jpg|png|webp|heic)')
+        && request.resource.size < mb * 1024 * 1024;
+    }
+
+    // Rejects a write that only *claims* to be an image by extension. Content
+    // type is set by the client and therefore not trustworthy on its own, but
+    // combined with the size ceiling it stops the bucket being used as free
+    // general-purpose file hosting, which is the realistic abuse here.
+    function isVideoUnder(mb) {
+      return request.resource != null
+        && request.resource.contentType.matches('video/(mp4|quicktime|webm)')
+        && request.resource.size < mb * 1024 * 1024;
+    }
+
+    // --- Profile photos ---------------------------------------------------
+    //
+    // Publicly readable: a career profile is meant to be shareable, and the
+    // photo is the least sensitive thing on it. Write is self-only, so nobody
+    // can replace another player's face.
+    match /users/{uid}/profile/{fileName} {
+      allow read: if true;
+      allow write: if isSelf(uid) && isImageUnder(8);
+      allow delete: if isSelf(uid);
+    }
+
+    // --- Club logos -------------------------------------------------------
+    //
+    // Any signed-in member of the club may set the logo. Storage cannot check
+    // membership, so this is deliberately loose and the real gate is that
+    // `orgs/{orgId}.logoUrl` can only be written by an org admin under
+    // firestore.rules — an unreferenced object in this prefix is invisible.
+    match /orgs/{orgId}/logo/{fileName} {
+      allow read: if true;
+      allow write: if isSignedIn() && isImageUnder(4);
+      allow delete: if isSignedIn();
+    }
+
+    // --- Match memories ---------------------------------------------------
+    //
+    // Photos and short clips attached to a fixture. Written under the
+    // uploader's own uid segment so a deletion rule can be exact: you may
+    // always remove your own upload, and never anyone else's. Club admins
+    // moderate by deleting the Firestore memory document, which is what makes
+    // the object undiscoverable.
+    match /memories/{orgId}/{fixtureId}/{uid}/{fileName} {
+      allow read: if isSignedIn();
+      allow create: if isSelf(uid) && (isImageUnder(8) || isVideoUnder(50));
+      // No update: a memory is a record of a moment. Replacing the bytes
+      // behind an existing caption and timestamp would let the record lie.
+      allow update: if false;
+      allow delete: if isSelf(uid);
+    }
+
+    // Anything not matched above is denied. Stated explicitly rather than left
+    // implicit, because a future `match` block added in the wrong scope is the
+    // usual way a bucket accidentally becomes world-writable.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

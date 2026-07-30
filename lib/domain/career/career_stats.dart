@@ -54,6 +54,52 @@ class CareerStats {
         'tally': tally,
         'clubsPlayedFor': clubsPlayedFor.toList(),
       };
+
+  /// Reads a career-stats document back.
+  ///
+  /// These documents have been written on every match finalize since ratings
+  /// shipped, but nothing had ever read them — there was no decoder and no
+  /// screen. The [docId] is the sport id, because the write path stores one
+  /// document per sport at `users/{uid}/career_stats/{sportId}`.
+  ///
+  /// `firstPlayedAt` is not written by the finalize path, so it is always null
+  /// here.
+  ///
+  /// [lastPlayedAt] is passed in already decoded rather than read from [d].
+  /// This file is pure domain — it must not import `cloud_firestore`, or the
+  /// scoring engines stop being testable without a Firebase harness — and a
+  /// `Timestamp` cannot be recognised here. The repository converts it.
+  factory CareerStats.fromMap(
+    Map<String, dynamic>? d,
+    String docId, {
+    String? uid,
+    DateTime? lastPlayedAt,
+  }) {
+    final data = d ?? const <String, dynamic>{};
+    final rawTally = data['tally'];
+    return CareerStats(
+      uid: uid ?? (data['uid'] is String ? data['uid'] as String : ''),
+      // Trust the path over the field: the document id is authoritative and a
+      // mismatched `sportId` field would silently merge two sports' totals.
+      sportId: docId,
+      matchesPlayed:
+          data['matchesPlayed'] is num ? (data['matchesPlayed'] as num).toInt() : 0,
+      tally: rawTally is Map
+          ? {
+              for (final e in rawTally.entries)
+                if (e.key is String && e.value is num)
+                  e.key as String: e.value as num,
+            }
+          : const {},
+      lastPlayedAt: lastPlayedAt,
+      clubsPlayedFor: data['clubsPlayedFor'] is List
+          ? {
+              for (final c in data['clubsPlayedFor'] as List)
+                if (c is String) c,
+            }
+          : const {},
+    );
+  }
 }
 
 /// One match's contribution to a career.

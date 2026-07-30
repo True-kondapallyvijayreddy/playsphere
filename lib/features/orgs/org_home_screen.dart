@@ -21,9 +21,10 @@ class OrgHomeScreen extends ConsumerWidget {
     final caps = ref.watch(myCapabilitiesProvider(orgId));
     final canCreate = caps.contains(Capability.manageCompetitions);
     final competitions = ref.watch(competitionsProvider(orgId));
-    final live = ref.watch(liveFixturesProvider(orgId)).valueOrNull ?? const [];
-    final pending =
-        ref.watch(pendingMembersProvider(orgId)).valueOrNull ?? const [];
+    final liveAsync = ref.watch(liveFixturesProvider(orgId));
+    final pendingAsync = ref.watch(pendingMembersProvider(orgId));
+    final live = liveAsync.valueOrNull ?? const [];
+    final pending = pendingAsync.valueOrNull ?? const [];
 
     return AppScaffold(
       orgId: orgId,
@@ -46,6 +47,16 @@ class OrgHomeScreen extends ConsumerWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    AsyncErrorStrip(
+                      value: liveAsync,
+                      what: 'live matches',
+                    ),
+                    if (caps.contains(Capability.manageMembers))
+                      AsyncErrorStrip(
+                        value: pendingAsync,
+                        what: 'join requests',
+                      ),
+
                     if (pending.isNotEmpty &&
                         caps.contains(Capability.manageMembers))
                       Card(

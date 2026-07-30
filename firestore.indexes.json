@@ -90,6 +90,30 @@
         { "fieldPath": "entityType", "order": "ASCENDING" },
         { "fieldPath": "at", "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "memories",
+      "queryScope": "COLLECTION_GROUP",
+      "fields": [
+        { "fieldPath": "taggedUids", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "challenges",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "fromOrgId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "challenges",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "toOrgId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

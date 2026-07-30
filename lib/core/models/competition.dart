@@ -194,6 +194,7 @@ class Competition {
     this.pointsForDraw = 1,
     this.pointsForLoss = 0,
     this.tiebreakChain,
+    this.participantOrgIds,
     this.createdBy,
     this.createdAt,
   });
@@ -239,8 +240,41 @@ class Competition {
   /// chess field to Buchholz.
   final List<String>? tiebreakChain;
 
+  /// The organizations taking part, when this competition spans more than the
+  /// one that owns it — a school-vs-school or village-vs-village challenge.
+  ///
+  /// ## Why the document is not enough on its own
+  ///
+  /// Competitions live at `orgs/{orgId}/competitions/{compId}`, which encodes
+  /// exactly one owner. An inter-club match has two, and the club that did not
+  /// happen to host it still has to read the fixture, watch it live and see its
+  /// own result. This field is what the security rules consult to grant that
+  /// second club access, so it is the authorization record for the match, not a
+  /// convenience copy.
+  ///
+  /// Null for ordinary internal competitions. When present it always contains
+  /// exactly two org ids, one of which is [orgId] — `firestore.rules` enforces
+  /// both, because the read rule checks the entries by index and a longer list
+  /// would silently grant nobody the access they were promised.
+  final List<String>? participantOrgIds;
+
   final String? createdBy;
   final DateTime? createdAt;
+
+  /// True when this competition exists because a challenge was accepted, and
+  /// therefore answers to two clubs rather than one.
+  bool get isInterClub =>
+      participantOrgIds != null && participantOrgIds!.length == 2;
+
+  /// The other club in an inter-club match, from [orgId]'s point of view.
+  String? opponentOf(String someOrgId) {
+    final ids = participantOrgIds;
+    if (ids == null) return null;
+    for (final id in ids) {
+      if (id != someOrgId) return id;
+    }
+    return null;
+  }
 
   bool get isFull => maxEntrants != null && entrantCount >= maxEntrants!;
 
@@ -281,6 +315,9 @@ class Competition {
       pointsForLoss: Fs.integer(d['pointsForLoss']),
       tiebreakChain:
           d['tiebreakChain'] is List ? Fs.strList(d['tiebreakChain']) : null,
+      participantOrgIds: d['participantOrgIds'] is List
+          ? Fs.strList(d['participantOrgIds'])
+          : null,
       createdBy: Fs.strOrNull(d['createdBy']),
       createdAt: Fs.dateOrNull(d['createdAt']),
     );
@@ -295,7 +332,14 @@ class Competition {
         'archetype': archetype.wire,
         'entrantType': entrantType.wire,
         'format': format.wire,
-        'status': CompetitionStatus.draft.wire,
+        // An ordinary competition always starts as a draft, so the organizer
+        // configures it before anyone can enter. A challenge match has nothing
+        // left to configure — both clubs already agreed the sport, the slot and
+        // the venue when the challenge was accepted — so it is created ready to
+        // play. `firestore.rules` permits exactly these two starting states.
+        'status': isInterClub
+            ? CompetitionStatus.scheduled.wire
+            : CompetitionStatus.draft.wire,
         'category': category.toMap(),
         'scoringPluginKey': scoringPluginKey,
         'description': description,
@@ -312,6 +356,7 @@ class Competition {
         'pointsForDraw': pointsForDraw,
         'pointsForLoss': pointsForLoss,
         'tiebreakChain': tiebreakChain,
+        'participantOrgIds': participantOrgIds,
         'createdBy': createdBy,
         'createdAt': FieldValue.serverTimestamp(),
       };

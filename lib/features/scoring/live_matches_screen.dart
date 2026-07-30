@@ -22,7 +22,8 @@ class LiveMatchesScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final live = ref.watch(liveFixturesProvider(orgId));
-    final mine = ref.watch(myScoringAssignmentsProvider).valueOrNull ?? const [];
+    final mineAsync = ref.watch(myScoringAssignmentsProvider);
+    final mine = mineAsync.valueOrNull ?? const [];
     final canScore =
         ref.watch(myCapabilitiesProvider(orgId)).contains(Capability.scoreMatches);
 
@@ -34,7 +35,10 @@ class LiveMatchesScreen extends ConsumerWidget {
       body: AsyncView(
         value: live,
         builder: (fixtures) {
-          if (fixtures.isEmpty && myHere.isEmpty) {
+          // Guarded by `!hasError`: if the assignments query was rejected,
+          // `myHere` is empty for the wrong reason, and telling a scorer that
+          // nothing is being played would send them home from a live ground.
+          if (fixtures.isEmpty && myHere.isEmpty && !mineAsync.hasError) {
             return const EmptyState(
               icon: Icons.sensors_off_outlined,
               title: 'Nothing is being played right now',
@@ -50,6 +54,10 @@ class LiveMatchesScreen extends ConsumerWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    AsyncErrorStrip(
+                      value: mineAsync,
+                      what: 'the matches you are scoring',
+                    ),
                     if (canScore && myHere.isNotEmpty) ...[
                       Text(
                         'You are scoring',

@@ -9,6 +9,7 @@ import '../../core/models/fixture.dart';
 import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
+import '../../domain/standings/tiebreak.dart';
 import '../../shared/app_scaffold.dart';
 import '../scoring/widgets/live_score_card.dart';
 
@@ -230,8 +231,12 @@ class _Entries extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final c = competition;
     final key = CompRef(c.orgId, c.id);
-    final regs = ref.watch(registrationsProvider(key)).valueOrNull ?? const [];
+    final regsAsync = ref.watch(registrationsProvider(key));
+    final regs = regsAsync.valueOrNull ?? const [];
     final me = ref.watch(currentUserProvider).valueOrNull;
+    // If the read failed, `myReg` is null for the wrong reason and the screen
+    // would offer "Enter" to someone already entered — a duplicate the rules
+    // then reject, which reads to the user as the button being broken.
     final myReg = me == null
         ? null
         : regs.where((r) => r.uid == me.uid).firstOrNull;
@@ -290,7 +295,8 @@ class _Entries extends ConsumerWidget {
               ),
             ],
             const SizedBox(height: 8),
-            if (regs.isEmpty)
+            AsyncErrorStrip(value: regsAsync, what: 'the entry list'),
+            if (regs.isEmpty && !regsAsync.hasError)
               Text('Nobody has entered yet.',
                   style: Theme.of(context).textTheme.bodySmall)
             else
@@ -389,13 +395,46 @@ class _StandingsTable extends ConsumerWidget {
       return const SizedBox.shrink();
     }
 
-    final table = ref.watch(
+    final tableAsync = ref.watch(
       standingsProvider(CompRef(competition.orgId, competition.id)),
     );
+
+    // A table that failed to load must say so. Collapsing to `shrink()` on
+    // error is what made a rejected fixtures read look like a competition
+    // nobody had played yet.
+    if (tableAsync.hasError) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 24),
+        child: Card(
+          child: ListTile(
+            leading: const Icon(Icons.error_outline),
+            title: const Text('Table unavailable'),
+            subtitle: Text(errorMessage(tableAsync.error!)),
+          ),
+        ),
+      );
+    }
+
+    final table = tableAsync.valueOrNull ?? const <Standing>[];
     if (table.isEmpty) return const SizedBox.shrink();
 
     final theme = Theme.of(context);
     final anyPlayed = table.any((r) => r.played > 0);
+
+    // The order shown has to be the order actually applied. This used to be a
+    // fixed sentence naming score difference, which misdescribed every cricket
+    // league (net run rate) and every Swiss event (Buchholz).
+    final chain = Tiebreak.parse(
+      competition.tiebreakChain,
+      competition.sportId,
+    );
+    final shownChain =
+        chain.where((t) => t != Tiebreak.name).map((t) => t.label).toList();
+
+    // Whichever separator the chain actually uses gets its own column, so an
+    // organizer can show a disputing captain the number that decided the order.
+    final showNrr = chain.contains(Tiebreak.netRunRate);
+    final showBuchholz = chain.contains(Tiebreak.buchholz);
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 24),
@@ -406,7 +445,7 @@ class _StandingsTable extends ConsumerWidget {
           const SizedBox(height: 4),
           Text(
             anyPlayed
-                ? 'Points, then score difference, then wins.'
+                ? 'Points, then ${shownChain.join(', then ').toLowerCase()}.'
                 : 'Updates automatically as results come in.',
             style: theme.textTheme.bodySmall,
           ),
@@ -424,15 +463,31 @@ class _StandingsTable extends ConsumerWidget {
                   dataRowMinHeight: 42,
                   dataRowMaxHeight: 48,
                   columnSpacing: 18,
-                  columns: const [
-                    DataColumn(label: Text('#')),
-                    DataColumn(label: Text('Entrant')),
-                    DataColumn(label: Text('P'), numeric: true),
-                    DataColumn(label: Text('W'), numeric: true),
-                    DataColumn(label: Text('D'), numeric: true),
-                    DataColumn(label: Text('L'), numeric: true),
-                    DataColumn(label: Text('+/−'), numeric: true),
-                    DataColumn(label: Text('Pts'), numeric: true),
+                  columns: [
+                    const DataColumn(label: Text('#')),
+                    const DataColumn(label: Text('Entrant')),
+                    const DataColumn(label: Text('P'), numeric: true),
+                    const DataColumn(label: Text('W'), numeric: true),
+                    const DataColumn(label: Text('D'), numeric: true),
+                    const DataColumn(label: Text('L'), numeric: true),
+                    const DataColumn(label: Text('+/−'), numeric: true),
+                    if (showNrr)
+                      const DataColumn(
+                        label: Tooltip(
+                          message: 'Net run rate',
+                          child: Text('NRR'),
+                        ),
+                        numeric: true,
+                      ),
+                    if (showBuchholz)
+                      const DataColumn(
+                        label: Tooltip(
+                          message: 'Buchholz — sum of opponents’ scores',
+                          child: Text('BH'),
+                        ),
+                        numeric: true,
+                      ),
+                    const DataColumn(label: Text('Pts'), numeric: true),
                   ],
                   rows: [
                     for (final row in table)
@@ -457,6 +512,16 @@ class _StandingsTable extends ConsumerWidget {
                                 ? '+${row.scoreDifference}'
                                 : '${row.scoreDifference}',
                           )),
+                          if (showNrr)
+                            DataCell(Text(
+                              // Three decimals, because that is the precision
+                              // qualification is argued at (CLAUDE.md §12.6).
+                              row.netRunRate == null
+                                  ? '—'
+                                  : row.netRunRate!.toStringAsFixed(3),
+                            )),
+                          if (showBuchholz)
+                            DataCell(Text('${row.buchholz}')),
                           DataCell(Text(
                             '${row.points}',
                             style: const TextStyle(fontWeight: FontWeight.w800),
@@ -496,9 +561,8 @@ class _AssignScorersDialogState extends ConsumerState<_AssignScorersDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final members =
-        ref.watch(orgMembersProvider(widget.fixture.orgId)).valueOrNull ??
-            const [];
+    final membersAsync = ref.watch(orgMembersProvider(widget.fixture.orgId));
+    final members = membersAsync.valueOrNull ?? const [];
     // Only roles that carry the scoring capability. Offering a plain member
     // would let an organizer assign someone the rules will then reject.
     final eligible = members
@@ -511,7 +575,12 @@ class _AssignScorersDialogState extends ConsumerState<_AssignScorersDialog> {
       title: const Text('Who can score this match?'),
       content: SizedBox(
         width: 400,
-        child: eligible.isEmpty
+        // The "nobody holds the scoring role" sentence sends the organizer to
+        // the Members screen to fix a problem that may not exist, so it is
+        // only claimed when the member list genuinely loaded.
+        child: membersAsync.hasError
+            ? AsyncErrorStrip(value: membersAsync, what: 'the member list')
+            : eligible.isEmpty
             ? const Text(
                 'Nobody in this organization holds the scoring role yet. '
                 'Give someone the Judge / Scorer role on the Members screen '
@@ -580,8 +649,16 @@ class _Fixtures extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final c = competition;
     final key = CompRef(c.orgId, c.id);
-    final fixtures = ref.watch(fixturesProvider(key)).valueOrNull ?? const [];
+    final fixturesAsync = ref.watch(fixturesProvider(key));
+    final fixtures = fixturesAsync.valueOrNull ?? const [];
     final myUid = ref.watch(currentUidProvider);
+
+    // "No matches yet" is a claim about the draw. Only make it when the read
+    // actually succeeded — otherwise an organizer is told to generate a draw
+    // that already exists.
+    if (fixturesAsync.hasError) {
+      return AsyncErrorStrip(value: fixturesAsync, what: 'the match list');
+    }
 
     if (fixtures.isEmpty) {
       return Text(
