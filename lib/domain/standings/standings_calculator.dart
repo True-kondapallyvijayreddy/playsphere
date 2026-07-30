@@ -1,14 +1,10 @@
 import '../../core/models/competition.dart';
 import '../../core/models/fixture.dart';
 import '../scoring/scoring_registry.dart';
+import 'net_run_rate.dart';
+import 'tiebreak.dart';
 
 /// Computes a league table from played fixtures.
-///
-/// Ported from the pre-Firebase prototype's `StandingsCalculatorService`,
-/// which had the ordering rules right — points, then score difference, then
-/// wins — and was lost when the app was rebuilt on Firebase. Rewritten against
-/// the current [Fixture] and [Standing] models and against per-competition
-/// points configuration rather than a separate config entity.
 ///
 /// ## Why this is computed, not stored
 ///
@@ -32,6 +28,13 @@ import '../scoring/scoring_registry.dart';
 /// badminton and runs in cricket — whatever that sport counts. This is why the
 /// fixture carries its own frozen `scoringConfig`: without it a volleyball
 /// match would be totted up under badminton's rules.
+///
+/// ## Separating teams that are level
+///
+/// Points alone rank almost nothing. The chain that breaks ties is per-sport
+/// configuration ([Tiebreak]), because cricket separates on net run rate,
+/// football on goal difference and a Swiss chess field on Buchholz — and a
+/// table that applies the wrong one produces the wrong champion.
 class StandingsCalculator {
   const StandingsCalculator();
 
@@ -50,6 +53,14 @@ class StandingsCalculator {
         e.id: _Row(entrantId: e.id, displayName: e.displayName),
     };
 
+    // Head-to-head results, keyed "winner|loser", plus the drawn pairs.
+    final headToHead = <String, int>{};
+    // Which opponents each entrant has faced, for Buchholz and
+    // Sonneborn-Berger.
+    final opponents = <String, List<String>>{};
+    final beaten = <String, List<String>>{};
+    final drewWith = <String, List<String>>{};
+
     for (final fixture in fixtures) {
       // Only decided matches count. A live or abandoned match must not move
       // the table — an abandoned game is not a draw, and treating it as one
@@ -62,56 +73,161 @@ class StandingsCalculator {
       // draw, has no row to credit. Skip rather than inventing one.
       if (a == null || b == null) continue;
 
+      // A resulted fixture with no winner and not flagged a draw is
+      // uninterpretable. Skip it entirely — crediting an appearance without an
+      // outcome makes played stop equalling won + drawn + lost.
+      final isDraw = fixture.isDraw;
+      final aWon = fixture.winnerEntrantId == a.entrantId;
+      final bWon = fixture.winnerEntrantId == b.entrantId;
+      if (!isDraw && !aWon && !bWon) continue;
+
       a.played++;
       b.played++;
 
-      if (fixture.isDraw) {
+      opponents.putIfAbsent(a.entrantId, () => []).add(b.entrantId);
+      opponents.putIfAbsent(b.entrantId, () => []).add(a.entrantId);
+
+      if (isDraw) {
         a.drawn++;
         b.drawn++;
         a.points += competition.pointsForDraw;
         b.points += competition.pointsForDraw;
-      } else if (fixture.winnerEntrantId == a.entrantId) {
+        drewWith.putIfAbsent(a.entrantId, () => []).add(b.entrantId);
+        drewWith.putIfAbsent(b.entrantId, () => []).add(a.entrantId);
+      } else if (aWon) {
         a.won++;
         b.lost++;
         a.points += competition.pointsForWin;
         b.points += competition.pointsForLoss;
-      } else if (fixture.winnerEntrantId == b.entrantId) {
+        headToHead['${a.entrantId}|${b.entrantId}'] =
+            (headToHead['${a.entrantId}|${b.entrantId}'] ?? 0) + 1;
+        beaten.putIfAbsent(a.entrantId, () => []).add(b.entrantId);
+      } else {
         b.won++;
         a.lost++;
         b.points += competition.pointsForWin;
         a.points += competition.pointsForLoss;
-      } else {
-        // Resulted but with no recorded winner and not flagged a draw. Count
-        // the appearance and nothing else rather than guessing an outcome.
-        continue;
+        headToHead['${b.entrantId}|${a.entrantId}'] =
+            (headToHead['${b.entrantId}|${a.entrantId}'] ?? 0) + 1;
+        beaten.putIfAbsent(b.entrantId, () => []).add(a.entrantId);
       }
 
+      final ctx = fixture.scoringContext();
       final outcome = ScoringRegistry.resolve(fixture.scoringPluginKey)
-          .outcome(fixture.scoreState, fixture.scoringContext());
+          .outcome(fixture.scoreState, ctx);
       a.scoreFor += outcome.scoreForA;
       a.scoreAgainst += outcome.scoreForB;
       b.scoreFor += outcome.scoreForB;
       b.scoreAgainst += outcome.scoreForA;
+
+      _accumulateNrr(fixture: fixture, ctx: ctx, a: a, b: b);
     }
 
+    // Buchholz and Sonneborn-Berger are functions of everyone else's final
+    // points, so they can only be computed once every row is complete.
+    for (final row in rows.values) {
+      var buchholz = 0;
+      for (final id in opponents[row.entrantId] ?? const <String>[]) {
+        buchholz += rows[id]?.points ?? 0;
+      }
+      row.buchholz = buchholz;
+
+      var sb = 0.0;
+      for (final id in beaten[row.entrantId] ?? const <String>[]) {
+        sb += rows[id]?.points ?? 0;
+      }
+      for (final id in drewWith[row.entrantId] ?? const <String>[]) {
+        sb += (rows[id]?.points ?? 0) / 2;
+      }
+      row.sonnebornBerger = sb;
+    }
+
+    final chain = Tiebreak.parse(
+      competition.tiebreakChain,
+      competition.sportId,
+    );
+
     final table = rows.values.toList()
-      ..sort((x, y) {
-        // Points, then score difference, then wins — the ordering used by
-        // effectively every league. Falling back to name keeps the order
-        // stable when two rows are genuinely identical, so the table does not
-        // reshuffle itself between rebuilds.
-        final byPoints = y.points.compareTo(x.points);
-        if (byPoints != 0) return byPoints;
-        final byDiff = y.difference.compareTo(x.difference);
-        if (byDiff != 0) return byDiff;
-        final byWins = y.won.compareTo(x.won);
-        if (byWins != 0) return byWins;
-        return x.displayName.toLowerCase().compareTo(y.displayName.toLowerCase());
-      });
+      ..sort((x, y) => _compare(x, y, chain, headToHead));
 
     return [
       for (var i = 0; i < table.length; i++) table[i].toStanding(rank: i + 1),
     ];
+  }
+
+  /// Adds one cricket fixture's innings to both entrants' running rate.
+  void _accumulateNrr({
+    required Fixture fixture,
+    required dynamic ctx,
+    required _Row a,
+    required _Row b,
+  }) {
+    final innings = NetRunRate.inningsOf(
+      scoreState: fixture.scoreState,
+      ctx: ctx,
+      pluginKey: fixture.scoringPluginKey,
+    );
+    if (innings.isEmpty) return;
+
+    final ballsPerOver = ctx.intConfig('ballsPerOver', 6) as int;
+
+    for (final inn in innings) {
+      final batting = inn.battingSide == 'a' ? a : b;
+      final bowling = inn.battingSide == 'a' ? b : a;
+      final overs = inn.oversForRate(ballsPerOver);
+      if (overs <= 0) continue;
+      batting.nrr.addBatting(inn.runs.toDouble(), overs);
+      bowling.nrr.addBowling(inn.runs.toDouble(), overs);
+    }
+  }
+
+  int _compare(
+    _Row x,
+    _Row y,
+    List<Tiebreak> chain,
+    Map<String, int> headToHead,
+  ) {
+    // Points always come first; the chain only separates rows already level.
+    final byPoints = y.points.compareTo(x.points);
+    if (byPoints != 0) return byPoints;
+
+    for (final rule in chain) {
+      final cmp = switch (rule) {
+        Tiebreak.headToHead => _headToHead(x, y, headToHead),
+        Tiebreak.netRunRate => _compareNullableDesc(x.nrr.value, y.nrr.value),
+        Tiebreak.scoreDifference => y.difference.compareTo(x.difference),
+        Tiebreak.scoreFor => y.scoreFor.compareTo(x.scoreFor),
+        Tiebreak.wins => y.won.compareTo(x.won),
+        Tiebreak.buchholz => y.buchholz.compareTo(x.buchholz),
+        Tiebreak.sonnebornBerger =>
+          y.sonnebornBerger.compareTo(x.sonnebornBerger),
+        // Fewest played ranks the team with games in hand higher.
+        Tiebreak.fewestPlayed => x.played.compareTo(y.played),
+        Tiebreak.name => x.displayName
+            .toLowerCase()
+            .compareTo(y.displayName.toLowerCase()),
+      };
+      if (cmp != 0) return cmp;
+    }
+    // Stable rather than arbitrary when two rows are genuinely identical, so
+    // the table does not reshuffle itself between rebuilds.
+    return x.displayName.toLowerCase().compareTo(y.displayName.toLowerCase());
+  }
+
+  int _headToHead(_Row x, _Row y, Map<String, int> h2h) {
+    final xBeatY = h2h['${x.entrantId}|${y.entrantId}'] ?? 0;
+    final yBeatX = h2h['${y.entrantId}|${x.entrantId}'] ?? 0;
+    return yBeatX.compareTo(xBeatY);
+  }
+
+  /// Descending, with "no value" sorting last rather than as zero. A team
+  /// with no completed innings has no net run rate; treating that as 0.000
+  /// would rank it above every team with a negative one.
+  int _compareNullableDesc(double? x, double? y) {
+    if (x == null && y == null) return 0;
+    if (x == null) return 1;
+    if (y == null) return -1;
+    return y.compareTo(x);
   }
 }
 
@@ -128,6 +244,10 @@ class _Row {
   int points = 0;
   int scoreFor = 0;
   int scoreAgainst = 0;
+  int buchholz = 0;
+  double sonnebornBerger = 0;
+
+  final NrrTally nrr = NrrTally();
 
   int get difference => scoreFor - scoreAgainst;
 
@@ -142,5 +262,7 @@ class _Row {
         scoreFor: scoreFor,
         scoreAgainst: scoreAgainst,
         rank: rank,
+        netRunRate: nrr.value,
+        buchholz: buchholz,
       );
 }

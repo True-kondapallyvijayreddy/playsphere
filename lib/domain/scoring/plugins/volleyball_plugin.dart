@@ -41,6 +41,15 @@ class VolleyballPlugin extends ScoringPlugin {
       ctx.intConfig('decidingSetPoints', 15);
   int _winBy(ScoringContext ctx) => ctx.intConfig('winBy', 2);
 
+  /// The score at which teams change ends in the deciding set.
+  ///
+  /// This is a law of the game, not decoration: the deciding set is short and
+  /// half of it is played into whatever wind, sun or glare the venue has, so
+  /// the switch at 8 is what keeps it fair. A scorer who is not prompted will
+  /// forget it, and the teams will play the whole set from one end.
+  int _switchEndsAt(ScoringContext ctx) =>
+      ctx.intConfig('switchEndsInDecidingAt', 8);
+
   @override
   Map<String, dynamic> initialState(ScoringContext ctx) => {
         'currentA': 0,
@@ -48,18 +57,40 @@ class VolleyballPlugin extends ScoringPlugin {
         'setsA': 0,
         'setsB': 0,
         'completedSets': <Map<String, dynamic>>[],
+        'endsSwapped': false,
         'complete': false,
         'winner': null,
         PlayerTally.stateKey: <String, dynamic>{},
       };
 
-  /// The target for the set being played. The deciding set is shorter.
-  int targetForCurrentSet(Map<String, dynamic> state, ScoringContext ctx) {
+  /// Whether the set being played is the decider.
+  bool isDecidingSet(Map<String, dynamic> state, ScoringContext ctx) {
     final toWin = _setsToWin(ctx);
     final setsA = (state['setsA'] as num?)?.toInt() ?? 0;
     final setsB = (state['setsB'] as num?)?.toInt() ?? 0;
-    final isDecider = setsA == toWin - 1 && setsB == toWin - 1;
-    return isDecider ? _decidingSetPoints(ctx) : _setPoints(ctx);
+    return setsA == toWin - 1 && setsB == toWin - 1;
+  }
+
+  /// The target for the set being played. The deciding set is shorter.
+  int targetForCurrentSet(Map<String, dynamic> state, ScoringContext ctx) =>
+      isDecidingSet(state, ctx)
+          ? _decidingSetPoints(ctx)
+          : _setPoints(ctx);
+
+  /// True once a side reaches the switch score in the deciding set and the
+  /// change of ends has not yet been recorded.
+  ///
+  /// Derived rather than stored so it cannot disagree with the score, and
+  /// exposed so the pad can prompt rather than relying on the scorer to
+  /// remember mid-rally.
+  bool shouldSwitchEnds(Map<String, dynamic> state, ScoringContext ctx) {
+    if (!isDecidingSet(state, ctx)) return false;
+    if (state['endsSwapped'] == true) return false;
+    final at = _switchEndsAt(ctx);
+    if (at <= 0) return false;
+    final a = (state['currentA'] as num?)?.toInt() ?? 0;
+    final b = (state['currentB'] as num?)?.toInt() ?? 0;
+    return a >= at || b >= at;
   }
 
   @override
@@ -147,6 +178,19 @@ class VolleyballPlugin extends ScoringPlugin {
         }
         return ScoringResult.ok(mutate(state, (s) => s[key] = current - 1));
 
+      case 'switch_ends':
+        // Recorded as its own event so the log shows the change of ends
+        // happened and at what score, which is what an official asks for
+        // when a deciding set is queried afterwards.
+        if (!isDecidingSet(state, ctx)) {
+          return const ScoringResult.rejected(
+            'Ends only change mid-set in the deciding set.',
+          );
+        }
+        return ScoringResult.ok(mutate(state, (s) {
+          s['endsSwapped'] = true;
+        }));
+
       case 'reopen':
         return ScoringResult.ok(mutate(state, (s) {
           s['complete'] = false;
@@ -187,6 +231,9 @@ class VolleyballPlugin extends ScoringPlugin {
       s['setsB'] = setsB;
       s['currentA'] = 0;
       s['currentB'] = 0;
+      // Teams change ends between sets anyway, so the mid-set flag resets
+      // with the set it belonged to.
+      s['endsSwapped'] = false;
       if (matchOver) {
         s['complete'] = true;
         s['winner'] = setsA > setsB ? 'a' : 'b';
@@ -295,6 +342,23 @@ class VolleyballPlugin extends ScoringPlugin {
       ];
     }
 
+    // Surfaced the moment the deciding set reaches the switch score, because
+    // a scorer mid-rally will not remember a law that fires once a season.
+    final endsPrompt = shouldSwitchEnds(state, ctx)
+        ? const ScoreControlGroup(
+            title: 'Change ends',
+            controls: [
+              ScoreControl(
+                action: 'switch_ends',
+                label: 'Ends changed',
+                style: ControlStyle.secondary,
+                shortcut: 'e',
+                tooltip: 'Teams change ends at this score in the final set',
+              ),
+            ],
+          )
+        : null;
+
     List<ScoreControl> forSide(Side side, String killKey) => [
           ScoreControl(
             action: 'point',
@@ -333,6 +397,7 @@ class VolleyballPlugin extends ScoringPlugin {
         ];
 
     return [
+      if (endsPrompt != null) endsPrompt,
       ScoreControlGroup(
         title: ctx.entrantAName,
         controls: forSide(Side.a, 'a'),

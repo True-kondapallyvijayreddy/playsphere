@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../../core/models/match_player.dart';
+import 'rule_config.dart';
 
 /// Which side of the match a control or event belongs to.
 enum Side {
@@ -177,19 +178,27 @@ class ScoringContext {
   /// Per-competition overrides: overs per innings, points per set, match
   /// duration. Frozen onto the fixture at generation time so changing the
   /// competition later cannot rewrite a finished match.
+  ///
+  /// Read this through [rules] rather than directly. The raw map stays public
+  /// only because it is what gets persisted.
   final Map<String, dynamic> config;
 
-  int intConfig(String key, int fallback) {
-    final v = config[key];
-    if (v is int) return v;
-    if (v is num) return v.toInt();
-    return fallback;
-  }
+  /// Typed view over [config]. Every rule parameter an engine reads must come
+  /// through here — see CLAUDE.md §2.3 and §12.2.
+  RuleConfig get rules => RuleConfig(config);
 
-  bool boolConfig(String key, bool fallback) {
-    final v = config[key];
-    return v is bool ? v : fallback;
-  }
+  int intConfig(String key, int fallback) => rules.getInt(key, fallback);
+
+  bool boolConfig(String key, bool fallback) => rules.getBool(key, fallback);
+
+  double doubleConfig(String key, double fallback) =>
+      rules.getDouble(key, fallback);
+
+  String stringConfig(String key, String fallback) =>
+      rules.getString(key, fallback);
+
+  List<int> intListConfig(String key, List<int> fallback) =>
+      rules.getIntList(key, fallback);
 
   String nameFor(Side side) => switch (side) {
         Side.a => entrantAName,
@@ -260,6 +269,81 @@ abstract class ScoringPlugin {
       if (result.isAccepted) state = result.state;
     }
     return state;
+  }
+
+  /// Rebuilds state from a log that may contain corrections.
+  ///
+  /// This is the whole of the UNDO model, and it is why the log can stay
+  /// append-only. A mistake is never edited or deleted; the scorer appends an
+  /// [undoActionType] event naming the sequence number it reverses, and the
+  /// projection is recomputed by replaying every event *except* the reversed
+  /// ones. Nothing is mutated and nothing is lost — the log still records
+  /// that the error was made and then withdrawn, which is what a disputed
+  /// scorecard needs to be able to show.
+  ///
+  /// Undoing an undo is supported: an undo is itself reversible, which is
+  /// what makes a mis-tapped correction recoverable.
+  Map<String, dynamic> rebuild(
+    Iterable<LoggedAction> log,
+    ScoringContext ctx,
+  ) {
+    final entries = log.toList()..sort((x, y) => x.seq.compareTo(y.seq));
+    final withdrawn = resolveWithdrawn(entries);
+
+    var state = initialState(ctx);
+    for (final e in entries) {
+      if (withdrawn.contains(e.seq)) continue;
+      // An undo is bookkeeping, not a scoring action. Handing it to an
+      // engine's `apply` would be rejected as unknown.
+      if (e.action.type == undoActionType) continue;
+      final result = apply(state, e.action, ctx);
+      if (result.isAccepted) state = result.state;
+    }
+    return state;
+  }
+
+  /// Which sequence numbers a log's corrections have withdrawn.
+  ///
+  /// Resolved by walking the log **backwards**. An undo can itself be undone,
+  /// and a forward pass cannot express that: by the time it reaches the
+  /// second undo it has already applied the first one's effect, and
+  /// un-marking the undo event does not restore what that undo removed.
+  /// Going backwards, the newest correction wins and cancels any older one it
+  /// targets before that older one is ever consulted.
+  static Set<int> resolveWithdrawn(List<LoggedAction> sortedEntries) {
+    final cancelled = <int>{};
+    for (final e in sortedEntries.reversed) {
+      if (e.action.type != undoActionType) continue;
+      // An undo that has itself been withdrawn does nothing.
+      if (cancelled.contains(e.seq)) continue;
+      final target = e.reversesSeq;
+      if (target != null) cancelled.add(target);
+    }
+    return cancelled;
+  }
+
+  /// The action type that withdraws an earlier event.
+  ///
+  /// Handled by [rebuild] rather than by any engine's `apply`, so every sport
+  /// gets correction for free and no engine can implement it inconsistently.
+  static const undoActionType = 'undo';
+}
+
+/// One event from the log, as replay sees it: an action plus the sequence
+/// number it was written under.
+@immutable
+class LoggedAction {
+  const LoggedAction({required this.seq, required this.action});
+
+  final int seq;
+  final ScoreAction action;
+
+  /// For an undo event, the sequence number being withdrawn.
+  int? get reversesSeq {
+    final v = action.payload['reversesSeq'];
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    return null;
   }
 }
 

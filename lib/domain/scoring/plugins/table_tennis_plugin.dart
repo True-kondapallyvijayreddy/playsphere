@@ -31,7 +31,18 @@ class TableTennisPlugin extends ScoringPlugin {
 
   int _gameTo(ScoringContext ctx) => ctx.intConfig('pointsPerSet', 11);
   int _gamesToWin(ScoringContext ctx) => ctx.intConfig('setsToWin', 3);
-  int _serveEvery(ScoringContext ctx) => ctx.intConfig('serveEvery', 2);
+
+  /// Serves per turn before deuce. The ITTF number is two; some club and
+  /// school ladders play five, so it is read rather than assumed.
+  int _serveEvery(ScoringContext ctx) =>
+      ctx.intConfig('serveEvery', ctx.intConfig('servesPerTurn', 2));
+
+  /// Serves per turn once both sides reach the deuce threshold.
+  int _serveEveryAtDeuce(ScoringContext ctx) =>
+      ctx.intConfig('servesPerTurnAtDeuce', 1);
+
+  /// The margin a game must be won by. ITTF is two.
+  int _winBy(ScoringContext ctx) => ctx.intConfig('winBy', 2);
 
   @override
   Map<String, dynamic> initialState(ScoringContext ctx) => {
@@ -60,9 +71,11 @@ class TableTennisPlugin extends ScoringPlugin {
 
     int blocks;
     if (a >= deuceAt && b >= deuceAt) {
-      // Everything before deuce in whole blocks, then one serve per point.
+      // Everything before deuce in whole blocks, then the deuce rate after.
       final beforeDeuce = deuceAt * 2;
-      blocks = beforeDeuce ~/ _serveEvery(ctx) + (played - beforeDeuce);
+      final atDeuce = _serveEveryAtDeuce(ctx).clamp(1, 1 << 30);
+      blocks = beforeDeuce ~/ _serveEvery(ctx) +
+          (played - beforeDeuce) ~/ atDeuce;
     } else {
       blocks = played ~/ _serveEvery(ctx);
     }
@@ -137,7 +150,7 @@ class TableTennisPlugin extends ScoringPlugin {
     final high = a > b ? a : b;
 
     // No cap: 15-13 is a legal table tennis game.
-    if (high < target || (a - b).abs() < 2) return state;
+    if (high < target || (a - b).abs() < _winBy(ctx)) return state;
 
     final aWon = a > b;
     final completed = copyList(state['completedGames'])..add({'a': a, 'b': b});

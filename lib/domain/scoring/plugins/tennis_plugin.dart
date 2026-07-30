@@ -48,7 +48,19 @@ class TennisPlugin extends ScoringPlugin {
   bool _decidingSetTiebreak(ScoringContext ctx) =>
       ctx.boolConfig('decidingSetTiebreak', false);
   int _decidingTiebreakTo(ScoringContext ctx) =>
-      ctx.intConfig('decidingTiebreakTo', 10);
+      ctx.intConfig('decidingTiebreakTo', ctx.intConfig('matchTiebreakTo', 10));
+
+  /// Points needed to take a game, and the margin required. Fast4 and other
+  /// abbreviated formats vary both, so neither is a constant.
+  int _pointsToWinGame(ScoringContext ctx) =>
+      ctx.intConfig('pointsToWinGame', 4);
+  int _gameWinBy(ScoringContext ctx) => ctx.intConfig('gameWinBy', 2);
+
+  /// Games needed to take a set, and by what margin. Fast4 sets are to four
+  /// and need only a one-game margin.
+  int _gamesWinBy(ScoringContext ctx) => ctx.intConfig('gamesWinBy', 2);
+
+  int _tiebreakWinBy(ScoringContext ctx) => ctx.intConfig('tiebreakWinBy', 2);
 
   @override
   Map<String, dynamic> initialState(ScoringContext ctx) => {
@@ -194,7 +206,8 @@ class TennisPlugin extends ScoringPlugin {
       final target = _isDecidingSet(next, ctx) && _decidingSetTiebreak(ctx)
           ? _decidingTiebreakTo(ctx)
           : _tiebreakTo(ctx);
-      if (v(key) >= target && v(key) - v(otherKey) >= 2) {
+      if (v(key) >= target &&
+          v(key) - v(otherKey) >= _tiebreakWinBy(ctx)) {
         return _awardSet(next, side, ctx, viaTiebreak: true);
       }
       return next;
@@ -205,12 +218,14 @@ class TennisPlugin extends ScoringPlugin {
     final mine = v(key);
     final theirs = v(otherKey);
     final noAd = _noAd(ctx);
+    final toWin = _pointsToWinGame(ctx);
     // With no-ad there is no advantage: four points takes the game whatever
     // the margin, so 4-3 wins where advantage scoring would call it AD.
     // Testing `mine >= 3 && theirs >= 3` instead would award the game AT
     // deuce, to whoever happened to arrive there second.
-    final gameWon =
-        noAd ? mine >= 4 : (mine >= 4 && mine - theirs >= 2);
+    final gameWon = noAd
+        ? mine >= toWin
+        : (mine >= toWin && mine - theirs >= _gameWinBy(ctx));
 
     if (gameWon) return _awardGame(next, side, ctx);
     return next;
@@ -244,7 +259,7 @@ class TennisPlugin extends ScoringPlugin {
     final mine = v(gk);
     final theirs = v(otherGk);
 
-    if (mine >= target && mine - theirs >= 2) {
+    if (mine >= target && mine - theirs >= _gamesWinBy(ctx)) {
       return _awardSet(next, side, ctx);
     }
     // Six all: tiebreak, unless the format replaces a deciding set with a

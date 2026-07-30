@@ -1,3 +1,4 @@
+import '../player_stats.dart';
 import '../scoring_plugin.dart';
 import 'cricket_scorecard.dart';
 
@@ -37,10 +38,82 @@ class CricketPlugin extends ScoringPlugin {
   @override
   String get displayName => 'Cricket (ball by ball)';
 
+  // Per-player tally keys.
+  //
+  // Cricket keeps its authoritative figures inside the innings records, which
+  // is what the scorecard renders from. These are a mirror of the same facts
+  // in the shared shape every other sport uses, so that the career aggregator
+  // and the rating service — neither of which knows anything about innings —
+  // can read cricket at all. Without this mirror the flagship sport
+  // contributes nothing to a player's lifelong record.
+  static const _runsScored = 'runsScored';
+  static const _ballsFaced = 'ballsFaced';
+  static const _fours = 'fours';
+  static const _sixes = 'sixes';
+  static const _dismissed = 'dismissed';
+  static const _wickets = 'wickets';
+  static const _ballsBowled = 'ballsBowled';
+  static const _runsConceded = 'runsConceded';
+  static const _maidens = 'maidens';
+  static const _catches = 'catches';
+  static const _stumpings = 'stumpings';
+  static const _runOuts = 'runOuts';
+  static const _runOutAssists = 'runOutAssists';
+
   int _ballsPerOver(ScoringContext ctx) => ctx.intConfig('ballsPerOver', 6);
   int _overs(ScoringContext ctx) => ctx.intConfig('oversPerInnings', 20);
   int _wicketsAllowed(ScoringContext ctx) =>
       ctx.intConfig('playersPerTeam', 11) - 1;
+
+  /// The penalty for a wide. Two under most tennis-ball and gully rules, one
+  /// under the ICC playing conditions.
+  int _wideRuns(ScoringContext ctx) => ctx.intConfig('wideRuns', 1);
+  int _noBallRuns(ScoringContext ctx) => ctx.intConfig('noBallRuns', 1);
+
+  /// Whether a no-ball grants a free hit. Off in most non-limited-overs and
+  /// tennis-ball formats.
+  bool _freeHitEnabled(ScoringContext ctx) =>
+      ctx.boolConfig('freeHitOnNoBall', true);
+
+  int _boundaryFour(ScoringContext ctx) => ctx.intConfig('boundaryFour', 4);
+  int _boundarySix(ScoringContext ctx) => ctx.intConfig('boundarySix', 6);
+
+  /// Who gets credit in the field for a dismissal, and for what.
+  ///
+  /// The spec asks for catches, stumpings and run-outs as first-class fielding
+  /// statistics. Before this they existed only inside the dismissal *string*
+  /// ("c Reddy b Sharma"), which reads correctly on a scorecard and is
+  /// invisible to a career record.
+  Map<String, Map<String, num>> _fieldingCredits(
+    ScoreAction action,
+    bool isRunOut,
+  ) {
+    final type = action.payload['type'] as String? ??
+        (isRunOut ? 'run_out' : 'bowled');
+    final fielder = action.payload['fielder'] as String?;
+    final keeper = action.payload['keeper'] as String?;
+    final credits = <String, Map<String, num>>{};
+
+    void give(String? id, String key) {
+      if (id == null || id.isEmpty) return;
+      credits[id] = {...?credits[id], key: (credits[id]?[key] ?? 0) + 1};
+    }
+
+    switch (type) {
+      case 'caught':
+        // A caught-behind is a catch to the keeper, not a stumping.
+        give(fielder ?? keeper, _catches);
+      case 'stumped':
+        give(keeper ?? fielder, _stumpings);
+      case 'run_out':
+        give(fielder, _runOuts);
+        // A second name on a run-out is the assist — the throw, where the
+        // first name took the bails off.
+        final assist = action.payload['assist'] as String?;
+        give(assist, _runOutAssists);
+    }
+    return credits;
+  }
 
   @override
   Map<String, dynamic> initialState(ScoringContext ctx) {
@@ -53,6 +126,7 @@ class CricketPlugin extends ScoringPlugin {
       'complete': false,
       'winner': null,
       'tie': false,
+      PlayerTally.stateKey: <String, dynamic>{},
     };
   }
 
@@ -249,6 +323,12 @@ class CricketPlugin extends ScoringPlugin {
     var runsThisBall = 0; // for strike rotation
     var nextFreeHit = false;
     var wicketFell = false;
+    // Whether the batter who went was the one on strike. A non-striker
+    // run-out leaves the striker where they are.
+    var wicketWasStriker = true;
+    String? dismissedPlayerId;
+    // Catches, stumpings and run-outs to credit to the fielding side.
+    var fielderCredits = const <String, Map<String, num>>{};
 
     switch (action.type) {
       case 'runs':
@@ -259,8 +339,8 @@ class CricketPlugin extends ScoringPlugin {
         cur['runs'] = i(cur['runs']) + r;
         bat['runs'] = i(bat['runs']) + r;
         bat['balls'] = i(bat['balls']) + 1;
-        if (r == 4) bat['fours'] = i(bat['fours']) + 1;
-        if (r == 6) bat['sixes'] = i(bat['sixes']) + 1;
+        if (r == _boundaryFour(ctx)) bat['fours'] = i(bat['fours']) + 1;
+        if (r == _boundarySix(ctx)) bat['sixes'] = i(bat['sixes']) + 1;
         bowl['runs'] = i(bowl['runs']) + r;
         cur['overRuns'] = i(cur['overRuns']) + r;
         legalDelivery = true;
@@ -271,7 +351,7 @@ class CricketPlugin extends ScoringPlugin {
         // faced nothing — so no ball is added to their tally. Does not clear
         // an existing free hit.
         final extra = i(action.payload['runs']);
-        final total = 1 + extra;
+        final total = _wideRuns(ctx) + extra;
         cur['runs'] = i(cur['runs']) + total;
         extras['wide'] = i(extras['wide']) + total;
         bowl['runs'] = i(bowl['runs']) + total;
@@ -284,16 +364,17 @@ class CricketPlugin extends ScoringPlugin {
         // Penalty plus runs off the bat. Not a legal delivery, but the batter
         // did face it, so it counts as a ball faced and the runs are theirs.
         final offBat = i(action.payload['runs']);
-        cur['runs'] = i(cur['runs']) + 1 + offBat;
-        extras['noBall'] = i(extras['noBall']) + 1;
+        final penalty = _noBallRuns(ctx);
+        cur['runs'] = i(cur['runs']) + penalty + offBat;
+        extras['noBall'] = i(extras['noBall']) + penalty;
         bat['runs'] = i(bat['runs']) + offBat;
         bat['balls'] = i(bat['balls']) + 1;
-        if (offBat == 4) bat['fours'] = i(bat['fours']) + 1;
-        if (offBat == 6) bat['sixes'] = i(bat['sixes']) + 1;
-        bowl['runs'] = i(bowl['runs']) + 1 + offBat;
+        if (offBat == _boundaryFour(ctx)) bat['fours'] = i(bat['fours']) + 1;
+        if (offBat == _boundarySix(ctx)) bat['sixes'] = i(bat['sixes']) + 1;
+        bowl['runs'] = i(bowl['runs']) + penalty + offBat;
         bowl['noBalls'] = i(bowl['noBalls']) + 1;
-        cur['overRuns'] = i(cur['overRuns']) + 1 + offBat;
-        nextFreeHit = true;
+        cur['overRuns'] = i(cur['overRuns']) + penalty + offBat;
+        nextFreeHit = _freeHitEnabled(ctx);
         runsThisBall = offBat;
 
       case 'bye':
@@ -322,21 +403,80 @@ class CricketPlugin extends ScoringPlugin {
         if (i(cur['wickets']) >= _wicketsAllowed(ctx)) {
           return const ScoringResult.rejected('All out already.');
         }
-        final withRuns = i(action.payload['runs']);
-        if (withRuns > 0) {
-          cur['runs'] = i(cur['runs']) + withRuns;
-          bat['runs'] = i(bat['runs']) + withRuns;
-          bowl['runs'] = i(bowl['runs']) + withRuns;
-          cur['overRuns'] = i(cur['overRuns']) + withRuns;
+
+        // A dismissal can happen off an illegal delivery: a batter can be
+        // stumped off a wide, or run out off a no-ball. When it does, the
+        // delivery keeps its own legality and its own penalty run — treating
+        // every wicket as a legal ball loses both.
+        final onDelivery =
+            action.payload['delivery'] as String? ?? 'legal';
+        final offWide = onDelivery == 'wide';
+        final offNoBall = onDelivery == 'no_ball';
+
+        // Who actually went. A non-striker run out is the case a naive engine
+        // gets wrong: it debits the striker, corrupting their average and the
+        // fall-of-wicket line for the rest of the innings.
+        final dismissedId = action.payload['playerId'] as String? ?? striker;
+        final nonStrikerId = cur['nonStriker'] as String?;
+        final dismissedIsStriker = dismissedId == striker;
+        if (!dismissedIsStriker && dismissedId != nonStrikerId) {
+          return const ScoringResult.rejected(
+            'The dismissed player must be one of the two batters at the '
+            'crease.',
+          );
         }
-        bat['balls'] = i(bat['balls']) + 1;
-        bat['out'] = true;
-        bat['dismissal'] = _dismissalText(action, ctx);
+
+        final dismissed = dismissedIsStriker
+            ? bat
+            : Map<String, dynamic>.from(
+                batting[dismissedId] as Map? ?? _newBatting(),
+              );
+
+        final withRuns = i(action.payload['runs']);
+        if (offWide) {
+          // Penalty plus anything run; nothing to the batter.
+          final total = _wideRuns(ctx) + withRuns;
+          cur['runs'] = i(cur['runs']) + total;
+          extras['wide'] = i(extras['wide']) + total;
+          bowl['runs'] = i(bowl['runs']) + total;
+          bowl['wides'] = i(bowl['wides']) + 1;
+          cur['overRuns'] = i(cur['overRuns']) + total;
+        } else if (offNoBall) {
+          final total = _noBallRuns(ctx) + withRuns;
+          cur['runs'] = i(cur['runs']) + total;
+          extras['noBall'] = i(extras['noBall']) + _noBallRuns(ctx);
+          bat['runs'] = i(bat['runs']) + withRuns;
+          bat['balls'] = i(bat['balls']) + 1;
+          bowl['runs'] = i(bowl['runs']) + total;
+          bowl['noBalls'] = i(bowl['noBalls']) + 1;
+          cur['overRuns'] = i(cur['overRuns']) + total;
+        } else {
+          if (withRuns > 0) {
+            cur['runs'] = i(cur['runs']) + withRuns;
+            bat['runs'] = i(bat['runs']) + withRuns;
+            bowl['runs'] = i(bowl['runs']) + withRuns;
+            cur['overRuns'] = i(cur['overRuns']) + withRuns;
+          }
+          // Only a legal delivery is a ball faced by the striker.
+          bat['balls'] = i(bat['balls']) + 1;
+        }
+
+        dismissed['out'] = true;
+        dismissed['dismissal'] = _dismissalText(action, ctx);
         cur['wickets'] = i(cur['wickets']) + 1;
-        // A run-out is not the bowler's wicket.
+        // A run-out is not the bowler's wicket, and a wicket off a wide can
+        // only ever be a run-out or a stumping.
         if (!isRunOut) bowl['wickets'] = i(bowl['wickets']) + 1;
-        legalDelivery = true;
+
+        if (!dismissedIsStriker) batting[dismissedId] = dismissed;
+
+        legalDelivery = !offWide && !offNoBall;
+        // A no-ball still grants the free hit even when a run-out falls off it.
+        nextFreeHit = offNoBall && _freeHitEnabled(ctx);
         wicketFell = true;
+        wicketWasStriker = dismissedIsStriker;
+        dismissedPlayerId = dismissedId;
+        fielderCredits = _fieldingCredits(action, isRunOut);
         runsThisBall = withRuns;
 
       default:
@@ -359,11 +499,15 @@ class CricketPlugin extends ScoringPlugin {
         'n': i(cur['wickets']),
         'runs': i(cur['runs']),
         'balls': i(cur['legalBalls']),
-        'playerId': striker,
+        'playerId': dismissedPlayerId ?? striker,
       });
-      // The crease is empty until a replacement is named. `new_batter` fills
-      // it; scoring another delivery first is refused above.
-      cur['striker'] = null;
+      // The crease the dismissed batter left is the one that needs filling.
+      // A non-striker run-out leaves the striker exactly where they were.
+      if (wicketWasStriker) {
+        cur['striker'] = null;
+      } else {
+        cur['nonStriker'] = null;
+      }
     } else if (runsThisBall.isOdd) {
       // Odd runs put the other batter on strike.
       final s1 = cur['striker'];
@@ -391,12 +535,100 @@ class CricketPlugin extends ScoringPlugin {
       ..['fow'] = fow;
     innings[idx] = cur;
 
-    final next = mutate(state, (s) {
+    var next = mutate(state, (s) {
       s['innings'] = innings;
       s['freeHit'] = nextFreeHit;
     });
 
+    next = _mirrorToTally(
+      next,
+      striker: striker,
+      bowler: bowler,
+      dismissedId: dismissedPlayerId,
+      fielderCredits: fielderCredits,
+      innings: innings,
+    );
+
     return ScoringResult.ok(_settle(next, ctx));
+  }
+
+  /// Rewrites the shared per-player tally from the innings records.
+  ///
+  /// Recomputed from the authoritative innings rather than incremented
+  /// alongside them. Two counters maintained in parallel drift the moment any
+  /// path updates one and not the other — and the whole reason this mirror
+  /// exists is that a career record has to agree with the scorecard.
+  Map<String, dynamic> _mirrorToTally(
+    Map<String, dynamic> state, {
+    required String striker,
+    required String bowler,
+    String? dismissedId,
+    required Map<String, Map<String, num>> fielderCredits,
+    required List<Map<String, dynamic>> innings,
+  }) {
+    // Fielding credits accumulate — they are not derivable from the innings
+    // records, which only hold batting and bowling.
+    final existing = Map<String, dynamic>.from(
+      state[PlayerTally.stateKey] as Map? ?? const <String, dynamic>{},
+    );
+    final fielding = <String, Map<String, num>>{};
+    for (final entry in existing.entries) {
+      final t = entry.value as Map? ?? const {};
+      final keep = <String, num>{};
+      for (final k in [_catches, _stumpings, _runOuts, _runOutAssists]) {
+        final v = t[k];
+        if (v is num && v != 0) keep[k] = v;
+      }
+      if (keep.isNotEmpty) fielding[entry.key] = keep;
+    }
+    for (final entry in fielderCredits.entries) {
+      final merged = Map<String, num>.from(fielding[entry.key] ?? const {});
+      for (final d in entry.value.entries) {
+        merged[d.key] = (merged[d.key] ?? 0) + d.value;
+      }
+      fielding[entry.key] = merged;
+    }
+
+    final tally = <String, dynamic>{};
+    void put(String id, String key, num value) {
+      if (value == 0) return;
+      final mine = Map<String, dynamic>.from(
+        tally[id] as Map? ?? const <String, dynamic>{},
+      );
+      mine[key] = (mine[key] as num? ?? 0) + value;
+      tally[id] = mine;
+    }
+
+    for (final inn in innings) {
+      final bat = inn['batting'] as Map? ?? const {};
+      for (final e in bat.entries) {
+        final id = e.key.toString();
+        final r = e.value as Map? ?? const {};
+        put(id, _runsScored, (r['runs'] as num?) ?? 0);
+        put(id, _ballsFaced, (r['balls'] as num?) ?? 0);
+        put(id, _fours, (r['fours'] as num?) ?? 0);
+        put(id, _sixes, (r['sixes'] as num?) ?? 0);
+        if (r['out'] == true) put(id, _dismissed, 1);
+      }
+
+      final bowl = inn['bowling'] as Map? ?? const {};
+      for (final e in bowl.entries) {
+        final id = e.key.toString();
+        final r = e.value as Map? ?? const {};
+        put(id, _wickets, (r['wickets'] as num?) ?? 0);
+        put(id, _ballsBowled, (r['balls'] as num?) ?? 0);
+        put(id, _runsConceded, (r['runs'] as num?) ?? 0);
+        put(id, _maidens, (r['maidens'] as num?) ?? 0);
+      }
+    }
+
+    for (final entry in fielding.entries) {
+      for (final d in entry.value.entries) {
+        put(entry.key, d.key, d.value);
+      }
+    }
+
+    return {...state, PlayerTally.stateKey: tally};
   }
 
   String _dismissalText(ScoreAction action, ScoringContext ctx) {

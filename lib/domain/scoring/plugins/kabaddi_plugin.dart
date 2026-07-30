@@ -1,4 +1,5 @@
 import '../player_stats.dart';
+import '../rule_config.dart';
 import '../scoring_plugin.dart';
 
 /// Kabaddi, scored properly.
@@ -56,6 +57,24 @@ class KabaddiPlugin extends ScoringPlugin {
 
   int _superRaidAt(ScoringContext ctx) => ctx.intConfig('superRaidPoints', 3);
 
+  /// What a single touch is worth. Configurable because circle-style and
+  /// amateur rulesets do not all award one point per defender touched.
+  int _touchPoints(ScoringContext ctx) =>
+      ctx.intConfig('touchPointsPerDefender', 1);
+
+  int _bonusValue(ScoringContext ctx) => ctx.intConfig('bonusPoints', 1);
+
+  int _tackleValue(ScoringContext ctx) => ctx.intConfig('tacklePoints', 1);
+
+  int _superTackleValue(ScoringContext ctx) =>
+      ctx.intConfig('superTacklePoints', 2);
+
+  int _allOutBonus(ScoringContext ctx) => ctx.intConfig('allOutBonus', 2);
+
+  /// How many consecutive empty raids force a do-or-die.
+  int _doOrDieAfter(ScoringContext ctx) =>
+      ctx.intConfig('doOrDieAfterEmptyRaids', 2);
+
   @override
   Map<String, dynamic> initialState(ScoringContext ctx) {
     final n = _onCourt(ctx);
@@ -83,8 +102,17 @@ class KabaddiPlugin extends ScoringPlugin {
   String _emptyKey(Side s) => s == Side.a ? 'emptyA' : 'emptyB';
 
   /// True when this side's next raid must produce a point.
-  bool isDoOrDie(Map<String, dynamic> state, Side raidingSide) =>
-      ((state[_emptyKey(raidingSide)] as num?)?.toInt() ?? 0) >= 2;
+  ///
+  /// [ctx] is optional so a caller that only has state — a summary line, a
+  /// spectator view — can still ask, falling back to the standard two raids.
+  bool isDoOrDie(
+    Map<String, dynamic> state,
+    Side raidingSide, [
+    ScoringContext? ctx,
+  ]) {
+    final threshold = ctx == null ? 2 : _doOrDieAfter(ctx);
+    return ((state[_emptyKey(raidingSide)] as num?)?.toInt() ?? 0) >= threshold;
+  }
 
   @override
   ScoringResult apply(
@@ -120,7 +148,9 @@ class KabaddiPlugin extends ScoringPlugin {
         final defendersOnCourt = val(_courtKey(defending));
 
         // The bonus line is only worth a point against a near-full defence.
-        if (bonus && defendersOnCourt < _bonusThreshold(ctx)) {
+        if (bonus &&
+            _bonusThreshold(ctx) > 0 &&
+            defendersOnCourt < _bonusThreshold(ctx)) {
           return ScoringResult.rejected(
             'A bonus point needs at least ${_bonusThreshold(ctx)} defenders '
             'on the mat — there are $defendersOnCourt.',
@@ -133,8 +163,9 @@ class KabaddiPlugin extends ScoringPlugin {
           );
         }
 
-        final scored = touched + (bonus ? 1 : 0);
-        final wasDoOrDie = isDoOrDie(state, raiding);
+        final scored =
+            touched * _touchPoints(ctx) + (bonus ? _bonusValue(ctx) : 0);
+        final wasDoOrDie = isDoOrDie(state, raiding, ctx);
 
         var next = Map<String, dynamic>.from(state);
 
@@ -191,8 +222,10 @@ class KabaddiPlugin extends ScoringPlugin {
 
         final defendersOnCourt = val(_courtKey(defending));
         // A depleted defence stopping a raider is worth double.
-        final isSuper = defendersOnCourt <= _superTackleAt(ctx);
-        final points = isSuper ? 2 : 1;
+        final isSuper = _superTackleAt(ctx) > 0 &&
+            defendersOnCourt <= _superTackleAt(ctx);
+        final points =
+            isSuper ? _superTackleValue(ctx) : _tackleValue(ctx);
 
         var next = Map<String, dynamic>.from(state);
         next[_sideKey(defending)] = val(_sideKey(defending)) + points;
@@ -257,16 +290,17 @@ class KabaddiPlugin extends ScoringPlugin {
     ScoringContext ctx,
   ) {
     final n = _onCourt(ctx);
+    final bonus = _allOutBonus(ctx);
     var next = Map<String, dynamic>.from(state);
     int val(String k) => (next[k] as num?)?.toInt() ?? 0;
 
     if (val('onCourtA') <= 0) {
-      next['b'] = val('b') + 2;
+      next['b'] = val('b') + bonus;
       next['allOutsB'] = val('allOutsB') + 1;
       next['onCourtA'] = n;
       next['onCourtB'] = n;
     } else if (val('onCourtB') <= 0) {
-      next['a'] = val('a') + 2;
+      next['a'] = val('a') + bonus;
       next['allOutsA'] = val('allOutsA') + 1;
       next['onCourtB'] = n;
       next['onCourtA'] = n;
@@ -274,7 +308,15 @@ class KabaddiPlugin extends ScoringPlugin {
     return next;
   }
 
-  static List<StatColumn> get columns => [
+  static List<StatColumn> get columns => columnsFor();
+
+  /// Stat columns for a given ruleset. Super-10 and High-5 are milestones
+  /// defined by the league, not by the sport, so their thresholds are read
+  /// from the same config the engine scored under.
+  static List<StatColumn> columnsFor([RuleConfig? rules]) {
+    final superTenAt = rules?.getInt('superTenAt', 10) ?? 10;
+    final highFiveAt = rules?.getInt('highFiveAt', 5) ?? 5;
+    return [
         const StatColumn(key: _raidPoints, label: 'Raid points', shortLabel: 'RP'),
         const StatColumn(
           key: _tacklePoints,
@@ -309,15 +351,16 @@ class KabaddiPlugin extends ScoringPlugin {
           shortLabel: 'S10',
           // Ten raid points in a match is kabaddi's headline individual
           // achievement, the way a century is in cricket.
-          derive: (t) => (t[_raidPoints] ?? 0) >= 10 ? 1 : 0,
+          derive: (t) => (t[_raidPoints] ?? 0) >= superTenAt ? 1 : 0,
         ),
         StatColumn(
           key: 'high5',
           label: 'High 5',
           shortLabel: 'H5',
-          derive: (t) => (t[_tacklePoints] ?? 0) >= 5 ? 1 : 0,
+          derive: (t) => (t[_tacklePoints] ?? 0) >= highFiveAt ? 1 : 0,
         ),
       ];
+  }
 
   BoxScore boxScore(
     Map<String, dynamic> state,
@@ -328,7 +371,7 @@ class KabaddiPlugin extends ScoringPlugin {
         state: state,
         ctx: ctx,
         side: side,
-        columns: columns,
+        columns: columnsFor(ctx.rules),
       );
 
   @override
@@ -348,8 +391,12 @@ class KabaddiPlugin extends ScoringPlugin {
       'Half ${state['period'] ?? 1} of ${_halves(ctx)}',
       '${state['onCourtA'] ?? 0} v ${state['onCourtB'] ?? 0} on the mat',
     ];
-    if (isDoOrDie(state, Side.a)) parts.add('${ctx.entrantAName}: DO OR DIE');
-    if (isDoOrDie(state, Side.b)) parts.add('${ctx.entrantBName}: DO OR DIE');
+    if (isDoOrDie(state, Side.a, ctx)) {
+      parts.add('${ctx.entrantAName}: DO OR DIE');
+    }
+    if (isDoOrDie(state, Side.b, ctx)) {
+      parts.add('${ctx.entrantBName}: DO OR DIE');
+    }
     return parts.join(' · ');
   }
 

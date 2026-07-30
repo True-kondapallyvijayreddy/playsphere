@@ -1,5 +1,9 @@
 import '../../core/models/enums.dart';
+import 'plugins/athletics_plugin.dart';
+import 'plugins/badminton_plugin.dart';
 import 'plugins/basketball_plugin.dart';
+import 'plugins/carrom_plugin.dart';
+import 'plugins/chess_plugin.dart';
 import 'plugins/cricket_plugin.dart';
 import 'plugins/football_plugin.dart';
 import 'plugins/goal_based_plugin.dart';
@@ -11,6 +15,7 @@ import 'plugins/volleyball_plugin.dart';
 import 'plugins/simple_points_plugin.dart';
 import 'plugins/table_tennis_plugin.dart';
 import 'plugins/tennis_plugin.dart';
+import 'rule_config.dart';
 import 'scoring_plugin.dart';
 
 /// One sport in the platform catalogue.
@@ -27,7 +32,7 @@ class SportSpec {
     required this.pluginKey,
     required this.archetype,
     this.defaultEntrantType = EntrantType.individual,
-    this.config = const {},
+    this.configOverrides = const {},
     this.icon = '🏅',
     this.unit,
   });
@@ -38,10 +43,23 @@ class SportSpec {
   final CompetitionArchetype archetype;
   final EntrantType defaultEntrantType;
 
+  /// Values layered on top of the sport's default rule preset. Almost always
+  /// empty: the presets in `rule_config.dart` are the single place rule
+  /// numbers are written down, and this exists only for the handful of
+  /// catalogue entries that reuse another sport's engine with a twist.
+  final Map<String, dynamic> configOverrides;
+
+  /// Every ruleset an organizer can pick for this sport, default first.
+  List<RulePreset> get presets => RulePresets.forSport(id);
+
+  /// The ruleset a new competition starts from.
+  RulePreset? get defaultPreset => RulePresets.defaultFor(id);
+
   /// Passed to the plugin as [ScoringContext.config]. Copied onto the
   /// competition at creation time and then frozen, so improving a default
   /// here never rewrites a season already in play.
-  final Map<String, dynamic> config;
+  Map<String, dynamic> get config =>
+      RulePresets.resolve(sportId: id, overrides: configOverrides).toMap();
 
   final String icon;
 
@@ -60,6 +78,11 @@ class SportCatalog {
   const SportCatalog._();
 
   static const List<SportSpec> all = [
+    // Rule numbers deliberately do not appear here. Each sport's parameters
+    // live in `rule_config.dart` as named presets, so a league can pick
+    // "Ultimate Kho Kho — Season 2" or "BWF 3x15" rather than inheriting one
+    // hard-coded ruleset. `SportSpec.config` resolves the default preset.
+
     // --- Bat and ball -----------------------------------------------------
     SportSpec(
       id: 'cricket',
@@ -67,41 +90,23 @@ class SportCatalog {
       pluginKey: CricketPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
       defaultEntrantType: EntrantType.team,
-      icon: '🏏',
-      config: {
-        'oversPerInnings': 20,
-        'ballsPerOver': 6,
-        'playersPerTeam': 11,
-      },
+      icon: '\u{1F3CF}',
     ),
 
     // --- Racquet / net ----------------------------------------------------
     SportSpec(
       id: 'badminton',
       name: 'Badminton',
-      pluginKey: SetBasedPlugin.pluginKey,
+      pluginKey: BadmintonPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
-      icon: '🏸',
-      // 21 a game, best of three, win by two, hard cap at 30.
-      config: {
-        'pointsPerSet': 21,
-        'setsToWin': 2,
-        'winBy': 2,
-        'hardCap': 30,
-      },
+      icon: '\u{1F3F8}',
     ),
     SportSpec(
       id: 'table_tennis',
       name: 'Table Tennis',
       pluginKey: TableTennisPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
-      icon: '🏓',
-      // 11 a game, best of five, win by two, no cap.
-      config: {
-        'pointsPerSet': 11,
-        'setsToWin': 3,
-        'winBy': 2,
-      },
+      icon: '\u{1F3D3}',
     ),
     SportSpec(
       id: 'volleyball',
@@ -109,28 +114,14 @@ class SportCatalog {
       pluginKey: VolleyballPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
       defaultEntrantType: EntrantType.team,
-      icon: '🏐',
-      // 25 a set, best of five, but the deciding fifth set is only to 15.
-      config: {
-        'pointsPerSet': 25,
-        'decidingSetPoints': 15,
-        'setsToWin': 3,
-        'winBy': 2,
-      },
+      icon: '\u{1F3D0}',
     ),
     SportSpec(
       id: 'tennis',
       name: 'Tennis',
       pluginKey: TennisPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
-      icon: '🎾',
-      config: {
-        'setsToWin': 2,
-        'gamesPerSet': 6,
-        'tiebreakTo': 7,
-        'noAd': false,
-        'decidingSetTiebreak': false,
-      },
+      icon: '\u{1F3BE}',
     ),
 
     // --- Field / court, goal scoring --------------------------------------
@@ -140,8 +131,7 @@ class SportCatalog {
       pluginKey: FootballPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
       defaultEntrantType: EntrantType.team,
-      icon: '⚽',
-      config: {'periods': 2, 'periodLabel': 'Half', 'allowDraw': true},
+      icon: '\u26BD',
     ),
     SportSpec(
       id: 'basketball',
@@ -149,12 +139,7 @@ class SportCatalog {
       pluginKey: BasketballPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
       defaultEntrantType: EntrantType.team,
-      icon: '🏀',
-      config: {
-        'periods': 4,
-        'periodLabel': 'Quarter',
-        'foulOutAt': 5,
-      },
+      icon: '\u{1F3C0}',
     ),
     SportSpec(
       id: 'kabaddi',
@@ -162,15 +147,7 @@ class SportCatalog {
       pluginKey: KabaddiPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
       defaultEntrantType: EntrantType.team,
-      icon: '🤼',
-      config: {
-        'periods': 2,
-        'periodLabel': 'Half',
-        'playersOnCourt': 7,
-        'bonusMinDefenders': 6,
-        'superTackleMaxDefenders': 3,
-        'superRaidPoints': 3,
-      },
+      icon: '\u{1F93C}',
     ),
     SportSpec(
       id: 'hockey',
@@ -178,8 +155,7 @@ class SportCatalog {
       pluginKey: HockeyPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
       defaultEntrantType: EntrantType.team,
-      icon: '🏑',
-      config: {'periods': 4, 'periodLabel': 'Quarter', 'allowDraw': true},
+      icon: '\u{1F3D1}',
     ),
     SportSpec(
       id: 'kho_kho',
@@ -187,21 +163,7 @@ class SportCatalog {
       pluginKey: KhoKhoPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
       defaultEntrantType: EntrantType.team,
-      icon: '🏃',
-      // Ultimate Kho Kho season-2 style values. Every one is overridable —
-      // they differ between UKK seasons and KKFI-aligned rulesets, and an
-      // engine that hard-coded them would be wrong for whichever league it
-      // was not written against.
-      config: {
-        'tagPoints': 2,
-        'poleDivePoints': 2,
-        'skyDivePoints': 2,
-        'allOutBonus': 4,
-        'batchSize': 3,
-        'turnsPerInnings': 2,
-        'dreamRunAfterSeconds': 180,
-        'dreamRunEverySeconds': 30,
-      },
+      icon: '\u{1F3C3}',
     ),
     SportSpec(
       id: 'throwball',
@@ -209,26 +171,25 @@ class SportCatalog {
       pluginKey: SetBasedPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
       defaultEntrantType: EntrantType.team,
-      icon: '🤾',
-      config: {'pointsPerSet': 25, 'setsToWin': 2, 'winBy': 2},
+      icon: '\u{1F93E}',
+      // Reuses the generic set engine; throwball ships no preset of its own.
+      configOverrides: {'pointsPerSet': 25, 'setsToWin': 2, 'winBy': 2},
     ),
 
     // --- Mind sports ------------------------------------------------------
     SportSpec(
       id: 'chess',
       name: 'Chess',
-      pluginKey: SimplePointsPlugin.pluginKey,
+      pluginKey: ChessPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
-      icon: '♟️',
-      config: {'target': 1, 'winBy': 1, 'allowDraw': true},
+      icon: '\u265F',
     ),
     SportSpec(
       id: 'carrom',
       name: 'Carrom',
-      pluginKey: SimplePointsPlugin.pluginKey,
+      pluginKey: CarromPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
-      icon: '🎯',
-      config: {'target': 25, 'winBy': 1, 'allowDraw': false},
+      icon: '\u{1F3AF}',
     ),
 
     // --- Performance sports (no opponent) ---------------------------------
@@ -236,27 +197,28 @@ class SportCatalog {
     // what allows a school athletics meet to run at all.
     SportSpec(
       id: 'athletics_sprint',
-      name: 'Athletics — Track',
-      pluginKey: SimplePointsPlugin.pluginKey,
+      name: 'Athletics \u2014 Track',
+      pluginKey: AthleticsPlugin.pluginKey,
       archetype: CompetitionArchetype.performance,
-      icon: '🏃',
+      icon: '\u{1F3C3}',
       unit: 'seconds',
     ),
     SportSpec(
       id: 'athletics_field',
-      name: 'Athletics — Field',
-      pluginKey: SimplePointsPlugin.pluginKey,
+      name: 'Athletics \u2014 Field',
+      pluginKey: AthleticsPlugin.pluginKey,
       archetype: CompetitionArchetype.performance,
-      icon: '🥏',
+      icon: '\u{1F94F}',
       unit: 'metres',
     ),
     SportSpec(
       id: 'swimming',
       name: 'Swimming',
-      pluginKey: SimplePointsPlugin.pluginKey,
+      pluginKey: AthleticsPlugin.pluginKey,
       archetype: CompetitionArchetype.performance,
-      icon: '🏊',
+      icon: '\u{1F3CA}',
       unit: 'seconds',
+      configOverrides: {'discipline': 'track', 'lowerIsBetter': true},
     ),
 
     // --- Escape hatch -----------------------------------------------------
@@ -267,7 +229,7 @@ class SportCatalog {
       name: 'Other sport',
       pluginKey: SimplePointsPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
-      icon: '🏅',
+      icon: '\u{1F3C5}',
     ),
   ];
 
@@ -306,6 +268,10 @@ class ScoringRegistry {
     TennisPlugin.pluginKey: TennisPlugin(),
     TableTennisPlugin.pluginKey: TableTennisPlugin(),
     HockeyPlugin.pluginKey: HockeyPlugin(),
+    BadmintonPlugin.pluginKey: BadmintonPlugin(),
+    ChessPlugin.pluginKey: ChessPlugin(),
+    CarromPlugin.pluginKey: CarromPlugin(),
+    AthleticsPlugin.pluginKey: AthleticsPlugin(),
   };
 
   static ScoringPlugin resolve(String? key) => _plugins[key] ?? _fallback;

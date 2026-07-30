@@ -43,6 +43,39 @@ class BasketballPlugin extends ScoringPlugin {
   /// FIBA fouls out at 5, the NBA at 6. Configurable, never assumed.
   int _foulLimit(ScoringContext ctx) => ctx.intConfig('foulOutAt', 5);
 
+  /// What each kind of basket is worth.
+  ///
+  /// 3×3 is the reason these are configuration rather than the constants
+  /// 1/2/3: under FIBA 3×3 an ordinary basket is worth 1 and a shot from
+  /// behind the arc is worth 2, so the point value alone cannot tell you what
+  /// kind of shot it was.
+  int _ftPoints(ScoringContext ctx) => ctx.intConfig('freeThrowPoints', 1);
+  int _fgPoints(ScoringContext ctx) => ctx.intConfig('fieldGoalPoints', 2);
+  int _threePoints(ScoringContext ctx) => ctx.intConfig('threePointPoints', 3);
+
+  /// 3×3 is first-to-21 as well as time-limited. Zero means "no target".
+  int _targetScore(ScoringContext ctx) => ctx.intConfig('targetScore', 0);
+
+  /// Classifies a shot. Modern logs carry an explicit `kind`; older ones only
+  /// have a point value, so fall back to inferring it the way the engine
+  /// originally did rather than mis-reading historic matches.
+  String _shotKind(Map<String, dynamic> payload, ScoringContext ctx) {
+    final explicit = payload['kind'];
+    if (explicit == 'ft' || explicit == 'fg' || explicit == 'three') {
+      return explicit as String;
+    }
+    final value = (payload['value'] as num?)?.toInt() ?? _fgPoints(ctx);
+    if (value == 1) return 'ft';
+    if (value == 3) return 'three';
+    return 'fg';
+  }
+
+  int _pointsForKind(String kind, ScoringContext ctx) => switch (kind) {
+        'ft' => _ftPoints(ctx),
+        'three' => _threePoints(ctx),
+        _ => _fgPoints(ctx),
+      };
+
   @override
   Map<String, dynamic> initialState(ScoringContext ctx) => {
         'a': 0,
@@ -58,6 +91,25 @@ class BasketballPlugin extends ScoringPlugin {
 
   List<String> _fouledOut(Map<String, dynamic> state) =>
       (state['fouledOut'] as List?)?.whereType<String>().toList() ?? const [];
+
+  /// 3×3 ends the moment a side reaches the target, without waiting for the
+  /// clock. A target of zero (the full-court presets) leaves the match open
+  /// until the scorer finalises it.
+  Map<String, dynamic> _settleTarget(
+    Map<String, dynamic> state,
+    ScoringContext ctx,
+  ) {
+    final target = _targetScore(ctx);
+    if (target <= 0) return state;
+    final a = (state['a'] as num?)?.toInt() ?? 0;
+    final b = (state['b'] as num?)?.toInt() ?? 0;
+    if (a < target && b < target) return state;
+    return mutate(state, (s) {
+      s['complete'] = true;
+      s['draw'] = false;
+      s['winner'] = a >= target ? 'a' : 'b';
+    });
+  }
 
   @override
   ScoringResult apply(
@@ -88,15 +140,12 @@ class BasketballPlugin extends ScoringPlugin {
         if (player == null) {
           return const ScoringResult.rejected('Who took the shot?');
         }
-        final value = (action.payload['value'] as num?)?.toInt() ?? 2;
-        if (value < 1 || value > 3) {
-          return const ScoringResult.rejected(
-            'A shot is worth 1, 2 or 3 points.',
-          );
-        }
+        final kind = _shotKind(action.payload, ctx);
+        final value = _pointsForKind(kind, ctx);
         final made = action.payload['made'] == true;
         final assist = action.payload['assistId'] as String?;
-        final isFreeThrow = value == 1;
+        final isFreeThrow = kind == 'ft';
+        final isThree = kind == 'three';
 
         final deltas = <String, num>{
           if (made) _points: value,
@@ -105,8 +154,8 @@ class BasketballPlugin extends ScoringPlugin {
           if (!isFreeThrow) _fgAttempted: 1,
           if (!isFreeThrow && made) _fgMade: 1,
           // A three counts in BOTH the three column and the field-goal column.
-          if (value == 3) _threeAttempted: 1,
-          if (value == 3 && made) _threeMade: 1,
+          if (isThree) _threeAttempted: 1,
+          if (isThree && made) _threeMade: 1,
           if (isFreeThrow) _ftAttempted: 1,
           if (isFreeThrow && made) _ftMade: 1,
         };
@@ -139,7 +188,7 @@ class BasketballPlugin extends ScoringPlugin {
             });
           next = {...next, 'shots': shots};
         }
-        return ScoringResult.ok(next);
+        return ScoringResult.ok(_settleTarget(next, ctx));
 
       case 'rebound':
         if (player == null) {
@@ -343,28 +392,34 @@ class BasketballPlugin extends ScoringPlugin {
       ];
     }
 
+    // Labels follow the ruleset: a 3×3 pad reads +1 / +2, a full-court pad
+    // reads +2 / +3, and neither is baked into the widget layer.
+    final fg = _fgPoints(ctx);
+    final three = _threePoints(ctx);
+    final ft = _ftPoints(ctx);
+
     List<ScoreControl> forSide(Side side, List<String> keys) => [
           ScoreControl(
             action: 'shot',
-            label: '+2',
+            label: '+$fg',
             side: side,
             style: ControlStyle.primary,
-            payload: const {'value': 2, 'made': true},
+            payload: {'kind': 'fg', 'value': fg, 'made': true},
             shortcut: keys[0],
           ),
           ScoreControl(
             action: 'shot',
-            label: '+3',
+            label: '+$three',
             side: side,
             style: ControlStyle.primary,
-            payload: const {'value': 3, 'made': true},
+            payload: {'kind': 'three', 'value': three, 'made': true},
             shortcut: keys[1],
           ),
           ScoreControl(
             action: 'shot',
             label: 'FT',
             side: side,
-            payload: const {'value': 1, 'made': true},
+            payload: {'kind': 'ft', 'value': ft, 'made': true},
             shortcut: keys[2],
           ),
           ScoreControl(
@@ -372,7 +427,7 @@ class BasketballPlugin extends ScoringPlugin {
             label: 'Miss',
             side: side,
             style: ControlStyle.subtle,
-            payload: const {'value': 2, 'made': false},
+            payload: {'kind': 'fg', 'value': fg, 'made': false},
           ),
           ScoreControl(action: 'rebound', label: 'Reb', side: side),
           ScoreControl(action: 'assist', label: 'Ast', side: side),
