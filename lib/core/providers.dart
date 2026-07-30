@@ -1,9 +1,11 @@
 import 'package:firebase_auth/firebase_auth.dart' as fb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../data/community_repository.dart';
 import '../data/competition_repository.dart';
 import '../data/org_repository.dart';
 import '../data/scoring_service.dart';
+import '../data/umpire_repository.dart';
 import '../domain/standings/standings_calculator.dart';
 import 'auth/auth_service.dart';
 import 'models/app_user.dart';
@@ -23,6 +25,9 @@ final orgRepositoryProvider = Provider((ref) => const OrgRepository());
 final competitionRepositoryProvider =
     Provider((ref) => const CompetitionRepository());
 final scoringServiceProvider = Provider((ref) => ScoringService());
+final communityRepositoryProvider =
+    Provider((ref) => const CommunityRepository());
+final umpireRepositoryProvider = Provider((ref) => const UmpireRepository());
 
 // ---------------------------------------------------------------------------
 // Session
