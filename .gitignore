@@ -57,3 +57,8 @@ test/security/package-lock.json
 
 # Firestore emulator data snapshots (local test data only)
 .emulator-data/
+firebase-export-*/
+
+# Throwaway UI spikes (splash animation demos). Kept out of the repo because
+# they are single-file HTML experiments, not part of the app.
+scratch/
