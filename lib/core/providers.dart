@@ -14,6 +14,7 @@ import '../data/org_repository.dart';
 import '../data/scoring_service.dart';
 import '../data/umpire_repository.dart';
 import '../domain/standings/standings_calculator.dart';
+import '../domain/tournament/tournament_leaderboard.dart';
 import '../domain/tournament/tournament_overview.dart';
 import 'async_combine.dart';
 import 'auth/auth_service.dart';
@@ -312,6 +313,19 @@ final tournamentOverviewProvider = Provider.family<AsyncValue<TournamentOverview
     ref.watch(tournamentFixturesProvider(key.tournamentId)),
     (events, fixtures) =>
         TournamentOverview.from(events: events, fixtures: fixtures),
+  );
+});
+
+/// Tournament-wide boards: who has had the best tournament, and how every
+/// group is doing without opening fifteen events one at a time.
+final tournamentLeaderboardProvider = Provider.family<
+    AsyncValue<TournamentLeaderboard>,
+    ({String orgId, String tournamentId})>((ref, key) {
+  return combineAsync2(
+    ref.watch(tournamentEventsProvider(key)),
+    ref.watch(tournamentFixturesProvider(key.tournamentId)),
+    (events, fixtures) =>
+        TournamentLeaderboard.from(events: events, fixtures: fixtures),
   );
 });
 

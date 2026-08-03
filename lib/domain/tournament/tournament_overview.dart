@@ -1,6 +1,7 @@
 import '../../core/models/competition.dart';
 import '../../core/models/enums.dart';
 import '../../core/models/fixture.dart';
+import '../standings/standings_calculator.dart';
 
 /// One event's line in a tournament summary.
 class EventSummary {
@@ -116,7 +117,7 @@ class TournamentOverview {
         total: own.length,
         played: ownPlayed,
         live: ownLive,
-        champion: _championOf(own),
+        champion: _championOf(event, own),
       ));
     }
 
@@ -149,22 +150,35 @@ class TournamentOverview {
     );
   }
 
-  /// The winner of the last match standing.
+  /// Who won an event, by the definition that actually applies to its format.
   ///
-  /// Found by taking the highest round with a result rather than by looking
-  /// for a fixture labelled "Final": a round robin has no final, a groups
-  /// draw numbers two phases from 1, and a double-elimination bracket's last
-  /// match may be a reset that was never played. The deepest resulted match
-  /// is the one definition that holds across every format.
-  static String? _championOf(List<Fixture> fixtures) {
+  /// A bracket is decided by its last match; a league is decided by its table.
+  /// Using one rule for both was wrong and silently so: in a round robin the
+  /// deepest resulted round is simply the final round of fixtures, and its
+  /// winner is whoever happened to win that one match — which is very often
+  /// not the team top of the table.
+  ///
+  /// For brackets the rule is still "deepest resulted round" rather than
+  /// "the fixture labelled Final", because a groups draw numbers two phases
+  /// from 1 and a double-elimination reset may never be played.
+  ///
+  /// Nobody is champion until every match is done: a leader mid-event is not
+  /// a winner.
+  static String? _championOf(Competition event, List<Fixture> fixtures) {
+    if (fixtures.isEmpty) return null;
+    if (fixtures.any((f) => !f.status.isResulted)) return null;
+
+    if (_tableFormats.contains(event.format)) {
+      final table = const StandingsCalculator()
+          .computeFromFixtures(competition: event, fixtures: fixtures);
+      return table.isEmpty ? null : table.first.displayName;
+    }
+
     final resulted = [
       for (final f in fixtures)
-        if (f.status.isResulted && f.winnerEntrantId != null) f,
+        if (f.winnerEntrantId != null) f,
     ];
     if (resulted.isEmpty) return null;
-
-    // Every match must be done — a leader mid-tournament is not a champion.
-    if (fixtures.any((f) => !f.status.isResulted)) return null;
 
     resulted.sort((a, b) {
       final byRound = b.round.compareTo(a.round);
@@ -175,4 +189,14 @@ class TournamentOverview {
         ? decider.entrantAName
         : decider.entrantBName;
   }
+
+  /// Formats decided by a table rather than by a last match.
+  ///
+  /// `groupThenKnockout` is deliberately absent: its groups feed a bracket,
+  /// and the bracket decides it.
+  static const _tableFormats = {
+    CompetitionFormat.roundRobin,
+    CompetitionFormat.leagueTable,
+    CompetitionFormat.swiss,
+  };
 }

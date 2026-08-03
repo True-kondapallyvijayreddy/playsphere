@@ -265,6 +265,42 @@ class StandingsCalculator {
     return tables;
   }
 
+  /// Builds a table from fixtures alone, synthesizing the rows from the names
+  /// the fixtures already carry.
+  ///
+  /// [compute] needs real [Entrant] documents because a league table must list
+  /// a team that has not played yet — leaving them out reads as though they
+  /// were never entered. A tournament summary has the opposite problem: it
+  /// renders many events at once and cannot afford a per-event entrant read
+  /// just to learn who won. Every entrant who appears in a fixture is already
+  /// named on it, so for "who leads this table" that is enough.
+  ///
+  /// The one thing it cannot show is an entrant with no fixtures at all. That
+  /// is the right trade here and the wrong one on the event screen, which is
+  /// why both exist.
+  List<Standing> computeFromFixtures({
+    required Competition competition,
+    required List<Fixture> fixtures,
+  }) {
+    final names = <String, String>{};
+    for (final f in fixtures) {
+      if (f.entrantAId.isNotEmpty) names[f.entrantAId] = f.entrantAName;
+      if (f.entrantBId.isNotEmpty) names[f.entrantBId] = f.entrantBName;
+    }
+    return compute(
+      competition: competition,
+      entrants: [
+        for (final entry in names.entries)
+          Entrant(
+            id: entry.key,
+            displayName: entry.value,
+            entrantType: competition.entrantType,
+          ),
+      ],
+      fixtures: fixtures,
+    );
+  }
+
   /// Whether every match in [groupId] has a result.
   ///
   /// A group table is only safe to promote from once it is final. Resolving a

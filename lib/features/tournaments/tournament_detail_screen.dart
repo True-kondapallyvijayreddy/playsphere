@@ -13,6 +13,7 @@ import '../../core/router/app_router.dart';
 import '../../domain/tournament/tournament_overview.dart';
 import '../../shared/app_scaffold.dart';
 import 'tournaments_screen.dart' show TournamentEditor;
+import 'widgets/leaderboard_cards.dart';
 import 'widgets/running_late_card.dart';
 
 /// One tournament at a glance: how far through it is, what is on court right
@@ -109,6 +110,16 @@ class TournamentDetailScreen extends ConsumerWidget {
                         overview: overview.valueOrNull,
                       ),
                       _UpNext(orgId: orgId, overview: overview.valueOrNull),
+                      GroupsSummaryCard(
+                        leaderboard: ref
+                            .watch(tournamentLeaderboardProvider(key))
+                            .valueOrNull,
+                      ),
+                      LeaderboardCard(
+                        leaderboard: ref
+                            .watch(tournamentLeaderboardProvider(key))
+                            .valueOrNull,
+                      ),
                       _Events(
                         orgId: orgId,
                         tournamentId: tournamentId,
