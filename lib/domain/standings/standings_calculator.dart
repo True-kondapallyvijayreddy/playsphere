@@ -1,4 +1,5 @@
 import '../../core/models/competition.dart';
+import '../../core/models/draw_slot.dart';
 import '../../core/models/fixture.dart';
 import '../scoring/scoring_registry.dart';
 import 'net_run_rate.dart';
@@ -212,6 +213,64 @@ class StandingsCalculator {
     // Stable rather than arbitrary when two rows are genuinely identical, so
     // the table does not reshuffle itself between rebuilds.
     return x.displayName.toLowerCase().compareTo(y.displayName.toLowerCase());
+  }
+
+  /// One table per group, for a groups+knockout draw.
+  ///
+  /// A single table across such a draw is meaningless — Group A's teams have
+  /// never played Group B's — and it was also all this class could produce,
+  /// because the fixtures carried no group tag. That is the whole reason a
+  /// groups+knockout competition could never work out who had qualified.
+  ///
+  /// Each group's rows are the entrants who actually appear in that group's
+  /// fixtures, so an entrant is never listed in a group they were not drawn
+  /// into.
+  Map<String, List<Standing>> computeGroups({
+    required Competition competition,
+    required List<Entrant> entrants,
+    required List<Fixture> fixtures,
+  }) {
+    final byGroup = <String, List<Fixture>>{};
+    for (final f in fixtures) {
+      final g = f.groupId;
+      if (f.bracket != Bracket.group || g == null) continue;
+      byGroup.putIfAbsent(g, () => []).add(f);
+    }
+
+    final byId = {for (final e in entrants) e.id: e};
+    final tables = <String, List<Standing>>{};
+
+    for (final entry in byGroup.entries) {
+      final ids = <String>{};
+      for (final f in entry.value) {
+        if (f.entrantAId.isNotEmpty) ids.add(f.entrantAId);
+        if (f.entrantBId.isNotEmpty) ids.add(f.entrantBId);
+      }
+      tables[entry.key] = compute(
+        competition: competition,
+        entrants: [
+          for (final id in ids)
+            if (byId[id] != null) byId[id]!,
+        ],
+        fixtures: entry.value,
+      );
+    }
+
+    return tables;
+  }
+
+  /// Whether every match in [groupId] has a result.
+  ///
+  /// A group table is only safe to promote from once it is final. Resolving a
+  /// qualifier from a half-played group would name someone who is top on
+  /// Saturday morning and fourth by Saturday night — and having already been
+  /// written into a quarter-final, they would stay there.
+  bool isGroupComplete(String groupId, List<Fixture> fixtures) {
+    final inGroup = fixtures.where(
+      (f) => f.bracket == Bracket.group && f.groupId == groupId,
+    );
+    if (inGroup.isEmpty) return false;
+    return inGroup.every((f) => f.status.isResulted);
   }
 
   int _headToHead(_Row x, _Row y, Map<String, int> h2h) {

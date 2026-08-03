@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../../domain/scoring/match_award.dart';
 import '../../domain/scoring/scoring_plugin.dart';
+import 'draw_slot.dart';
 import 'enums.dart';
 import 'firestore_codec.dart';
 import 'match_official.dart';
@@ -59,6 +60,13 @@ class Fixture {
     this.tossDecision,
     this.feedsWinnerToFixtureId,
     this.feedsWinnerToSlot,
+    this.feedsLoserToFixtureId,
+    this.feedsLoserToSlot,
+    this.bracket = Bracket.knockout,
+    this.groupId,
+    this.qualifierA,
+    this.qualifierB,
+    this.courtId,
     this.startedAt,
     this.completedAt,
   });
@@ -274,6 +282,57 @@ class Fixture {
   /// draw generator so advancement never has to guess.
   final String? feedsWinnerToSlot;
 
+  /// Where this match's *loser* is sent — populated only inside a
+  /// double-elimination draw, where losing a winners-bracket match drops a
+  /// player into the losers bracket instead of eliminating them outright.
+  ///
+  /// Null everywhere else, including on every losers-bracket match itself: a
+  /// losers-bracket loss is a real elimination and goes nowhere. Until this
+  /// field existed the generator wired the whole losers bracket correctly and
+  /// the persistence layer dropped it, so the bracket was written and nobody
+  /// ever arrived in it.
+  final String? feedsLoserToFixtureId;
+  final String? feedsLoserToSlot;
+
+  /// Which sub-bracket this match belongs to. Defaults to [Bracket.knockout],
+  /// which is what every fixture written before this field existed was.
+  final Bracket bracket;
+
+  /// Set on [Bracket.group] matches — "A", "B", … — and null everywhere else.
+  ///
+  /// This is the field a group table is computed over. Without it the
+  /// standings calculator can only produce one table across the whole draw,
+  /// which for a groups+knockout competition is a table nobody wants and no
+  /// group table at all — so qualifiers could never be resolved.
+  final String? groupId;
+
+  /// On a knockout fixture whose entrant is not yet known, which table
+  /// position will fill this side once the groups finish. Null once the real
+  /// entrant is known, and null for a side that is genuinely empty (a bye).
+  final QualifierSource? qualifierA;
+  final QualifierSource? qualifierB;
+
+  /// Which playing area within [venue] this match is on — court 3 of a
+  /// badminton hall, pitch 2 of a ground.
+  ///
+  /// Distinct from [venue] because capacity lives here: a venue with six
+  /// courts runs six matches at once, and a schedule that cannot say which
+  /// court a match is on is not a schedule, it is a start time.
+  final String? courtId;
+
+  /// What to show on a side with no entrant yet — the qualifier it is waiting
+  /// on, if it is waiting on one, rather than a bare "To be decided".
+  String displayNameA() =>
+      entrantAId.isNotEmpty ? entrantAName : (qualifierA?.label ?? entrantAName);
+
+  String displayNameB() =>
+      entrantBId.isNotEmpty ? entrantBName : (qualifierB?.label ?? entrantBName);
+
+  /// Whether both sides are known, so this match can actually be played.
+  /// A knockout placeholder still waiting on a feeder is not playable, and
+  /// the scheduler must not call it to a court.
+  bool get hasBothEntrants => entrantAId.isNotEmpty && entrantBId.isNotEmpty;
+
   final DateTime? startedAt;
   final DateTime? completedAt;
 
@@ -334,6 +393,13 @@ class Fixture {
       tossDecision: Fs.strOrNull(d['tossDecision']),
       feedsWinnerToFixtureId: Fs.strOrNull(d['feedsWinnerToFixtureId']),
       feedsWinnerToSlot: Fs.strOrNull(d['feedsWinnerToSlot']),
+      feedsLoserToFixtureId: Fs.strOrNull(d['feedsLoserToFixtureId']),
+      feedsLoserToSlot: Fs.strOrNull(d['feedsLoserToSlot']),
+      bracket: Bracket.fromWire(Fs.strOrNull(d['bracket'])),
+      groupId: Fs.strOrNull(d['groupId']),
+      qualifierA: QualifierSource.fromWire(Fs.strOrNull(d['qualifierA'])),
+      qualifierB: QualifierSource.fromWire(Fs.strOrNull(d['qualifierB'])),
+      courtId: Fs.strOrNull(d['courtId']),
       startedAt: Fs.dateOrNull(d['startedAt']),
       completedAt: Fs.dateOrNull(d['completedAt']),
     );
@@ -376,6 +442,13 @@ class Fixture {
         'tossDecision': tossDecision,
         'feedsWinnerToFixtureId': feedsWinnerToFixtureId,
         'feedsWinnerToSlot': feedsWinnerToSlot,
+        'feedsLoserToFixtureId': feedsLoserToFixtureId,
+        'feedsLoserToSlot': feedsLoserToSlot,
+        'bracket': bracket.wire,
+        'groupId': groupId,
+        'qualifierA': qualifierA?.wire,
+        'qualifierB': qualifierB?.wire,
+        'courtId': courtId,
         'createdAt': FieldValue.serverTimestamp(),
       };
 
@@ -396,6 +469,7 @@ class Fixture {
     List<MatchOfficial>? officials,
     DateTime? scheduledAt,
     String? venue,
+    String? courtId,
   }) {
     return Fixture(
       id: id,
@@ -439,6 +513,17 @@ class Fixture {
       tossDecision: tossDecision,
       feedsWinnerToFixtureId: feedsWinnerToFixtureId,
       feedsWinnerToSlot: feedsWinnerToSlot,
+      // Carried through explicitly, never a parameter: where a result sends
+      // the two sides is fixed by the draw. `copyWith` runs on every score
+      // event, and dropping any of these would quietly unwire the bracket
+      // somewhere around the first point of the first match.
+      feedsLoserToFixtureId: feedsLoserToFixtureId,
+      feedsLoserToSlot: feedsLoserToSlot,
+      bracket: bracket,
+      groupId: groupId,
+      qualifierA: qualifierA,
+      qualifierB: qualifierB,
+      courtId: courtId ?? this.courtId,
       startedAt: startedAt,
       completedAt: completedAt,
     );

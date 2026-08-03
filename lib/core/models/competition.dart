@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'app_user.dart';
 import 'enums.dart';
+import 'draw_config.dart';
 import 'firestore_codec.dart';
 
 /// Eligibility rule attached to a competition.
@@ -203,6 +204,8 @@ class Competition {
     this.pointsForDraw = 1,
     this.pointsForLoss = 0,
     this.tiebreakChain,
+    this.drawConfig = const DrawConfig(),
+    this.scheduleConfig = const ScheduleConfig(),
     this.participantOrgIds,
     this.createdBy,
     this.createdAt,
@@ -298,6 +301,67 @@ class Competition {
   /// cricket goes to net run rate, football to goal difference, a Swiss
   /// chess field to Buchholz.
   final List<String>? tiebreakChain;
+
+  /// How the draw is shaped — group count, qualifiers per group, second leg,
+  /// bracket reset, shuffle seed. See [DrawConfig] for why these are stored
+  /// rather than defaulted at generation time.
+  final DrawConfig drawConfig;
+
+  /// Courts, match length and rest gaps — everything the scheduler needs to
+  /// turn a set of fixtures into a timetable instead of a single start time.
+  final ScheduleConfig scheduleConfig;
+
+  /// Returns this competition with the organizer's draw setup applied.
+  ///
+  /// Deliberately narrow rather than a general `copyWith`: these two are the
+  /// only fields a screen changes between reading a competition and handing it
+  /// straight back to `generateDraw`, and a full copy-with over thirty-odd
+  /// fields is thirty-odd chances to drop one silently.
+  Competition withDrawSetup({
+    DrawConfig? drawConfig,
+    ScheduleConfig? scheduleConfig,
+  }) =>
+      Competition(
+        id: id,
+        orgId: orgId,
+        name: name,
+        sportId: sportId,
+        sportName: sportName,
+        archetype: archetype,
+        entrantType: entrantType,
+        format: format,
+        status: status,
+        category: category,
+        scoringPluginKey: scoringPluginKey,
+        description: description,
+        venue: venue,
+        startDate: startDate,
+        endDate: endDate,
+        registrationClosesAt: registrationClosesAt,
+        maxEntrants: maxEntrants,
+        entrantCount: entrantCount,
+        fixtureCount: fixtureCount,
+        participationModel: participationModel,
+        preselectedSlots: preselectedSlots,
+        waitlistEnabled: waitlistEnabled,
+        openToNonMembers: openToNonMembers,
+        entryFeeRupees: entryFeeRupees,
+        teamSize: teamSize,
+        rulesNote: rulesNote,
+        confirmedCount: confirmedCount,
+        waitlistCount: waitlistCount,
+        verificationTier: verificationTier,
+        rulesetVersion: rulesetVersion,
+        pointsForWin: pointsForWin,
+        pointsForDraw: pointsForDraw,
+        pointsForLoss: pointsForLoss,
+        tiebreakChain: tiebreakChain,
+        drawConfig: drawConfig ?? this.drawConfig,
+        scheduleConfig: scheduleConfig ?? this.scheduleConfig,
+        participantOrgIds: participantOrgIds,
+        createdBy: createdBy,
+        createdAt: createdAt,
+      );
 
   /// The organizations taking part, when this competition spans more than the
   /// one that owns it — a school-vs-school or village-vs-village challenge.
@@ -432,6 +496,16 @@ class Competition {
       pointsForLoss: Fs.integer(d['pointsForLoss']),
       tiebreakChain:
           d['tiebreakChain'] is List ? Fs.strList(d['tiebreakChain']) : null,
+      drawConfig: DrawConfig.fromMap(
+        d['drawConfig'] is Map
+            ? Map<String, dynamic>.from(d['drawConfig'] as Map)
+            : null,
+      ),
+      scheduleConfig: ScheduleConfig.fromMap(
+        d['scheduleConfig'] is Map
+            ? Map<String, dynamic>.from(d['scheduleConfig'] as Map)
+            : null,
+      ),
       participantOrgIds: d['participantOrgIds'] is List
           ? Fs.strList(d['participantOrgIds'])
           : null,
@@ -494,6 +568,8 @@ class Competition {
         'pointsForDraw': pointsForDraw,
         'pointsForLoss': pointsForLoss,
         'tiebreakChain': tiebreakChain,
+        'drawConfig': drawConfig.toMap(),
+        'scheduleConfig': scheduleConfig.toMap(),
         'participantOrgIds': participantOrgIds,
         'createdBy': createdBy,
         'createdAt': FieldValue.serverTimestamp(),
@@ -523,6 +599,8 @@ class Competition {
         'pointsForDraw': pointsForDraw,
         'pointsForLoss': pointsForLoss,
         'tiebreakChain': tiebreakChain,
+        'drawConfig': drawConfig.toMap(),
+        'scheduleConfig': scheduleConfig.toMap(),
         'updatedAt': FieldValue.serverTimestamp(),
       });
 }

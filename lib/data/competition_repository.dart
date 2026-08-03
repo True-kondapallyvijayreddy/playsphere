@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../core/errors/app_exception.dart';
+import '../core/firebase/chunked_batch.dart';
 import '../core/firebase/firestore_refs.dart';
 import '../core/models/app_user.dart';
 import '../core/models/competition.dart';
@@ -11,7 +12,10 @@ import '../core/models/fixture.dart';
 import '../core/models/match_player.dart';
 import '../core/models/scoring_request.dart';
 import '../core/models/squad_entry.dart';
+import '../core/sync/uuid_v7.dart';
 import '../domain/draw/fixture_generator.dart';
+import '../domain/draw/match_scheduler.dart';
+import '../domain/standings/standings_calculator.dart';
 import '../domain/scoring/scoring_plugin.dart';
 import '../domain/scoring/scoring_registry.dart';
 import 'org_repository.dart' show guard, guardStream;
@@ -679,9 +683,21 @@ class CompetitionRepository {
           );
         }
 
+        // Every parameter the generator accepts is passed. Until this call
+        // carried them, a groups+knockout draw silently took the fallback of
+        // roughly four per group with two qualifiers each no matter what the
+        // organizer chose, because there was no way to say otherwise and no
+        // field to say it in.
+        final draw = competition.drawConfig;
         final planned = const FixtureGenerator().generate(
           format: competition.format,
           entrants: entrants,
+          shuffleSeed: draw.shuffleSeed,
+          doubleRoundRobin: draw.doubleRoundRobin,
+          bracketReset: draw.bracketReset,
+          groupSize: draw.groupSize,
+          numGroups: draw.numGroups,
+          qualifiersPerGroup: draw.qualifiersPerGroup,
         );
         if (planned.isEmpty) {
           throw const ValidationException(
@@ -726,7 +742,13 @@ class CompetitionRepository {
         // Identifies this draw, so a partial write is detectable and
         // repairable — see `ChunkedBatch` for why atomicity cannot be
         // promised across chunks.
-        final drawId = uuidV7();
+        final drawId = UuidV7.generate();
+
+        // Turn the draw into a timetable before writing it. Every fixture used
+        // to be stamped with `competition.startDate`, so a 38-entrant draw
+        // told all 38 entrants to arrive at the same minute — which is not a
+        // schedule, and is why tournaments that start at ten finish at eleven.
+        final timetable = _planSchedule(kept, competition);
 
         final batch = ChunkedBatch(Refs.db);
 
@@ -751,7 +773,8 @@ class CompetitionRepository {
             matchIndex: p.matchIndex,
             roundLabel: p.roundLabel,
             venue: competition.venue,
-            scheduledAt: competition.startDate,
+            scheduledAt: timetable.startAt[p.matchIndex] ?? competition.startDate,
+            courtId: timetable.courtId[p.matchIndex],
             scorerUids: defaultScorerUids,
             scoringPluginKey: competition.scoringPluginKey,
             sportId: competition.sportId,
@@ -763,6 +786,18 @@ class CompetitionRepository {
                 .initialState(_contextFor(p, sport)),
             feedsWinnerToFixtureId: idFor(p.feedsWinnerToIndex),
             feedsWinnerToSlot: p.feedsWinnerToSlot,
+            // The rest of the draw's wiring, which the generator has always
+            // produced and this method used to drop on the floor. Without
+            // `groupId` no group table can be computed, so no qualifier can
+            // ever be resolved and a groups+knockout draw sits at "To be
+            // decided" forever; without `feedsLoserTo*` the losers bracket is
+            // written and nobody arrives in it.
+            feedsLoserToFixtureId: idFor(p.feedsLoserToIndex),
+            feedsLoserToSlot: p.feedsLoserToSlot,
+            bracket: p.bracket,
+            groupId: p.groupId,
+            qualifierA: p.qualifierA,
+            qualifierB: p.qualifierB,
           );
 
           batch.set(ref, fixture.toCreate());
@@ -941,6 +976,220 @@ class CompetitionRepository {
 
         return (compId: compRef.id, fixtureId: fixtureRef.id);
       });
+
+  /// Fills the knockout phase of a groups+knockout draw from the group tables.
+  ///
+  /// This is the step that was missing entirely. The generator has always
+  /// produced a fully-shaped knockout bracket alongside the groups, with each
+  /// slot tagged by the table position that will fill it ("winner of Group B"),
+  /// and nothing has ever read those tags — so the quarter-finals of every
+  /// groups+knockout tournament ever drawn in this app read "To be decided"
+  /// permanently, and organizers did the promotion on paper.
+  ///
+  /// ## Only complete groups promote
+  ///
+  /// A group is resolved only once every one of its matches has a result. Half
+  /// a group has a leader, not a winner, and writing that leader into a
+  /// quarter-final would stick: nothing downstream would move them back out
+  /// when the last group match reversed the table.
+  ///
+  /// ## Safe to call repeatedly
+  ///
+  /// Idempotent by construction — a slot that already holds a real entrant is
+  /// skipped, so this can run on every result without needing to know whether
+  /// it has run before. That matters because the natural trigger is "a group
+  /// match finished", which fires many times for the same group.
+  Future<QualifierOutcome> resolveQualifiers({
+    required String orgId,
+    required String compId,
+  }) =>
+      guard(() async {
+        final compDoc = await Refs.competition(orgId, compId).get();
+        if (!compDoc.exists) {
+          throw const NotFoundException('That competition no longer exists.');
+        }
+        final competition = Competition.fromDoc(compDoc);
+
+        final fixtureSnap = await Refs.fixtures(orgId, compId).get();
+        final fixtures = fixtureSnap.docs.map(Fixture.fromDoc).toList();
+
+        final entrantSnap = await Refs.entrants(orgId, compId).get();
+        final entrants = entrantSnap.docs.map(Entrant.fromDoc).toList();
+
+        const calculator = StandingsCalculator();
+        final tables = calculator.computeGroups(
+          competition: competition,
+          entrants: entrants,
+          fixtures: fixtures,
+        );
+
+        final complete = <String, List<Standing>>{
+          for (final entry in tables.entries)
+            if (calculator.isGroupComplete(entry.key, fixtures))
+              entry.key: entry.value,
+        };
+
+        final batch = Refs.db.batch();
+        var resolved = 0;
+        final waiting = <String>{};
+
+        for (final fixture in fixtures) {
+          final updates = <String, Object?>{};
+
+          void fill(String slot, QualifierSource? source, String existingId) {
+            if (source == null || existingId.isNotEmpty) return;
+            final table = complete[source.groupId];
+            if (table == null) {
+              waiting.add(source.groupId);
+              return;
+            }
+            // A group with fewer finishers than the draw expects to promote
+            // — an entrant withdrew before a ball was played. Leaving the
+            // slot unresolved is right: the organizer has to decide whether
+            // to give a bye or reshape the bracket, and a silent wrong name
+            // in a quarter-final is worse than an empty one.
+            if (source.position > table.length) return;
+            final standing = table[source.position - 1];
+            updates['entrant${slot}Id'] = standing.entrantId;
+            updates['entrant${slot}Name'] = standing.displayName;
+          }
+
+          fill('A', fixture.qualifierA, fixture.entrantAId);
+          fill('B', fixture.qualifierB, fixture.entrantBId);
+
+          if (updates.isEmpty) continue;
+          batch.update(Refs.fixture(orgId, compId, fixture.id), updates);
+          resolved++;
+        }
+
+        if (resolved > 0) {
+          // Not awaited, for the reason every match-day write here is not:
+          // the local cache has it already and awaiting would hang offline.
+          unawaited(batch.commit().catchError((Object error) {
+            _writeFailures.add(_translateWriteFailure(error));
+          }));
+        }
+
+        return QualifierOutcome(
+          slotsResolved: resolved,
+          groupsComplete: complete.keys.toList()..sort(),
+          groupsPending: waiting.toList()..sort(),
+        );
+      });
+
+  /// Turns a generated draw into "which court, what time" for every fixture.
+  ///
+  /// ## Why placeholders get a time too
+  ///
+  /// [MatchScheduler] deliberately skips a fixture whose entrants are not both
+  /// known — you cannot check a rest gap for a player you cannot name, and a
+  /// semi-final has no players until the quarter-finals are played. But an
+  /// organizer publishing a schedule still has to tell people roughly when to
+  /// come back, and every federation solves this the same way: a placeholder
+  /// carries a **"not before" time**, derived from when its feeder round is
+  /// expected to finish. So this method schedules what it can properly, then
+  /// gives every remaining round a provisional start one slot after the
+  /// latest match of the round before it.
+  ///
+  /// Group matches are scheduled ahead of knockout matches regardless of round
+  /// number, because a groups+knockout draw numbers both from 1 and the
+  /// knockout phase cannot begin until every group has finished.
+  ({Map<int, DateTime> startAt, Map<int, String> courtId, List<String> problems})
+      _planSchedule(List<PlannedFixture> kept, Competition competition) {
+    final cfg = competition.scheduleConfig;
+    final start = competition.startDate;
+
+    // Without courts or a start date there is nothing to lay out against, so
+    // every fixture keeps the competition's own start time — the old
+    // behaviour, which is the honest answer when the organizer has not told
+    // us how many courts they have.
+    if (!cfg.hasCourts || start == null) {
+      return (startAt: {}, courtId: {}, problems: const []);
+    }
+
+    final venues = [
+      for (final name in cfg.courts) Venue(id: name, name: name, capacity: 1),
+    ];
+
+    // Enough slots that the draw fits even if every match needs its own,
+    // spilling onto later days at the configured day boundaries. Capped so a
+    // misconfiguration (one court, thousand-entrant field) cannot spin here.
+    final perDay =
+        ((cfg.dayEndHour - cfg.dayStartHour) * 60) ~/ cfg.slotMinutes;
+    final slots = <TimeSlot>[];
+    if (perDay > 0) {
+      final daysNeeded =
+          ((kept.length / (venues.length * perDay)).ceil()).clamp(1, 30);
+      for (var day = 0; day < daysNeeded; day++) {
+        var cursor = DateTime(
+          start.year,
+          start.month,
+          start.day + day,
+          cfg.dayStartHour,
+        );
+        for (var i = 0; i < perDay; i++) {
+          final end = cursor.add(Duration(minutes: cfg.matchMinutes));
+          slots.add(TimeSlot(start: cursor, end: end));
+          cursor = cursor.add(Duration(minutes: cfg.slotMinutes));
+        }
+      }
+    }
+
+    // Group matches first, then by round, then by draw position — the order
+    // the scheduler fills slots in, and therefore the order matches are
+    // played. A later round must never take an earlier court than the round
+    // that feeds it.
+    final ordered = [...kept]..sort((a, b) {
+        final phase = (a.bracket == Bracket.group ? 0 : 1)
+            .compareTo(b.bracket == Bracket.group ? 0 : 1);
+        if (phase != 0) return phase;
+        final round = a.round.compareTo(b.round);
+        if (round != 0) return round;
+        return a.matchIndex.compareTo(b.matchIndex);
+      });
+
+    final result = const MatchScheduler().schedule(
+      fixtures: ordered,
+      venues: venues,
+      slots: slots,
+      minRestBetweenMatches: Duration(minutes: cfg.restGapMinutes),
+    );
+
+    final startAt = <int, DateTime>{};
+    final courtId = <int, String>{};
+    for (final s in result.scheduled) {
+      startAt[s.fixture.matchIndex] = s.slot.start;
+      courtId[s.fixture.matchIndex] = s.venue.id;
+    }
+
+    // "Not before" times for everything still unplaced. Walk the rounds in
+    // playing order; each round with no real placement starts one slot after
+    // the latest time anything before it is due to finish.
+    var watermark = startAt.values.isEmpty
+        ? DateTime(start.year, start.month, start.day, cfg.dayStartHour)
+        : startAt.values.reduce((a, b) => a.isAfter(b) ? a : b);
+
+    for (final p in ordered) {
+      if (startAt.containsKey(p.matchIndex)) {
+        final placed = startAt[p.matchIndex]!;
+        if (placed.isAfter(watermark)) watermark = placed;
+        continue;
+      }
+      watermark = watermark.add(Duration(minutes: cfg.slotMinutes));
+      startAt[p.matchIndex] = watermark;
+      // No court: a provisional match has not been given one, and inventing
+      // one would have an organizer holding a court empty for a match that
+      // might be an hour late.
+    }
+
+    return (
+      startAt: startAt,
+      courtId: courtId,
+      problems: [
+        for (final u in result.unscheduled) '${u.fixture.roundLabel}: ${u.reason}',
+      ],
+    );
+  }
 
   ScoringContext _contextFor(PlannedFixture p, SportSpec sport) =>
       ScoringContext(
@@ -1603,4 +1852,28 @@ class DrawOutcome {
   /// a large number on a non-knockout format usually means the field size is
   /// awkward rather than that anything went wrong.
   int get skipped => planned - written;
+}
+
+/// What one pass of [CompetitionRepository.resolveQualifiers] achieved.
+///
+/// Reports pending groups as well as resolved slots because "nothing happened"
+/// has two very different meanings to an organizer — every qualifier is
+/// already in place, or Group C still has two matches to play — and a bare
+/// count cannot tell them apart.
+class QualifierOutcome {
+  const QualifierOutcome({
+    required this.slotsResolved,
+    required this.groupsComplete,
+    required this.groupsPending,
+  });
+
+  /// Knockout fixtures that gained at least one entrant on this pass.
+  final int slotsResolved;
+
+  final List<String> groupsComplete;
+
+  /// Groups a knockout slot is still waiting on.
+  final List<String> groupsPending;
+
+  bool get isFullyResolved => groupsPending.isEmpty;
 }

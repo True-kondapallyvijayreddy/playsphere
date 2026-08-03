@@ -355,16 +355,22 @@ them together. That is the leverage point.
 
 Ordered by value ÷ cost. Every phase ships and is tested.
 
-### Phase T1 — Reconnect the dead code *(≈1 week, unlocks the most)*
-1. Add `bracket`, `groupId`, `qualifierA/B`, `feedsLoserToFixtureId/Slot`, `courtId` to `Fixture`
-2. Pass all six generator parameters through `generateDraw`; store them on `Competition`
-3. Per-group standings — filter `StandingsCalculator` by `groupId`
-4. **Qualifier resolution**: when a group table is final, fill the knockout slots
-5. **Loser routing**: mirror the existing winner-advancement on result
-6. Call `MatchScheduler` at draw time; write real per-match times and courts
-7. Organizer UI: group count, qualifiers per group, seeding, courts, slot length
+### Phase T1 — Reconnect the dead code ✅ **DONE 2026-08-03**
+1. ✅ `bracket`, `groupId`, `qualifierA/B`, `feedsLoserToFixtureId/Slot`, `courtId` on `Fixture` — `Bracket` and `QualifierSource` moved to `core/models/draw_slot.dart` as wire types
+2. ✅ All six generator parameters passed through `generateDraw`, stored as `DrawConfig` / `ScheduleConfig` on `Competition`
+3. ✅ `StandingsCalculator.computeGroups` + `isGroupComplete`; `groupStandingsProvider`
+4. ✅ `CompetitionRepository.resolveQualifiers` — idempotent, promotes only from complete groups
+5. ✅ Loser routing folded into `_maybeAdvanceWinner`, in the same batch as the result
+6. ✅ `_planSchedule` calls `MatchScheduler` at draw time; unresolvable placeholders get a "not before" time rather than nothing
+7. ✅ `DrawSetupSheet` (groups, qualifiers, courts, match length, changeover, rest gap), `_QualifierCard` ("Update the bracket"), per-group tables with a qualification line, court + time on every match card
 
-*Result: groups → quarters → semis → final fills itself in. Exactly what was done by hand in Hyderabad.*
+**Tests:** `test/qualifier_resolution_test.dart`, 15 new. Suite 593 → 608.
+
+**Two pre-existing breakages found and fixed on the way:** `competition_repository.dart` referenced an undefined `uuidV7()` and never imported `ChunkedBatch`, so `lib/` did not compile; and `test/tournament_test.dart` referenced `PlannedFixture.isBye`, removed when `SlotFill` replaced it, so all 27 tournament tests were silently not running.
+
+*Result: groups → quarters → semis → final fills itself in, on a real timetable across real courts. Exactly what was done by hand in Hyderabad.*
+
+**Still deliberately out of T1:** seeding from Glicko (T4), federation-style random draws (T4), result types (T2), and the cross-event scheduling that only a `Tournament` entity makes possible (T3). The schedule laid down here is per-competition and static — it does not yet reflow when a match runs late.
 
 ### Phase T2 — Result integrity *(≈3 days, fixes silent data corruption)*
 8. `MatchResultType` enum: normal / walkover / retired / disqualified / no-show / abandoned / conceded

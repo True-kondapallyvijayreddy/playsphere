@@ -181,7 +181,7 @@ void main() {
       final wbRound1 = fixtures
           .where((f) => f.bracket == Bracket.winners && f.round == 1)
           .toList();
-      final byeMatch = wbRound1.firstWhere((f) => f.isBye);
+      final byeMatch = wbRound1.firstWhere((f) => f.isWalkover);
       final advanced = (byeMatch.entrantA ?? byeMatch.entrantB)!;
 
       final wbRound2 = fixtures
@@ -478,7 +478,7 @@ void main() {
       );
 
       final round1 = fixtures.where((f) => f.round == 1).toList();
-      final byes = round1.where((f) => f.isBye).toList();
+      final byes = round1.where((f) => f.isWalkover).toList();
       expect(byes, isNotEmpty);
 
       for (final bye in byes) {

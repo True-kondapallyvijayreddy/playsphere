@@ -22,6 +22,16 @@ class Fs {
     return fallback;
   }
 
+  /// For settings where "not set" and "set to zero" are different answers —
+  /// a draw with `numGroups: null` derives its group count, one with
+  /// `numGroups: 0` is a mistake worth seeing rather than silently treating
+  /// as absent.
+  static int? intOrNull(Object? v) {
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    return null;
+  }
+
   static double decimal(Object? v, [double fallback = 0]) {
     if (v is double) return v;
     if (v is num) return v.toDouble();

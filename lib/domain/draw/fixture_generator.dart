@@ -1,72 +1,10 @@
 import 'dart:math';
 
 import '../../core/models/competition.dart';
+import '../../core/models/draw_slot.dart';
 import '../../core/models/enums.dart';
 
-/// Which sub-bracket a fixture belongs to.
-///
-/// A plain knockout or a round robin only ever has one shape, so this used
-/// to be implicit. Double elimination and groups+knockout both produce
-/// several structurally different kinds of match in a single draw — a
-/// group-stage match is not interchangeable with a losers-bracket match —
-/// and downstream code (standings, brackets UI, the scheduler) needs to
-/// know which is which without guessing from round numbers.
-enum Bracket {
-  /// Single-elimination ladder — either the whole draw (plain knockout), or
-  /// the qualifier stage of groups+knockout.
-  knockout,
-
-  /// The undefeated side of a double-elimination draw.
-  winners,
-
-  /// The one-loss side of a double-elimination draw.
-  losers,
-
-  /// Winners-bracket champion vs. losers-bracket champion.
-  grandFinal,
-
-  /// Played only if the losers-bracket champion wins [grandFinal] — a
-  /// double-elimination decider exists because a single loss must not be
-  /// allowed to eliminate the side that came through undefeated. See
-  /// [FixtureGenerator._doubleElimination] for why this is emitted as an
-  /// unconditioned placeholder rather than pre-populated.
-  grandFinalReset,
-
-  /// Round robin within one group of a groups+knockout draw.
-  group,
-}
-
-/// Identifies a not-yet-known knockout entrant by table position — "the
-/// winner of Group B" — rather than by identity.
-///
-/// At draw time the group stage has not been played, so no real [Entrant]
-/// exists yet for a qualifier slot. This is what lets the knockout phase of
-/// [CompetitionFormat.groupThenKnockout] be generated up front, in one pass,
-/// alongside the groups: the bracket's *shape* (who plays whom, seeded so
-/// group-mates cannot meet again immediately) is pure structure and does
-/// not depend on results. Only the entrant identity does. Application code
-/// fills [PlannedFixture.entrantA] / [PlannedFixture.entrantB] for these
-/// matches once each group's table (via `StandingsCalculator`) is final.
-class QualifierSource {
-  const QualifierSource({required this.groupId, required this.position});
-
-  final String groupId;
-
-  /// 1 = group winner, 2 = runner-up, and so on.
-  final int position;
-
-  @override
-  String toString() => 'Group $groupId #$position';
-
-  @override
-  bool operator ==(Object other) =>
-      other is QualifierSource &&
-      other.groupId == groupId &&
-      other.position == position;
-
-  @override
-  int get hashCode => Object.hash(groupId, position);
-}
+export '../../core/models/draw_slot.dart' show Bracket, QualifierSource;
 
 /// A fixture the generator produced, before it has been written to Firestore.
 class PlannedFixture {

@@ -9,8 +9,11 @@ import '../../core/models/fixture.dart';
 import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
+import '../../core/models/draw_slot.dart';
+import '../../domain/standings/standings_calculator.dart';
 import '../../domain/standings/tiebreak.dart';
 import '../../shared/app_scaffold.dart';
+import 'widgets/draw_setup_sheet.dart';
 import 'widgets/squad_call_card.dart';
 import '../scoring/widgets/live_score_card.dart';
 import '../scoring/widgets/share_match_button.dart';
@@ -62,6 +65,7 @@ class CompetitionDetailScreen extends ConsumerWidget {
                     _Header(competition: comp),
                     const SizedBox(height: 16),
                     if (canManage) _OrganizerActions(competition: comp),
+                    if (canManage) _QualifierCard(competition: comp),
                     const SizedBox(height: 16),
                     _Entries(competition: comp, canManage: canManage),
                     const SizedBox(height: 24),
@@ -172,18 +176,44 @@ class _OrganizerActions extends ConsumerWidget {
               }),
         ),
       CompetitionStatus.registrationClosed => (
-          'Generate the draw',
-          'Creates every fixture for a ${c.format.label.toLowerCase()}.',
+          'Set up and generate the draw',
+          'Choose groups, courts and match length, then create every fixture '
+              'for a ${c.format.label.toLowerCase()}.',
           () => run(() async {
+                // The organizer's choices are collected BEFORE generating,
+                // because the draw's shape and its timetable are both fixed
+                // the moment the fixtures are written — regenerating
+                // afterwards is only possible while nothing has been scored.
+                final choices = await DrawSetupSheet.show(
+                  context,
+                  competition: c,
+                  entrantCount: entrants.where((e) => !e.withdrawn).length,
+                );
+                if (choices == null) return;
+
+                final configured = c.withDrawSetup(
+                  drawConfig: choices.draw,
+                  scheduleConfig: choices.schedule,
+                );
+                // Persisted first, so the draw can be explained — and
+                // reproduced identically — after the fact.
+                await repo.updateCompetition(configured);
+
                 final uid = ref.read(currentUidProvider);
                 final made = await repo.generateDraw(
-                  competition: c,
+                  competition: configured,
                   entrants: entrants,
                   defaultScorerUids: uid == null ? const [] : [uid],
                 );
                 if (context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('$made matches created.')),
+                    SnackBar(
+                      content: Text(
+                        '${made.written} matches created'
+                        '${choices.schedule.hasCourts ? ' and scheduled across '
+                            '${choices.schedule.courts.length} courts' : ''}.',
+                      ),
+                    ),
                   );
                 }
               }),
@@ -477,6 +507,214 @@ class _SlotsLine extends StatelessWidget {
 /// Shown only for formats where a table means something. A knockout bracket
 /// has no standings — presenting one implies a league that is not being
 /// played, and an organizer reading it would draw the wrong conclusion.
+/// Promotes finished group winners into the knockout bracket.
+///
+/// The step that used to be done on paper. The draw has always carried, on
+/// every knockout fixture, the table position that will fill it — "winner of
+/// Group B" — and nothing ever read those tags, so the quarter-finals of a
+/// groups+knockout tournament said "To be decided" until the organizer
+/// rewrote them by hand.
+///
+/// Shown only while there is something left to promote, so it disappears once
+/// the bracket is full rather than sitting there as a permanent button.
+class _QualifierCard extends ConsumerStatefulWidget {
+  const _QualifierCard({required this.competition});
+  final Competition competition;
+
+  @override
+  ConsumerState<_QualifierCard> createState() => _QualifierCardState();
+}
+
+class _QualifierCardState extends ConsumerState<_QualifierCard> {
+  bool _busy = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.competition;
+    if (c.format != CompetitionFormat.groupThenKnockout) {
+      return const SizedBox.shrink();
+    }
+
+    final fixtures =
+        ref.watch(fixturesProvider(CompRef(c.orgId, c.id))).valueOrNull ??
+            const <Fixture>[];
+
+    // Knockout slots still waiting on a group they can name.
+    final pending = fixtures.where((f) =>
+        (f.qualifierA != null && f.entrantAId.isEmpty) ||
+        (f.qualifierB != null && f.entrantBId.isEmpty));
+    if (pending.isEmpty) return const SizedBox.shrink();
+
+    const groupsDone = StandingsCalculator();
+    final readyGroups = <String>{
+      for (final f in fixtures)
+        if (f.bracket == Bracket.group && f.groupId != null) f.groupId!,
+    }.where((g) => groupsDone.isGroupComplete(g, fixtures)).toList()
+      ..sort();
+
+    final theme = Theme.of(context);
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Card(
+        color: theme.colorScheme.tertiaryContainer,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Fill the knockout stage',
+                style: theme.textTheme.titleMedium,
+              ),
+              const SizedBox(height: 6),
+              Text(
+                readyGroups.isEmpty
+                    ? 'No group has finished yet. A group only promotes once '
+                        'every one of its matches has a result — half a group '
+                        'has a leader, not a winner.'
+                    : '${readyGroups.length} group'
+                        '${readyGroups.length == 1 ? '' : 's'} finished '
+                        '(${readyGroups.join(', ')}). '
+                        '${pending.length} knockout '
+                        '${pending.length == 1 ? 'match is' : 'matches are'} '
+                        'still waiting on a name.',
+                style: theme.textTheme.bodyMedium,
+              ),
+              const SizedBox(height: 12),
+              FilledButton.tonalIcon(
+                onPressed: _busy || readyGroups.isEmpty ? null : _resolve,
+                icon: _busy
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.account_tree_outlined),
+                label: const Text('Update the bracket'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _resolve() async {
+    setState(() => _busy = true);
+    final c = widget.competition;
+    try {
+      final outcome = await ref.read(competitionRepositoryProvider)
+          .resolveQualifiers(orgId: c.orgId, compId: c.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            outcome.slotsResolved == 0
+                ? 'Nothing to promote yet — still waiting on '
+                    '${outcome.groupsPending.join(', ')}.'
+                : '${outcome.slotsResolved} knockout '
+                    '${outcome.slotsResolved == 1 ? 'match' : 'matches'} '
+                    'filled in.',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (mounted) showError(context, e);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+}
+
+/// One group's table, with the qualifying places marked.
+///
+/// The line under the last qualifying position is the whole point: a group
+/// table is read to answer one question — am I going through? — and a table
+/// that does not answer it makes everyone ask the organizer instead.
+class _GroupTable extends StatelessWidget {
+  const _GroupTable({
+    required this.groupId,
+    required this.rows,
+    required this.qualifiers,
+  });
+
+  final String groupId;
+  final List<Standing> rows;
+  final int qualifiers;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Group $groupId', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 8),
+            for (var i = 0; i < rows.length; i++) ...[
+              Row(
+                children: [
+                  SizedBox(
+                    width: 24,
+                    child: Text(
+                      '${i + 1}',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: i < qualifiers
+                            ? theme.colorScheme.primary
+                            : theme.colorScheme.onSurfaceVariant,
+                        fontWeight:
+                            i < qualifiers ? FontWeight.bold : FontWeight.normal,
+                      ),
+                    ),
+                  ),
+                  Expanded(child: Text(rows[i].displayName)),
+                  Text('${rows[i].played}',
+                      style: theme.textTheme.bodySmall),
+                  const SizedBox(width: 16),
+                  SizedBox(
+                    width: 28,
+                    child: Text(
+                      '${rows[i].points}',
+                      textAlign: TextAlign.end,
+                      style: theme.textTheme.bodyMedium
+                          ?.copyWith(fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ],
+              ),
+              if (i == qualifiers - 1 && i < rows.length - 1)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Divider(color: theme.colorScheme.primary),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        child: Text(
+                          'qualify',
+                          style: theme.textTheme.labelSmall
+                              ?.copyWith(color: theme.colorScheme.primary),
+                        ),
+                      ),
+                      Expanded(
+                        child: Divider(color: theme.colorScheme.primary),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _StandingsTable extends ConsumerWidget {
   const _StandingsTable({required this.competition});
   final Competition competition;
@@ -492,6 +730,33 @@ class _StandingsTable extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     if (!_tableFormats.contains(competition.format)) {
       return const SizedBox.shrink();
+    }
+
+    // A groups draw has several tables and no meaningful combined one: Group
+    // A's players have never met Group B's, so their points do not compare.
+    // Showing one merged table was not just untidy, it was wrong.
+    if (competition.format == CompetitionFormat.groupThenKnockout) {
+      final groupsAsync = ref.watch(
+        groupStandingsProvider(CompRef(competition.orgId, competition.id)),
+      );
+      final tables = groupsAsync.valueOrNull ?? const <String, List<Standing>>{};
+      if (tables.isEmpty) return const SizedBox.shrink();
+
+      final ids = tables.keys.toList()..sort();
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (final id in ids)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: _GroupTable(
+                groupId: id,
+                rows: tables[id]!,
+                qualifiers: competition.drawConfig.qualifiersPerGroup,
+              ),
+            ),
+        ],
+      );
     }
 
     final tableAsync = ref.watch(

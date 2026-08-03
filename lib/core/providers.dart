@@ -502,6 +502,30 @@ final standingsProvider =
   );
 });
 
+/// One table per group, for a groups+knockout draw.
+///
+/// Separate from [standingsProvider] rather than replacing it because the two
+/// answer different questions: a league has one table, a groups draw has
+/// several and a single merged one is meaningless — Group A's players have
+/// never met Group B's, so their points are not comparable.
+final groupStandingsProvider =
+    Provider.family<AsyncValue<Map<String, List<Standing>>>, CompRef>(
+        (ref, key) {
+  return combineAsync3(
+    ref.watch(competitionProvider(key)),
+    ref.watch(entrantsProvider(key)),
+    ref.watch(fixturesProvider(key)),
+    (competition, entrants, fixtures) {
+      if (competition == null) return const <String, List<Standing>>{};
+      return const StandingsCalculator().computeGroups(
+        competition: competition,
+        entrants: entrants,
+        fixtures: fixtures,
+      );
+    },
+  );
+});
+
 /// Everything currently being played in an organization — the screen a remote
 /// spectator opens first.
 final liveFixturesProvider =

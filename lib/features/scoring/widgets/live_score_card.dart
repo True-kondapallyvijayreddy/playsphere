@@ -73,9 +73,9 @@ class LiveScoreCard extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  if (fixture.venue != null)
+                  if (_whereAndWhen(fixture) != null)
                     Text(
-                      fixture.venue!,
+                      _whereAndWhen(fixture)!,
                       style: theme.textTheme.labelSmall
                           ?.copyWith(color: theme.hintColor),
                     ),
@@ -87,7 +87,10 @@ class LiveScoreCard extends StatelessWidget {
                 children: [
                   Expanded(
                     child: _Side(
-                      name: fixture.entrantAName,
+                      // Names the group a slot is waiting on rather than
+                      // "To be decided" — a spectator reading a bracket wants
+                      // to know it is the Group A winner who lands here.
+                      name: fixture.displayNameA(),
                       isWinner: winnerId == fixture.entrantAId,
                       align: TextAlign.start,
                     ),
@@ -104,7 +107,7 @@ class LiveScoreCard extends StatelessWidget {
                   ),
                   Expanded(
                     child: _Side(
-                      name: fixture.entrantBName,
+                      name: fixture.displayNameB(),
                       isWinner: winnerId == fixture.entrantBId,
                       align: TextAlign.end,
                     ),
@@ -142,6 +145,26 @@ class LiveScoreCard extends StatelessWidget {
       ),
     );
   }
+
+  /// "Court 3 · 14:30" — where and when, in the corner where the venue used
+  /// to sit alone.
+  ///
+  /// The time matters more than anything else on a tournament day. Before the
+  /// draw carried a per-match schedule there was nothing to show here but a
+  /// venue name shared by every match in the competition, so a player had no
+  /// way to learn when they were on except by waiting at the hall.
+  static String? _whereAndWhen(Fixture fixture) {
+    final parts = <String>[
+      if (fixture.courtId != null) fixture.courtId!
+      else if (fixture.venue != null) fixture.venue!,
+      if (fixture.scheduledAt != null) _hhmm(fixture.scheduledAt!),
+    ];
+    return parts.isEmpty ? null : parts.join(' · ');
+  }
+
+  static String _hhmm(DateTime d) =>
+      '${d.hour.toString().padLeft(2, '0')}:'
+      '${d.minute.toString().padLeft(2, '0')}';
 }
 
 class _Side extends StatelessWidget {

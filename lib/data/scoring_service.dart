@@ -876,40 +876,60 @@ class ScoringService {
         _ => null,
       };
 
-  /// Advances a knockout winner into the next round's fixture, in the SAME
-  /// batch as the result that produced them. Factored out of [submit] so
-  /// [_replayFixtureGroup] applies the identical rule to a match completed
-  /// by a queued event that only lands during a reconnect — see the comment
-  /// at the [submit] call site for why this must never happen in a second,
-  /// separate write.
+  /// Advances a knockout winner into the next round's fixture — and, in a
+  /// double-elimination draw, drops the loser into the losers bracket — in the
+  /// SAME batch as the result that produced them.
+  ///
+  /// Factored out of [submit] so [_replayFixtureGroup] applies the identical
+  /// rule to a match completed by a queued event that only lands during a
+  /// reconnect — see the comment at the [submit] call site for why this must
+  /// never happen in a second, separate write.
+  ///
+  /// The loser leg exists because losing a winners-bracket match is not an
+  /// elimination: it is a transfer. The draw generator has always wired that
+  /// transfer and nothing ever read it, so a double-elimination tournament
+  /// wrote a full losers bracket that no player could ever reach.
   void _maybeAdvanceWinner(
     WriteBatch batch,
     Fixture fixture,
     MatchOutcome outcome,
     String? winnerEntrantId,
   ) {
-    if (!outcome.isComplete ||
-        outcome.isDraw ||
-        fixture.feedsWinnerToFixtureId == null ||
-        fixture.feedsWinnerToSlot == null ||
-        winnerEntrantId == null) {
+    if (!outcome.isComplete || outcome.isDraw || winnerEntrantId == null) {
       return;
     }
-    final slot = fixture.feedsWinnerToSlot == 'a' ? 'A' : 'B';
-    final winnerName = winnerEntrantId == fixture.entrantAId
-        ? fixture.entrantAName
-        : fixture.entrantBName;
-    batch.update(
-      Refs.fixture(
-        fixture.orgId,
-        fixture.compId,
-        fixture.feedsWinnerToFixtureId!,
-      ),
-      {
-        'entrant${slot}Id': winnerEntrantId,
-        'entrant${slot}Name': winnerName,
-      },
+
+    void feed(String? targetFixtureId, String? targetSlot, String entrantId) {
+      if (targetFixtureId == null || targetSlot == null) return;
+      final slot = targetSlot == 'a' ? 'A' : 'B';
+      final name = entrantId == fixture.entrantAId
+          ? fixture.entrantAName
+          : fixture.entrantBName;
+      batch.update(
+        Refs.fixture(fixture.orgId, fixture.compId, targetFixtureId),
+        {'entrant${slot}Id': entrantId, 'entrant${slot}Name': name},
+      );
+    }
+
+    feed(
+      fixture.feedsWinnerToFixtureId,
+      fixture.feedsWinnerToSlot,
+      winnerEntrantId,
     );
+
+    // Whoever was not the winner. Derived rather than passed in, because the
+    // outcome only ever names a winner and a two-sided fixture makes the
+    // other side unambiguous.
+    final loserEntrantId = winnerEntrantId == fixture.entrantAId
+        ? fixture.entrantBId
+        : fixture.entrantAId;
+    if (loserEntrantId.isNotEmpty) {
+      feed(
+        fixture.feedsLoserToFixtureId,
+        fixture.feedsLoserToSlot,
+        loserEntrantId,
+      );
+    }
   }
 
   /// Generates the durable idempotency key for one event: a fresh UUIDv7,
