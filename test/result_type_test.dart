@@ -250,7 +250,7 @@ void main() {
       // A concession is a decided match. A group waiting on it forever would
       // block the whole knockout stage behind one team that went home.
       final fixtures = [
-        Fixture(
+        const Fixture(
           id: 'g1',
           orgId: 'o1',
           compId: 'c1',

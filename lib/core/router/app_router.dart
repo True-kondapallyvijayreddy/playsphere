@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../features/venues/venues_screen.dart';
 import '../../features/analytics/analytics_screen.dart';
 import '../../features/auth/profile_setup_screen.dart';
 import '../../features/auth/sign_in_screen.dart';
@@ -58,6 +59,8 @@ class Routes {
   static String inviteUrl(String code) => '$publicOrigin${joinWithCode(code)}';
   static const lookingFor = '/community/looking-for';
   static const umpireRegistry = '/community/officials';
+
+  static String venues(String orgId) => '/org/$orgId/venues';
 
   static const myProfile = '/me';
   static String profile(String uid) => '/player/$uid';
@@ -269,6 +272,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             path: 'gallery',
             builder: (_, state) =>
                 ClubGalleryScreen(orgId: state.pathParameters['orgId']!),
+          ),
+          GoRoute(
+            path: 'venues',
+            builder: (_, state) =>
+                VenuesScreen(orgId: state.pathParameters['orgId']!),
           ),
           GoRoute(
             path: 'files',

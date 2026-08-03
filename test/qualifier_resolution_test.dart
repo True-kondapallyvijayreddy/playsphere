@@ -2,7 +2,6 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:playsphere/core/models/competition.dart';
 import 'package:playsphere/core/models/draw_config.dart';
-import 'package:playsphere/core/models/draw_slot.dart';
 import 'package:playsphere/core/models/enums.dart';
 import 'package:playsphere/core/models/fixture.dart';
 import 'package:playsphere/domain/draw/fixture_generator.dart';
@@ -103,7 +102,7 @@ void main() {
     });
 
     test('an unresolved slot names the group it waits on, not "TBD"', () {
-      final f = Fixture(
+      const f = Fixture(
         id: 'qf1',
         orgId: 'o1',
         compId: 'c1',
@@ -112,8 +111,8 @@ void main() {
         entrantAName: 'To be decided',
         entrantBName: 'To be decided',
         status: FixtureStatus.scheduled,
-        qualifierA: const QualifierSource(groupId: 'A', position: 1),
-        qualifierB: const QualifierSource(groupId: 'B', position: 2),
+        qualifierA: QualifierSource(groupId: 'A', position: 1),
+        qualifierB: QualifierSource(groupId: 'B', position: 2),
       );
 
       expect(f.displayNameA(), 'Group A winner');
@@ -166,7 +165,7 @@ void main() {
     test('knockout fixtures contribute to no table at all', () {
       final fixtures = [
         ...twoCompleteGroups(),
-        Fixture(
+        const Fixture(
           id: 'sf1',
           orgId: 'o1',
           compId: 'c1',
