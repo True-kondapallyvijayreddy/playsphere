@@ -1307,6 +1307,65 @@ service cloud.firestore {
       }
 
       // -----------------------------------------------------------------
+      // Venues — where matches are played
+      // -----------------------------------------------------------------
+      //
+      // Readable by anyone who can read the org, because a spectator opening
+      // a public fixture needs to know which hall to walk to. Written only by
+      // whoever runs competitions: a venue's court list is what the scheduler
+      // allocates against, so a member who could add courts could manufacture
+      // a timetable that does not exist.
+      match /venues/{venueId} {
+        allow read: if orgIsReadable(orgId);
+
+        allow create: if canManageCompetitions(orgId)
+          && request.resource.data.orgId == orgId
+          && request.resource.data.name is string
+          && request.resource.data.name.size() > 0
+          // A day that ends before it starts produces a slot grid with no
+          // slots, and a schedule that silently contains nothing.
+          && request.resource.data.openHour is int
+          && request.resource.data.closeHour is int
+          && request.resource.data.openHour >= 0
+          && request.resource.data.closeHour <= 24
+          && request.resource.data.openHour < request.resource.data.closeHour;
+
+        allow update: if canManageCompetitions(orgId)
+          && unchanged('orgId')
+          && unchangedIfPresent('createdAt')
+          && unchangedIfPresent('createdBy')
+          && request.resource.data.openHour < request.resource.data.closeHour;
+
+        // Deliberately absent: a venue that has hosted a match is part of the
+        // record, and fixtures name it. `archiveVenue` hides it instead.
+        allow delete: if false;
+      }
+
+      // -----------------------------------------------------------------
+      // Tournaments — the container that owns many competition draws
+      // -----------------------------------------------------------------
+      match /tournaments/{tournamentId} {
+        allow read: if orgIsReadable(orgId);
+
+        allow create: if canManageCompetitions(orgId)
+          && request.resource.data.orgId == orgId
+          && request.resource.data.name is string
+          && request.resource.data.name.size() > 0
+          && request.resource.data.eventCount == 0;
+
+        allow update: if canManageCompetitions(orgId)
+          && unchanged('orgId')
+          && unchangedIfPresent('createdAt')
+          && unchangedIfPresent('createdBy')
+          // A completed tournament is a historical record. Reopening it would
+          // silently rewrite results participants have been told are final.
+          && resource.data.status != 'completed';
+
+        allow delete: if canManageCompetitions(orgId)
+          && resource.data.get('eventCount', 0) == 0;
+      }
+
+      // -----------------------------------------------------------------
       // Competitions (what the product calls "events")
       // -----------------------------------------------------------------
       match /competitions/{compId} {

@@ -177,6 +177,27 @@ class Refs {
   ) =>
       competition(orgId, compId).collection('entrants');
 
+  /// Venues belong to the organization, not to any one competition — a club
+  /// plays at the same two or three places all season, and re-declaring them
+  /// per event is how the court list drifts between events.
+  static CollectionReference<Map<String, dynamic>> venues(String orgId) =>
+      org(orgId).collection('venues');
+
+  static DocumentReference<Map<String, dynamic>> venue(
+    String orgId,
+    String venueId,
+  ) =>
+      venues(orgId).doc(venueId);
+
+  static CollectionReference<Map<String, dynamic>> tournaments(String orgId) =>
+      org(orgId).collection('tournaments');
+
+  static DocumentReference<Map<String, dynamic>> tournament(
+    String orgId,
+    String tournamentId,
+  ) =>
+      tournaments(orgId).doc(tournamentId);
+
   static CollectionReference<Map<String, dynamic>> standings(
     String orgId,
     String compId,

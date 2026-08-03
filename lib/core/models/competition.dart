@@ -204,6 +204,7 @@ class Competition {
     this.pointsForDraw = 1,
     this.pointsForLoss = 0,
     this.tiebreakChain,
+    this.tournamentId,
     this.drawConfig = const DrawConfig(),
     this.scheduleConfig = const ScheduleConfig(),
     this.participantOrgIds,
@@ -302,6 +303,14 @@ class Competition {
   /// chess field to Buchholz.
   final List<String>? tiebreakChain;
 
+  /// The tournament this draw belongs to, when it belongs to one.
+  ///
+  /// Null for a standalone event — a club's Sunday league or a one-off
+  /// challenge, which are the common case and must not be forced to invent a
+  /// tournament around themselves. Set, it is what lets the scheduler see
+  /// that this draw shares courts and players with fourteen others.
+  final String? tournamentId;
+
   /// How the draw is shaped — group count, qualifiers per group, second leg,
   /// bracket reset, shuffle seed. See [DrawConfig] for why these are stored
   /// rather than defaulted at generation time.
@@ -356,6 +365,7 @@ class Competition {
         pointsForDraw: pointsForDraw,
         pointsForLoss: pointsForLoss,
         tiebreakChain: tiebreakChain,
+        tournamentId: tournamentId,
         drawConfig: drawConfig ?? this.drawConfig,
         scheduleConfig: scheduleConfig ?? this.scheduleConfig,
         participantOrgIds: participantOrgIds,
@@ -496,6 +506,7 @@ class Competition {
       pointsForLoss: Fs.integer(d['pointsForLoss']),
       tiebreakChain:
           d['tiebreakChain'] is List ? Fs.strList(d['tiebreakChain']) : null,
+      tournamentId: Fs.strOrNull(d['tournamentId']),
       drawConfig: DrawConfig.fromMap(
         d['drawConfig'] is Map
             ? Map<String, dynamic>.from(d['drawConfig'] as Map)
@@ -568,6 +579,7 @@ class Competition {
         'pointsForDraw': pointsForDraw,
         'pointsForLoss': pointsForLoss,
         'tiebreakChain': tiebreakChain,
+        'tournamentId': tournamentId,
         'drawConfig': drawConfig.toMap(),
         'scheduleConfig': scheduleConfig.toMap(),
         'participantOrgIds': participantOrgIds,

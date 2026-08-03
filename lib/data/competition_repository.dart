@@ -12,6 +12,7 @@ import '../core/models/fixture.dart';
 import '../core/models/match_player.dart';
 import '../core/models/scoring_request.dart';
 import '../core/models/squad_entry.dart';
+import '../core/models/venue.dart' as venue_model;
 import '../core/sync/uuid_v7.dart';
 import '../domain/draw/fixture_generator.dart';
 import '../domain/draw/match_scheduler.dart';
@@ -744,11 +745,25 @@ class CompetitionRepository {
         // promised across chunks.
         final drawId = UuidV7.generate();
 
+        // Resolve the picked venues into court names. Done here rather than
+        // inside `_planSchedule` so that method stays a pure function of what
+        // it is given, and so the reads happen once.
+        final venueCourtNames = <String>[];
+        for (final venueId in competition.scheduleConfig.venueIds) {
+          final vDoc = await Refs.venue(orgId, venueId).get();
+          if (!vDoc.exists) continue;
+          final venue = venue_model.Venue.fromDoc(vDoc);
+          if (venue.isArchived) continue;
+          for (final court in venue.usableCourts) {
+            venueCourtNames.add(court.name);
+          }
+        }
+
         // Turn the draw into a timetable before writing it. Every fixture used
         // to be stamped with `competition.startDate`, so a 38-entrant draw
         // told all 38 entrants to arrive at the same minute — which is not a
         // schedule, and is why tournaments that start at ten finish at eleven.
-        final timetable = _planSchedule(kept, competition);
+        final timetable = _planSchedule(kept, competition, venueCourtNames);
 
         final batch = ChunkedBatch(Refs.db);
 
@@ -1198,7 +1213,11 @@ class CompetitionRepository {
   /// number, because a groups+knockout draw numbers both from 1 and the
   /// knockout phase cannot begin until every group has finished.
   ({Map<int, DateTime> startAt, Map<int, String> courtId, List<String> problems})
-      _planSchedule(List<PlannedFixture> kept, Competition competition) {
+      _planSchedule(
+    List<PlannedFixture> kept,
+    Competition competition,
+    List<String> venueCourts,
+  ) {
     final cfg = competition.scheduleConfig;
     final start = competition.startDate;
 
@@ -1210,8 +1229,23 @@ class CompetitionRepository {
       return (startAt: {}, courtId: {}, problems: const []);
     }
 
+    // Court names come from real venue documents when the organizer picked
+    // venues, and from typed text when they did not. Only the names differ
+    // here — a single draw does not care that two events share a hall,
+    // because it is the only draw there is. Cross-event contention is
+    // `TournamentRepository.generateSchedule`'s problem, and it is why a
+    // venue has to be an entity rather than a string.
+    final courtNames = cfg.usesVenues
+        ? [
+            for (final v in venueCourts) v,
+          ]
+        : cfg.courts;
+    if (courtNames.isEmpty) {
+      return (startAt: {}, courtId: {}, problems: const []);
+    }
+
     final venues = [
-      for (final name in cfg.courts) Venue(id: name, name: name, capacity: 1),
+      for (final name in courtNames) Venue(id: name, name: name, capacity: 1),
     ];
 
     // Enough slots that the draw fits even if every match needs its own,

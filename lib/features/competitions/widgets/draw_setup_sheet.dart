@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../../core/models/competition.dart';
 import '../../../core/models/draw_config.dart';
 import '../../../core/models/enums.dart';
+import '../../../core/models/venue.dart';
 
 /// Asks the organizer how the draw should be shaped and laid out, immediately
 /// before it is generated.
@@ -24,16 +25,22 @@ class DrawSetupSheet extends StatefulWidget {
     super.key,
     required this.competition,
     required this.entrantCount,
+    this.venues = const [],
   });
 
   final Competition competition;
   final int entrantCount;
+
+  /// Venues this club has defined. Empty is normal and supported — the sheet
+  /// falls back to typed court names.
+  final List<Venue> venues;
 
   /// Returns the organizer's choices, or null if they backed out.
   static Future<({DrawConfig draw, ScheduleConfig schedule})?> show(
     BuildContext context, {
     required Competition competition,
     required int entrantCount,
+    List<Venue> venues = const [],
   }) {
     return showModalBottomSheet<({DrawConfig draw, ScheduleConfig schedule})>(
       context: context,
@@ -42,6 +49,7 @@ class DrawSetupSheet extends StatefulWidget {
       builder: (_) => DrawSetupSheet(
         competition: competition,
         entrantCount: entrantCount,
+        venues: venues,
       ),
     );
   }
@@ -56,6 +64,7 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
   late final TextEditingController _courts = TextEditingController(
     text: _schedule.courts.join(', '),
   );
+  late final Set<String> _venueIds = {..._schedule.venueIds};
 
   @override
   void dispose() {
@@ -178,17 +187,56 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
 
             const SizedBox(height: 8),
             const _SectionLabel('Courts and timing'),
-            TextField(
-              controller: _courts,
-              decoration: const InputDecoration(
-                labelText: 'Courts, separated by commas',
-                hintText: 'Court 1, Court 2, Court 3',
-                helperText: 'Leave empty to give every match the same start '
-                    'time — which is what makes tournaments run late.',
-                helperMaxLines: 3,
+
+            // Real venues where the club has defined them, typed names where
+            // it has not. Both, rather than forcing one: a district
+            // championship needs venue documents so several events can share
+            // courts, and a Sunday club afternoon should not have to fill in
+            // a venue form before it can start.
+            if (widget.venues.isNotEmpty) ...[
+              Text(
+                'Play at',
+                style: theme.textTheme.labelLarge,
               ),
-              onChanged: (_) => setState(() {}),
-            ),
+              const SizedBox(height: 4),
+              for (final venue in widget.venues)
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  value: _venueIds.contains(venue.id),
+                  title: Text(venue.name),
+                  subtitle: Text(
+                    '${venue.capacity} court'
+                    '${venue.capacity == 1 ? '' : 's'} · '
+                    '${venue.openHour}:00–${venue.closeHour}:00'
+                    '${venue.city != null ? ' · ${venue.city}' : ''}',
+                  ),
+                  onChanged: (on) => setState(() {
+                    if (on == true) {
+                      _venueIds.add(venue.id);
+                    } else {
+                      _venueIds.remove(venue.id);
+                    }
+                  }),
+                ),
+              const SizedBox(height: 8),
+            ],
+
+            if (_venueIds.isEmpty)
+              TextField(
+                controller: _courts,
+                decoration: InputDecoration(
+                  labelText: 'Courts, separated by commas',
+                  hintText: 'Court 1, Court 2, Court 3',
+                  helperText: widget.venues.isEmpty
+                      ? 'Leave empty to give every match the same start time '
+                          '— which is what makes tournaments run late. Set up '
+                          'venues to share courts between events.'
+                      : 'Or type court names for a one-off.',
+                  helperMaxLines: 3,
+                ),
+                onChanged: (_) => setState(() {}),
+              ),
             const SizedBox(height: 12),
             _Stepper(
               label: 'Minutes per match',
@@ -242,7 +290,10 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
                 FilledButton(
                   onPressed: () => Navigator.of(context).pop((
                     draw: _draw,
-                    schedule: _schedule.copyWith(courts: _parsedCourts),
+                    schedule: _schedule.copyWith(
+                      courts: _venueIds.isEmpty ? _parsedCourts : const [],
+                      venueIds: _venueIds.toList(),
+                    ),
                   )),
                   child: const Text('Generate the draw'),
                 ),

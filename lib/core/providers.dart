@@ -4,6 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart' as fb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/career_repository.dart';
+import '../data/tournament_repository.dart';
 import '../data/community_repository.dart';
 import '../data/competition_repository.dart';
 import '../data/memory_composer.dart';
@@ -16,6 +17,8 @@ import '../domain/standings/standings_calculator.dart';
 import 'async_combine.dart';
 import 'auth/auth_service.dart';
 import 'models/app_user.dart';
+import 'models/venue.dart';
+import 'models/tournament.dart';
 import 'models/challenge.dart';
 import 'models/competition.dart';
 import 'models/memory.dart';
@@ -249,6 +252,48 @@ final pendingMembersProvider =
 
 final publicOrgsProvider = StreamProvider<List<Organization>>((ref) {
   return ref.watch(orgRepositoryProvider).watchPublicOrgs();
+});
+
+// ---------------------------------------------------------------------------
+// Venues and tournaments
+// ---------------------------------------------------------------------------
+
+final tournamentRepositoryProvider =
+    Provider((ref) => const TournamentRepository());
+
+/// Every venue a club can play at. Watched rather than fetched because the
+/// draw-setup sheet has to offer them the moment one is added.
+final venuesProvider =
+    StreamProvider.family<List<Venue>, String>((ref, orgId) {
+  return ref.watch(tournamentRepositoryProvider).watchVenues(orgId);
+});
+
+final venueProvider =
+    StreamProvider.family<Venue?, ({String orgId, String venueId})>(
+        (ref, key) {
+  return ref
+      .watch(tournamentRepositoryProvider)
+      .watchVenue(key.orgId, key.venueId);
+});
+
+final tournamentsProvider =
+    StreamProvider.family<List<Tournament>, String>((ref, orgId) {
+  return ref.watch(tournamentRepositoryProvider).watchTournaments(orgId);
+});
+
+final tournamentProvider = StreamProvider.family<Tournament?,
+    ({String orgId, String tournamentId})>((ref, key) {
+  return ref
+      .watch(tournamentRepositoryProvider)
+      .watchTournament(key.orgId, key.tournamentId);
+});
+
+/// The draws belonging to one tournament.
+final tournamentEventsProvider = StreamProvider.family<List<Competition>,
+    ({String orgId, String tournamentId})>((ref, key) {
+  return ref
+      .watch(tournamentRepositoryProvider)
+      .watchEvents(key.orgId, key.tournamentId);
 });
 
 // ---------------------------------------------------------------------------

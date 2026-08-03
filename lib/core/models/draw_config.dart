@@ -98,6 +98,7 @@ class DrawConfig {
 class ScheduleConfig {
   const ScheduleConfig({
     this.courts = const [],
+    this.venueIds = const [],
     this.matchMinutes = 30,
     this.changeoverMinutes = 5,
     this.restGapMinutes = 20,
@@ -105,9 +106,26 @@ class ScheduleConfig {
     this.dayEndHour = 19,
   });
 
-  /// The playing areas available — "Court 1", "Court 2", … A hall with six
-  /// courts runs six matches at once, and until this existed there was no way
-  /// to say so.
+  /// Venues this draw may be played at — ids into `orgs/{orgId}/venues`.
+  ///
+  /// This is the field that makes cross-event scheduling possible, and
+  /// [courts] is why it had to be added. A typed court name is a fact local
+  /// to one draw: the U-13 event's "Court 1" and the senior event's "Court 1"
+  /// are unrelated strings, so nothing could tell that two draws were
+  /// competing for the same physical court — which is exactly the contention
+  /// that overruns a tournament day. A venue id resolves to the same [Court]
+  /// objects for every event that names it.
+  ///
+  /// Empty means fall back to [courts], so a standalone club event that just
+  /// wants to type "Court 1, Court 2" still can.
+  final List<String> venueIds;
+
+  /// Ad-hoc playing-area names, for a draw that is not part of a tournament
+  /// and whose organizer has not set up a venue.
+  ///
+  /// Retained rather than removed because most club events are exactly this:
+  /// one afternoon, two courts, nobody wants to fill in a venue form first.
+  /// [venueIds] takes precedence whenever it is set.
   final List<String> courts;
 
   /// Planned duration of one match, before changeover. The single biggest
@@ -133,12 +151,17 @@ class ScheduleConfig {
   /// matches on a court.
   int get slotMinutes => matchMinutes + changeoverMinutes;
 
-  bool get hasCourts => courts.isNotEmpty;
+  /// Whether this draw has anywhere at all to be scheduled into.
+  bool get hasCourts => courts.isNotEmpty || venueIds.isNotEmpty;
+
+  /// Whether courts come from real venue documents rather than typed text.
+  bool get usesVenues => venueIds.isNotEmpty;
 
   static ScheduleConfig fromMap(Map<String, dynamic>? m) {
     if (m == null) return const ScheduleConfig();
     return ScheduleConfig(
       courts: Fs.strList(m['courts']),
+      venueIds: Fs.strList(m['venueIds']),
       matchMinutes: Fs.integer(m['matchMinutes'], 30),
       changeoverMinutes: Fs.integer(m['changeoverMinutes'], 5),
       restGapMinutes: Fs.integer(m['restGapMinutes'], 20),
@@ -149,6 +172,7 @@ class ScheduleConfig {
 
   Map<String, Object?> toMap() => {
         'courts': courts,
+        'venueIds': venueIds,
         'matchMinutes': matchMinutes,
         'changeoverMinutes': changeoverMinutes,
         'restGapMinutes': restGapMinutes,
@@ -158,6 +182,7 @@ class ScheduleConfig {
 
   ScheduleConfig copyWith({
     List<String>? courts,
+    List<String>? venueIds,
     int? matchMinutes,
     int? changeoverMinutes,
     int? restGapMinutes,
@@ -166,6 +191,7 @@ class ScheduleConfig {
   }) =>
       ScheduleConfig(
         courts: courts ?? this.courts,
+        venueIds: venueIds ?? this.venueIds,
         matchMinutes: matchMinutes ?? this.matchMinutes,
         changeoverMinutes: changeoverMinutes ?? this.changeoverMinutes,
         restGapMinutes: restGapMinutes ?? this.restGapMinutes,

@@ -188,6 +188,8 @@ class _OrganizerActions extends ConsumerWidget {
                   context,
                   competition: c,
                   entrantCount: entrants.where((e) => !e.withdrawn).length,
+                  venues: ref.read(venuesProvider(c.orgId)).valueOrNull ??
+                      const [],
                 );
                 if (choices == null) return;
 

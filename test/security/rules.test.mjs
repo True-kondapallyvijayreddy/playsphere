@@ -3970,3 +3970,220 @@ describe('player codes', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Venues and tournaments
+// ---------------------------------------------------------------------------
+//
+// A venue's court list is what the scheduler allocates against, so write
+// access has to match who runs competitions — a member who could add courts
+// could manufacture a timetable that does not exist.
+describe('venues', () => {
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER),
+        membership(OWNER, PUBLIC_ORG, 'owner'),
+      );
+    });
+  });
+
+  const venue = (overrides = {}) => ({
+    orgId: PUBLIC_ORG,
+    name: 'Gachibowli Indoor Stadium',
+    nameLower: 'gachibowli indoor stadium',
+    address: null,
+    city: 'Hyderabad',
+    district: 'Rangareddy',
+    latitude: null,
+    longitude: null,
+    courts: [
+      { id: 'c1', name: 'Court 1', isIndoor: true, surface: null, isAvailable: true },
+      { id: 'c2', name: 'Court 2', isIndoor: true, surface: null, isAvailable: true },
+    ],
+    openHour: 6,
+    closeHour: 22,
+    notes: null,
+    isArchived: false,
+    createdBy: OWNER,
+    createdAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  it('an organizer creates a venue for their club', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      setDoc(doc(db, `orgs/${PUBLIC_ORG}/venues/v_new`), venue()),
+    );
+  });
+
+  it('a plain outsider cannot create one', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(doc(db, `orgs/${PUBLIC_ORG}/venues/v_outsider`), venue()),
+    );
+  });
+
+  it('a venue that closes before it opens is rejected', async () => {
+    // A backwards window produces a slot grid with no slots, and therefore a
+    // schedule that silently contains nothing.
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, `orgs/${PUBLIC_ORG}/venues/v_backwards`),
+        venue({ openHour: 20, closeHour: 8 }),
+      ),
+    );
+  });
+
+  it('anyone who can read the org can read its venues', async () => {
+    // A spectator opening a public fixture needs to know which hall to walk to.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(
+        doc(ctx.firestore(), `orgs/${PUBLIC_ORG}/venues/v_read`),
+        venue(),
+      );
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertSucceeds(
+      getDoc(doc(db, `orgs/${PUBLIC_ORG}/venues/v_read`)),
+    );
+  });
+
+  it('a venue can never be deleted, only archived', async () => {
+    // Fixtures name it, and a career profile that says "played at" needs
+    // somewhere to point.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(
+        doc(ctx.firestore(), `orgs/${PUBLIC_ORG}/venues/v_perm`),
+        venue(),
+      );
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      deleteDoc(doc(db, `orgs/${PUBLIC_ORG}/venues/v_perm`)),
+    );
+    await assertSucceeds(
+      updateDoc(doc(db, `orgs/${PUBLIC_ORG}/venues/v_perm`), {
+        isArchived: true,
+      }),
+    );
+  });
+
+  it('an organizer cannot move a venue to another org', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(
+        doc(ctx.firestore(), `orgs/${PUBLIC_ORG}/venues/v_move`),
+        venue(),
+      );
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      updateDoc(doc(db, `orgs/${PUBLIC_ORG}/venues/v_move`), {
+        orgId: PRIVATE_ORG,
+      }),
+    );
+  });
+});
+
+describe('tournaments', () => {
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER),
+        membership(OWNER, PUBLIC_ORG, 'owner'),
+      );
+    });
+  });
+
+  const tournament = (overrides = {}) => ({
+    orgId: PUBLIC_ORG,
+    name: 'Hyderabad District Championship',
+    nameLower: 'hyderabad district championship',
+    status: 'draft',
+    grade: 'district',
+    description: null,
+    venueIds: [],
+    startDate: new Date('2026-09-12'),
+    endDate: new Date('2026-09-13'),
+    entryDeadline: null,
+    eventCount: 0,
+    contactPhone: null,
+    entryFeeRupees: 0,
+    matchMinutesDefault: 30,
+    changeoverMinutes: 5,
+    restGapMinutes: 20,
+    createdBy: OWNER,
+    createdAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  it('an organizer creates a tournament', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      setDoc(doc(db, `orgs/${PUBLIC_ORG}/tournaments/t_new`), tournament()),
+    );
+  });
+
+  it('a tournament cannot be created already claiming to hold events', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, `orgs/${PUBLIC_ORG}/tournaments/t_liar`),
+        tournament({ eventCount: 12 }),
+      ),
+    );
+  });
+
+  it('an outsider cannot create one', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(doc(db, `orgs/${PUBLIC_ORG}/tournaments/t_out`), tournament()),
+    );
+  });
+
+  it('a completed tournament cannot be reopened', async () => {
+    // Reopening would silently rewrite results participants have already been
+    // told are final.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(
+        doc(ctx.firestore(), `orgs/${PUBLIC_ORG}/tournaments/t_done`),
+        tournament({ status: 'completed' }),
+      );
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      updateDoc(doc(db, `orgs/${PUBLIC_ORG}/tournaments/t_done`), {
+        status: 'in_progress',
+      }),
+    );
+  });
+
+  it('a tournament holding events cannot be deleted', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(
+        doc(ctx.firestore(), `orgs/${PUBLIC_ORG}/tournaments/t_full`),
+        tournament({ eventCount: 3 }),
+      );
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      deleteDoc(doc(db, `orgs/${PUBLIC_ORG}/tournaments/t_full`)),
+    );
+  });
+
+  it('an empty tournament can be deleted', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(
+        doc(ctx.firestore(), `orgs/${PUBLIC_ORG}/tournaments/t_empty`),
+        tournament(),
+      );
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      deleteDoc(doc(db, `orgs/${PUBLIC_ORG}/tournaments/t_empty`)),
+    );
+  });
+});
