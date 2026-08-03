@@ -53,6 +53,17 @@ service firebase.storage {
         && request.resource.size < mb * 1024 * 1024;
     }
 
+    // The document types a club genuinely circulates, and nothing else. A
+    // bucket that accepts arbitrary bytes is free file hosting with somebody
+    // else's billing account attached.
+    function isDocumentUnder(mb) {
+      return request.resource != null
+        && request.resource.contentType.matches(
+             'application/pdf|image/(jpeg|jpg|png|webp)|text/plain|application/vnd.openxmlformats-officedocument.*|application/msword|application/vnd.ms-excel'
+           )
+        && request.resource.size < mb * 1024 * 1024;
+    }
+
     // --- Profile photos ---------------------------------------------------
     //
     // Publicly readable: a career profile is meant to be shareable, and the
@@ -66,14 +77,29 @@ service firebase.storage {
 
     // --- Club logos -------------------------------------------------------
     //
-    // Any signed-in member of the club may set the logo. Storage cannot check
-    // membership, so this is deliberately loose and the real gate is that
-    // `orgs/{orgId}.logoUrl` can only be written by an org admin under
-    // firestore.rules — an unreferenced object in this prefix is invisible.
-    match /orgs/{orgId}/logo/{fileName} {
+    // The uploader's uid is a path segment, exactly as it is for memories
+    // below, and for the same reason: it is the only fact this file can check.
+    //
+    // Before this, the path was `orgs/{orgId}/logo/{fileName}` with
+    // `write: if isSignedIn()` and `delete: if isSignedIn()`. That path is
+    // fully guessable from an org id, so any account in the world could
+    // overwrite a school's logo with anything that passed the image check, or
+    // simply delete it. The uid segment makes both impossible: a stranger can
+    // only ever write under their own segment, which nothing references.
+    //
+    // NOTE, so nobody "fixes" this later by reaching for a membership check:
+    // Cloud Storage rules cannot read Cloud Firestore. There is no
+    // firestore.get() available here (this file uses none anywhere), so
+    // "owners and admins only" is not expressible in this file. The real gate
+    // on which object becomes a club's logo stays where it can be enforced —
+    // `orgs/{orgId}.logoUrl` is writable only by an org admin under
+    // firestore.rules, so an object nobody linked is an object nobody sees.
+    // Making this properly role-aware needs either an admin custom claim on
+    // the token or an upload that goes through a server.
+    match /orgs/{orgId}/logo/{uid}/{fileName} {
       allow read: if true;
-      allow write: if isSignedIn() && isImageUnder(4);
-      allow delete: if isSignedIn();
+      allow write: if isSelf(uid) && isImageUnder(4);
+      allow delete: if isSelf(uid);
     }
 
     // --- Match memories ---------------------------------------------------
@@ -88,6 +114,25 @@ service firebase.storage {
       allow create: if isSelf(uid) && (isImageUnder(8) || isVideoUnder(50));
       // No update: a memory is a record of a moment. Replacing the bytes
       // behind an existing caption and timestamp would let the record lie.
+      allow update: if false;
+      allow delete: if isSelf(uid);
+    }
+
+    // --- Club files -------------------------------------------------------
+    //
+    // The fixtures list a school sends round, the tournament rules PDF, a
+    // consent form. The flow puts files inside a club next to announcements
+    // and polls, and until now there was nowhere to put one.
+    //
+    // Deliberately narrower than memories: a document store attached to every
+    // club is the most attractive thing in this bucket to abuse, so uploads
+    // are capped hard and restricted to the handful of types a club actually
+    // shares. Write authority is checked in Firestore — the accompanying
+    // `files` document can only be created by an admin — and the uid segment
+    // keeps deletion exact.
+    match /clubFiles/{orgId}/{uid}/{fileName} {
+      allow read: if isSignedIn();
+      allow create: if isSelf(uid) && isDocumentUnder(10);
       allow update: if false;
       allow delete: if isSelf(uid);
     }
