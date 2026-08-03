@@ -49,7 +49,25 @@ class PlayerPrompt {
     this.from = PromptSource.actingSide,
     this.optional = false,
     this.multiple = false,
+    this.only,
   });
+
+  /// Restricts the pool to specific players, computed by the plugin from the
+  /// current state.
+  ///
+  /// [from] answers "which side", which is all most prompts need. Substitution
+  /// is the case it cannot express: "who comes off" is drawn from whoever is
+  /// on the field right now and "who comes on" from whoever is not, and both
+  /// pools change with every event. Neither is a side.
+  ///
+  /// The alternative — teaching the pad what a substitution is — is the same
+  /// mistake the hard-coded cricket action names were. The plugin already
+  /// holds the state when it builds its controls, so it names the candidates
+  /// and the screen stays ignorant of what it is asking about.
+  ///
+  /// Null means no restriction; an empty list means nobody is eligible, and
+  /// the pad shows that rather than offering a choice that cannot be made.
+  final List<String>? only;
 
   /// Whether this names SEVERAL people, written as a list rather than an id.
   ///

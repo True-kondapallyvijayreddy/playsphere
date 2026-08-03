@@ -1,3 +1,4 @@
+import '../match_flow.dart';
 import '../player_stats.dart';
 import '../scoring_plugin.dart';
 
@@ -16,8 +17,38 @@ import '../scoring_plugin.dart';
 ///    — 33-31 is a legal set and an engine with a hard cap would end it wrongly.
 ///  * **The deciding set is to 15**, still win by two. Playing it to 25 is the
 ///    error that decides the match that matters most incorrectly.
-class VolleyballPlugin extends ScoringPlugin {
+class VolleyballPlugin extends ScoringPlugin with SquadRotation, TeamTimeouts {
   const VolleyballPlugin();
+
+  /// Volleyball counts substitutions and timeouts **per set**, and its match
+  /// has no running clock at all. So it takes the shared rotation machinery
+  /// for the legality checks and the bench, and declines the minutes column:
+  /// a number nobody at the venue could check is worse than no number.
+  @override
+  bool get tracksPlayingTime => false;
+
+  /// Rally count stands in for a clock. Nothing here is measured in minutes;
+  /// this exists so "has the match started" has an answer, which is what
+  /// decides whether the starting six can still be declared.
+  @override
+  int rotationClock(Map<String, dynamic> state) {
+    var played = 0;
+    for (final set in copyList(state['completedSets'])) {
+      played += ((set['a'] as num?) ?? 0).toInt();
+      played += ((set['b'] as num?) ?? 0).toInt();
+    }
+    return played +
+        ((state['currentA'] as num?) ?? 0).toInt() +
+        ((state['currentB'] as num?) ?? 0).toInt();
+  }
+
+  /// Derived from the score, so there is nothing to write.
+  @override
+  Map<String, dynamic> withRotationClock(
+    Map<String, dynamic> state,
+    int value,
+  ) =>
+      state;
 
   static const pluginKey = 'volleyball';
 
@@ -61,6 +92,8 @@ class VolleyballPlugin extends ScoringPlugin {
         'complete': false,
         'winner': null,
         PlayerTally.stateKey: <String, dynamic>{},
+        ...rotationInitialState(ctx),
+        ...timeoutInitialState(ctx),
       };
 
   /// Whether the set being played is the decider.
@@ -104,6 +137,10 @@ class VolleyballPlugin extends ScoringPlugin {
         'This match is already finished. Reopen it to make a correction.',
       );
     }
+
+    final shared = applyRotationAction(state, action, ctx) ??
+        applyTimeoutAction(state, action, ctx);
+    if (shared != null) return shared;
 
     switch (action.type) {
       case 'point':
@@ -234,6 +271,12 @@ class VolleyballPlugin extends ScoringPlugin {
       // Teams change ends between sets anyway, so the mid-set flag resets
       // with the set it belonged to.
       s['endsSwapped'] = false;
+      // A new set refills both allowances. Carrying a spent set's timeouts
+      // into the next one is how a side is told it has none left in a set it
+      // has not yet called one in.
+      s[TeamTimeouts.usedKey] = {'a': 0, 'b': 0};
+      s[SquadRotation.subsUsedKey] = {'a': 0, 'b': 0};
+      s[SquadRotation.subbedOffKey] = <String>[];
       if (matchOver) {
         s['complete'] = true;
         s['winner'] = setsA > setsB ? 'a' : 'b';
@@ -364,7 +407,12 @@ class VolleyballPlugin extends ScoringPlugin {
     // won the point with the attack?" and refuses without an answer. An
     // opponent error is nobody's, which is why it is the one point button
     // below that carries no prompt.
-    List<ScoreControl> forSide(Side side, String killKey) => [
+    List<ScoreControl> forSide(Side side, String killKey) {
+      final starters = startersControl(state, ctx, side);
+      final sub = substitutionControl(state, ctx, side);
+      final timeout = timeoutControl(state, ctx, side);
+
+      return [
           ScoreControl(
             action: 'point',
             label: 'Kill',
@@ -415,7 +463,11 @@ class VolleyballPlugin extends ScoringPlugin {
             side: side,
             style: ControlStyle.subtle,
           ),
+          if (starters != null) starters,
+          if (sub != null) sub,
+          if (timeout != null) timeout,
         ];
+    }
 
     return [
       if (endsPrompt != null) endsPrompt,

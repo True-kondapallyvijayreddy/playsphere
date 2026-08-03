@@ -104,14 +104,26 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
     /// line-ups are offered rather than guessing one.
     List<MatchPlayer> candidates(PlayerPrompt prompt) {
       final acting = control.side;
-      if (acting == Side.neutral || prompt.from == PromptSource.eitherSide) {
-        return [...ctx.lineupFor(Side.a), ...ctx.lineupFor(Side.b)];
-      }
-      return switch (prompt.from) {
-        PromptSource.actingSide => ctx.lineupFor(acting),
-        PromptSource.opposingSide => ctx.lineupFor(acting.opposite),
-        PromptSource.eitherSide => const [],
-      };
+      final pool =
+          acting == Side.neutral || prompt.from == PromptSource.eitherSide
+              ? [...ctx.lineupFor(Side.a), ...ctx.lineupFor(Side.b)]
+              : switch (prompt.from) {
+                  PromptSource.actingSide => ctx.lineupFor(acting),
+                  PromptSource.opposingSide => ctx.lineupFor(acting.opposite),
+                  PromptSource.eitherSide => const <MatchPlayer>[],
+                };
+
+      // An explicit list narrows the side to the people the plugin says are
+      // eligible right now — who is on the field, who is on the bench. Order
+      // follows the plugin's, not the team sheet's, because for a substitution
+      // that order is who came on most recently.
+      final only = prompt.only;
+      if (only == null) return pool;
+      final byId = {for (final p in pool) p.id: p};
+      return [
+        for (final id in only)
+          if (byId[id] case final player?) player,
+      ];
     }
 
     final byKey = {for (final p in control.prompts) p.key: p};

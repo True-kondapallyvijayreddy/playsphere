@@ -1,3 +1,4 @@
+import '../match_flow.dart';
 import '../player_stats.dart';
 import '../scoring_plugin.dart';
 
@@ -14,7 +15,8 @@ import '../scoring_plugin.dart';
 /// yellow (temporary suspension) and red. Collapsing green into yellow, as a
 /// football-shaped engine would, loses the distinction between a caution and
 /// a suspension.
-class HockeyPlugin extends ScoringPlugin {
+class HockeyPlugin extends ScoringPlugin
+    with PeriodedMatch, SquadRotation, TeamTimeouts, MatchReviews {
   const HockeyPlugin();
 
   static const pluginKey = 'hockey';
@@ -35,14 +37,19 @@ class HockeyPlugin extends ScoringPlugin {
   static const _yellows = 'yellowCards';
   static const _reds = 'redCards';
 
-  int _periods(ScoringContext ctx) => ctx.intConfig('periods', 4);
+  @override
+  int periodCount(ScoringContext ctx) => ctx.intConfig('periods', 4);
+
+  @override
+  String periodNoun(ScoringContext ctx) =>
+      ctx.stringConfig('periodLabel', 'Quarter');
+
   bool _allowDraw(ScoringContext ctx) => ctx.boolConfig('allowDraw', true);
 
   @override
   Map<String, dynamic> initialState(ScoringContext ctx) => {
         'a': 0,
         'b': 0,
-        'period': 1,
         'complete': false,
         'winner': null,
         'draw': false,
@@ -51,6 +58,10 @@ class HockeyPlugin extends ScoringPlugin {
         'pcAwardedB': 0,
         'suspended': <String>[],
         PlayerTally.stateKey: <String, dynamic>{},
+        ...periodInitialState(ctx),
+        ...rotationInitialState(ctx),
+        ...timeoutInitialState(ctx),
+        ...reviewInitialState(ctx),
       };
 
   List<String> _suspended(Map<String, dynamic> state) =>
@@ -68,12 +79,37 @@ class HockeyPlugin extends ScoringPlugin {
       );
     }
 
+    // Any event may carry the minute it happened at, and the clock follows it
+    // before anything else reads it. A red card in the 20th minute has to move
+    // the clock first, or the player it removes is credited with whatever was
+    // banked at the last timed event — zero, for a dismissal early on.
+    state = withMinuteFrom(state, action);
+
     final player = action.payload['playerId'] as String?;
     if (player != null && _suspended(state).contains(player)) {
       return ScoringResult.rejected(
         '${ctx.playerName(player)} has been sent off and cannot take part.',
       );
     }
+
+    final comingOn = action.payload['playerOnId'] as String?;
+    if (comingOn != null && _suspended(state).contains(comingOn)) {
+      return ScoringResult.rejected(
+        '${ctx.playerName(comingOn)} has been sent off and cannot come on.',
+      );
+    }
+
+    // Rolling substitution, timeouts and the video umpire are match mechanics
+    // rather than hockey ones. Hockey's own contribution is that its
+    // substitutions are unlimited and a substituted player may return, which
+    // is configuration rather than another implementation.
+    final crossed = applyPeriodAction(state, action, ctx);
+    if (crossed != null) return refillIfScoped(crossed, ctx);
+
+    final shared = applyRotationAction(state, action, ctx) ??
+        applyTimeoutAction(state, action, ctx) ??
+        applyReviewAction(state, action, ctx);
+    if (shared != null) return shared;
 
     int v(String k) => ((state[k] as num?) ?? 0).toInt();
 
@@ -139,20 +175,9 @@ class HockeyPlugin extends ScoringPlugin {
         // warning — treating either as a sending-off would be wrong.
         if (colour == 'red') {
           next = {...next, 'suspended': [..._suspended(next), player]};
+          next = removeFromField(next, player);
         }
         return ScoringResult.ok(next);
-
-      case 'next_period':
-        final period = v('period');
-        if (period >= _periods(ctx)) {
-          return ScoringResult.rejected(
-            'This match has only ${_periods(ctx)} quarters. '
-            'Use "End match" to finish.',
-          );
-        }
-        return ScoringResult.ok(
-          mutate(state, (s) => s['period'] = period + 1),
-        );
 
       case 'finish':
         final a = v('a');
@@ -163,14 +188,15 @@ class HockeyPlugin extends ScoringPlugin {
             'play a shootout, then record the result.',
           );
         }
-        return ScoringResult.ok(mutate(state, (s) {
+        final settled = closePlayingTime(atFullTime(state, ctx));
+        return ScoringResult.ok(mutate(settled, (s) {
           s['complete'] = true;
           s['draw'] = a == b;
           s['winner'] = a == b ? null : (a > b ? 'a' : 'b');
         }));
 
       case 'reopen':
-        return ScoringResult.ok(mutate(state, (s) {
+        return ScoringResult.ok(mutate(reopenPlayingTime(state), (s) {
           s['complete'] = false;
           s['winner'] = null;
           s['draw'] = false;
@@ -199,6 +225,7 @@ class HockeyPlugin extends ScoringPlugin {
   }
 
   static List<StatColumn> get columns => [
+        SquadRotation.minutesColumn,
         const StatColumn(key: _goals, label: 'Goals', shortLabel: 'G'),
         const StatColumn(
           key: _fieldGoals,
@@ -229,7 +256,7 @@ class HockeyPlugin extends ScoringPlugin {
     Side side,
   ) =>
       PlayerTally.boxScore(
-          state: state, ctx: ctx, side: side, columns: columns);
+          state: forDisplay(state), ctx: ctx, side: side, columns: columns);
 
   @override
   String headline(Map<String, dynamic> state, ScoringContext ctx) =>
@@ -244,7 +271,7 @@ class HockeyPlugin extends ScoringPlugin {
     if (state['complete'] == true) {
       return state['draw'] == true ? 'Full time · drawn' : 'Full time';
     }
-    return 'Quarter ${state['period'] ?? 1} of ${_periods(ctx)}';
+    return periodStatus(state, ctx);
   }
 
   @override
@@ -290,7 +317,12 @@ class HockeyPlugin extends ScoringPlugin {
       PlayerPrompt(key: 'assistId', label: 'Assisted by', optional: true),
     ];
 
-    List<ScoreControl> forSide(Side side, String key) => [
+    List<ScoreControl> forSide(Side side, String key) {
+      final starters = startersControl(state, ctx, side);
+      final sub = substitutionControl(state, ctx, side);
+      final timeout = timeoutControl(state, ctx, side);
+
+      return [
           ScoreControl(
             action: 'goal',
             label: 'Field goal',
@@ -353,21 +385,21 @@ class HockeyPlugin extends ScoringPlugin {
               PlayerPrompt(key: 'playerId', label: 'Who was sent off?'),
             ],
           ),
+          if (starters != null) starters,
+          if (sub != null) sub,
+          if (timeout != null) timeout,
+          ...reviewControls(state, ctx, side),
         ];
+    }
 
     return [
       ScoreControlGroup(title: ctx.entrantAName, controls: forSide(Side.a, 'a')),
       ScoreControlGroup(title: ctx.entrantBName, controls: forSide(Side.b, 'l')),
-      const ScoreControlGroup(
+      ScoreControlGroup(
         title: 'Match',
         controls: [
-          ScoreControl(
-            action: 'next_period',
-            label: 'Next quarter',
-            style: ControlStyle.secondary,
-            shortcut: 'n',
-          ),
-          ScoreControl(
+          nextPeriodControl(ctx),
+          const ScoreControl(
             action: 'finish',
             label: 'End match',
             style: ControlStyle.danger,

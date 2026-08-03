@@ -1,3 +1,4 @@
+import '../match_flow.dart';
 import '../player_stats.dart';
 import '../scoring_plugin.dart';
 
@@ -11,7 +12,8 @@ import '../scoring_plugin.dart';
 ///
 /// Shots carry optional normalised court coordinates so a shot chart can be
 /// drawn later without re-deriving anything from the event log.
-class BasketballPlugin extends ScoringPlugin {
+class BasketballPlugin extends ScoringPlugin
+    with PeriodedMatch, SquadRotation, TeamTimeouts, MatchReviews {
   const BasketballPlugin();
 
   static const pluginKey = 'basketball';
@@ -38,7 +40,12 @@ class BasketballPlugin extends ScoringPlugin {
   static const _fouls = 'fouls';
   static const _technicals = 'technicals';
 
-  int _periods(ScoringContext ctx) => ctx.intConfig('periods', 4);
+  @override
+  int periodCount(ScoringContext ctx) => ctx.intConfig('periods', 4);
+
+  @override
+  String periodNoun(ScoringContext ctx) =>
+      ctx.stringConfig('periodLabel', 'Quarter');
 
   /// FIBA fouls out at 5, the NBA at 6. Configurable, never assumed.
   int _foulLimit(ScoringContext ctx) => ctx.intConfig('foulOutAt', 5);
@@ -80,13 +87,16 @@ class BasketballPlugin extends ScoringPlugin {
   Map<String, dynamic> initialState(ScoringContext ctx) => {
         'a': 0,
         'b': 0,
-        'period': 1,
         'complete': false,
         'winner': null,
         'draw': false,
         'fouledOut': <String>[],
         'shots': <Map<String, dynamic>>[],
         PlayerTally.stateKey: <String, dynamic>{},
+        ...periodInitialState(ctx),
+        ...rotationInitialState(ctx),
+        ...timeoutInitialState(ctx),
+        ...reviewInitialState(ctx),
       };
 
   List<String> _fouledOut(Map<String, dynamic> state) =>
@@ -123,12 +133,35 @@ class BasketballPlugin extends ScoringPlugin {
       );
     }
 
+    // Any event may carry the minute it happened at, and the clock follows it
+    // before anything else reads it. A red card in the 20th minute has to move
+    // the clock first, or the player it removes is credited with whatever was
+    // banked at the last timed event — zero, for a dismissal early on.
+    state = withMinuteFrom(state, action);
+
     final player = action.payload['playerId'] as String?;
     if (player != null && _fouledOut(state).contains(player)) {
       return ScoringResult.rejected(
         '${ctx.playerName(player)} has fouled out and cannot take part.',
       );
     }
+    final comingOn = action.payload['playerOnId'] as String?;
+    if (comingOn != null && _fouledOut(state).contains(comingOn)) {
+      return ScoringResult.rejected(
+        '${ctx.playerName(comingOn)} has fouled out and cannot come back on.',
+      );
+    }
+
+    // Periods, substitutions, timeouts and reviews come from the shared match
+    // mechanics; each declines what it does not recognise. Basketball's
+    // timeouts are per quarter, so crossing a period refills them.
+    final crossed = applyPeriodAction(state, action, ctx);
+    if (crossed != null) return refillIfScoped(crossed, ctx);
+
+    final shared = applyRotationAction(state, action, ctx) ??
+        applyTimeoutAction(state, action, ctx) ??
+        applyReviewAction(state, action, ctx);
+    if (shared != null) return shared;
 
     int score(String side) => (state[side] as num?)?.toInt() ?? 0;
 
@@ -202,6 +235,16 @@ class BasketballPlugin extends ScoringPlugin {
           1,
         ));
 
+      // The pad has always had an "Ast" button for an assist recorded on its
+      // own — a scorer who logged the basket first, then realised who passed.
+      // The engine had no case for it, so every press came back "Unknown
+      // action 'assist'" and the assist was lost.
+      case 'assist':
+        if (player == null) {
+          return const ScoringResult.rejected('Who assisted?');
+        }
+        return ScoringResult.ok(PlayerTally.add(state, player, _assists, 1));
+
       case 'steal':
         if (player == null) {
           return const ScoringResult.rejected('Who stole it?');
@@ -236,20 +279,10 @@ class BasketballPlugin extends ScoringPlugin {
             ...next,
             'fouledOut': [..._fouledOut(next), player],
           };
+          // Fouling out ends their game, so it ends their minutes too.
+          next = removeFromField(next, player);
         }
         return ScoringResult.ok(next);
-
-      case 'next_period':
-        final period = (state['period'] as num?)?.toInt() ?? 1;
-        if (period >= _periods(ctx)) {
-          return ScoringResult.rejected(
-            'This match has only ${_periods(ctx)} periods. '
-            'Use "End match" to finish.',
-          );
-        }
-        return ScoringResult.ok(
-          mutate(state, (s) => s['period'] = period + 1),
-        );
 
       case 'finish':
         final a = score('a');
@@ -262,14 +295,15 @@ class BasketballPlugin extends ScoringPlugin {
             'then record the result.',
           );
         }
-        return ScoringResult.ok(mutate(state, (s) {
+        final settled = closePlayingTime(atFullTime(state, ctx));
+        return ScoringResult.ok(mutate(settled, (s) {
           s['complete'] = true;
           s['draw'] = false;
           s['winner'] = a > b ? 'a' : 'b';
         }));
 
       case 'reopen':
-        return ScoringResult.ok(mutate(state, (s) {
+        return ScoringResult.ok(mutate(reopenPlayingTime(state), (s) {
           s['complete'] = false;
           s['winner'] = null;
         }));
@@ -283,6 +317,7 @@ class BasketballPlugin extends ScoringPlugin {
       attempted == 0 ? 0 : made / attempted;
 
   static List<StatColumn> get columns => [
+        SquadRotation.minutesColumn,
         const StatColumn(key: _points, label: 'Points', shortLabel: 'PTS'),
         StatColumn(
           key: 'rebounds',
@@ -329,7 +364,7 @@ class BasketballPlugin extends ScoringPlugin {
     Side side,
   ) =>
       PlayerTally.boxScore(
-        state: state,
+        state: forDisplay(state),
         ctx: ctx,
         side: side,
         columns: columns,
@@ -356,8 +391,7 @@ class BasketballPlugin extends ScoringPlugin {
   @override
   String? statusLine(Map<String, dynamic> state, ScoringContext ctx) {
     if (state['complete'] == true) return 'Final';
-    final label = ctx.config['periodLabel'] as String? ?? 'Quarter';
-    return '$label ${state['period'] ?? 1} of ${_periods(ctx)}';
+    return periodStatus(state, ctx);
   }
 
   @override
@@ -411,7 +445,12 @@ class BasketballPlugin extends ScoringPlugin {
       PlayerPrompt(key: 'assistId', label: 'Assisted by', optional: true),
     ];
 
-    List<ScoreControl> forSide(Side side, List<String> keys) => [
+    List<ScoreControl> forSide(Side side, List<String> keys) {
+      final starters = startersControl(state, ctx, side);
+      final sub = substitutionControl(state, ctx, side);
+      final timeout = timeoutControl(state, ctx, side);
+
+      return [
           ScoreControl(
             action: 'shot',
             label: '+$fg',
@@ -476,7 +515,12 @@ class BasketballPlugin extends ScoringPlugin {
               PlayerPrompt(key: 'playerId', label: 'Who committed the foul?'),
             ],
           ),
+          if (starters != null) starters,
+          if (sub != null) sub,
+          if (timeout != null) timeout,
+          ...reviewControls(state, ctx, side),
         ];
+    }
 
     return [
       ScoreControlGroup(
@@ -487,16 +531,11 @@ class BasketballPlugin extends ScoringPlugin {
         title: ctx.entrantBName,
         controls: forSide(Side.b, ['j', 'k', 'l']),
       ),
-      const ScoreControlGroup(
+      ScoreControlGroup(
         title: 'Match',
         controls: [
-          ScoreControl(
-            action: 'next_period',
-            label: 'Next quarter',
-            style: ControlStyle.secondary,
-            shortcut: 'n',
-          ),
-          ScoreControl(
+          nextPeriodControl(ctx),
+          const ScoreControl(
             action: 'finish',
             label: 'End match',
             style: ControlStyle.danger,

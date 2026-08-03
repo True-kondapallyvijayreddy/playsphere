@@ -1,3 +1,4 @@
+import '../match_flow.dart';
 import '../player_stats.dart';
 import '../scoring_plugin.dart';
 
@@ -21,7 +22,11 @@ import '../scoring_plugin.dart';
 ///  * **A sent-off player cannot be involved in anything afterwards.**
 ///  * **A clean sheet belongs to the goalkeeper who finished the match**, and
 ///    is derived at full time rather than tracked as it goes.
-class FootballPlugin extends ScoringPlugin {
+///  * **Five substitutions, and nobody comes back.** Both come from the shared
+///    rotation mixin, so the minutes-played column is computed the same way it
+///    is in hockey and basketball rather than three times over.
+class FootballPlugin extends ScoringPlugin
+    with PeriodedMatch, SquadRotation, TeamTimeouts, MatchReviews {
   const FootballPlugin();
 
   static const pluginKey = 'football';
@@ -45,20 +50,22 @@ class FootballPlugin extends ScoringPlugin {
   static const _penaltiesScored = 'penaltiesScored';
   static const _penaltiesMissed = 'penaltiesMissed';
 
-  int _periods(ScoringContext ctx) => ctx.intConfig('periods', 2);
   bool _allowDraw(ScoringContext ctx) => ctx.boolConfig('allowDraw', true);
 
   @override
   Map<String, dynamic> initialState(ScoringContext ctx) => {
         'a': 0,
         'b': 0,
-        'period': 1,
         'complete': false,
         'winner': null,
         'draw': false,
         'timeline': <Map<String, dynamic>>[],
         'sentOff': <String>[],
         PlayerTally.stateKey: <String, dynamic>{},
+        ...periodInitialState(ctx),
+        ...rotationInitialState(ctx),
+        ...timeoutInitialState(ctx),
+        ...reviewInitialState(ctx),
       };
 
   List<String> _sentOff(Map<String, dynamic> state) =>
@@ -76,6 +83,12 @@ class FootballPlugin extends ScoringPlugin {
       );
     }
 
+    // Any event may carry the minute it happened at, and the clock follows it
+    // before anything else reads it. A red card in the 20th minute has to move
+    // the clock first, or the player it removes is credited with whatever was
+    // banked at the last timed event — zero, for a dismissal early on.
+    state = withMinuteFrom(state, action);
+
     final player = action.payload['playerId'] as String?;
     final sentOff = _sentOff(state);
 
@@ -86,6 +99,27 @@ class FootballPlugin extends ScoringPlugin {
         '${ctx.playerName(player)} has been sent off and cannot take part.',
       );
     }
+    // ...and cannot be sent back on as a substitute. The rotation mixin knows
+    // about benches, not about red cards, so the sport that issues them says
+    // so here.
+    final comingOn = action.payload['playerOnId'] as String?;
+    if (comingOn != null && sentOff.contains(comingOn)) {
+      return ScoringResult.rejected(
+        '${ctx.playerName(comingOn)} has been sent off and cannot come on. '
+        'A side that goes down to ten plays on with ten.',
+      );
+    }
+
+    // Periods, substitutions, timeouts and reviews are match mechanics rather
+    // than football ones; each mixin claims what it recognises and declines
+    // the rest by returning null.
+    final crossed = applyPeriodAction(state, action, ctx);
+    if (crossed != null) return refillIfScoped(crossed, ctx);
+
+    final shared = applyRotationAction(state, action, ctx) ??
+        applyTimeoutAction(state, action, ctx) ??
+        applyReviewAction(state, action, ctx);
+    if (shared != null) return shared;
 
     int score(String side) => (state[side] as num?)?.toInt() ?? 0;
 
@@ -200,6 +234,8 @@ class FootballPlugin extends ScoringPlugin {
         if (colour == 'red') {
           var next = PlayerTally.add(state, player, _reds, 1);
           next = {...next, 'sentOff': [...sentOff, player]};
+          // Their afternoon ends here, and so does their minutes column.
+          next = removeFromField(next, player);
           return ScoringResult.ok(
             withTimeline(next, 'red_card', playerId: player),
           );
@@ -212,24 +248,13 @@ class FootballPlugin extends ScoringPlugin {
         if (yellows + 1 >= 2) {
           next = PlayerTally.add(next, player, _reds, 1);
           next = {...next, 'sentOff': [...sentOff, player]};
+          next = removeFromField(next, player);
           return ScoringResult.ok(
             withTimeline(next, 'second_yellow', playerId: player),
           );
         }
         return ScoringResult.ok(
           withTimeline(next, 'yellow_card', playerId: player),
-        );
-
-      case 'next_period':
-        final period = (state['period'] as num?)?.toInt() ?? 1;
-        if (period >= _periods(ctx)) {
-          return ScoringResult.rejected(
-            'This match has only ${_periods(ctx)} periods. '
-            'Use "End match" to finish.',
-          );
-        }
-        return ScoringResult.ok(
-          mutate(state, (s) => s['period'] = period + 1),
         );
 
       case 'finish':
@@ -241,14 +266,18 @@ class FootballPlugin extends ScoringPlugin {
             'play extra time or a shootout, then record the result.',
           );
         }
-        return ScoringResult.ok(mutate(state, (s) {
+        // Run the clock out to full time before banking anyone's minutes,
+        // otherwise everyone who was not substituted is credited only to the
+        // last event that happened to name a minute.
+        var settled = closePlayingTime(atFullTime(state, ctx));
+        return ScoringResult.ok(mutate(settled, (s) {
           s['complete'] = true;
           s['draw'] = a == b;
           s['winner'] = a == b ? null : (a > b ? 'a' : 'b');
         }));
 
       case 'reopen':
-        return ScoringResult.ok(mutate(state, (s) {
+        return ScoringResult.ok(mutate(reopenPlayingTime(state), (s) {
           s['complete'] = false;
           s['winner'] = null;
           s['draw'] = false;
@@ -261,6 +290,7 @@ class FootballPlugin extends ScoringPlugin {
 
   /// Columns for the box score, in the order a football sheet reads.
   static List<StatColumn> get columns => [
+        SquadRotation.minutesColumn,
         const StatColumn(key: _goals, label: 'Goals', shortLabel: 'G'),
         const StatColumn(key: _assists, label: 'Assists', shortLabel: 'A'),
         const StatColumn(key: _shots, label: 'Shots', shortLabel: 'Sh'),
@@ -299,7 +329,7 @@ class FootballPlugin extends ScoringPlugin {
     Side side,
   ) =>
       PlayerTally.boxScore(
-        state: state,
+        state: forDisplay(state),
         ctx: ctx,
         side: side,
         columns: columns,
@@ -326,9 +356,12 @@ class FootballPlugin extends ScoringPlugin {
     if (state['complete'] == true) {
       return state['draw'] == true ? 'Full time · drawn' : 'Full time';
     }
-    final label = ctx.config['periodLabel'] as String? ?? 'Half';
-    return '$label ${state['period'] ?? 1} of ${_periods(ctx)}';
+    return periodStatus(state, ctx);
   }
+
+  @override
+  String periodNoun(ScoringContext ctx) =>
+      ctx.stringConfig('periodLabel', 'Half');
 
   @override
   MatchOutcome outcome(Map<String, dynamic> state, ScoringContext ctx) {
@@ -368,7 +401,14 @@ class FootballPlugin extends ScoringPlugin {
     // — "Who scored?", "Who was booked?". Until the controls declared their
     // prompts the pad never asked, so every button on this pad returned a
     // rejection and a football match could not be scored at all.
-    List<ScoreControl> forSide(Side side, String goalKey) => [
+    List<ScoreControl> forSide(Side side, String goalKey) {
+      // Nulls here are the ruleset speaking: no bench, no sub button; a
+      // competition with no timeouts or reviews shows neither.
+      final starters = startersControl(state, ctx, side);
+      final sub = substitutionControl(state, ctx, side);
+      final timeout = timeoutControl(state, ctx, side);
+
+      return [
           ScoreControl(
             action: 'goal',
             label: 'Goal',
@@ -423,7 +463,12 @@ class FootballPlugin extends ScoringPlugin {
               PlayerPrompt(key: 'playerId', label: 'Who was sent off?'),
             ],
           ),
+          if (starters != null) starters,
+          if (sub != null) sub,
+          if (timeout != null) timeout,
+          ...reviewControls(state, ctx, side),
         ];
+    }
 
     return [
       ScoreControlGroup(
@@ -434,16 +479,11 @@ class FootballPlugin extends ScoringPlugin {
         title: ctx.entrantBName,
         controls: forSide(Side.b, 'l'),
       ),
-      const ScoreControlGroup(
+      ScoreControlGroup(
         title: 'Match',
         controls: [
-          ScoreControl(
-            action: 'next_period',
-            label: 'Next period',
-            style: ControlStyle.secondary,
-            shortcut: 'n',
-          ),
-          ScoreControl(
+          nextPeriodControl(ctx),
+          const ScoreControl(
             action: 'finish',
             label: 'End match',
             style: ControlStyle.danger,

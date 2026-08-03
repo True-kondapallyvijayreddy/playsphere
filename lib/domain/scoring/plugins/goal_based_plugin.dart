@@ -1,3 +1,4 @@
+import '../match_flow.dart';
 import '../scoring_plugin.dart';
 
 /// Clock-and-period scoring for football, hockey, basketball, kabaddi,
@@ -6,7 +7,7 @@ import '../scoring_plugin.dart';
 /// Score values are configurable, which is what lets one plugin serve both
 /// football (every score worth 1) and basketball (1, 2 or 3), instead of
 /// forcing a separate implementation for what is otherwise identical logic.
-class GoalBasedPlugin extends ScoringPlugin {
+class GoalBasedPlugin extends ScoringPlugin with PeriodedMatch, TeamTimeouts {
   const GoalBasedPlugin();
 
   static const pluginKey = 'goal_based';
@@ -21,11 +22,12 @@ class GoalBasedPlugin extends ScoringPlugin {
   Map<String, dynamic> initialState(ScoringContext ctx) => {
         'a': 0,
         'b': 0,
-        'period': 1,
         'log': <Map<String, dynamic>>[],
         'complete': false,
         'winner': null,
         'draw': false,
+        ...periodInitialState(ctx),
+        ...timeoutInitialState(ctx),
       };
 
   List<int> _scoreValues(ScoringContext ctx) {
@@ -49,8 +51,16 @@ class GoalBasedPlugin extends ScoringPlugin {
       );
     }
 
-    final periods = ctx.intConfig('periods', 2);
     final allowDraw = ctx.boolConfig('allowDraw', true);
+
+    // Periods and timeouts are shared. Substitutions are not mixed in here on
+    // purpose: this archetype records side totals and names nobody, so it has
+    // no line-up to rotate and a minutes column would have no rows.
+    final crossed = applyPeriodAction(state, action, ctx);
+    if (crossed != null) return refillIfScoped(crossed, ctx);
+
+    final shared = applyTimeoutAction(state, action, ctx);
+    if (shared != null) return shared;
 
     switch (action.type) {
       case 'score':
@@ -83,15 +93,6 @@ class GoalBasedPlugin extends ScoringPlugin {
           );
         }
         return ScoringResult.ok(mutate(state, (s) => s[key] = current - value));
-
-      case 'next_period':
-        final period = (state['period'] as num?)?.toInt() ?? 1;
-        if (period >= periods) {
-          return ScoringResult.rejected(
-            'This match only has $periods periods. Use "End match" to finish.',
-          );
-        }
-        return ScoringResult.ok(mutate(state, (s) => s['period'] = period + 1));
 
       case 'finish':
         final a = (state['a'] as num?)?.toInt() ?? 0;
@@ -133,9 +134,7 @@ class GoalBasedPlugin extends ScoringPlugin {
     if (state['complete'] == true) {
       return state['draw'] == true ? 'Full time · drawn' : 'Full time';
     }
-    final periods = ctx.intConfig('periods', 2);
-    final label = ctx.config['periodLabel'] as String? ?? 'Period';
-    return '$label ${state['period'] ?? 1} of $periods';
+    return periodStatus(state, ctx);
   }
 
   @override
@@ -175,7 +174,10 @@ class GoalBasedPlugin extends ScoringPlugin {
     final aShortcuts = ['a', 's', 'd'];
     final bShortcuts = ['j', 'k', 'l'];
 
-    List<ScoreControl> sideControls(Side side, List<String> keys) => [
+    List<ScoreControl> sideControls(Side side, List<String> keys) {
+      final timeout = timeoutControl(state, ctx, side);
+
+      return [
           for (var i = 0; i < values.length; i++)
             ScoreControl(
               action: 'score',
@@ -193,7 +195,9 @@ class GoalBasedPlugin extends ScoringPlugin {
             payload: const {'value': 1},
             shortcut: side == Side.a ? 'z' : 'm',
           ),
+          if (timeout != null) timeout,
         ];
+    }
 
     return [
       ScoreControlGroup(
@@ -204,16 +208,11 @@ class GoalBasedPlugin extends ScoringPlugin {
         title: ctx.entrantBName,
         controls: sideControls(Side.b, bShortcuts),
       ),
-      const ScoreControlGroup(
+      ScoreControlGroup(
         title: 'Match',
         controls: [
-          ScoreControl(
-            action: 'next_period',
-            label: 'Next period',
-            style: ControlStyle.secondary,
-            shortcut: 'n',
-          ),
-          ScoreControl(
+          nextPeriodControl(ctx),
+          const ScoreControl(
             action: 'finish',
             label: 'End match',
             style: ControlStyle.danger,

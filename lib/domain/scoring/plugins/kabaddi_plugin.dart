@@ -1,3 +1,4 @@
+import '../match_flow.dart';
 import '../player_stats.dart';
 import '../rule_config.dart';
 import '../scoring_plugin.dart';
@@ -24,8 +25,15 @@ import '../scoring_plugin.dart';
 ///  * **An all-out is worth two points and revives the whole side.**
 ///  * **Players out are revived in the order they went out**, one per point
 ///    scored — which is why the engine tracks a queue rather than a count.
-class KabaddiPlugin extends ScoringPlugin {
+class KabaddiPlugin extends ScoringPlugin
+    with PeriodedMatch, TeamTimeouts, MatchReviews {
   const KabaddiPlugin();
+
+  /// Deliberately no [SquadRotation]. Kabaddi's mat count is driven by outs
+  /// and revivals rather than by a coach's bench — a side goes from seven to
+  /// three because three raiders got them out, and comes back to seven on an
+  /// all-out. Layering a substitution model over that would give the mat two
+  /// disagreeing sources of truth for the same number.
 
   static const pluginKey = 'kabaddi';
 
@@ -45,7 +53,12 @@ class KabaddiPlugin extends ScoringPlugin {
   static const _timesOut = 'timesOut';
 
   int _onCourt(ScoringContext ctx) => ctx.intConfig('playersOnCourt', 7);
-  int _halves(ScoringContext ctx) => ctx.intConfig('periods', 2);
+  @override
+  int periodCount(ScoringContext ctx) => ctx.intConfig('periods', 2);
+
+  @override
+  String periodNoun(ScoringContext ctx) =>
+      ctx.stringConfig('periodLabel', 'Half');
 
   /// A bonus point is only available when the defence is at full-ish strength.
   int _bonusThreshold(ScoringContext ctx) =>
@@ -94,6 +107,9 @@ class KabaddiPlugin extends ScoringPlugin {
       'allOutsA': 0,
       'allOutsB': 0,
       PlayerTally.stateKey: <String, dynamic>{},
+      ...periodInitialState(ctx),
+      ...timeoutInitialState(ctx),
+      ...reviewInitialState(ctx),
     };
   }
 
@@ -125,6 +141,10 @@ class KabaddiPlugin extends ScoringPlugin {
         'This match is already finished. Reopen it to make a correction.',
       );
     }
+
+    final shared = applyTimeoutAction(state, action, ctx) ??
+        applyReviewAction(state, action, ctx);
+    if (shared != null) return shared;
 
     final n = _onCourt(ctx);
     int val(String k) => (state[k] as num?)?.toInt() ?? 0;
@@ -247,21 +267,21 @@ class KabaddiPlugin extends ScoringPlugin {
         return ScoringResult.ok(_settleAllOut(next, ctx));
 
       case 'next_period':
-        final period = (state['period'] as num?)?.toInt() ?? 1;
-        if (period >= _halves(ctx)) {
-          return ScoringResult.rejected(
-            'This match has only ${_halves(ctx)} halves. '
-            'Use "End match" to finish.',
-          );
+        // The shared mixin owns the period number, the clock and the refusal
+        // to run past the last half; kabaddi adds what only kabaddi does at
+        // the break — both sides come back to full strength.
+        final crossed = applyPeriodAction(state, action, ctx);
+        if (crossed == null || !crossed.isAccepted) {
+          return crossed ?? const ScoringResult.rejected('Unknown action.');
         }
-        // Both sides return to full strength at the break.
-        return ScoringResult.ok(mutate(state, (s) {
-          s['period'] = period + 1;
-          s['onCourtA'] = n;
-          s['onCourtB'] = n;
-          s['emptyA'] = 0;
-          s['emptyB'] = 0;
-        }));
+        return ScoringResult.ok(
+          mutate(refillIfScoped(crossed, ctx).state, (s) {
+            s['onCourtA'] = n;
+            s['onCourtB'] = n;
+            s['emptyA'] = 0;
+            s['emptyB'] = 0;
+          }),
+        );
 
       case 'finish':
         final a = val('a');
@@ -389,7 +409,7 @@ class KabaddiPlugin extends ScoringPlugin {
       return state['draw'] == true ? 'Full time · tied' : 'Full time';
     }
     final parts = <String>[
-      'Half ${state['period'] ?? 1} of ${_halves(ctx)}',
+      periodStatus(state, ctx),
       '${state['onCourtA'] ?? 0} v ${state['onCourtB'] ?? 0} on the mat',
     ];
     if (isDoOrDie(state, Side.a, ctx)) {
@@ -524,16 +544,11 @@ class KabaddiPlugin extends ScoringPlugin {
           ),
         ],
       ),
-      const ScoreControlGroup(
+      ScoreControlGroup(
         title: 'Match',
         controls: [
-          ScoreControl(
-            action: 'next_period',
-            label: 'Second half',
-            style: ControlStyle.secondary,
-            shortcut: 'n',
-          ),
-          ScoreControl(
+          nextPeriodControl(ctx),
+          const ScoreControl(
             action: 'finish',
             label: 'End match',
             style: ControlStyle.danger,
