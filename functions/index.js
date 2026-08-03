@@ -22,13 +22,19 @@
  */
 
 import { initializeApp } from 'firebase-admin/app';
-import { getFirestore } from 'firebase-admin/firestore';
+import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
 import { onDocumentCreated, onDocumentUpdated } from 'firebase-functions/v2/firestore';
 import { setGlobalOptions } from 'firebase-functions/v2';
 import { logger } from 'firebase-functions';
 
 import { awardsFor, ROUND_LABEL, WINDOW_DAYS } from './ranking.js';
+import {
+  DEFAULT_DEVIATION,
+  DEFAULT_RATING,
+  DEFAULT_VOLATILITY,
+  rate,
+} from './glicko2.js';
 
 initializeApp();
 const db = getFirestore();
@@ -497,5 +503,147 @@ export const onTournamentCompleted = onDocumentUpdated(
         route: `/org/${orgId}/live-tournament/${tournamentId}`,
       });
     }
+  },
+);
+
+/**
+ * Settles ratings and career statistics when a match finishes.
+ *
+ * ## Why this is a trigger
+ *
+ * `firestore.rules` had narrowed client rating writes a long way — assigned
+ * scorer only, on a fixture the target actually played in, every field typed
+ * and bounded, one game at a time. What it could not check, and said so in its
+ * own comment, is whether a bounded single-game delta corresponds to a real
+ * result or to a small self-serving nudge repeated over a season. Career
+ * tallies were weaker still: they went through `FieldValue.increment()`, whose
+ * resolved value rules cannot see, so they were never range-checked at all.
+ *
+ * Reading the fixture here removes the question entirely. The numbers come
+ * from the match, not from whoever happened to be holding the scoring pad.
+ *
+ * ## Result types are honoured
+ *
+ * A walkover, a no-show, a disqualification and a concession all produce a
+ * winner and none of them is evidence about anybody's skill. Rating those
+ * would let a player climb on opponents who never turned up.
+ *
+ * ## Idempotency
+ *
+ * `settledFixtures` on each rating document records which matches have already
+ * moved it. A retried trigger, or an organizer reopening and re-finishing a
+ * match, cannot pay the same result twice.
+ */
+export const onMatchSettled = onDocumentUpdated(
+  'orgs/{orgId}/competitions/{compId}/fixtures/{fixtureId}',
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (!before || !after) return;
+
+    const wasDone = before.status === 'completed';
+    const isDone = after.status === 'completed';
+    if (wasDone || !isDone) return;
+
+    const resultType = after.resultType ?? 'normal';
+    if (resultType !== 'normal' && resultType !== 'retired') {
+      logger.info(`Fixture ${event.params.fixtureId}: ${resultType}, not rated.`);
+      return;
+    }
+
+    const { orgId, fixtureId } = event.params;
+    const sportId = after.sportId ?? 'unknown';
+
+    // Who played, per side. Individual events name nobody in a line-up — the
+    // entrant id is the uid — so both shapes are handled.
+    const sideA = (after.lineupA ?? [])
+      .map((p) => p.uid)
+      .filter(Boolean);
+    const sideB = (after.lineupB ?? [])
+      .map((p) => p.uid)
+      .filter(Boolean);
+    if (sideA.length === 0 && after.entrantAId) sideA.push(after.entrantAId);
+    if (sideB.length === 0 && after.entrantBId) sideB.push(after.entrantBId);
+    if (sideA.length === 0 || sideB.length === 0) return;
+
+    const aWon = after.winnerEntrantId === after.entrantAId;
+    const isDraw = after.isDraw === true;
+
+    // Current ratings for everybody involved.
+    const current = new Map();
+    for (const uid of [...sideA, ...sideB]) {
+      const snap = await db.doc(`users/${uid}/ratings/${sportId}`).get();
+      const d = snap.exists ? snap.data() : null;
+      current.set(uid, {
+        rating: d?.rating ?? DEFAULT_RATING,
+        deviation: d?.deviation ?? DEFAULT_DEVIATION,
+        volatility: d?.volatility ?? DEFAULT_VOLATILITY,
+        gamesPlayed: d?.gamesPlayed ?? 0,
+        settled: d?.settledFixtures ?? [],
+      });
+    }
+
+    const average = (uids) => {
+      const rs = uids.map((u) => current.get(u)?.rating ?? DEFAULT_RATING);
+      return rs.reduce((s, r) => s + r, 0) / rs.length;
+    };
+    const avgA = average(sideA);
+    const avgB = average(sideB);
+
+    const batch = db.batch();
+    let settled = 0;
+
+    for (const [uids, opponentAvg, won] of [
+      [sideA, avgB, aWon],
+      [sideB, avgA, !aWon],
+    ]) {
+      const score = isDraw ? 0.5 : won ? 1 : 0;
+      for (const uid of uids) {
+        const player = current.get(uid);
+        // Already paid for this match.
+        if (player.settled.includes(fixtureId)) continue;
+
+        const next = rate(player, [
+          {
+            opponent: { rating: opponentAvg, deviation: DEFAULT_DEVIATION },
+            score,
+          },
+        ]);
+
+        batch.set(
+          db.doc(`users/${uid}/ratings/${sportId}`),
+          {
+            rating: next.rating,
+            deviation: next.deviation,
+            volatility: next.volatility,
+            gamesPlayed: next.gamesPlayed,
+            // Bounded: the last few are enough to catch a retry, and an
+            // unbounded array would grow without limit over a career.
+            settledFixtures: [...player.settled, fixtureId].slice(-50),
+            updatedAt: new Date(),
+          },
+          { merge: true },
+        );
+
+        batch.set(
+          db.doc(`users/${uid}/career_stats/${sportId}`),
+          {
+            uid,
+            sportId,
+            matchesPlayed: FieldValue.increment(1),
+            wins: FieldValue.increment(score === 1 ? 1 : 0),
+            draws: FieldValue.increment(score === 0.5 ? 1 : 0),
+            losses: FieldValue.increment(score === 0 ? 1 : 0),
+            lastPlayedAt: new Date(),
+            clubsPlayedFor: FieldValue.arrayUnion(orgId),
+          },
+          { merge: true },
+        );
+        settled += 1;
+      }
+    }
+
+    if (settled > 0) await batch.commit();
+    logger.info(`Fixture ${fixtureId}: settled ${settled} player ratings.`);
   },
 );

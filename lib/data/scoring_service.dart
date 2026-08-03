@@ -8,6 +8,7 @@ import '../core/errors/app_exception.dart';
 import '../core/firebase/firestore_refs.dart';
 import '../core/models/enums.dart';
 import '../core/models/fixture.dart';
+import '../domain/rating/glicko2.dart';
 import '../core/sync/sync_batch_planner.dart';
 import '../core/sync/sync_queue_entry.dart';
 import '../core/sync/uuid_v7.dart';
@@ -232,7 +233,8 @@ class ScoringService {
               scoreState: updated.scoreState,
             )
             .catchError((Object error) {
-          debugPrint('[PlaySphere] rating settlement error: $error');
+          debugPrint('[PlaySphere] rating projection error: $error');
+          return const <String, Rating>{};
         }),
       );
     }
@@ -856,8 +858,9 @@ class ScoringService {
               )
               .catchError((Object error) {
             debugPrint(
-              '[PlaySphere] rating settlement error (replay): $error',
+              '[PlaySphere] rating projection error (replay): $error',
             );
+            return const <String, Rating>{};
           }),
         );
       }

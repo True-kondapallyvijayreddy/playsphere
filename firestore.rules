@@ -904,62 +904,39 @@ service cloud.firestore {
         allow read, write: if isSignedIn() && uid() == userId;
       }
 
+      // -----------------------------------------------------------------
+      // Ratings and career statistics — settled by the server, nowhere else
+      // -----------------------------------------------------------------
+      //
+      // These used to be client-written under a long list of guards: assigned
+      // scorer only, on a fixture the target actually played in, every field
+      // typed and range-checked, `gamesPlayed` advancing by exactly one, and a
+      // bounded per-write rating movement. That stopped a passing stranger
+      // from overwriting anybody's rating, and it was worth having.
+      //
+      // It could not stop the thing that mattered most, and the rules said so
+      // themselves: nothing here can verify that a bounded single-game delta
+      // corresponds to a real result rather than a small self-serving nudge,
+      // repeated over a season by somebody who scores real matches. Career
+      // tallies were weaker still — written through FieldValue.increment(),
+      // whose resolved value rules cannot see at evaluation time, so they were
+      // never range-checked at all.
+      //
+      // `onMatchSettled` now reads the finished fixture itself and derives
+      // both documents from it. The numbers come from the match rather than
+      // from whoever was holding the scoring pad, so the client needs no write
+      // path and does not get one.
+      //
+      // Readable by any signed-in user: a rating nobody can see is not a
+      // rating, and a career profile is the product's whole Part 3 promise.
       match /ratings/{sportId} {
         allow read: if isSignedIn();
-
-        allow write: if isSignedIn()
-          && isMatchSettlementFor(userId)
-          && request.resource.data.keys().hasOnly(['rating', 'deviation', 'volatility', 'gamesPlayed', 'settledBy'])
-          && request.resource.data.rating is number
-          && request.resource.data.rating > 0
-          && request.resource.data.rating < 4000
-          && request.resource.data.deviation is number
-          && request.resource.data.deviation > 0
-          && request.resource.data.deviation <= 350
-          && request.resource.data.volatility is number
-          && request.resource.data.volatility > 0
-          && request.resource.data.volatility < 1
-          && request.resource.data.gamesPlayed is int
-          && request.resource.data.gamesPlayed >= 0
-          && (
-            resource == null
-            || (
-              request.resource.data.gamesPlayed == resource.data.gamesPlayed + 1
-              // A generous heuristic bound, not a re-derivation of Glicko-2:
-              // a single real game — even a first game at max deviation
-              // (350) against a very differently-rated opponent — should
-              // never move a rating by this much. It exists to stop a
-              // single hostile write from catapulting or cratering a
-              // rating outright, not to validate the math.
-              && (request.resource.data.rating - resource.data.rating) <= 500
-              && (resource.data.rating - request.resource.data.rating) <= 500
-            )
-          );
+        allow write: if false;
       }
 
       match /career_stats/{sportId} {
         allow read: if isSignedIn();
-
-        // See the residual-risk comment above — this is the same
-        // architectural gap, narrowed the same way, for the fields that a
-        // FieldValue.increment()-free write can actually validate.
-        allow write: if isSignedIn()
-          && isMatchSettlementFor(userId)
-          && request.resource.data.keys().hasOnly(['uid', 'sportId', 'matchesPlayed', 'lastPlayedAt', 'tally', 'clubsPlayedFor', 'settledBy'])
-          && request.resource.data.uid == userId
-          && request.resource.data.sportId == sportId
-          && request.resource.data.lastPlayedAt is timestamp
-          && request.resource.data.lastPlayedAt <= request.time
-          // The clubs timeline. Written with arrayUnion, so like
-          // `matchesPlayed` its resolved value is not reliably visible here —
-          // only the type and a sane ceiling can be checked. The bound stops
-          // this becoming unbounded storage on a document anyone can write to
-          // their own profile.
-          && (
-            !('clubsPlayedFor' in request.resource.data)
-            || (request.resource.data.clubsPlayedFor is list
-                && request.resource.data.clubsPlayedFor.size() <= 200)
-          );
+        allow write: if false;
       }
 
       // -----------------------------------------------------------------

@@ -913,230 +913,85 @@ describe('guardian consent records', () => {
 // ---------------------------------------------------------------------------
 // Ratings & career stats — must no longer be world-writable.
 // ---------------------------------------------------------------------------
-describe('ratings & career_stats: write-lockdown', () => {
-  const PLAYER = 'uid_rating_player';
-  const OTHER_PLAYER = 'uid_rating_other_player';
-  const COMP = 'comp_rated';
-  const FIX = 'fx_rated';
+describe('ratings & career_stats: server-settled only', () => {
+  // These were client-written under a long list of guards — assigned scorer
+  // only, on a fixture the target played in, every field typed and bounded,
+  // gamesPlayed advancing by exactly one. That stopped a passing stranger.
+  //
+  // It could not stop a scorer of genuine matches nudging their own rating
+  // upward a little at a time, because every individual write looked
+  // legitimate. `onMatchSettled` derives both documents from the finished
+  // fixture instead, so the client needs no write path and does not get one.
+  const SPORT = 'badminton';
+  const ratingPath = (uid) => `users/${uid}/ratings/${SPORT}`;
+  const careerPath = (uid) => `users/${uid}/career_stats/${SPORT}`;
 
-  // The provenance stamp the settlement batch now carries. Rules load this
-  // fixture and refuse the write unless the caller is one of its assigned
-  // scorers and the profile being written to is on its `playerUids`.
-  const settledBy = { orgId: PUBLIC_ORG, compId: COMP, fixtureId: FIX };
-
-  beforeEach(async () => {
-    await seed(async (db) => {
-      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
-      await setDoc(
-        doc(db, 'orgs', PUBLIC_ORG, 'members', SCORER),
-        membership(SCORER, PUBLIC_ORG, 'judge_scorer'),
-      );
-      await setDoc(
-        doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP, 'fixtures', FIX),
-        {
-          ...fixture(PUBLIC_ORG, COMP, [SCORER], 'completed'),
-          playerUids: [PLAYER, OTHER_PLAYER],
-        },
-      );
-    });
-  });
-
-  const ratingDoc = (overrides = {}) => ({
-    rating: 1500,
-    deviation: 350,
+  const rating = {
+    rating: 1520,
+    deviation: 300,
     volatility: 0.06,
-    gamesPlayed: 0,
-    settledBy,
-    ...overrides,
+    gamesPlayed: 1,
+  };
+
+  it('a rating is readable by any signed-in user', async () => {
+    // A rating nobody can see is not a rating.
+    await seed(async (db) => {
+      await setDoc(doc(db, ratingPath(OWNER)), rating);
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertSucceeds(getDoc(doc(db, ratingPath(OWNER))));
   });
 
-  // ---- The exploit these rules exist to stop -----------------------------
+  it('nobody may write their own rating', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(setDoc(doc(db, ratingPath(OWNER)), rating));
+  });
 
-  it('refuses a STRANGER overwriting another player\'s rating', async () => {
-    // Reproduced against the emulator before the fix: an account that had
-    // never been near a match wrote +500 to somebody's rating, because the
-    // rule asked for nothing but isSignedIn().
+  it('nobody may write anybody else\'s rating', async () => {
     const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(setDoc(doc(db, ratingPath(OWNER)), rating));
+  });
+
+  it('a scorer may no longer settle a rating either', async () => {
+    // The path that existed before. It was the narrowest client write in the
+    // product and it is still gone, because narrow is not the same as
+    // verifiable.
+    const db = testEnv.authenticatedContext(SCORER).firestore();
     await assertFails(
-      setDoc(
-        doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
-        ratingDoc({ rating: 2000, gamesPlayed: 1 }),
-      ),
+      setDoc(doc(db, ratingPath(OWNER)), {
+        ...rating,
+        settledBy: { orgId: PUBLIC_ORG, compId: 'c1', fixtureId: 'f1' },
+      }),
     );
   });
 
-  it('refuses a STRANGER inflating another player\'s career stats', async () => {
-    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+  it('an existing rating cannot be edited or deleted', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, ratingPath(OWNER)), rating);
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(updateDoc(doc(db, ratingPath(OWNER)), { rating: 2400 }));
+    await assertFails(deleteDoc(doc(db, ratingPath(OWNER))));
+  });
+
+  it('career statistics are equally read-only to every client', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, careerPath(OWNER)), {
+        uid: OWNER,
+        sportId: SPORT,
+        matchesPlayed: 4,
+      });
+    });
+    const read = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertSucceeds(getDoc(doc(read, careerPath(OWNER))));
+
+    const write = testEnv.authenticatedContext(OWNER).firestore();
     await assertFails(
-      setDoc(doc(db, 'users', OTHER_PLAYER, 'career_stats', 'cricket'), {
-        uid: OTHER_PLAYER,
-        sportId: 'cricket',
+      setDoc(doc(write, careerPath(OWNER)), {
+        uid: OWNER,
+        sportId: SPORT,
         matchesPlayed: 999,
-        lastPlayedAt: new Date(),
-        tally: { runsScored: 99999 },
-        settledBy,
       }),
-    );
-  });
-
-  it('refuses a settlement write with no provenance at all', async () => {
-    const db = testEnv.authenticatedContext(SCORER).firestore();
-    const { settledBy: _drop, ...noProvenance } = ratingDoc({ gamesPlayed: 1 });
-    await assertFails(
-      setDoc(doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'), noProvenance),
-    );
-  });
-
-  it('refuses a scorer settling onto somebody who did not play in that match', async () => {
-    const db = testEnv.authenticatedContext(SCORER).firestore();
-    await assertFails(
-      setDoc(
-        doc(db, 'users', 'uid_never_played', 'ratings', 'cricket'),
-        ratingDoc({ gamesPlayed: 1 }),
-      ),
-    );
-  });
-
-  it('refuses provenance naming a fixture the caller does not score', async () => {
-    await seed(async (db) => {
-      await setDoc(
-        doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP, 'fixtures', 'fx_other'),
-        { ...fixture(PUBLIC_ORG, COMP, [OWNER], 'completed'), playerUids: [OTHER_PLAYER] },
-      );
-    });
-    const db = testEnv.authenticatedContext(SCORER).firestore();
-    await assertFails(
-      setDoc(doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'), {
-        ...ratingDoc({ gamesPlayed: 1 }),
-        settledBy: { orgId: PUBLIC_ORG, compId: COMP, fixtureId: 'fx_other' },
-      }),
-    );
-  });
-
-  it('refuses a user settling their OWN rating with no match behind it', async () => {
-    const db = testEnv.authenticatedContext(PLAYER).firestore();
-    const { settledBy: _drop, ...noProvenance } = ratingDoc({ gamesPlayed: 1 });
-    await assertFails(
-      setDoc(doc(db, 'users', PLAYER, 'ratings', 'cricket'), noProvenance),
-    );
-  });
-
-  // ---- The flow that must keep working -----------------------------------
-
-  it('lets the ASSIGNED SCORER write a player\'s first rating doc', async () => {
-    const db = testEnv.authenticatedContext(SCORER).firestore();
-    await assertSucceeds(
-      setDoc(
-        doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
-        ratingDoc({ gamesPlayed: 1 }),
-      ),
-    );
-  });
-
-  it('refuses a rating write carrying an unrecognized extra field', async () => {
-    const db = testEnv.authenticatedContext(SCORER).firestore();
-    await assertFails(
-      setDoc(
-        doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
-        { ...ratingDoc({ gamesPlayed: 1 }), note: 'hacked' },
-      ),
-    );
-  });
-
-  it('refuses an absurd out-of-range rating value', async () => {
-    const db = testEnv.authenticatedContext(SCORER).firestore();
-    await assertFails(
-      setDoc(
-        doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
-        ratingDoc({ rating: 999999, gamesPlayed: 1 }),
-      ),
-    );
-  });
-
-  it('refuses gamesPlayed jumping by more than one in a single write', async () => {
-    await seed(async (db) => {
-      await setDoc(doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'), ratingDoc({ gamesPlayed: 1 }));
-    });
-    const db = testEnv.authenticatedContext(SCORER).firestore();
-    await assertFails(
-      setDoc(doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'), ratingDoc({ gamesPlayed: 50 })),
-    );
-  });
-
-  it('refuses a single write catapulting the rating by an implausible amount', async () => {
-    await seed(async (db) => {
-      await setDoc(
-        doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
-        ratingDoc({ rating: 1500, gamesPlayed: 1 }),
-      );
-    });
-    const db = testEnv.authenticatedContext(SCORER).firestore();
-    await assertFails(
-      setDoc(
-        doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
-        ratingDoc({ rating: 3000, gamesPlayed: 2 }),
-      ),
-    );
-  });
-
-  it('lets a follow-up write advance gamesPlayed by exactly one with a bounded rating delta', async () => {
-    await seed(async (db) => {
-      await setDoc(
-        doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
-        ratingDoc({ rating: 1500, gamesPlayed: 1 }),
-      );
-    });
-    const db = testEnv.authenticatedContext(SCORER).firestore();
-    await assertSucceeds(
-      setDoc(
-        doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
-        ratingDoc({ rating: 1516, gamesPlayed: 2 }),
-      ),
-    );
-  });
-
-  const careerDoc = (uid, sportId, overrides = {}) => ({
-    uid,
-    sportId,
-    matchesPlayed: 1,
-    lastPlayedAt: new Date(),
-    tally: { runsScored: 42 },
-    settledBy,
-    ...overrides,
-  });
-
-  it('lets the assigned scorer write a career_stats doc whose identity fields match its own path', async () => {
-    const db = testEnv.authenticatedContext(SCORER).firestore();
-    await assertSucceeds(
-      setDoc(doc(db, 'users', OTHER_PLAYER, 'career_stats', 'cricket'), careerDoc(OTHER_PLAYER, 'cricket')),
-    );
-  });
-
-  it('refuses a career_stats write whose uid field does not match the document\'s owner', async () => {
-    const db = testEnv.authenticatedContext(SCORER).firestore();
-    await assertFails(
-      // uid spoofed to the writer instead of the doc's own owner.
-      setDoc(doc(db, 'users', OTHER_PLAYER, 'career_stats', 'cricket'), careerDoc(PLAYER, 'cricket')),
-    );
-  });
-
-  it('refuses a future-dated lastPlayedAt', async () => {
-    const db = testEnv.authenticatedContext(SCORER).firestore();
-    await assertFails(
-      setDoc(
-        doc(db, 'users', OTHER_PLAYER, 'career_stats', 'cricket'),
-        careerDoc(OTHER_PLAYER, 'cricket', { lastPlayedAt: new Date('2099-01-01') }),
-      ),
-    );
-  });
-
-  it('refuses an extra field being smuggled into career_stats', async () => {
-    const db = testEnv.authenticatedContext(SCORER).firestore();
-    await assertFails(
-      setDoc(
-        doc(db, 'users', OTHER_PLAYER, 'career_stats', 'cricket'),
-        { ...careerDoc(OTHER_PLAYER, 'cricket'), verified: true },
-      ),
     );
   });
 });
@@ -2039,66 +1894,22 @@ describe('match memories', () => {
 // Career stats — now that clubsPlayedFor is actually persisted.
 // ---------------------------------------------------------------------------
 describe('career stats clubsPlayedFor', () => {
-  const PLAYER = 'uid_player';
-  const COMP = 'comp_clubs';
-  const FIX = 'fx_clubs';
-  const statPath = ['users', PLAYER, 'career_stats', 'kabaddi'];
-  const settledBy = { orgId: PUBLIC_ORG, compId: COMP, fixtureId: FIX };
-
-  beforeEach(async () => {
+  // The clubs timeline is part of the career document, which is now written
+  // only by `onMatchSettled`. The client cannot append to it any more than it
+  // can set a rating — the trigger derives it from the fixture's own orgId.
+  it('a client cannot append to its own clubs timeline', async () => {
+    const path = `users/${OWNER}/career_stats/badminton`;
     await seed(async (db) => {
-      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
-      await setDoc(
-        doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP, 'fixtures', FIX),
-        { ...fixture(PUBLIC_ORG, COMP, [SCORER], 'completed'), playerUids: [PLAYER] },
-      );
+      await setDoc(doc(db, path), {
+        uid: OWNER,
+        sportId: 'badminton',
+        matchesPlayed: 1,
+        clubsPlayedFor: [PUBLIC_ORG],
+      });
     });
-  });
-
-  it('accepts the clubs timeline the finalize batch now writes', async () => {
-    const db = testEnv.authenticatedContext(SCORER).firestore();
-    await assertSucceeds(
-      setDoc(doc(db, ...statPath), {
-        uid: PLAYER,
-        sportId: 'kabaddi',
-        matchesPlayed: 1,
-        lastPlayedAt: serverTimestamp(),
-        tally: { raidPoints: 7 },
-        clubsPlayedFor: ['org_a'],
-        settledBy,
-      }),
-    );
-  });
-
-  it('refuses an unbounded clubs list', async () => {
-    const db = testEnv.authenticatedContext(SCORER).firestore();
-    const tooMany = Array.from({ length: 201 }, (_, i) => `org_${i}`);
+    const db = testEnv.authenticatedContext(OWNER).firestore();
     await assertFails(
-      setDoc(doc(db, ...statPath), {
-        uid: PLAYER,
-        sportId: 'kabaddi',
-        matchesPlayed: 1,
-        lastPlayedAt: serverTimestamp(),
-        tally: {},
-        clubsPlayedFor: tooMany,
-        settledBy,
-      }),
-    );
-  });
-
-  it('still refuses a smuggled extra field', async () => {
-    const db = testEnv.authenticatedContext(SCORER).firestore();
-    await assertFails(
-      setDoc(doc(db, ...statPath), {
-        uid: PLAYER,
-        sportId: 'kabaddi',
-        matchesPlayed: 1,
-        lastPlayedAt: serverTimestamp(),
-        tally: {},
-        clubsPlayedFor: [],
-        settledBy,
-        verificationTier: 'association_verified',
-      }),
+      updateDoc(doc(db, path), { clubsPlayedFor: [PUBLIC_ORG, PRIVATE_ORG] }),
     );
   });
 });

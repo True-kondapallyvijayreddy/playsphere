@@ -3,14 +3,16 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import '../core/firebase/firestore_refs.dart';
 import '../core/models/fixture.dart';
 import '../core/models/match_player.dart';
-import '../domain/career/career_stats.dart';
 import '../domain/rating/glicko2.dart';
 import '../domain/scoring/match_award.dart';
 import '../domain/scoring/player_stats.dart';
 
-/// Service responsible for calculating sport-specific contribution weights,
-/// running Glicko-2 rating updates, and persisting ratings & career statistics
-/// to Firestore when a match completes.
+/// Contribution weights and Glicko-2 projections.
+///
+/// No longer persists anything: `onMatchSettled` settles ratings and career
+/// statistics server-side, and `firestore.rules` denies every client write to
+/// both collections. See [processMatchRatings] for why that move was
+/// necessary even though the old client path was already tightly guarded.
 class RatingService {
   const RatingService({
     FirebaseFirestore? firestore,
@@ -18,10 +20,11 @@ class RatingService {
   })  : _db = firestore,
         _glicko2 = glicko2 ?? const Glicko2();
 
+  /// Retained so existing call sites keep compiling, and unused: nothing in
+  /// this class writes any more.
+  // ignore: unused_field
   final FirebaseFirestore? _db;
   final Glicko2 _glicko2;
-
-  FirebaseFirestore get _firestore => _db ?? Refs.db;
 
   /// Calculates individual performance weights (w_i in [0.2, 1.8]) for a squad
   /// based on their sport-specific player tallies.
@@ -86,9 +89,24 @@ class RatingService {
     return Rating.fromMap(snapshot.data()!);
   }
 
-  /// Processes Glicko-2 rating updates and career statistics for all registered
-  /// players in a completed fixture.
-  Future<void> processMatchRatings({
+  /// Projects what a finished match *would* do to everyone's rating.
+  ///
+  /// ## This no longer writes anything
+  ///
+  /// Settlement moved to the `onMatchSettled` Cloud Function, and
+  /// `firestore.rules` now denies every client write to `ratings/` and
+  /// `career_stats/`. The reason is in the rules file: the old client path was
+  /// the narrowest write in the product — assigned scorer only, on a fixture
+  /// the target actually played in, every field typed and bounded, one game at
+  /// a time — and narrow still is not verifiable. Nothing in a rule can tell a
+  /// real single-game delta from a small self-serving nudge repeated over a
+  /// season by somebody who scores genuine matches.
+  ///
+  /// The method is kept because the projection is still worth having on the
+  /// client: a scoring pad can show "this result moves you +18" before the
+  /// server confirms it. It returns the computed ratings instead of
+  /// persisting them.
+  Future<Map<String, Rating>> processMatchRatings({
     required Fixture fixture,
     required Map<String, dynamic> scoreState,
   }) async {
@@ -105,15 +123,12 @@ class RatingService {
     //
     // A retirement passes deliberately. Somebody did play, the winner earned
     // it, and every federation counts it.
-    if (!fixture.resultType.countsForRating) return;
+    if (!fixture.resultType.countsForRating) return const {};
     // Career statistics are kept per sport; ratings additionally split by
     // time control for chess. Keying either on the plugin would merge chess,
     // carrom, athletics and swimming into one pool, because they share
     // engines — see Fixture.sport and Fixture.ratingKey.
-    final sportId = fixture.sport;
     final ratingKey = fixture.ratingKey;
-    final orgId = fixture.orgId;
-    final playedAt = fixture.completedAt ?? DateTime.now();
 
     // 1. Identify registered players for both sides
     final sideAPlayers =
@@ -121,7 +136,7 @@ class RatingService {
     final sideBPlayers =
         fixture.lineupB.where((p) => p.uid != null).toList(growable: false);
 
-    if (sideAPlayers.isEmpty && sideBPlayers.isEmpty) return;
+    if (sideAPlayers.isEmpty && sideBPlayers.isEmpty) return const {};
 
     // 2. Fetch existing ratings for all registered players
     final allPlayers = [...sideAPlayers, ...sideBPlayers];
@@ -167,85 +182,45 @@ class RatingService {
     final weightsA = calculatePerformanceWeights(scoreState, fixture.lineupA);
     final weightsB = calculatePerformanceWeights(scoreState, fixture.lineupB);
 
-    // 6. Accumulate career statistics
-    final contributions = const CareerAggregator().contributionsFrom(
-      scoreState: scoreState,
-      ctx: fixture.scoringContext(),
-      sportId: sportId,
-      orgId: orgId,
-      playedAt: playedAt,
-    );
 
-    final batch = _firestore.batch();
+    // Nothing is written here any more. `onMatchSettled` reads this same
+    // fixture server-side and derives both the ratings and the career tallies
+    // from it, so there is no client write path to secure — which was the
+    // whole point of moving it.
+    //
+    // The projection is still computed and returned: a scoring pad showing
+    // "this result moves you +18" before the server confirms is worth having,
+    // and it is now honestly a *preview* rather than the authority.
+    final projected = <String, Rating>{};
 
-    // The provenance stamp every settlement write carries. `firestore.rules`
-    // reads it back, loads that fixture, and refuses the write unless the
-    // caller is one of its assigned scorers and the profile being written to
-    // belongs to somebody who actually played in it. Without it these writes
-    // are rejected — which is the point: they used to be open to any
-    // signed-in stranger.
-    final settledBy = <String, Object?>{
-      'orgId': orgId,
-      'compId': fixture.compId,
-      'fixtureId': fixture.id,
-    };
-
-    // 7. Rate Side A players
     for (final player in sideAPlayers) {
       final uid = player.uid!;
-      final current = currentRatings[uid] ?? const Rating();
-      final weight = weightsA[player.id] ?? 1.0;
-      final updated = _glicko2.rate(
-        current,
-        [RatingGame(opponent: opponentRatingForA, score: scoreA, weight: weight)],
-      );
-      batch.set(
-        Refs.userRating(uid, ratingKey),
-        {...updated.toMap(), 'settledBy': settledBy},
-        SetOptions(merge: true),
+      projected[uid] = _glicko2.rate(
+        currentRatings[uid] ?? const Rating(),
+        [
+          RatingGame(
+            opponent: opponentRatingForA,
+            score: scoreA,
+            weight: weightsA[player.id] ?? 1.0,
+          ),
+        ],
       );
     }
 
-    // 8. Rate Side B players
     for (final player in sideBPlayers) {
       final uid = player.uid!;
-      final current = currentRatings[uid] ?? const Rating();
-      final weight = weightsB[player.id] ?? 1.0;
-      final updated = _glicko2.rate(
-        current,
-        [RatingGame(opponent: opponentRatingForB, score: scoreB, weight: weight)],
-      );
-      batch.set(
-        Refs.userRating(uid, ratingKey),
-        {...updated.toMap(), 'settledBy': settledBy},
-        SetOptions(merge: true),
+      projected[uid] = _glicko2.rate(
+        currentRatings[uid] ?? const Rating(),
+        [
+          RatingGame(
+            opponent: opponentRatingForB,
+            score: scoreB,
+            weight: weightsB[player.id] ?? 1.0,
+          ),
+        ],
       );
     }
 
-    // 9. Update Career Stats documents in Firestore
-    for (final c in contributions) {
-      final statRef = Refs.userCareerStat(c.uid, sportId);
-      final fields = <String, Object?>{
-        'uid': c.uid,
-        'sportId': sportId,
-        'matchesPlayed': FieldValue.increment(1),
-        'lastPlayedAt': Timestamp.fromDate(c.playedAt),
-        // The clubs timeline on a career profile. `CareerStats` has always had
-        // a `clubsPlayedFor` field and the aggregator has always computed it,
-        // but this write path never persisted it — so the one thing that makes
-        // a profile *portable* ("played for these four clubs across ten
-        // years") was silently dropped on every finalize. arrayUnion is
-        // idempotent, which matters because a replayed finalize must not
-        // duplicate a club.
-        'clubsPlayedFor': FieldValue.arrayUnion([c.orgId]),
-        'settledBy': settledBy,
-      };
-      for (final entry in c.tally.entries) {
-        fields['tally.${entry.key}'] = FieldValue.increment(entry.value);
-      }
-      batch.set(statRef, fields, SetOptions(merge: true));
-    }
-
-    await batch.commit();
+    return projected;
   }
 }
