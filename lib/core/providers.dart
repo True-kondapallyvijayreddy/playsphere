@@ -13,6 +13,7 @@ import '../data/memory_repository.dart';
 import '../data/org_repository.dart';
 import '../data/scoring_service.dart';
 import '../data/umpire_repository.dart';
+import '../domain/career/head_to_head.dart';
 import '../domain/standings/standings_calculator.dart';
 import '../domain/tournament/tournament_leaderboard.dart';
 import '../domain/tournament/tournament_overview.dart';
@@ -330,6 +331,15 @@ final tournamentLeaderboardProvider = Provider.family<
   );
 });
 
+/// Who a player has faced, and how they have done against each of them.
+final headToHeadProvider =
+    StreamProvider.family<List<HeadToHeadRecord>, String>((ref, uid) {
+  return ref
+      .watch(careerRepositoryProvider)
+      .watchPlayerFixtures(uid)
+      .map((fixtures) => HeadToHead.forPlayer(uid: uid, fixtures: fixtures));
+});
+
 /// The ranking list for one sport, summed over the rolling window.
 final rankingProvider =
     StreamProvider.family<List<RankingRow>, String>((ref, sportId) {
@@ -337,6 +347,12 @@ final rankingProvider =
       .watch(tournamentRepositoryProvider)
       .watchRankingEntries(sportId: sportId)
       .map(buildRanking);
+});
+
+/// Titles won at tournaments this club has run.
+final clubHonoursProvider =
+    StreamProvider.family<List<RankingEntry>, String>((ref, orgId) {
+  return ref.watch(tournamentRepositoryProvider).watchClubHonours(orgId);
 });
 
 /// One player's ranking results, for their profile.

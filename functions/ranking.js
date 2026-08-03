@@ -163,5 +163,17 @@ export function awardsFor({ format, grade, fixtures }) {
   return awards;
 }
 
+/** Human wording for a finish, for the notification a player actually reads. */
+export const ROUND_LABEL = {
+  winner: 'Champion',
+  runner_up: 'Runner-up',
+  semi_final: 'Semi-finalist',
+  quarter_final: 'Quarter-finalist',
+  last_16: 'Last 16',
+  last_32: 'Last 32',
+  group_stage: 'Group stage',
+  participated: 'Took part',
+};
+
 /** 52 weeks — the rolling window every federation ranking uses. */
 export const WINDOW_DAYS = 364;

@@ -28,7 +28,7 @@ import { onDocumentCreated, onDocumentUpdated } from 'firebase-functions/v2/fire
 import { setGlobalOptions } from 'firebase-functions/v2';
 import { logger } from 'firebase-functions';
 
-import { awardsFor, WINDOW_DAYS } from './ranking.js';
+import { awardsFor, ROUND_LABEL, WINDOW_DAYS } from './ranking.js';
 
 initializeApp();
 const db = getFirestore();
@@ -389,6 +389,7 @@ export const onTournamentCompleted = onDocumentUpdated(
     let written = 0;
     let batch = db.batch();
     let inBatch = 0;
+    const notifiable = [];
 
     for (const compDoc of events.docs) {
       const comp = compDoc.data();
@@ -441,6 +442,12 @@ export const onTournamentCompleted = onDocumentUpdated(
           awardedAt,
           expiresAt,
         });
+        notifiable.push({
+          uid,
+          round: award.round,
+          eventName: comp.name ?? 'Event',
+          points: award.points,
+        });
         written += 1;
         inBatch += 1;
 
@@ -457,5 +464,38 @@ export const onTournamentCompleted = onDocumentUpdated(
     logger.info(
       `Tournament ${tournamentId}: wrote ${written} ranking entries.`,
     );
+
+    // Tell people what they got.
+    //
+    // This is the whole point of the ledger from a player's side: a result
+    // that changes nothing anybody can see is the Telegram channel again. One
+    // notification per person, not per event — somebody entered in singles,
+    // doubles and mixed should not get three buzzes for one afternoon.
+    const byUid = new Map();
+    for (const award of notifiable) {
+      const row = byUid.get(award.uid) ?? { best: award, total: 0, count: 0 };
+      if (award.points > row.best.points) row.best = award;
+      row.total += award.points;
+      row.count += 1;
+      byUid.set(award.uid, row);
+    }
+
+    for (const [uid, row] of byUid) {
+      const others = row.count - 1;
+      await sendToUsers([uid], {
+        type: 'result',
+        title: `${after.name ?? 'Tournament'} — your result`,
+        body:
+          `${ROUND_LABEL[row.best.round] ?? 'Took part'} in ` +
+          `${row.best.eventName}` +
+          (others > 0
+            ? `, plus ${others} more event${others === 1 ? '' : 's'}`
+            : '') +
+          // The total across every event they entered, which is what the
+          // "plus N more" clause is promising to account for.
+          `. ${row.total} ranking points.`,
+        route: `/org/${orgId}/live-tournament/${tournamentId}`,
+      });
+    }
   },
 );

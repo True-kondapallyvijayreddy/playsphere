@@ -185,6 +185,24 @@ class TournamentRepository {
         .map((snap) => snap.docs.map(RankingEntry.fromDoc).toList());
   }
 
+  /// Every title and placing won at tournaments this club ran.
+  ///
+  /// Keyed on the organizing club rather than on the winners' clubs, which is
+  /// the honest thing this data can answer: a ranking entry records who ran
+  /// the tournament, not which club each competitor came from. An honours
+  /// board of "events we have hosted, and who won them" is a real board; one
+  /// claiming "titles our members have won everywhere" would need a club on
+  /// every entrant and would quietly under-report until it had one.
+  Stream<List<RankingEntry>> watchClubHonours(String orgId) {
+    return Refs.rankingEntries
+        .where('orgId', isEqualTo: orgId)
+        .where('round', isEqualTo: 'winner')
+        .snapshots()
+        .map((snap) => snap.docs.map(RankingEntry.fromDoc).toList()
+          ..sort((a, b) => (b.awardedAt ?? DateTime(0))
+              .compareTo(a.awardedAt ?? DateTime(0))));
+  }
+
   /// One player's ranking results, for their profile.
   Stream<List<RankingEntry>> watchPlayerRanking(String uid) {
     return Refs.rankingEntries

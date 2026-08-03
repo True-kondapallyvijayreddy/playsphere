@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../core/firebase/firestore_refs.dart';
+import '../core/models/fixture.dart';
 import '../core/models/firestore_codec.dart';
 import '../domain/career/career_stats.dart';
 import '../domain/rating/glicko2.dart';
@@ -44,6 +45,21 @@ class CareerLine {
 /// reader of data the app has been accumulating all along.
 class CareerRepository {
   const CareerRepository();
+
+  /// Every match a player has appeared in, across every club.
+  ///
+  /// A collection-group query on `playerUids`, which each fixture already
+  /// carries for the security rules. Capped because a career is unbounded and
+  /// a head-to-head table is read from a profile screen — the most recent few
+  /// hundred matches answer every question anybody asks of it, and reading a
+  /// decade to render one card would get slower every season.
+  Stream<List<Fixture>> watchPlayerFixtures(String uid, {int limit = 300}) {
+    return Refs.allFixturesQuery
+        .where('playerUids', arrayContains: uid)
+        .limit(limit)
+        .snapshots()
+        .map((snap) => snap.docs.map(Fixture.fromDoc).toList());
+  }
 
   /// Every sport this player has a record in, most-played first.
   Stream<List<CareerLine>> watchCareer(String uid) {
