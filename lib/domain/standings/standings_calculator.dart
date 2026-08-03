@@ -48,6 +48,15 @@ class StandingsCalculator {
     required Competition competition,
     required List<Entrant> entrants,
     required List<Fixture> fixtures,
+
+    /// Replaces the competition's own tiebreak chain.
+    ///
+    /// Exists for exactly one caller: the mini-league in [_separate], which
+    /// must run WITHOUT [Tiebreak.miniLeague] in the chain. A mini-table is
+    /// already "the matches among these teams" — asking it to break its own
+    /// ties by building a mini-table of the same teams from the same matches
+    /// is circular by definition, and recurses until the stack gives out.
+    List<Tiebreak>? chainOverride,
   }) {
     final rows = <String, _Row>{
       for (final e in entrants)
@@ -101,22 +110,32 @@ class StandingsCalculator {
         b.points += competition.pointsForDraw;
         drewWith.putIfAbsent(a.entrantId, () => []).add(b.entrantId);
         drewWith.putIfAbsent(b.entrantId, () => []).add(a.entrantId);
-      } else if (aWon) {
-        a.won++;
-        b.lost++;
-        a.points += competition.pointsForWin;
-        b.points += competition.pointsForLoss;
-        headToHead['${a.entrantId}|${b.entrantId}'] =
-            (headToHead['${a.entrantId}|${b.entrantId}'] ?? 0) + 1;
-        beaten.putIfAbsent(a.entrantId, () => []).add(b.entrantId);
       } else {
-        b.won++;
-        a.lost++;
-        b.points += competition.pointsForWin;
-        a.points += competition.pointsForLoss;
-        headToHead['${b.entrantId}|${a.entrantId}'] =
-            (headToHead['${b.entrantId}|${a.entrantId}'] ?? 0) + 1;
-        beaten.putIfAbsent(b.entrantId, () => []).add(a.entrantId);
+        // The margin is read BEFORE points are awarded, because in volleyball
+        // and the rugby-shaped leagues the margin is what decides how many
+        // points there are to award — a 3-2 is a different result from a 3-0
+        // and the table is supposed to say so.
+        final ctxForMargin = fixture.scoringContext();
+        final outcomeForMargin = ScoringRegistry
+            .resolve(fixture.scoringPluginKey)
+            .outcome(fixture.scoreState, ctxForMargin);
+        final margin =
+            (outcomeForMargin.scoreForA - outcomeForMargin.scoreForB).abs();
+        final award = competition.matchPointsModel.award(
+          margin: margin,
+          pointsForWin: competition.pointsForWin,
+          pointsForLoss: competition.pointsForLoss,
+        );
+
+        final winner = aWon ? a : b;
+        final loser = aWon ? b : a;
+        winner.won++;
+        loser.lost++;
+        winner.points += award.winner;
+        loser.points += award.loser;
+        headToHead['${winner.entrantId}|${loser.entrantId}'] =
+            (headToHead['${winner.entrantId}|${loser.entrantId}'] ?? 0) + 1;
+        beaten.putIfAbsent(winner.entrantId, () => []).add(loser.entrantId);
       }
 
       final ctx = fixture.scoringContext();
@@ -128,6 +147,7 @@ class StandingsCalculator {
       b.scoreAgainst += outcome.scoreForA;
 
       _accumulateNrr(fixture: fixture, ctx: ctx, a: a, b: b);
+      _accumulateSetPoints(fixture: fixture, a: a, b: b);
     }
 
     // Buchholz and Sonneborn-Berger are functions of everyone else's final
@@ -149,17 +169,60 @@ class StandingsCalculator {
       row.sonnebornBerger = sb;
     }
 
-    final chain = Tiebreak.parse(
-      competition.tiebreakChain,
-      competition.sportId,
-    );
+    final chain = chainOverride ??
+        Tiebreak.parse(competition.tiebreakChain, competition.sportId);
 
-    final table = rows.values.toList()
-      ..sort((x, y) => _compare(x, y, chain, headToHead));
+    final table = _rank(
+      rows.values.toList(),
+      chain: chain,
+      headToHead: headToHead,
+      fixtures: fixtures,
+      competition: competition,
+    );
 
     return [
       for (var i = 0; i < table.length; i++) table[i].toStanding(rank: i + 1),
     ];
+  }
+
+  /// Adds one set-based fixture's sets and points to both entrants.
+  ///
+  /// Volleyball separates level teams on **ratios** — sets won ÷ sets lost,
+  /// then points won ÷ points lost — and a ratio cannot be recovered from the
+  /// difference the table already keeps: 3 sets to 0 across two matches is a
+  /// better record than 30 to 27, and a difference reads them as the same.
+  ///
+  /// The per-set scores come from `completedSets`, which every set-based
+  /// plugin writes as `{a, b}` per set. A sport that does not write it simply
+  /// contributes nothing, and its ratio stays null rather than becoming a
+  /// misleading zero.
+  void _accumulateSetPoints({
+    required Fixture fixture,
+    required _Row a,
+    required _Row b,
+  }) {
+    final sets = fixture.scoreState['completedSets'];
+    if (sets is! List) return;
+
+    for (final set in sets) {
+      if (set is! Map) continue;
+      final pa = (set['a'] as num?)?.toInt();
+      final pb = (set['b'] as num?)?.toInt();
+      if (pa == null || pb == null) continue;
+
+      a.pointsWon += pa;
+      a.pointsLost += pb;
+      b.pointsWon += pb;
+      b.pointsLost += pa;
+
+      if (pa > pb) {
+        a.setsWon++;
+        b.setsLost++;
+      } else if (pb > pa) {
+        b.setsWon++;
+        a.setsLost++;
+      }
+    }
   }
 
   /// Adds one cricket fixture's innings to both entrants' running rate.
@@ -188,6 +251,139 @@ class StandingsCalculator {
     }
   }
 
+  /// Orders the whole table, resolving ties the way the sport actually does.
+  ///
+  /// ## Why this is not one comparator
+  ///
+  /// A `sort` comparator sees two rows at a time, and the rule most team
+  /// sports use cannot be expressed that way. When three teams finish level,
+  /// FIBA and FIVB rank them by a table built from **only the matches those
+  /// three played against each other** — and if that separates one but leaves
+  /// two still level, the rule recurses on the pair. "Who beat whom" has no
+  /// pairwise answer in a three-way tie: A beat B, B beat C, C beat A.
+  ///
+  /// So ties are found first, as runs of equal points, and each run is ranked
+  /// as a unit. Everything that genuinely is pairwise still goes through
+  /// [_compare].
+  List<_Row> _rank(
+    List<_Row> all, {
+    required List<Tiebreak> chain,
+    required Map<String, int> headToHead,
+    required List<Fixture> fixtures,
+    required Competition competition,
+  }) {
+    all.sort((x, y) {
+      final byPoints = y.points.compareTo(x.points);
+      if (byPoints != 0) return byPoints;
+      return x.displayName.toLowerCase().compareTo(y.displayName.toLowerCase());
+    });
+
+    final ordered = <_Row>[];
+    var i = 0;
+    while (i < all.length) {
+      var j = i + 1;
+      while (j < all.length && all[j].points == all[i].points) {
+        j++;
+      }
+      final tied = all.sublist(i, j);
+      ordered.addAll(
+        tied.length == 1
+            ? tied
+            : _separate(
+                tied,
+                chain: chain,
+                headToHead: headToHead,
+                fixtures: fixtures,
+                competition: competition,
+                depth: 0,
+              ),
+      );
+      i = j;
+    }
+
+    return ordered;
+  }
+
+  /// Ranks a set of rows that are level on points.
+  ///
+  /// [depth] guards the recursion. A group where every mini-league is also
+  /// level — three teams who each beat one and lost to one by identical
+  /// margins — is genuinely undecidable by results, and every federation
+  /// eventually falls back to a draw of lots. Recursing forever instead would
+  /// hang the table.
+  List<_Row> _separate(
+    List<_Row> tied, {
+    required List<Tiebreak> chain,
+    required Map<String, int> headToHead,
+    required List<Fixture> fixtures,
+    required Competition competition,
+    required int depth,
+  }) {
+    if (tied.length <= 1 || depth > 4) return tied;
+
+    if (chain.contains(Tiebreak.miniLeague)) {
+      final ids = {for (final r in tied) r.entrantId};
+      // Only the matches these teams played against each other.
+      final mutual = [
+        for (final f in fixtures)
+          if (ids.contains(f.entrantAId) && ids.contains(f.entrantBId)) f,
+      ];
+
+      if (mutual.isNotEmpty) {
+        final mini = compute(
+          competition: competition,
+          entrants: [
+            for (final r in tied)
+              Entrant(
+                id: r.entrantId,
+                displayName: r.displayName,
+                entrantType: competition.entrantType,
+              ),
+          ],
+          fixtures: mutual,
+          // Without miniLeague — see `chainOverride`.
+          chainOverride: [
+            for (final t in chain)
+              if (t != Tiebreak.miniLeague) t,
+          ],
+        );
+        final position = {
+          for (var k = 0; k < mini.length; k++) mini[k].entrantId: k,
+        };
+        final byId = {for (final r in tied) r.entrantId: r};
+
+        // Regroup by mini-league position: rows the mini-table separated are
+        // settled; any that are still level recurse.
+        final grouped = <int, List<_Row>>{};
+        for (final r in tied) {
+          grouped.putIfAbsent(position[r.entrantId] ?? 1 << 20, () => []).add(r);
+        }
+        final keys = grouped.keys.toList()..sort();
+        final out = <_Row>[];
+        for (final key in keys) {
+          final bucket = grouped[key]!;
+          out.addAll(
+            bucket.length == 1
+                ? bucket
+                : _separate(
+                    bucket,
+                    chain: chain,
+                    headToHead: headToHead,
+                    fixtures: fixtures,
+                    competition: competition,
+                    depth: depth + 1,
+                  ),
+          );
+        }
+        // Only trust the mini-league when it actually reordered something;
+        // an identical order means it separated nobody.
+        if (out.length == tied.length && byId.length == tied.length) return out;
+      }
+    }
+
+    return tied..sort((x, y) => _compare(x, y, chain, headToHead));
+  }
+
   int _compare(
     _Row x,
     _Row y,
@@ -206,6 +402,13 @@ class StandingsCalculator {
         Tiebreak.scoreFor => y.scoreFor.compareTo(x.scoreFor),
         Tiebreak.wins => y.won.compareTo(x.won),
         Tiebreak.buchholz => y.buchholz.compareTo(x.buchholz),
+        Tiebreak.setsRatio =>
+          _compareNullableDesc(x.setsRatio, y.setsRatio),
+        Tiebreak.pointsRatio =>
+          _compareNullableDesc(x.pointsRatio, y.pointsRatio),
+        // Handled by `_separate` before any pairwise comparison runs; there is
+        // nothing sensible it can mean between exactly two rows here.
+        Tiebreak.miniLeague => 0,
         Tiebreak.sonnebornBerger =>
           y.sonnebornBerger.compareTo(x.sonnebornBerger),
         // Fewest played ranks the team with games in hand higher.
@@ -339,6 +542,25 @@ class _Row {
   final String displayName;
 
   int played = 0;
+  int setsWon = 0;
+  int setsLost = 0;
+  int pointsWon = 0;
+  int pointsLost = 0;
+
+  /// Sets won ÷ sets lost. Null when this sport records no sets, so it sorts
+  /// last rather than reading as a ratio of zero.
+  double? get setsRatio => _ratio(setsWon, setsLost);
+
+  double? get pointsRatio => _ratio(pointsWon, pointsLost);
+
+  /// A side that has lost nothing has an undefined ratio, not an infinite
+  /// one. Treated as very large so it ranks top, which is what "won every set
+  /// they played" should do.
+  static double? _ratio(int won, int lost) {
+    if (won == 0 && lost == 0) return null;
+    if (lost == 0) return 1e9 + won;
+    return won / lost;
+  }
   int won = 0;
   int drawn = 0;
   int lost = 0;

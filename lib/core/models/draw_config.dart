@@ -224,3 +224,100 @@ class ScheduleConfig {
         dayEndHour: dayEndHour ?? this.dayEndHour,
       );
 }
+
+
+/// How a league awards match points.
+///
+/// ## Why 3/1/0 is not enough
+///
+/// The product has always had `pointsForWin` / `pointsForDraw` /
+/// `pointsForLoss`, which covers football and most club leagues and is simply
+/// wrong for two sports it already supports:
+///
+/// - **Volleyball (FIVB).** A 3-0 or 3-1 win is worth 3 and the loser nothing;
+///   a 3-2 win is worth 2 and the loser 1. A five-set match is a different
+///   result from a straight-sets one and the table is supposed to say so.
+/// - **Kabaddi and rugby-shaped leagues.** A team beaten by less than a set
+///   margin takes a losing bonus point.
+///
+/// Both are "the margin changes the points", which a flat win/draw/loss triple
+/// cannot express at all. Off by default, so every existing league keeps
+/// exactly the points it has been awarding.
+class MatchPointsModel {
+  const MatchPointsModel({
+    this.enabled = false,
+    this.closeWin = 2,
+    this.closeLoss = 1,
+    this.closeMarginAtMost = 1,
+    this.losingBonusWithin = 0,
+    this.losingBonusPoints = 1,
+  });
+
+  /// When false, the plain `pointsForWin/Draw/Loss` triple is used and nothing
+  /// here applies.
+  final bool enabled;
+
+  /// Points to the winner of a match decided by a narrow margin.
+  final int closeWin;
+
+  /// Points to the loser of one.
+  final int closeLoss;
+
+  /// What counts as narrow, measured in the sport's own score unit — sets for
+  /// volleyball, so 1 means a 3-2. Zero disables the close-match split.
+  final int closeMarginAtMost;
+
+  /// A losing team within this margin takes [losingBonusPoints]. Zero
+  /// disables the bonus entirely, which is the default.
+  final int losingBonusWithin;
+
+  final int losingBonusPoints;
+
+  /// Points for one result, given the margin the winner won by.
+  ///
+  /// [margin] is always non-negative — the winner's score minus the loser's.
+  ({int winner, int loser}) award({
+    required int margin,
+    required int pointsForWin,
+    required int pointsForLoss,
+  }) {
+    if (!enabled) return (winner: pointsForWin, loser: pointsForLoss);
+
+    if (closeMarginAtMost > 0 && margin <= closeMarginAtMost) {
+      return (winner: closeWin, loser: closeLoss);
+    }
+    if (losingBonusWithin > 0 && margin <= losingBonusWithin) {
+      return (winner: pointsForWin, loser: pointsForLoss + losingBonusPoints);
+    }
+    return (winner: pointsForWin, loser: pointsForLoss);
+  }
+
+  static MatchPointsModel fromMap(Map<String, dynamic>? m) {
+    if (m == null) return const MatchPointsModel();
+    return MatchPointsModel(
+      enabled: Fs.boolean(m['enabled']),
+      closeWin: Fs.integer(m['closeWin'], 2),
+      closeLoss: Fs.integer(m['closeLoss'], 1),
+      closeMarginAtMost: Fs.integer(m['closeMarginAtMost'], 1),
+      losingBonusWithin: Fs.integer(m['losingBonusWithin']),
+      losingBonusPoints: Fs.integer(m['losingBonusPoints'], 1),
+    );
+  }
+
+  Map<String, Object?> toMap() => {
+        'enabled': enabled,
+        'closeWin': closeWin,
+        'closeLoss': closeLoss,
+        'closeMarginAtMost': closeMarginAtMost,
+        'losingBonusWithin': losingBonusWithin,
+        'losingBonusPoints': losingBonusPoints,
+      };
+
+  /// FIVB: 3 for a 3-0 or 3-1, 2/1 for a 3-2.
+  static const volleyball = MatchPointsModel(
+    enabled: true,
+    closeWin: 2,
+    closeLoss: 1,
+    closeMarginAtMost: 1,
+  );
+}

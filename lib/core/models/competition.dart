@@ -205,6 +205,7 @@ class Competition {
     this.pointsForLoss = 0,
     this.tiebreakChain,
     this.tournamentId,
+    this.matchPointsModel = const MatchPointsModel(),
     this.drawConfig = const DrawConfig(),
     this.scheduleConfig = const ScheduleConfig(),
     this.participantOrgIds,
@@ -311,6 +312,11 @@ class Competition {
   /// that this draw shares courts and players with fourteen others.
   final String? tournamentId;
 
+  /// How match points are awarded when the margin matters — volleyball's
+  /// 3-0/3-1 versus 3-2 split, a losing bonus point. Disabled by default, so
+  /// an existing league keeps exactly the points it has been awarding.
+  final MatchPointsModel matchPointsModel;
+
   /// How the draw is shaped — group count, qualifiers per group, second leg,
   /// bracket reset, shuffle seed. See [DrawConfig] for why these are stored
   /// rather than defaulted at generation time.
@@ -366,6 +372,7 @@ class Competition {
         pointsForLoss: pointsForLoss,
         tiebreakChain: tiebreakChain,
         tournamentId: tournamentId,
+        matchPointsModel: matchPointsModel,
         drawConfig: drawConfig ?? this.drawConfig,
         scheduleConfig: scheduleConfig ?? this.scheduleConfig,
         participantOrgIds: participantOrgIds,
@@ -507,6 +514,11 @@ class Competition {
       tiebreakChain:
           d['tiebreakChain'] is List ? Fs.strList(d['tiebreakChain']) : null,
       tournamentId: Fs.strOrNull(d['tournamentId']),
+      matchPointsModel: MatchPointsModel.fromMap(
+        d['matchPointsModel'] is Map
+            ? Map<String, dynamic>.from(d['matchPointsModel'] as Map)
+            : null,
+      ),
       drawConfig: DrawConfig.fromMap(
         d['drawConfig'] is Map
             ? Map<String, dynamic>.from(d['drawConfig'] as Map)
@@ -580,6 +592,7 @@ class Competition {
         'pointsForLoss': pointsForLoss,
         'tiebreakChain': tiebreakChain,
         'tournamentId': tournamentId,
+        'matchPointsModel': matchPointsModel.toMap(),
         'drawConfig': drawConfig.toMap(),
         'scheduleConfig': scheduleConfig.toMap(),
         'participantOrgIds': participantOrgIds,

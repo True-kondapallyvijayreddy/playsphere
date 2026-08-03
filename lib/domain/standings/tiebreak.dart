@@ -30,6 +30,28 @@ enum Tiebreak {
   /// Fewest matches played — used where a table is shown mid-season.
   fewestPlayed('fewest_played', 'Fewest played'),
 
+  /// Rank the tied teams by a table built from **only the matches they played
+  /// against each other**, recursing if that still leaves some of them level.
+  ///
+  /// This is FIBA's and FIVB's rule and it is genuinely different from
+  /// [headToHead], which only compares two rows. When three teams tie, "who
+  /// beat whom" has no answer as a pairwise question — A beat B, B beat C, C
+  /// beat A — and the sport's actual rule is to build a mini-league of those
+  /// three and separate them inside it. Applying a flat chain over the full
+  /// table instead gives a different, wrong answer.
+  miniLeague('mini_league', 'Results between tied teams'),
+
+  /// Sets won ÷ sets lost. Volleyball's second criterion, after match points
+  /// and before points ratio.
+  ///
+  /// A ratio, not a difference: 3 sets to 0 across two matches is a better
+  /// record than 30 to 27, and a difference cannot tell them apart.
+  setsRatio('sets_ratio', 'Sets ratio'),
+
+  /// Points won ÷ points lost, across every set played. Volleyball's third
+  /// criterion, and the one that usually settles it.
+  pointsRatio('points_ratio', 'Points ratio'),
+
   /// Last resort so the order is stable rather than arbitrary.
   name('name', 'Name');
 
@@ -55,6 +77,22 @@ enum Tiebreak {
             Tiebreak.buchholz,
             Tiebreak.sonnebornBerger,
             Tiebreak.headToHead,
+            Tiebreak.name,
+          ],
+        // FIVB: match points, then sets ratio, then points ratio, then the
+        // results between the tied teams.
+        'volleyball' => const [
+            Tiebreak.setsRatio,
+            Tiebreak.pointsRatio,
+            Tiebreak.miniLeague,
+            Tiebreak.name,
+          ],
+        // FIBA classifies a tie from the matches among the tied teams only,
+        // recursively, before anything else.
+        'basketball' => const [
+            Tiebreak.miniLeague,
+            Tiebreak.scoreDifference,
+            Tiebreak.scoreFor,
             Tiebreak.name,
           ],
         _ => const [

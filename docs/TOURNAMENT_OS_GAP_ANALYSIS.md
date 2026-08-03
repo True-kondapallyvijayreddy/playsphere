@@ -418,12 +418,16 @@ Every unseeded player carries a **reason** — "2 of 5 rated matches played", "r
 24. Honours board per club and district; head-to-head records
 25. Result-to-profile push: "You reached the QF. District ranking 14 → 9."
 
-### Phase T6 — Federation-grade standings & match control *(≈1 week)*
-26. Recursive sub-group tiebreak (FIBA/FIVB shape)
-27. Ratio tiebreaks — sets ratio, points ratio
-28. Configurable match-points models (3/2/1/0, narrow-loss bonus)
-29. Officials rostered to court-slots with neutrality checks
-30. Referee role, dispute flow, protest window, scorecard lock
+### Phase T6 — Federation-grade standings & match control 🟡 **IN PROGRESS 2026-08-03**
+26. ✅ **Recursive mini-league** (`Tiebreak.miniLeague`) — when teams finish level, rank them on a table built from *only the matches they played against each other*, recursing if that separates some but not all. This is genuinely not expressible as a `sort` comparator: a three-way tie where A beat B, B beat C and C beat A has no pairwise "who beat whom" answer, so ties are now found as runs of equal points and each run ranked as a unit. Depth-capped, because a fully circular tie is undecidable on results and every federation falls back to a draw of lots — recursing forever would hang the table. The mini-table runs with `miniLeague` stripped from its own chain; leaving it in recursed until the stack gave out
+27. ✅ **Ratio tiebreaks** — `setsRatio` and `pointsRatio`, read from the `completedSets` every set-based plugin already writes. Ratios rather than differences because 3 sets to 0 across two matches is a better record than 30 to 27 and a difference reads them as the same. Null, not zero, where a sport records no sets
+28. ✅ **`MatchPointsModel`** — volleyball's 3-0/3-1 = 3 versus 3-2 = 2/1, and a losing bonus within a configurable margin. Both are "the margin changes the points", which a flat win/draw/loss triple cannot express. **Off by default**, so every existing league keeps exactly the points it has been awarding
+29. ⬜ Officials rostered to court-slots with neutrality checks
+30. ⬜ Referee role, dispute flow, protest window, scorecard lock
+
+Default chains added for `volleyball` (sets ratio → points ratio → mini-league) and `basketball` (mini-league → point difference → points scored).
+
+**Tests:** `federation_standings_test.dart`, 10 new. Suite 747 → 757.
 
 ### Phase T7 — Engine depth *(≈2–3 weeks)*
 31. **Shared framework first**: substitution, timeout, challenge/review, period management as opt-in mixins in `scoring_plugin.dart`
