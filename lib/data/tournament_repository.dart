@@ -99,6 +99,29 @@ class TournamentRepository {
           .map((snap) => snap.docs.map(Competition.fromDoc).toList()
             ..sort((a, b) => a.name.compareTo(b.name)));
 
+  /// Every match in a tournament, across all its events, as one stream.
+  ///
+  /// A collection-group query rather than one listener per event: a district
+  /// championship has fifteen draws, and fifteen listeners to render one
+  /// "what is on court now" board is the difference between a free tier and a
+  /// bill. This is what `Fixture.tournamentId` exists for.
+  Stream<List<Fixture>> watchFixtures(String tournamentId) {
+    return Refs.allFixturesQuery
+        .where('tournamentId', isEqualTo: tournamentId)
+        .snapshots()
+        .map((snap) => snap.docs.map(Fixture.fromDoc).toList()
+          ..sort((a, b) {
+            final at = a.scheduledAt;
+            final bt = b.scheduledAt;
+            if (at == null && bt == null) {
+              return a.matchIndex.compareTo(b.matchIndex);
+            }
+            if (at == null) return 1;
+            if (bt == null) return -1;
+            return at.compareTo(bt);
+          }));
+  }
+
   Future<String> createTournament(Tournament tournament) => guard(() async {
         if (tournament.name.trim().isEmpty) {
           throw const ValidationException('A tournament needs a name.');

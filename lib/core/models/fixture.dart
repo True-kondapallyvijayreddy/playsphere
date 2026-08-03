@@ -67,6 +67,7 @@ class Fixture {
     this.qualifierA,
     this.qualifierB,
     this.courtId,
+    this.tournamentId,
     this.resultType = MatchResultType.normal,
     this.resultNote,
     this.startedAt,
@@ -335,6 +336,15 @@ class Fixture {
   /// the scheduler must not call it to a court.
   bool get hasBothEntrants => entrantAId.isNotEmpty && entrantBId.isNotEmpty;
 
+  /// The tournament this match belongs to, denormalized from its competition.
+  ///
+  /// Carried on the fixture so a tournament-wide order of play is one
+  /// collection-group query rather than one query per event. A district
+  /// championship has fifteen draws, and fifteen listeners to render one
+  /// "what is on court now" screen is the difference between a free tier and
+  /// a bill.
+  final String? tournamentId;
+
   /// How the match ended — see [MatchResultType]. Defaults to [normal], which
   /// is what every fixture written before this field existed was.
   final MatchResultType resultType;
@@ -420,6 +430,7 @@ class Fixture {
       qualifierA: QualifierSource.fromWire(Fs.strOrNull(d['qualifierA'])),
       qualifierB: QualifierSource.fromWire(Fs.strOrNull(d['qualifierB'])),
       courtId: Fs.strOrNull(d['courtId']),
+      tournamentId: Fs.strOrNull(d['tournamentId']),
       resultType: MatchResultType.fromWire(Fs.strOrNull(d['resultType'])),
       resultNote: Fs.strOrNull(d['resultNote']),
       startedAt: Fs.dateOrNull(d['startedAt']),
@@ -471,6 +482,7 @@ class Fixture {
         'qualifierA': qualifierA?.wire,
         'qualifierB': qualifierB?.wire,
         'courtId': courtId,
+        'tournamentId': tournamentId,
         'resultType': resultType.wire,
         'resultNote': resultNote,
         'createdAt': FieldValue.serverTimestamp(),
@@ -550,6 +562,7 @@ class Fixture {
       qualifierA: qualifierA,
       qualifierB: qualifierB,
       courtId: courtId ?? this.courtId,
+      tournamentId: tournamentId,
       resultType: resultType ?? this.resultType,
       resultNote: resultNote ?? this.resultNote,
       startedAt: startedAt,

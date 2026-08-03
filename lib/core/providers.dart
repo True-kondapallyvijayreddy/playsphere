@@ -14,6 +14,7 @@ import '../data/org_repository.dart';
 import '../data/scoring_service.dart';
 import '../data/umpire_repository.dart';
 import '../domain/standings/standings_calculator.dart';
+import '../domain/tournament/tournament_overview.dart';
 import 'async_combine.dart';
 import 'auth/auth_service.dart';
 import 'models/app_user.dart';
@@ -294,6 +295,24 @@ final tournamentEventsProvider = StreamProvider.family<List<Competition>,
   return ref
       .watch(tournamentRepositoryProvider)
       .watchEvents(key.orgId, key.tournamentId);
+});
+
+/// Every match across every event of one tournament.
+final tournamentFixturesProvider =
+    StreamProvider.family<List<Fixture>, String>((ref, tournamentId) {
+  return ref.watch(tournamentRepositoryProvider).watchFixtures(tournamentId);
+});
+
+/// The derived high-level state of a tournament — progress, what is on court,
+/// what is next, and who has won what.
+final tournamentOverviewProvider = Provider.family<AsyncValue<TournamentOverview>,
+    ({String orgId, String tournamentId})>((ref, key) {
+  return combineAsync2(
+    ref.watch(tournamentEventsProvider(key)),
+    ref.watch(tournamentFixturesProvider(key.tournamentId)),
+    (events, fixtures) =>
+        TournamentOverview.from(events: events, fixtures: fixtures),
+  );
 });
 
 // ---------------------------------------------------------------------------

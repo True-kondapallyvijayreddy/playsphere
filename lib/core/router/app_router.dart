@@ -6,6 +6,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../features/venues/venues_screen.dart';
+import '../../features/tournaments/tournaments_screen.dart';
+import '../../features/tournaments/tournament_detail_screen.dart';
 import '../../features/analytics/analytics_screen.dart';
 import '../../features/auth/profile_setup_screen.dart';
 import '../../features/auth/sign_in_screen.dart';
@@ -61,6 +63,11 @@ class Routes {
   static const umpireRegistry = '/community/officials';
 
   static String venues(String orgId) => '/org/$orgId/venues';
+
+  static String tournaments(String orgId) => '/org/$orgId/tournaments';
+
+  static String tournament(String orgId, String tournamentId) =>
+      '/org/$orgId/tournaments/$tournamentId';
 
   static const myProfile = '/me';
   static String profile(String uid) => '/player/$uid';
@@ -272,6 +279,20 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             path: 'gallery',
             builder: (_, state) =>
                 ClubGalleryScreen(orgId: state.pathParameters['orgId']!),
+          ),
+          GoRoute(
+            path: 'tournaments',
+            builder: (_, state) =>
+                TournamentsScreen(orgId: state.pathParameters['orgId']!),
+            routes: [
+              GoRoute(
+                path: ':tournamentId',
+                builder: (_, state) => TournamentDetailScreen(
+                  orgId: state.pathParameters['orgId']!,
+                  tournamentId: state.pathParameters['tournamentId']!,
+                ),
+              ),
+            ],
           ),
           GoRoute(
             path: 'venues',

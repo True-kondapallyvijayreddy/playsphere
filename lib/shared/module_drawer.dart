@@ -151,6 +151,13 @@ class ModuleDrawer extends ConsumerWidget {
           needsClub: true,
         ),
         ModuleEntry(
+          icon: Icons.emoji_events_outlined,
+          label: 'Tournaments',
+          description: 'Many events, one set of courts, one timetable',
+          path: Routes.tournaments(id),
+          needsClub: true,
+        ),
+        ModuleEntry(
           icon: Icons.stadium_outlined,
           label: 'Venues',
           description: 'Halls, grounds and their courts — shared by every event',

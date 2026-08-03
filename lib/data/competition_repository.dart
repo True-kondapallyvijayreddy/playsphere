@@ -790,6 +790,7 @@ class CompetitionRepository {
             venue: competition.venue,
             scheduledAt: timetable.startAt[p.matchIndex] ?? competition.startDate,
             courtId: timetable.courtId[p.matchIndex],
+            tournamentId: competition.tournamentId,
             scorerUids: defaultScorerUids,
             scoringPluginKey: competition.scoringPluginKey,
             sportId: competition.sportId,
