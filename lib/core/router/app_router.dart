@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../features/venues/venues_screen.dart';
 import '../../features/rankings/rankings_screen.dart';
+import '../../features/tournaments/certificates_screen.dart';
 import '../../features/tournaments/public_tournament_screen.dart';
 import '../../features/tournaments/tournaments_screen.dart';
 import '../../features/tournaments/tournament_detail_screen.dart';
@@ -72,6 +73,9 @@ class Routes {
 
   static String tournament(String orgId, String tournamentId) =>
       '/org/$orgId/tournaments/$tournamentId';
+
+  static String certificates(String orgId, String tournamentId) =>
+      '/org/$orgId/tournaments/$tournamentId/certificates';
 
   static const myProfile = '/me';
   static String profile(String uid) => '/player/$uid';
@@ -315,6 +319,15 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                   orgId: state.pathParameters['orgId']!,
                   tournamentId: state.pathParameters['tournamentId']!,
                 ),
+                routes: [
+                  GoRoute(
+                    path: 'certificates',
+                    builder: (_, state) => CertificatesScreen(
+                      orgId: state.pathParameters['orgId']!,
+                      tournamentId: state.pathParameters['tournamentId']!,
+                    ),
+                  ),
+                ],
               ),
             ],
           ),

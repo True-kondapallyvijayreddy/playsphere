@@ -129,6 +129,25 @@ class TournamentDetailScreen extends ConsumerWidget {
                         overview: overview.valueOrNull,
                       ),
                       _Honours(overview: overview.valueOrNull),
+                      if ((overview.valueOrNull?.completedEvents ?? 0) > 0)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 12),
+                          child: Card(
+                            child: ListTile(
+                              leading:
+                                  const Icon(Icons.workspace_premium_outlined),
+                              title: const Text('Certificates'),
+                              subtitle: const Text(
+                                'For everyone who played — champion down to '
+                                'participation, from the results themselves',
+                              ),
+                              trailing: const Icon(Icons.chevron_right),
+                              onTap: () => context.push(
+                                Routes.certificates(orgId, tournamentId),
+                              ),
+                            ),
+                          ),
+                        ),
                     ],
                   ],
                 ),
