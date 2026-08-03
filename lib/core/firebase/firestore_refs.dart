@@ -177,6 +177,11 @@ class Refs {
   ) =>
       competition(orgId, compId).collection('entrants');
 
+  /// Ranking points, top-level so a district or state list can be read across
+  /// every club at once. Server-written only — see `firestore.rules`.
+  static CollectionReference<Map<String, dynamic>> get rankingEntries =>
+      db.collection('rankingEntries');
+
   /// Venues belong to the organization, not to any one competition — a club
   /// plays at the same two or three places all season, and re-declaring them
   /// per event is how the court list drifts between events.

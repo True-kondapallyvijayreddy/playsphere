@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../features/venues/venues_screen.dart';
+import '../../features/rankings/rankings_screen.dart';
 import '../../features/tournaments/public_tournament_screen.dart';
 import '../../features/tournaments/tournaments_screen.dart';
 import '../../features/tournaments/tournament_detail_screen.dart';
@@ -66,6 +67,8 @@ class Routes {
   static String venues(String orgId) => '/org/$orgId/venues';
 
   static String tournaments(String orgId) => '/org/$orgId/tournaments';
+
+  static String rankings(String orgId) => '/org/$orgId/rankings';
 
   static String tournament(String orgId, String tournamentId) =>
       '/org/$orgId/tournaments/$tournamentId';
@@ -288,6 +291,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             path: 'gallery',
             builder: (_, state) =>
                 ClubGalleryScreen(orgId: state.pathParameters['orgId']!),
+          ),
+          GoRoute(
+            path: 'rankings',
+            builder: (_, state) =>
+                RankingsScreen(orgId: state.pathParameters['orgId']!),
           ),
           GoRoute(
             path: 'live-tournament/:tournamentId',

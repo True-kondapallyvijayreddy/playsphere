@@ -28,6 +28,8 @@ import { onDocumentCreated, onDocumentUpdated } from 'firebase-functions/v2/fire
 import { setGlobalOptions } from 'firebase-functions/v2';
 import { logger } from 'firebase-functions';
 
+import { awardsFor, WINDOW_DAYS } from './ranking.js';
+
 initializeApp();
 const db = getFirestore();
 
@@ -332,5 +334,128 @@ export const onRegistrationPromotion = onDocumentUpdated(
       route: '/org/:orgId/event/:compId',
       params: { orgId, compId },
     }));
+  },
+);
+
+/**
+ * Awards ranking points when a tournament is closed.
+ *
+ * ## Why this is a trigger and not a client write
+ *
+ * A ranking table decides seeding, selection and funding, which makes it the
+ * most valuable thing in this database to forge. Ratings and career stats are
+ * currently client-written, and that is a known weakness; repeating it for a
+ * ranking list would be a worse one. `rankingEntries` is therefore written
+ * only from here, and `firestore.rules` denies every client write to it.
+ *
+ * ## Why on completion rather than per result
+ *
+ * How far somebody got is not knowable until the event is over. A player top
+ * of a group on Saturday morning is not a group winner, and awarding as
+ * results land would mean issuing points and then taking them back — which,
+ * on a table people are selected from, is worse than waiting.
+ *
+ * ## Idempotency
+ *
+ * The entry id is deterministic — `{tournamentId}_{compId}_{entrantId}` — so
+ * re-running this, or an organizer reopening and re-closing a tournament,
+ * overwrites the same documents rather than paying anybody twice.
+ */
+export const onTournamentCompleted = onDocumentUpdated(
+  'orgs/{orgId}/tournaments/{tournamentId}',
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (!before || !after) return;
+    if (before.status === 'completed' || after.status !== 'completed') return;
+
+    const { orgId, tournamentId } = event.params;
+    const grade = after.grade ?? 'club';
+
+    const events = await db
+      .collection(`orgs/${orgId}/competitions`)
+      .where('tournamentId', '==', tournamentId)
+      .get();
+    if (events.empty) {
+      logger.info(`Tournament ${tournamentId} closed with no events.`);
+      return;
+    }
+
+    const awardedAt = new Date();
+    const expiresAt = new Date(
+      awardedAt.getTime() + WINDOW_DAYS * 24 * 60 * 60 * 1000,
+    );
+
+    let written = 0;
+    let batch = db.batch();
+    let inBatch = 0;
+
+    for (const compDoc of events.docs) {
+      const comp = compDoc.data();
+      const fixturesSnap = await compDoc.ref.collection('fixtures').get();
+      const fixtures = fixturesSnap.docs.map((d) => d.data());
+
+      // Only a finished event awards anything. An abandoned draw, or one the
+      // organizer never completed, has no finishing positions to score.
+      const unfinished = fixtures.some(
+        (f) => f.status !== 'completed' && f.status !== 'walkover',
+      );
+      if (unfinished || fixtures.length === 0) continue;
+
+      const awards = awardsFor({
+        format: comp.format ?? 'knockout',
+        grade,
+        fixtures,
+      });
+      if (awards.length === 0) continue;
+
+      // Entrant ids are the player's uid for individual events; for team
+      // events they are not, and a team cannot hold a personal ranking. Those
+      // are skipped rather than credited to a team id that no profile reads.
+      const entrantsSnap = await compDoc.ref.collection('entrants').get();
+      const uidByEntrant = new Map();
+      for (const d of entrantsSnap.docs) {
+        const uid = d.data().uid;
+        if (uid) uidByEntrant.set(d.id, uid);
+      }
+
+      for (const award of awards) {
+        const uid = uidByEntrant.get(award.entrantId);
+        if (!uid) continue;
+
+        const id = `${tournamentId}_${compDoc.id}_${award.entrantId}`;
+        batch.set(db.collection('rankingEntries').doc(id), {
+          uid,
+          entrantId: award.entrantId,
+          displayName: award.displayName,
+          orgId,
+          tournamentId,
+          tournamentName: after.name ?? 'Tournament',
+          grade,
+          compId: compDoc.id,
+          eventName: comp.name ?? 'Event',
+          sportId: comp.sportId ?? 'unknown',
+          categoryLabel: comp.category?.label ?? 'Open',
+          round: award.round,
+          points: award.points,
+          awardedAt,
+          expiresAt,
+        });
+        written += 1;
+        inBatch += 1;
+
+        // Firestore caps a batch at 500 writes.
+        if (inBatch >= 400) {
+          await batch.commit();
+          batch = db.batch();
+          inBatch = 0;
+        }
+      }
+    }
+
+    if (inBatch > 0) await batch.commit();
+    logger.info(
+      `Tournament ${tournamentId}: wrote ${written} ranking entries.`,
+    );
   },
 );

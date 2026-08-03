@@ -151,6 +151,13 @@ class ModuleDrawer extends ConsumerWidget {
           needsClub: true,
         ),
         ModuleEntry(
+          icon: Icons.leaderboard_outlined,
+          label: 'Rankings',
+          description: 'Points won over the last 52 weeks, across every club',
+          path: Routes.rankings(id),
+          needsClub: true,
+        ),
+        ModuleEntry(
           icon: Icons.emoji_events_outlined,
           label: 'Tournaments',
           description: 'Many events, one set of courts, one timetable',

@@ -1112,6 +1112,27 @@ service cloud.firestore {
     // already uses: no client writes at all, with a documented escape hatch
     // for an operator who does hold one. Rulebook updates go through the
     // Firebase console or an admin SDK script until an admin tier exists.
+    // -------------------------------------------------------------------
+    // Ranking points — the one collection no client may ever write
+    // -------------------------------------------------------------------
+    //
+    // A ranking table decides seeding, selection and funding, which makes it
+    // the most valuable thing in this database to forge. A client that could
+    // write here could award itself a national title.
+    //
+    // So: world-readable, because a ranking list is meaningless if people
+    // cannot see it, and written ONLY by the `onTournamentCompleted` Cloud
+    // Function, which runs with admin credentials and bypasses these rules
+    // entirely. There is deliberately no client escape hatch.
+    //
+    // Ratings and career stats are still client-written, which is a known
+    // weakness recorded in the project notes. This collection does not repeat
+    // it.
+    match /rankingEntries/{entryId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
     match /sportRules/{ruleId} {
       allow read: if true;
       allow write: if request.auth != null

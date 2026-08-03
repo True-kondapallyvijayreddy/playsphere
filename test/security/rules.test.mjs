@@ -4187,3 +4187,66 @@ describe('tournaments', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Ranking points
+// ---------------------------------------------------------------------------
+//
+// The one collection with no client write path at all. A ranking table decides
+// seeding, selection and funding, so a client that could write here could
+// award itself a national title.
+describe('ranking entries', () => {
+  const entry = (uid, overrides = {}) => ({
+    uid,
+    entrantId: uid,
+    displayName: 'Aarav Reddy',
+    orgId: PUBLIC_ORG,
+    tournamentId: 't1',
+    tournamentName: 'District Championship',
+    grade: 'district',
+    compId: 'c1',
+    eventName: 'Senior Singles',
+    sportId: 'badminton',
+    categoryLabel: 'Open',
+    round: 'winner',
+    points: 300,
+    awardedAt: new Date(),
+    expiresAt: new Date(Date.now() + 364 * 24 * 3600 * 1000),
+    ...overrides,
+  });
+
+  it('anyone can read the ranking list, signed in or not', async () => {
+    // A ranking list nobody can see is not a ranking list.
+    await seed(async (db) => {
+      await setDoc(doc(db, 'rankingEntries/e1'), entry(OWNER));
+    });
+    const db = testEnv.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(db, 'rankingEntries/e1')));
+  });
+
+  it('a player cannot award themselves points', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(doc(db, 'rankingEntries/forged'), entry(OUTSIDER)),
+    );
+  });
+
+  it('an org owner cannot award points either', async () => {
+    // Not a permissions question — nobody writes here but the trigger.
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      setDoc(doc(db, 'rankingEntries/forged2'), entry(OWNER)),
+    );
+  });
+
+  it('an existing entry cannot be edited or deleted', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'rankingEntries/e2'), entry(OWNER));
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'rankingEntries/e2'), { points: 99999 }),
+    );
+    await assertFails(deleteDoc(doc(db, 'rankingEntries/e2')));
+  });
+});

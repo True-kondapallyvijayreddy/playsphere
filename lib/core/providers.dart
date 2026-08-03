@@ -27,6 +27,7 @@ import 'models/memory.dart';
 import 'models/enums.dart';
 import 'models/fixture.dart';
 import 'models/organization.dart';
+import 'models/ranking_entry.dart';
 import 'models/scoring_request.dart';
 import 'models/club_file.dart';
 import 'models/squad_entry.dart';
@@ -327,6 +328,21 @@ final tournamentLeaderboardProvider = Provider.family<
     (events, fixtures) =>
         TournamentLeaderboard.from(events: events, fixtures: fixtures),
   );
+});
+
+/// The ranking list for one sport, summed over the rolling window.
+final rankingProvider =
+    StreamProvider.family<List<RankingRow>, String>((ref, sportId) {
+  return ref
+      .watch(tournamentRepositoryProvider)
+      .watchRankingEntries(sportId: sportId)
+      .map(buildRanking);
+});
+
+/// One player's ranking results, for their profile.
+final playerRankingProvider =
+    StreamProvider.family<List<RankingEntry>, String>((ref, uid) {
+  return ref.watch(tournamentRepositoryProvider).watchPlayerRanking(uid);
 });
 
 // ---------------------------------------------------------------------------

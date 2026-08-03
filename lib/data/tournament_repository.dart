@@ -9,6 +9,7 @@ import '../core/models/competition.dart';
 import '../core/models/draw_slot.dart';
 import '../core/models/enums.dart';
 import '../core/models/fixture.dart';
+import '../core/models/ranking_entry.dart';
 import '../core/models/tournament.dart';
 import '../core/models/venue.dart';
 import '../domain/draw/schedule_shift.dart';
@@ -158,6 +159,40 @@ class TournamentRepository {
         });
         await batch.commit();
       });
+
+  // --- Ranking ----------------------------------------------------------
+
+  /// Current ranking entries for one sport.
+  ///
+  /// Filtered on `expiresAt` in the query rather than in Dart so an aged-out
+  /// result costs nothing to ignore: a busy sport accumulates entries forever,
+  /// and reading a decade of them to sum the last year would get slower every
+  /// season.
+  ///
+  /// [limit] caps what any one screen will read. A ranking list is a top-N
+  /// board and nobody scrolls to position four hundred; the cap is what stops
+  /// a popular sport turning one screen into an unbounded read.
+  Stream<List<RankingEntry>> watchRankingEntries({
+    required String sportId,
+    int limit = 500,
+  }) {
+    return Refs.rankingEntries
+        .where('sportId', isEqualTo: sportId)
+        .where('expiresAt', isGreaterThan: Timestamp.now())
+        .orderBy('expiresAt')
+        .limit(limit)
+        .snapshots()
+        .map((snap) => snap.docs.map(RankingEntry.fromDoc).toList());
+  }
+
+  /// One player's ranking results, for their profile.
+  Stream<List<RankingEntry>> watchPlayerRanking(String uid) {
+    return Refs.rankingEntries
+        .where('uid', isEqualTo: uid)
+        .snapshots()
+        .map((snap) => snap.docs.map(RankingEntry.fromDoc).toList()
+          ..sort((a, b) => b.points.compareTo(a.points)));
+  }
 
   // --- The cross-event schedule ----------------------------------------
 

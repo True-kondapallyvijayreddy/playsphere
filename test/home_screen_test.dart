@@ -190,6 +190,26 @@ void main() {
         matching: find.text(label),
       );
 
+  /// Scrolls the drawer until [label] is built.
+  ///
+  /// The drawer is a `ListView`, so it only builds what is on screen — an
+  /// entry below the fold genuinely does not exist in the tree yet. As modules
+  /// are added the list outgrows a phone viewport, which is what the scrolling
+  /// is for rather than a sign anything overflowed.
+  Future<void> scrollToInDrawer(WidgetTester tester, String label) async {
+    await tester.dragUntilVisible(
+      inDrawer(label),
+      find
+          .descendant(
+            of: find.byType(ModuleDrawer),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+      const Offset(0, -120),
+    );
+    await settle(tester);
+  }
+
   Future<void> pump(
     WidgetTester tester,
     Widget widget, {
@@ -280,7 +300,9 @@ void main() {
     expect(inDrawer('Rules library'), findsOneWidget);
     expect(inDrawer('Looking for'), findsOneWidget);
     expect(inDrawer('Umpire & scorer registry'), findsOneWidget);
-    // An event manager holds viewAnalytics, so it is offered.
+    // An event manager holds viewAnalytics, so it is offered — below the fold
+    // now that the drawer carries rankings, tournaments and venues too.
+    await scrollToInDrawer(tester, 'Analytics');
     expect(inDrawer('Analytics'), findsOneWidget);
     expect(find.text('Kompally Sports Academy'), findsWidgets);
   });
