@@ -14,6 +14,8 @@ import '../../domain/standings/standings_calculator.dart';
 import '../../domain/standings/tiebreak.dart';
 import '../../shared/app_scaffold.dart';
 import 'widgets/draw_setup_sheet.dart';
+import 'widgets/move_match_sheet.dart';
+import '../tournaments/widgets/running_late_card.dart';
 import 'widgets/squad_call_card.dart';
 import '../scoring/widgets/live_score_card.dart';
 import '../scoring/widgets/share_match_button.dart';
@@ -66,6 +68,29 @@ class CompetitionDetailScreen extends ConsumerWidget {
                     const SizedBox(height: 16),
                     if (canManage) _OrganizerActions(competition: comp),
                     if (canManage) _QualifierCard(competition: comp),
+                    // Only for a standalone event: one inside a tournament is
+                    // shifted from the tournament screen, because its matches
+                    // share courts with fourteen other draws and moving it
+                    // alone would tear the shared timetable.
+                    if (canManage && comp.tournamentId == null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 12),
+                        child: RunningLateCard(
+                          fixtures: ref
+                                  .watch(fixturesProvider(
+                                      CompRef(comp.orgId, comp.id)))
+                                  .valueOrNull ??
+                              const [],
+                          onShift: ({by, newStart}) => ref
+                              .read(competitionRepositoryProvider)
+                              .shiftSchedule(
+                                orgId: comp.orgId,
+                                compId: comp.id,
+                                by: by,
+                                newStart: newStart,
+                              ),
+                        ),
+                      ),
                     const SizedBox(height: 16),
                     _Entries(competition: comp, canManage: canManage),
                     const SizedBox(height: 24),
@@ -1063,6 +1088,18 @@ class _Fixtures extends ConsumerWidget {
                 // worse thing to send someone than nothing.
                 if (f.isLive || f.hasResult)
                   ShareMatchButton(fixture: f, compact: true),
+                // A match already played is history; one in progress has a
+                // scorer standing over it. Neither is the organizer's to move.
+                if (canManage && !f.hasResult && !f.isLive)
+                  IconButton(
+                    tooltip: 'Move this match',
+                    icon: const Icon(Icons.edit_calendar_outlined),
+                    onPressed: () => MoveMatchSheet.show(
+                      context,
+                      fixture: f,
+                      siblings: fixtures,
+                    ),
+                  ),
                 if (canManage)
                   IconButton(
                     tooltip: f.scorerUids.isEmpty

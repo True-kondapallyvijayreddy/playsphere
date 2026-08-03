@@ -16,6 +16,7 @@ import '../core/models/venue.dart' as venue_model;
 import '../core/sync/uuid_v7.dart';
 import '../domain/draw/fixture_generator.dart';
 import '../domain/draw/match_scheduler.dart';
+import '../domain/draw/schedule_shift.dart';
 import '../domain/standings/standings_calculator.dart';
 import '../domain/scoring/scoring_plugin.dart';
 import '../domain/scoring/scoring_registry.dart';
@@ -1944,18 +1945,71 @@ class CompetitionRepository {
         );
       });
 
+  /// Moves one match. The organizer's override on everything the scheduler
+  /// decided — a court that flooded, two players who asked to swap, a
+  /// referee's call. [courtId] is here because a schedule that can move a
+  /// match in time but not across the hall is only half an override.
   Future<void> rescheduleFixture({
     required String orgId,
     required String compId,
     required String fixtureId,
     DateTime? scheduledAt,
     String? venue,
+    String? courtId,
   }) =>
       guard(() => Refs.fixture(orgId, compId, fixtureId).update({
             if (scheduledAt != null)
               'scheduledAt': Timestamp.fromDate(scheduledAt),
             if (venue != null) 'venue': venue,
+            if (courtId != null) 'courtId': courtId,
+            'updatedAt': FieldValue.serverTimestamp(),
           }));
+
+  /// Moves the remaining schedule of one standalone event.
+  ///
+  /// The tournament-level equivalent lives on `TournamentRepository`; this is
+  /// for a club's own afternoon, which is the common case and has no
+  /// tournament above it to shift from.
+  Future<ShiftPlan> shiftSchedule({
+    required String orgId,
+    required String compId,
+    Duration? by,
+    DateTime? newStart,
+    DateTime? from,
+  }) =>
+      guard(() async {
+        if (by == null && newStart == null) {
+          throw const ValidationException(
+            'Say either a new start time or how long to move by.',
+          );
+        }
+
+        final snap = await Refs.fixtures(orgId, compId).get();
+        final fixtures = snap.docs.map(Fixture.fromDoc).toList();
+
+        final plan = newStart != null
+            ? ScheduleShift.planNewStart(
+                fixtures: fixtures,
+                newStart: newStart,
+              )
+            : ScheduleShift.plan(fixtures: fixtures, by: by!, from: from);
+
+        if (plan.isEmpty) return plan;
+
+        final batch = ChunkedBatch(Refs.db);
+        for (final entry in plan.moves.entries) {
+          batch.update(Refs.fixture(orgId, compId, entry.key), {
+            'scheduledAt': Timestamp.fromDate(entry.value),
+            'updatedAt': FieldValue.serverTimestamp(),
+          });
+        }
+
+        unawaited(batch.commitAll().catchError((Object error) {
+          _writeFailures.add(_translateWriteFailure(error));
+        }));
+
+        return plan;
+      });
 }
 
 /// What a draw generation actually did.

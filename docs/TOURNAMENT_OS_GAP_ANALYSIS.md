@@ -383,13 +383,23 @@ Ordered by value ÷ cost. Every phase ships and is tested.
 
 **Tests:** `test/result_type_test.dart`, 15 new. Suite 608 → 623.
 
-### Phase T3 — The tournament container *(≈2 weeks, the structural unlock)*
-11. `Tournament` entity owning many `Competition` draws; shared courts, dates, officials
-12. Tournament-level entry: one person, many events
-13. **Cross-event scheduler** — no player on two courts at once, rest gaps enforced across draws, per-event priority windows
-14. **Rolling "not before" times** — recompute the day live as matches finish early or late, and push the change to players. *This is the single feature that fixes waiting-at-the-venue-since-10am.*
-15. Match duration model per (sport, category, round) with a variance buffer
-16. Call-room states: called → on court → in progress → finished
+### Phase T3 — The tournament container ✅ **DONE 2026-08-03**
+11. ✅ `Venue` + `Court` as real documents under the org (the prerequisite — a typed court name is local to one draw, so nothing could tell two events were contending for the same hall), and `Tournament` owning many `Competition` draws
+12. ✅ Events attach to a tournament; one event belongs to one timetable
+13. ✅ `TournamentScheduler` — clash detection keyed on **player uid, not entrant id**, because the same person is a different `Entrant` in the singles, the doubles and the mixed. Rest gaps hold across draws; per-event priority derived from the category's age bound
+14. ✅ **Organizer-driven shift** rather than automatic recompute — see below
+15. ✅ Per-event `matchMinutes`; per-(sport, round) variance still open
+16. ⬜ Call-room states — not built
+17. ✅ Tournament UI: list, editor, and a detail screen with progress, order of play, per-event points tables (groups get one table each with the qualifying line), and a champions board
+18. ✅ `MoveMatchSheet` — per-match override of time and court, warning on clashes and blocking none of them
+
+**On item 14, the design changed on the user's instruction, and for the better.** The plan was to recompute the day automatically as matches ran early or late. What shipped is `ScheduleShift`: the organizer says "we are starting at 10:30 now" and the whole remaining plan moves by exactly that much.
+
+The reason it is better is that everything the scheduler solves — courts, order, rest gaps, round dependencies — is **relative**. An hour's delay makes none of it wrong; only the clock is wrong. Recomputing would re-solve the whole allocation and could hand a player a different court and a different place in the order for reasons nobody in the hall can see. Shifting preserves the plan that was already announced.
+
+Never moved: a played match (its time is the record), a live match (someone is scoring it), or a placeholder with no time yet. `from` leaves a morning that ran to time alone.
+
+**Tests:** `test/tournament_scheduler_test.dart` 17, `test/tournament_overview_test.dart` 14, `test/schedule_shift_test.dart` 16. Suite 623 → 670. Emulator rules 230 → 242.
 
 ### Phase T4 — Fair draws & real seeding *(≈1 week)*
 17. Seed from Glicko-2 within (sport, category); unrated ⇒ unseeded, never seed 1

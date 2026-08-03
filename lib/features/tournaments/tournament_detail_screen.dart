@@ -13,6 +13,7 @@ import '../../core/router/app_router.dart';
 import '../../domain/tournament/tournament_overview.dart';
 import '../../shared/app_scaffold.dart';
 import 'tournaments_screen.dart' show TournamentEditor;
+import 'widgets/running_late_card.dart';
 
 /// One tournament at a glance: how far through it is, what is on court right
 /// now, what is next, every event with its table, and who has won what.
@@ -86,6 +87,22 @@ class TournamentDetailScreen extends ConsumerWidget {
                           orgId: orgId,
                           tournament: tournament,
                           overview: overview.valueOrNull,
+                        ),
+                      if (canManage)
+                        RunningLateCard(
+                          fixtures: ref
+                                  .watch(tournamentFixturesProvider(
+                                      tournamentId))
+                                  .valueOrNull ??
+                              const [],
+                          onShift: ({by, newStart}) => ref
+                              .read(tournamentRepositoryProvider)
+                              .shiftSchedule(
+                                orgId: orgId,
+                                tournamentId: tournamentId,
+                                by: by,
+                                newStart: newStart,
+                              ),
                         ),
                       _OnCourtNow(
                         orgId: orgId,

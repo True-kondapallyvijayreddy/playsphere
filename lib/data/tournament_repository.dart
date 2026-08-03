@@ -11,6 +11,7 @@ import '../core/models/enums.dart';
 import '../core/models/fixture.dart';
 import '../core/models/tournament.dart';
 import '../core/models/venue.dart';
+import '../domain/draw/schedule_shift.dart';
 import '../domain/draw/tournament_scheduler.dart';
 import 'org_repository.dart' show guard;
 
@@ -336,6 +337,69 @@ class TournamentRepository {
             for (final u in schedule.unplaced) u.reason,
           }.toList(),
         );
+      });
+
+  /// Moves the whole remaining schedule, keeping the plan intact.
+  ///
+  /// The operation an organizer needs when a day slips. Everything the
+  /// scheduler solved — courts, order, rest gaps, round dependencies — is
+  /// *relative*, so an hour's delay makes none of it wrong; only the clock is
+  /// wrong. Regenerating would re-solve the whole allocation and could hand a
+  /// player a different court and a different position in the order for
+  /// reasons they cannot see. This keeps the announced plan and moves it
+  /// bodily, which is what "we are running an hour late" means to everyone
+  /// standing in the hall.
+  ///
+  /// Pass [newStart] to say "we are starting at half past ten now" — the
+  /// offset is computed from the earliest match still to be played. Pass [by]
+  /// to nudge everything a fixed amount. Pass [from] to leave a morning that
+  /// ran to time alone and move only what is left.
+  Future<ShiftPlan> shiftSchedule({
+    required String orgId,
+    required String tournamentId,
+    Duration? by,
+    DateTime? newStart,
+    DateTime? from,
+  }) =>
+      guard(() async {
+        if (by == null && newStart == null) {
+          throw const ValidationException(
+            'Say either a new start time or how long to move by.',
+          );
+        }
+
+        final snap = await Refs.allFixturesQuery
+            .where('tournamentId', isEqualTo: tournamentId)
+            .get();
+        final fixtures = snap.docs.map(Fixture.fromDoc).toList();
+
+        final plan = newStart != null
+            ? ScheduleShift.planNewStart(
+                fixtures: fixtures,
+                newStart: newStart,
+              )
+            : ScheduleShift.plan(fixtures: fixtures, by: by!, from: from);
+
+        if (plan.isEmpty) return plan;
+
+        final byId = {for (final f in fixtures) f.id: f};
+        final batch = ChunkedBatch(Refs.db);
+        for (final entry in plan.moves.entries) {
+          final fixture = byId[entry.key]!;
+          batch.update(
+            Refs.fixture(orgId, fixture.compId, fixture.id),
+            {
+              'scheduledAt': Timestamp.fromDate(entry.value),
+              'updatedAt': FieldValue.serverTimestamp(),
+            },
+          );
+        }
+
+        unawaited(batch.commitAll().catchError((Object e) {
+          _writeFailures.add(_translate(e));
+        }));
+
+        return plan;
       });
 
   /// Younger age groups go first.
