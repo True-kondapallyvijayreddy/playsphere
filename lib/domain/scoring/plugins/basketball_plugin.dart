@@ -322,6 +322,7 @@ class BasketballPlugin extends ScoringPlugin {
         const StatColumn(key: _fouls, label: 'Fouls', shortLabel: 'PF'),
       ];
 
+  @override
   BoxScore boxScore(
     Map<String, dynamic> state,
     ScoringContext ctx,
@@ -398,6 +399,18 @@ class BasketballPlugin extends ScoringPlugin {
     final three = _threePoints(ctx);
     final ft = _ftPoints(ctx);
 
+    // Every one of these refuses an event that names nobody — "Who took the
+    // shot?", "Who got the rebound?" — so before the controls declared their
+    // prompts a basketball match could not record a single basket.
+    //
+    // The assist on a made shot is optional and asked in the same breath as
+    // the scorer, which is how a scorer at courtside actually sees it: the
+    // pass and the basket are one event, not two button presses.
+    const shooter = [
+      PlayerPrompt(key: 'playerId', label: 'Who took the shot?'),
+      PlayerPrompt(key: 'assistId', label: 'Assisted by', optional: true),
+    ];
+
     List<ScoreControl> forSide(Side side, List<String> keys) => [
           ScoreControl(
             action: 'shot',
@@ -406,6 +419,7 @@ class BasketballPlugin extends ScoringPlugin {
             style: ControlStyle.primary,
             payload: {'kind': 'fg', 'value': fg, 'made': true},
             shortcut: keys[0],
+            prompts: shooter,
           ),
           ScoreControl(
             action: 'shot',
@@ -414,6 +428,7 @@ class BasketballPlugin extends ScoringPlugin {
             style: ControlStyle.primary,
             payload: {'kind': 'three', 'value': three, 'made': true},
             shortcut: keys[1],
+            prompts: shooter,
           ),
           ScoreControl(
             action: 'shot',
@@ -421,6 +436,9 @@ class BasketballPlugin extends ScoringPlugin {
             side: side,
             payload: {'kind': 'ft', 'value': ft, 'made': true},
             shortcut: keys[2],
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Who took the free throw?'),
+            ],
           ),
           ScoreControl(
             action: 'shot',
@@ -428,14 +446,35 @@ class BasketballPlugin extends ScoringPlugin {
             side: side,
             style: ControlStyle.subtle,
             payload: {'kind': 'fg', 'value': fg, 'made': false},
+            // No assist on a miss: nobody assists a shot that did not go in.
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Who missed?'),
+            ],
           ),
-          ScoreControl(action: 'rebound', label: 'Reb', side: side),
-          ScoreControl(action: 'assist', label: 'Ast', side: side),
+          ScoreControl(
+            action: 'rebound',
+            label: 'Reb',
+            side: side,
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Who got the rebound?'),
+            ],
+          ),
+          ScoreControl(
+            action: 'assist',
+            label: 'Ast',
+            side: side,
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Who assisted?'),
+            ],
+          ),
           ScoreControl(
             action: 'foul',
             label: 'Foul',
             side: side,
             style: ControlStyle.danger,
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Who committed the foul?'),
+            ],
           ),
         ];
 

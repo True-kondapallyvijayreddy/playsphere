@@ -102,12 +102,26 @@ class AdaptiveGrid extends StatelessWidget {
     this.minTileWidth = 240,
     this.spacing = 12,
     this.childAspectRatio = 1.6,
+    this.tileHeight,
   });
 
   final List<Widget> children;
   final double minTileWidth;
   final double spacing;
+
+  /// Tile width : height. Ignored when [tileHeight] is given.
   final double childAspectRatio;
+
+  /// Fixed tile height in logical pixels, independent of column count.
+  ///
+  /// Prefer this to [childAspectRatio] for anything whose content is a fixed
+  /// number of text lines. A ratio ties height to WIDTH, and width grows as
+  /// columns are dropped — so a tile sized to look right 4-up on a laptop is
+  /// two and a half times taller on the phone that is the actual target
+  /// device. That is how the dashboard's Explore tiles came to be 162px tall
+  /// each on a 420px screen: an icon and two lines of text in a box half the
+  /// height of the viewport.
+  final double? tileHeight;
 
   @override
   Widget build(BuildContext context) {
@@ -115,14 +129,18 @@ class AdaptiveGrid extends StatelessWidget {
       builder: (context, constraints) {
         final columns =
             (constraints.maxWidth / minTileWidth).floor().clamp(1, 4);
-        return GridView.count(
-          crossAxisCount: columns,
-          crossAxisSpacing: spacing,
-          mainAxisSpacing: spacing,
-          childAspectRatio: childAspectRatio,
+        return GridView.builder(
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
-          children: children,
+          itemCount: children.length,
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: columns,
+            crossAxisSpacing: spacing,
+            mainAxisSpacing: spacing,
+            childAspectRatio: childAspectRatio,
+            mainAxisExtent: tileHeight,
+          ),
+          itemBuilder: (_, i) => children[i],
         );
       },
     );

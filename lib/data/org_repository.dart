@@ -4,6 +4,8 @@ import '../core/errors/app_exception.dart';
 import '../core/firebase/firestore_refs.dart';
 import '../core/models/app_user.dart';
 import '../core/models/enums.dart';
+import '../core/models/firestore_codec.dart';
+import '../core/models/player_code.dart';
 import '../core/models/organization.dart';
 
 /// Translates raw Firestore failures into [AppException]s.
@@ -16,16 +18,38 @@ Future<T> guard<T>(Future<T> Function() body) async {
   try {
     return await body();
   } on FirebaseException catch (e) {
-    throw switch (e.code) {
+    throw asAppException(e);
+  }
+}
+
+/// The same translation for a long-lived listener.
+///
+/// Reads were left unguarded on the theory that a query which passed review
+/// cannot fail, and a whole class of failure went unnamed because of it: a
+/// listener errors LATE — after it has already delivered from the local
+/// cache — so a rejected query looks like a screen that works and then
+/// stops, and every one of them reached the UI as a raw `FirebaseException`
+/// rendered as "Something went wrong". A stream that feeds a screen belongs
+/// behind this for the same reason a write does.
+Stream<T> guardStream<T>(Stream<T> Function() body) => body().handleError(
+      (Object e) => throw asAppException(e as FirebaseException),
+      test: (e) => e is FirebaseException,
+    );
+
+/// Firebase error code -> the sentence a user sees. Shared by [guard] and
+/// [guardStream] so a read and a write never disagree about what a code means.
+AppException asAppException(FirebaseException e) => switch (e.code) {
       'permission-denied' => const PermissionDeniedException(),
       'not-found' => const NotFoundException(),
       'already-exists' => const ConflictException(),
       'unavailable' || 'deadline-exceeded' => const NetworkException(),
       'unauthenticated' => const UnauthorizedException(),
+      // Almost always a missing composite or collection-group index. The
+      // client cannot recover, so it must not be reported as something the
+      // user could have done differently.
+      'failed-precondition' => const BackendNotReadyException(),
       _ => ValidationException(e.message ?? 'Something went wrong.'),
     };
-  }
-}
 
 class UserRepository {
   const UserRepository();
@@ -46,6 +70,119 @@ class UserRepository {
 
   Future<void> updateProfile(AppUser user) =>
       guard(() => Refs.user(user.uid).update(user.toUpdate()));
+
+  /// Mirrors the clubs this user actively belongs to onto their own profile
+  /// document, most-recently-joined first.
+  ///
+  /// This is the only structure `firestore.rules` can use to answer "do these
+  /// two people share a club", which is what `profileVisibility: community` —
+  /// the default for every new account — turns on. Rules cannot run a query,
+  /// so without the mirror the community setting could not be honoured at all
+  /// and nobody could open anybody else's profile.
+  ///
+  /// Order matters: the rule can only afford to check the first few entries
+  /// (a single-document read may make ten lookups at most), so the freshest
+  /// club has to come first.
+  ///
+  /// Safe to call on every membership change — it is a plain overwrite of one
+  /// field, and the caller skips it when nothing moved.
+  Future<void> mirrorOrgIds(String uid, List<String> orgIds) =>
+      guard(() => Refs.user(uid).update({'orgIds': orgIds}));
+
+  /// Makes sure this person has a player code, claiming one if they do not.
+  ///
+  /// Firestore has no unique constraint, so uniqueness is bought structurally:
+  /// the code is the id of a document in `playerCodes`, and a `create` on an
+  /// id that already exists fails. Retrying with a fresh candidate is the
+  /// whole collision strategy, and with 33 million codes it effectively never
+  /// runs twice.
+  ///
+  /// Idempotent and safe to call on every launch. It returns early when the
+  /// profile already carries a code, so the common path costs nothing beyond
+  /// the read the caller had already done.
+  ///
+  /// Deliberately a backfill rather than something only profile creation does:
+  /// every account that existed before codes did needs one, and there is no
+  /// server tier here to run a migration.
+  Future<String?> ensureCode(AppUser user) => guard(() async {
+        final existing = user.playerCode;
+        if (existing != null && existing.isNotEmpty) return existing;
+
+        for (var attempt = 0; attempt < 5; attempt++) {
+          final candidate = PlayerCode.generate();
+          try {
+            // Both writes, one batch: a claimed code with no profile pointing
+            // at it is a code permanently burned, and a profile naming a code
+            // nobody reserved is a code somebody else can still take.
+            final batch = Refs.db.batch();
+            batch.set(Refs.playerCode(candidate), {
+              'uid': user.uid,
+              // Denormalized so a lookup by a stranger — the entire point of
+              // a code — costs one public read and never touches the profile
+              // document, which they are not entitled to see.
+              'displayName': user.displayName,
+              'photoUrl': user.photoUrl,
+              'createdAt': FieldValue.serverTimestamp(),
+            });
+            batch.update(Refs.user(user.uid), {'playerCode': candidate});
+            await batch.commit();
+            return candidate;
+          } on FirebaseException catch (e) {
+            // ALREADY_EXISTS surfaces as permission-denied, because the rule
+            // that permits the claim requires the document not to exist.
+            // Either way the answer is the same: try another code.
+            if (e.code != 'permission-denied' && e.code != 'already-exists') {
+              rethrow;
+            }
+          }
+        }
+        // Five collisions in a row is not a thing that happens; if it somehow
+        // does, the person keeps working without a code rather than being
+        // blocked from signing in.
+        return null;
+      });
+
+  /// Resolves a code somebody typed to the player it belongs to.
+  ///
+  /// Returns null for a code that is not claimed, which is the same answer as
+  /// for a mistyped one — deliberately, so this cannot be used to enumerate
+  /// which codes exist any faster than guessing already would.
+  Future<PlayerLookup?> findByPlayerCode(String typed) => guard(() async {
+        final code = PlayerCode.normalize(typed);
+        if (code == null) return null;
+
+        final doc = await Refs.playerCode(code).get();
+        final data = doc.data();
+        if (!doc.exists || data == null) return null;
+
+        return PlayerLookup(
+          uid: Fs.str(data['uid']),
+          code: code,
+          displayName: Fs.str(data['displayName'], 'Player'),
+          photoUrl: Fs.strOrNull(data['photoUrl']),
+        );
+      });
+}
+
+/// What a code lookup returns: enough to put somebody on a team sheet, and
+/// nothing else.
+///
+/// Not an [AppUser]. The caller may well have no right to read that person's
+/// profile — a code is for adding a player from another club — so this is
+/// only ever a name, a photo and the uid that ties the match record to the
+/// right career. No date of birth, no phone, no email.
+class PlayerLookup {
+  const PlayerLookup({
+    required this.uid,
+    required this.code,
+    required this.displayName,
+    this.photoUrl,
+  });
+
+  final String uid;
+  final String code;
+  final String displayName;
+  final String? photoUrl;
 }
 
 class OrgRepository {
@@ -65,26 +202,38 @@ class OrgRepository {
   /// Uses a collection-group query rather than a mirrored "my orgs" list.
   /// A mirror would need two writes kept in sync from a client that can crash
   /// between them; the query has one source of truth and cannot drift.
+  /// Every club this person belongs to, in one query across all of them.
+  ///
+  /// The landing screen has no second source for this, so a failure here is
+  /// the whole dashboard rather than one section — hence [guardStream].
+  /// Needs the collection-group index declared under `fieldOverrides` in
+  /// firestore.indexes.json; see the matching rule in firestore.rules.
   Stream<List<Membership>> watchMyMemberships(String uid) {
-    return Refs.myMembershipsQuery
-        .where('uid', isEqualTo: uid)
-        .snapshots()
-        .map((snap) => snap.docs.map(Membership.fromDoc).toList());
+    return guardStream(
+      () => Refs.myMembershipsQuery
+          .where('uid', isEqualTo: uid)
+          .snapshots()
+          .map((snap) => snap.docs.map(Membership.fromDoc).toList()),
+    );
   }
 
   Stream<Membership?> watchMembership(String orgId, String uid) {
-    return Refs.member(orgId, uid).snapshots().map(
-          (doc) => doc.exists ? Membership.fromDoc(doc) : null,
-        );
+    return guardStream(
+      () => Refs.member(orgId, uid).snapshots().map(
+            (doc) => doc.exists ? Membership.fromDoc(doc) : null,
+          ),
+    );
   }
 
   Stream<List<Membership>> watchMembers(String orgId, {MembershipStatus? status}) {
     Query<Map<String, dynamic>> q = Refs.members(orgId);
     if (status != null) q = q.where('status', isEqualTo: status.wire);
-    return q.snapshots().map(
-          (snap) => snap.docs.map(Membership.fromDoc).toList()
-            ..sort((a, b) => b.role.rank.compareTo(a.role.rank)),
-        );
+    return guardStream(
+      () => q.snapshots().map(
+            (snap) => snap.docs.map(Membership.fromDoc).toList()
+              ..sort((a, b) => b.role.rank.compareTo(a.role.rank)),
+          ),
+    );
   }
 
   /// Creates the organization and its owner membership atomically.

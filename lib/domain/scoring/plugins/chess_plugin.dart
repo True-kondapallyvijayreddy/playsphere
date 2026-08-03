@@ -393,6 +393,7 @@ class ChessPlugin extends ScoringPlugin {
         const StatColumn(key: _blackGames, label: 'As black', shortLabel: 'BL'),
       ];
 
+  @override
   BoxScore boxScore(
     Map<String, dynamic> state,
     ScoringContext ctx,

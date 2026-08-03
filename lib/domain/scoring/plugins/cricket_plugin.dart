@@ -934,8 +934,43 @@ class CricketPlugin extends ScoringPlugin {
     // The pad refuses to offer a delivery until it knows who is involved.
     // Offering runs with nobody on strike is how a total ends up belonging to
     // no one, which no scorecard can then explain.
+    // `side` is set to whichever side is BATTING, and it is load-bearing
+    // rather than decorative: the pad resolves a prompt's candidates relative
+    // to the control's side, so this is what makes "on strike" offer the
+    // batting line-up and "bowling" offer the other one — and keeps doing so
+    // after the innings break, when the two swap over. `apply` ignores
+    // `action.side` for all three of these, so setting it costs nothing.
+    final battingSide = Side.fromWire(cur['battingSide'] as String?);
+
+    // A wicket clears the striker and leaves everything else standing, so
+    // "somebody is out" and "the innings has not started" are different
+    // states that both have a null striker. They were treated as one, and the
+    // scorer was sent back through the full opening dialog after every
+    // wicket — re-picking a non-striker who was already at the crease, which
+    // `apply` then rejects the moment they pick the same name twice.
+    final resuming = cur['bowler'] != null && cur['nonStriker'] != null;
+
+    if (cur['striker'] == null && resuming) {
+      return [
+        ScoreControlGroup(
+          title: 'Next batter in',
+          controls: [
+            ScoreControl(
+              action: 'new_batter',
+              label: 'Choose the incoming batter',
+              style: ControlStyle.primary,
+              side: battingSide,
+              prompts: const [
+                PlayerPrompt(key: 'playerId', label: 'Incoming batter'),
+              ],
+            ),
+          ],
+        ),
+      ];
+    }
+
     if (cur['striker'] == null || cur['bowler'] == null) {
-      return const [
+      return [
         ScoreControlGroup(
           title: 'Who is playing?',
           controls: [
@@ -943,6 +978,16 @@ class CricketPlugin extends ScoringPlugin {
               action: 'open',
               label: 'Choose batters and bowler',
               style: ControlStyle.primary,
+              side: battingSide,
+              prompts: const [
+                PlayerPrompt(key: 'striker', label: 'On strike'),
+                PlayerPrompt(key: 'nonStriker', label: 'Non-striker'),
+                PlayerPrompt(
+                  key: 'bowler',
+                  label: 'Bowling',
+                  from: PromptSource.opposingSide,
+                ),
+              ],
             ),
           ],
         ),
@@ -1010,10 +1055,10 @@ class CricketPlugin extends ScoringPlugin {
           ),
         ],
       ),
-      const ScoreControlGroup(
+      ScoreControlGroup(
         title: 'Match',
         controls: [
-          ScoreControl(
+          const ScoreControl(
             action: 'swap_strike',
             label: 'Swap strike',
             style: ControlStyle.subtle,
@@ -1023,8 +1068,19 @@ class CricketPlugin extends ScoringPlugin {
             action: 'new_bowler',
             label: 'Change bowler',
             style: ControlStyle.secondary,
+            // Same trick as the opening control: the side is the BATTING
+            // side, so the bowler is drawn from the opposition and stays
+            // correct after the innings break.
+            side: battingSide,
+            prompts: const [
+              PlayerPrompt(
+                key: 'playerId',
+                label: 'Next bowler',
+                from: PromptSource.opposingSide,
+              ),
+            ],
           ),
-          ScoreControl(
+          const ScoreControl(
             action: 'end_innings',
             label: 'End innings',
             style: ControlStyle.danger,

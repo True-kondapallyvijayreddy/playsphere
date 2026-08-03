@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../../../core/models/enums.dart';
 import '../../../core/models/fixture.dart';
 import '../../../core/models/match_player.dart';
 import '../../../core/models/memory.dart';
@@ -128,11 +129,17 @@ class MatchMemoriesSection extends ConsumerWidget {
     );
 
     try {
+      // Decides whether this memory is listable on a public career profile or
+      // only to the club. Read from the club document rather than assumed,
+      // because the rules re-derive the same value and reject a mismatch.
+      final org = ref.read(organizationProvider(fixture.orgId)).valueOrNull;
+
       await ref.read(memoryRepositoryProvider).upload(
             orgId: fixture.orgId,
             compId: fixture.compId,
             fixtureId: fixture.id,
             uploaderUid: myUid,
+            orgIsPublic: org?.visibility == OrgVisibility.public,
             bytes: composed.bytes,
             contentType: composed.contentType,
             kind: composed.kind,

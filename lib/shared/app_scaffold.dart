@@ -7,6 +7,10 @@ import '../core/layout/responsive.dart';
 import '../core/permissions/capability.dart';
 import '../core/providers.dart';
 import '../core/router/app_router.dart';
+import '../features/home/home_providers.dart';
+import 'account_button.dart';
+import 'module_drawer.dart';
+import 'playsphere_logo.dart';
 
 /// Width of the extended navigation rail.
 ///
@@ -45,14 +49,17 @@ class NavItem {
 
 /// The application shell.
 ///
-/// Renders a drawer on phones, a navigation rail on tablets and a permanent
-/// sidebar on laptops, from one declaration. Screens never think about which
-/// they are getting, which is what keeps Android, iOS and web the same
-/// product rather than three that slowly diverge.
+/// Every signed-in screen wears the same three things: the PlaySphere mark at
+/// the top left, the module menu — the "three lines" — behind it, and the
+/// account button at the top right. Underneath that it renders a bottom bar on
+/// phones, a navigation rail on tablets and an extended rail on laptops, from
+/// one declaration. Screens never think about which they are getting, which is
+/// what keeps Android, iOS and web the same product rather than three that
+/// slowly diverge.
 class AppScaffold extends ConsumerWidget {
   const AppScaffold({
     super.key,
-    required this.orgId,
+    this.orgId,
     required this.title,
     required this.body,
     this.actions,
@@ -60,7 +67,11 @@ class AppScaffold extends ConsumerWidget {
     this.subtitle,
   });
 
-  final String orgId;
+  /// The club this screen belongs to, or null on the screens that belong to
+  /// the person rather than to any one club — home, and the profile. The
+  /// module menu falls back to their most recent club for org-scoped links.
+  final String? orgId;
+
   final String title;
   final String? subtitle;
   final Widget body;
@@ -69,83 +80,111 @@ class AppScaffold extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final caps = ref.watch(myCapabilitiesProvider(orgId));
-    final org = ref.watch(organizationProvider(orgId)).valueOrNull;
+    final orgId = this.orgId;
+    final caps = orgId == null
+        ? const <Capability>{}
+        : ref.watch(myCapabilitiesProvider(orgId));
+    final org =
+        orgId == null ? null : ref.watch(organizationProvider(orgId)).valueOrNull;
     final window = context.windowSize;
 
-    final items = <NavItem>[
-      NavItem(
-        icon: Icons.home_outlined,
-        selectedIcon: Icons.home,
-        label: 'Home',
-        path: Routes.org(orgId),
-      ),
-      NavItem(
-        icon: Icons.sensors_outlined,
-        selectedIcon: Icons.sensors,
-        label: 'Live now',
-        path: Routes.live(orgId),
-      ),
-      NavItem(
-        icon: Icons.sports_kabaddi_outlined,
-        selectedIcon: Icons.sports_kabaddi,
-        label: 'Challenges',
-        path: Routes.challenges(orgId),
-        // Any member can watch who their club is playing; only an event
-        // manager sees the accept/decline controls on the screen itself.
-        badgeCount: ref.watch(incomingChallengesProvider(orgId)).valueOrNull
-            ?.length,
-      ),
-      NavItem(
-        icon: Icons.groups_outlined,
-        selectedIcon: Icons.groups,
-        label: 'Members',
-        path: Routes.members(orgId),
-        requires: Capability.manageMembers,
-      ),
-      const NavItem(
-        icon: Icons.menu_book_outlined,
-        selectedIcon: Icons.menu_book,
-        label: 'Rules',
-        path: Routes.rules,
-      ),
-    ].where((i) => i.requires == null || caps.contains(i.requires)).toList();
+    // See profileOrgMirrorProvider: keeps this user's club mirror current so
+    // `profileVisibility: community` can actually be honoured. Mounted on the
+    // shell so it runs on every in-app screen, not only the landing one.
+    ref.watch(profileOrgMirrorProvider);
+
+    // Backfills this account's PSOS code if it predates codes existing. Same
+    // placement and same reasoning as the mirror above.
+    ref.watch(playerCodeProvider);
+
+    // Registers this device for push. Mounted here for the same reason: a
+    // token has to be registered on a cold start where the session was
+    // restored and no sign-in ever happened, not only at the moment somebody
+    // taps Sign in.
+    ref.watch(pushRegistrationProvider);
+
+    final items = (orgId == null
+            ? _globalItems(ref)
+            : _clubItems(ref, orgId))
+        .where((i) => i.requires == null || caps.contains(i.requires))
+        .toList();
 
     final currentPath = GoRouterState.of(context).uri.path;
     var selected = items.indexWhere((i) => i.path == currentPath);
     if (selected < 0) selected = 0;
 
-    void go(int index) => context.go(items[index].path);
+    // Neither `go` nor a plain `push`.
+    //
+    // `go` was the bug: it rebuilds the whole stack from the target path, so
+    // a person who reached a club from home was left with a history one entry
+    // deep and a back press that closed the app.
+    //
+    // A plain `push` is the opposite mistake — tapping between two
+    // destinations six times leaves six screens to walk back through.
+    //
+    // So: leaving the section's own root pushes, which makes "back" return to
+    // the club rather than skipping it; moving between two non-root siblings
+    // replaces the top. The stack stays at most one deeper than where the
+    // person started, and every back press undoes exactly one thing.
+    void go(int index) {
+      final target = items[index].path;
+      if (target == currentPath) return;
+      if (currentPath == items.first.path) {
+        context.push(target);
+      } else {
+        context.replace(target);
+      }
+    }
+
+    // A screen that was pushed needs a way back that is not the system
+    // button. Scaffold will not offer one here: it renders the hamburger
+    // whenever a drawer is present and never looks at whether the route can
+    // pop, so every inner screen in this app showed a menu icon and nothing
+    // else. The menu does not disappear — it moves to the right, next to the
+    // account button, so it is still reachable from every screen.
+    final canPop = context.canPop();
 
     final appBar = AppBar(
+      titleSpacing: 4,
+      leading: canPop
+          ? IconButton(
+              icon: const Icon(Icons.arrow_back),
+              tooltip: MaterialLocalizations.of(context).backButtonTooltip,
+              onPressed: () => context.pop(),
+            )
+          : null,
       title: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(title, overflow: TextOverflow.ellipsis),
-          if (subtitle != null || org != null)
-            Text(
-              subtitle ?? org!.name,
-              style: Theme.of(context).textTheme.bodySmall,
-              overflow: TextOverflow.ellipsis,
-            ),
+          const PlaySphereLogo(markSize: 24, fontSize: 16),
+          Text(
+            [
+              title,
+              if (subtitle != null)
+                subtitle!
+              else if (org != null)
+                org.name,
+            ].join(' · '),
+            style: Theme.of(context).textTheme.bodySmall,
+            overflow: TextOverflow.ellipsis,
+          ),
         ],
       ),
       actions: [
         ...?actions,
-        IconButton(
-          icon: const Icon(Icons.menu_book_outlined),
-          tooltip: 'Official Rules (ICC, FIFA, FIBA, PKL)',
-          onPressed: () => context.push(Routes.rules),
-        ),
-        const _AccountButton(),
-        const SizedBox(width: 8),
+        if (canPop) const _ModuleMenuButton(),
+        const AccountButton(),
+        const SizedBox(width: 4),
       ],
     );
+
+    final drawer = ModuleDrawer(orgId: orgId);
 
     if (window.isCompact) {
       return Scaffold(
         appBar: appBar,
+        drawer: drawer,
         body: body,
         floatingActionButton: floatingActionButton,
         bottomNavigationBar: items.length < 2
@@ -167,6 +206,7 @@ class AppScaffold extends ConsumerWidget {
 
     return Scaffold(
       appBar: appBar,
+      drawer: drawer,
       floatingActionButton: floatingActionButton,
       body: Row(
         children: [
@@ -195,7 +235,7 @@ class AppScaffold extends ConsumerWidget {
                       width: _railExtendedWidth - 24, // minus the padding above
                       child: Row(
                         children: [
-                          const Icon(Icons.sports_score, size: 22),
+                          const PlaySphereMark(size: 22),
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
@@ -226,72 +266,109 @@ class AppScaffold extends ConsumerWidget {
   }
 }
 
-class _AccountButton extends ConsumerWidget {
-  const _AccountButton();
+/// Opens the module menu from the app bar's right side.
+///
+/// Only rendered when the back arrow has taken the leading slot. Without it
+/// the "three lines" would vanish the moment anyone navigated one level in,
+/// which is where most of the product actually lives.
+class _ModuleMenuButton extends StatelessWidget {
+  const _ModuleMenuButton();
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final user = ref.watch(currentUserProvider).valueOrNull;
-
-    return PopupMenuButton<String>(
-      tooltip: 'Account',
-      icon: CircleAvatar(
-        radius: 15,
-        backgroundImage:
-            user?.photoUrl != null ? NetworkImage(user!.photoUrl!) : null,
-        child: user?.photoUrl == null
-            ? Text(
-                (user?.displayName ?? '?').characters.first.toUpperCase(),
-                style: const TextStyle(fontSize: 13),
-              )
-            : null,
-      ),
-      itemBuilder: (context) => [
-        PopupMenuItem(
-          enabled: false,
-          child: ListTile(
-            contentPadding: EdgeInsets.zero,
-            title: Text(user?.displayName ?? 'Signed in'),
-            subtitle: Text(user?.email ?? ''),
-          ),
-        ),
-        const PopupMenuDivider(),
-        const PopupMenuItem(
-          value: 'profile',
-          child: ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: Icon(Icons.person_outline),
-            title: Text('My career profile'),
-          ),
-        ),
-        const PopupMenuItem(
-          value: 'switch',
-          child: ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: Icon(Icons.swap_horiz),
-            title: Text('Switch organization'),
-          ),
-        ),
-        const PopupMenuItem(
-          value: 'signout',
-          child: ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: Icon(Icons.logout),
-            title: Text('Sign out'),
-          ),
-        ),
-      ],
-      onSelected: (value) async {
-        if (value == 'profile') {
-          context.push(Routes.myProfile);
-        } else if (value == 'switch') {
-          context.go(Routes.orgs);
-        } else if (value == 'signout') {
-          await ref.read(authServiceProvider).signOut();
-        }
-      },
+  Widget build(BuildContext context) {
+    return IconButton(
+      icon: const Icon(Icons.menu),
+      tooltip: 'Modules',
+      onPressed: Scaffold.of(context).openDrawer,
     );
   }
+}
+
+/// The four destinations a person uses on a match day inside one club.
+///
+/// Deliberately short. Everything else the product does lives in the module
+/// menu — a bottom bar with seven items is a bar nobody reads, and the rail
+/// mirrors it so the two never say different things.
+List<NavItem> _clubItems(WidgetRef ref, String orgId) => [
+      NavItem(
+        icon: Icons.home_outlined,
+        selectedIcon: Icons.home,
+        label: 'Club',
+        path: Routes.org(orgId),
+      ),
+      NavItem(
+        icon: Icons.sensors_outlined,
+        selectedIcon: Icons.sensors,
+        label: 'Live now',
+        path: Routes.live(orgId),
+      ),
+      NavItem(
+        icon: Icons.sports_kabaddi_outlined,
+        selectedIcon: Icons.sports_kabaddi,
+        label: 'Challenges',
+        path: Routes.challenges(orgId),
+        // Any member can watch who their club is playing; only an event
+        // manager sees the accept/decline controls on the screen itself.
+        badgeCount:
+            ref.watch(incomingChallengesProvider(orgId)).valueOrNull?.length,
+      ),
+      NavItem(
+        icon: Icons.photo_library_outlined,
+        selectedIcon: Icons.photo_library,
+        label: 'Gallery',
+        path: Routes.gallery(orgId),
+      ),
+      NavItem(
+        icon: Icons.groups_outlined,
+        selectedIcon: Icons.groups,
+        label: 'Members',
+        path: Routes.members(orgId),
+        requires: Capability.manageMembers,
+      ),
+      const NavItem(
+        icon: Icons.dashboard_outlined,
+        selectedIcon: Icons.dashboard,
+        label: 'Home',
+        path: Routes.home,
+      ),
+    ];
+
+/// What the bar carries on the screens that belong to the person rather than
+/// to a club. "Live now" points at their most recent club, and drops out
+/// entirely for someone who has not joined one — a destination that leads to
+/// an error is worse than one that is absent.
+List<NavItem> _globalItems(WidgetRef ref) {
+  final primaryOrgId = ref.watch(primaryOrgIdProvider);
+  final live = ref.watch(myLiveFixturesProvider).valueOrNull?.length;
+
+  return [
+    const NavItem(
+      icon: Icons.dashboard_outlined,
+      selectedIcon: Icons.dashboard,
+      label: 'Home',
+      path: Routes.home,
+    ),
+    const NavItem(
+      icon: Icons.groups_2_outlined,
+      selectedIcon: Icons.groups_2,
+      label: 'My clubs',
+      path: Routes.orgs,
+    ),
+    if (primaryOrgId != null)
+      NavItem(
+        icon: Icons.sensors_outlined,
+        selectedIcon: Icons.sensors,
+        label: 'Live now',
+        path: Routes.live(primaryOrgId),
+        badgeCount: live == 0 ? null : live,
+      ),
+    const NavItem(
+      icon: Icons.menu_book_outlined,
+      selectedIcon: Icons.menu_book,
+      label: 'Rules',
+      path: Routes.rules,
+    ),
+  ];
 }
 
 /// A navigation icon that carries [NavItem.badgeCount] when there is one.
@@ -394,7 +471,12 @@ class AsyncView<T> extends StatelessWidget {
         icon: Icons.error_outline,
         title: 'Could not load this',
         message: errorMessage(error),
-        action: onRetry == null
+        // Offered only where it can actually work. A missing index is
+        // rejected identically on every attempt, and with offline
+        // persistence the cache answers first — so each tap repainted the
+        // screen for a frame and then failed again, which reads as the app
+        // taunting you rather than as a server that is not set up.
+        action: onRetry == null || error is BackendNotReadyException
             ? null
             : FilledButton.tonal(
                 onPressed: onRetry,

@@ -292,6 +292,7 @@ class FootballPlugin extends ScoringPlugin {
         ),
       ];
 
+  @override
   BoxScore boxScore(
     Map<String, dynamic> state,
     ScoringContext ctx,
@@ -363,6 +364,10 @@ class FootballPlugin extends ScoringPlugin {
       ];
     }
 
+    // Every one of these reads a `playerId` and refuses the event without it
+    // — "Who scored?", "Who was booked?". Until the controls declared their
+    // prompts the pad never asked, so every button on this pad returned a
+    // rejection and a football match could not be scored at all.
     List<ScoreControl> forSide(Side side, String goalKey) => [
           ScoreControl(
             action: 'goal',
@@ -370,15 +375,43 @@ class FootballPlugin extends ScoringPlugin {
             side: side,
             style: ControlStyle.primary,
             shortcut: goalKey,
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Who scored?'),
+              // Optional, and it has to be: most goals have no assist, and a
+              // picker that will not close without one teaches the scorer to
+              // name whoever was nearest.
+              PlayerPrompt(
+                key: 'assistId',
+                label: 'Assisted by',
+                optional: true,
+              ),
+            ],
           ),
-          ScoreControl(action: 'shot', label: 'Shot', side: side),
-          ScoreControl(action: 'save', label: 'Save', side: side),
+          ScoreControl(
+            action: 'shot',
+            label: 'Shot',
+            side: side,
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Who had the shot?'),
+            ],
+          ),
+          ScoreControl(
+            action: 'save',
+            label: 'Save',
+            side: side,
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Which keeper?'),
+            ],
+          ),
           ScoreControl(
             action: 'card',
             label: 'Yellow',
             side: side,
             payload: const {'colour': 'yellow'},
             style: ControlStyle.secondary,
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Who was booked?'),
+            ],
           ),
           ScoreControl(
             action: 'card',
@@ -386,6 +419,9 @@ class FootballPlugin extends ScoringPlugin {
             side: side,
             payload: const {'colour': 'red'},
             style: ControlStyle.danger,
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Who was sent off?'),
+            ],
           ),
         ];
 

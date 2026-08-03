@@ -188,6 +188,15 @@ class Competition {
     this.maxEntrants,
     this.entrantCount = 0,
     this.fixtureCount = 0,
+    this.participationModel = ParticipationModel.approval,
+    this.preselectedSlots = 0,
+    this.waitlistEnabled = false,
+    this.openToNonMembers = false,
+    this.entryFeeRupees = 0,
+    this.teamSize,
+    this.rulesNote,
+    this.confirmedCount = 0,
+    this.waitlistCount = 0,
     this.verificationTier = VerificationTier.casual,
     this.rulesetVersion = 1,
     this.pointsForWin = 3,
@@ -224,6 +233,56 @@ class Competition {
   final int entrantCount;
   final int fixtureCount;
   final VerificationTier verificationTier;
+
+  /// How this event fills. See [ParticipationModel] — it decides whether
+  /// tapping Register puts you in the team or in a queue.
+  final ParticipationModel participationModel;
+
+  /// For [ParticipationModel.hybrid]: how many of [maxEntrants] the organizer
+  /// reserves for their own picks. The rest are open to first-come
+  /// registration. Zero for every other model.
+  ///
+  /// Example from the flow: a 13-a-side cricket match where the captain names
+  /// 8 regulars is `maxEntrants: 13, preselectedSlots: 8` — five slots stay
+  /// open and the sixth person to tap Register is waitlisted.
+  final int preselectedSlots;
+
+  /// Whether someone arriving after the field is full is queued rather than
+  /// turned away. Grassroots events lose two players to work or traffic on
+  /// the morning; a waitlist is the difference between playing and cancelling.
+  final bool waitlistEnabled;
+
+  /// Whether people who are not members of the hosting club may register.
+  /// False is "restricted" — an internal club event. True is the open,
+  /// discoverable event the spec calls for.
+  final bool openToNonMembers;
+
+  /// Entry fee in whole rupees. Zero means free, which is the default and the
+  /// overwhelmingly common case: the spec makes scoring and club management
+  /// free forever, so a fee here is the organizer's ground/ball cost, not
+  /// ours.
+  final int entryFeeRupees;
+
+  /// Players per side, where the sport has a fixed one. Null means "whatever
+  /// turns up", which is how most pickup games actually work.
+  final int? teamSize;
+
+  /// Free-text rules and guidelines the organizer wants entrants to read
+  /// before they register — "leather ball", "spikes not allowed", "report by
+  /// 6am".
+  final String? rulesNote;
+
+  /// Live tallies maintained transactionally alongside the registrations they
+  /// count.
+  ///
+  /// A count that could be derived by reading every registration is
+  /// duplicated here for one reason: `firestore.rules` cannot count documents.
+  /// Capacity is only enforceable server-side if the number being checked
+  /// lives in a document the rules can read, which is what makes
+  /// "the first thirteen get in" a guarantee rather than a client-side
+  /// suggestion. See `CompetitionRepository.register`.
+  final int confirmedCount;
+  final int waitlistCount;
 
   /// Bumped whenever the organizer changes scoring configuration. Fixtures
   /// record the version they were played under so a mid-season rule change
@@ -278,13 +337,61 @@ class Competition {
 
   bool get isFull => maxEntrants != null && entrantCount >= maxEntrants!;
 
+  /// How many places are open to first-come registration.
+  ///
+  /// For a hybrid event this is capacity minus the slots the organizer has
+  /// reserved for their own picks — the "remaining 5" of the flow's 8 + 5.
+  /// Null when the event has no capacity at all, which means unlimited.
+  int? get openSlots {
+    final cap = maxEntrants;
+    if (cap == null) return null;
+    if (participationModel != ParticipationModel.hybrid) return cap;
+    final open = cap - preselectedSlots;
+    return open < 0 ? 0 : open;
+  }
+
+  /// Places still available to someone registering right now.
+  ///
+  /// Counts against [openSlots] rather than [maxEntrants], so an organizer's
+  /// reserved picks cannot be taken by whoever refreshes fastest.
+  int? get slotsRemaining {
+    final open = openSlots;
+    if (open == null) return null;
+    final left = open - confirmedCount;
+    return left < 0 ? 0 : left;
+  }
+
+  /// True when the open portion of the field is taken.
+  bool get openSlotsFull {
+    final left = slotsRemaining;
+    return left != null && left == 0;
+  }
+
   bool get registrationIsOpen {
     if (!status.acceptsRegistrations) return false;
-    if (isFull) return false;
+    // A full field is no longer open — unless there is a waitlist, in which
+    // case joining the queue is a legitimate thing to be able to do.
+    if (openSlotsFull && !waitlistEnabled) return false;
+    if (isFull && !waitlistEnabled) return false;
     final closes = registrationClosesAt;
     if (closes != null && DateTime.now().isAfter(closes)) return false;
     return true;
   }
+
+  /// What tapping Register right now would actually produce.
+  ///
+  /// Kept on the model rather than inside the repository so the button can
+  /// say the true thing before it is pressed — "Register" versus "Join
+  /// waitlist" versus "Apply" — instead of the user finding out afterwards.
+  /// The repository re-decides this inside a transaction against fresh
+  /// counts; this is the honest prediction, not the authority.
+  RegistrationStatus get outcomeOfRegisteringNow {
+    if (!participationModel.autoConfirms) return RegistrationStatus.pending;
+    if (openSlotsFull) return RegistrationStatus.waitlisted;
+    return RegistrationStatus.confirmed;
+  }
+
+  bool get isFree => entryFeeRupees <= 0;
 
   factory Competition.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
     final d = doc.data() ?? const {};
@@ -308,6 +415,16 @@ class Competition {
       maxEntrants: d['maxEntrants'] == null ? null : Fs.integer(d['maxEntrants']),
       entrantCount: Fs.integer(d['entrantCount']),
       fixtureCount: Fs.integer(d['fixtureCount']),
+      participationModel:
+          ParticipationModel.fromWire(Fs.strOrNull(d['participationModel'])),
+      preselectedSlots: Fs.integer(d['preselectedSlots']),
+      waitlistEnabled: Fs.boolean(d['waitlistEnabled']),
+      openToNonMembers: Fs.boolean(d['openToNonMembers']),
+      entryFeeRupees: Fs.integer(d['entryFeeRupees']),
+      teamSize: d['teamSize'] == null ? null : Fs.integer(d['teamSize']),
+      rulesNote: Fs.strOrNull(d['rulesNote']),
+      confirmedCount: Fs.integer(d['confirmedCount']),
+      waitlistCount: Fs.integer(d['waitlistCount']),
       verificationTier: VerificationTier.fromWire(Fs.str(d['verificationTier'])),
       rulesetVersion: Fs.integer(d['rulesetVersion'], 1),
       pointsForWin: Fs.integer(d['pointsForWin'], 3),
@@ -337,9 +454,17 @@ class Competition {
         // left to configure — both clubs already agreed the sport, the slot and
         // the venue when the challenge was accepted — so it is created ready to
         // play. `firestore.rules` permits exactly these two starting states.
-        'status': isInterClub
-            ? CompetitionStatus.scheduled.wire
-            : CompetitionStatus.draft.wire,
+        //
+        // A single match is the third case. It has no field to assemble and
+        // no draw to make — both sides were named on the way in — so it opens
+        // already in progress and the scoring pad is reachable on the next
+        // tap. Sitting it in `draft` would reintroduce exactly the ceremony
+        // the format exists to remove.
+        'status': switch (true) {
+          _ when isInterClub => CompetitionStatus.scheduled.wire,
+          _ when format.isSingleMatch => CompetitionStatus.inProgress.wire,
+          _ => CompetitionStatus.draft.wire,
+        },
         'category': category.toMap(),
         'scoringPluginKey': scoringPluginKey,
         'description': description,
@@ -350,6 +475,19 @@ class Competition {
         'maxEntrants': maxEntrants,
         'entrantCount': 0,
         'fixtureCount': 0,
+        'participationModel': participationModel.wire,
+        'preselectedSlots': preselectedSlots,
+        'waitlistEnabled': waitlistEnabled,
+        'openToNonMembers': openToNonMembers,
+        'entryFeeRupees': entryFeeRupees,
+        'teamSize': teamSize,
+        'rulesNote': rulesNote,
+        // Both counters start at zero and are only ever moved by the
+        // registration transaction. Seeding them here rather than letting
+        // them be absent is what allows `firestore.rules` to compare against
+        // `resource.data.confirmedCount` without a null check on every path.
+        'confirmedCount': 0,
+        'waitlistCount': 0,
         'verificationTier': verificationTier.wire,
         'rulesetVersion': rulesetVersion,
         'pointsForWin': pointsForWin,
@@ -370,6 +508,16 @@ class Competition {
         'endDate': Fs.ts(endDate),
         'registrationClosesAt': Fs.ts(registrationClosesAt),
         'maxEntrants': maxEntrants,
+        // `participationModel` and `preselectedSlots` are deliberately absent:
+        // they define what tapping Register meant to everyone who has already
+        // tapped it, and changing that retroactively would silently move
+        // people between the team and the queue. The organizer picks them
+        // once, at creation.
+        'waitlistEnabled': waitlistEnabled,
+        'openToNonMembers': openToNonMembers,
+        'entryFeeRupees': entryFeeRupees,
+        'teamSize': teamSize,
+        'rulesNote': rulesNote,
         'category': category.toMap(),
         'pointsForWin': pointsForWin,
         'pointsForDraw': pointsForDraw,
@@ -394,6 +542,8 @@ class Registration {
     this.eligibilityNote,
     this.decidedBy,
     this.createdAt,
+    this.waitlistPosition,
+    this.preselected = false,
   });
 
   final String uid;
@@ -401,6 +551,20 @@ class Registration {
   final RegistrationStatus status;
   final String? photoUrl;
   final String? teamName;
+
+  /// Place in the queue, 1-based, for a waitlisted entrant.
+  ///
+  /// Stored rather than derived from creation order because it is the thing
+  /// the entrant is actually told ("you are 2nd reserve"), and a number that
+  /// changes every time someone else's document happens to sort differently
+  /// is not a promise anyone can rely on.
+  final int? waitlistPosition;
+
+  /// True when an organizer put this entrant in the field directly rather
+  /// than the entrant registering — the preselected 8 of a hybrid event.
+  /// Shown in the entrant list so the open registrants can see which slots
+  /// were ever really available.
+  final bool preselected;
 
   /// Recorded when an organizer overrode a failed eligibility check, so the
   /// decision is visible later if the result is protested.
@@ -420,15 +584,32 @@ class Registration {
       eligibilityNote: Fs.strOrNull(d['eligibilityNote']),
       decidedBy: Fs.strOrNull(d['decidedBy']),
       createdAt: Fs.dateOrNull(d['createdAt']),
+      waitlistPosition:
+          d['waitlistPosition'] == null ? null : Fs.integer(d['waitlistPosition']),
+      preselected: Fs.boolean(d['preselected']),
     );
   }
 
-  Map<String, Object?> toCreate() => {
+  /// The registration document as first written.
+  ///
+  /// [status] is passed in rather than fixed at `pending` because the outcome
+  /// is decided by the event's [ParticipationModel] against its live counts,
+  /// inside the transaction that also moves those counts. `firestore.rules`
+  /// re-checks every combination this can produce — a client cannot confirm
+  /// itself into an approval event by calling this with the wrong argument.
+  Map<String, Object?> toCreate({
+    RegistrationStatus status = RegistrationStatus.pending,
+    int? waitlistPosition,
+    bool preselected = false,
+  }) =>
+      {
         'uid': uid,
         'displayName': displayName,
         'photoUrl': photoUrl,
         'teamName': teamName,
-        'status': RegistrationStatus.pending.wire,
+        'status': status.wire,
+        'waitlistPosition': waitlistPosition,
+        'preselected': preselected,
         'eligibilityNote': eligibilityNote,
         'createdAt': FieldValue.serverTimestamp(),
       };

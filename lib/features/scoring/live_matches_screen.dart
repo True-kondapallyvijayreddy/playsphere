@@ -74,7 +74,7 @@ class LiveMatchesScreen extends ConsumerWidget {
                           padding: const EdgeInsets.only(bottom: 10),
                           child: LiveScoreCard(
                             fixture: f,
-                            onTap: () => context.go(
+                            onTap: () => context.push(
                               Routes.scoring(orgId, f.compId, f.id),
                             ),
                           ),
@@ -92,7 +92,7 @@ class LiveMatchesScreen extends ConsumerWidget {
                           padding: const EdgeInsets.only(bottom: 10),
                           child: LiveScoreCard(
                             fixture: f,
-                            onTap: () => context.go(
+                            onTap: () => context.push(
                               Routes.watch(orgId, f.compId, f.id),
                             ),
                           ),

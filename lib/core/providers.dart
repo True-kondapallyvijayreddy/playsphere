@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:firebase_auth/firebase_auth.dart' as fb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -5,6 +7,7 @@ import '../data/career_repository.dart';
 import '../data/community_repository.dart';
 import '../data/competition_repository.dart';
 import '../data/memory_composer.dart';
+import '../data/club_file_repository.dart';
 import '../data/memory_repository.dart';
 import '../data/org_repository.dart';
 import '../data/scoring_service.dart';
@@ -19,6 +22,10 @@ import 'models/memory.dart';
 import 'models/enums.dart';
 import 'models/fixture.dart';
 import 'models/organization.dart';
+import 'models/scoring_request.dart';
+import 'models/club_file.dart';
+import 'models/squad_entry.dart';
+import 'notifications/notification_service.dart';
 import 'permissions/capability.dart';
 
 // ---------------------------------------------------------------------------
@@ -57,6 +64,44 @@ final currentUidProvider = Provider<String?>(
   (ref) => ref.watch(authStateProvider).valueOrNull?.uid,
 );
 
+/// The device half of push notifications.
+///
+/// Sending happens in Cloud Functions — a client cannot be allowed to make
+/// other people's phones buzz. This only registers the device so the server
+/// can reach it, and turns arriving messages into something the app can route
+/// on. See `functions/index.js` for what actually decides to send.
+final notificationServiceProvider = Provider<NotificationService>((ref) {
+  final service = NotificationService();
+  ref.onDispose(service.dispose);
+  return service;
+});
+
+/// Registers this device against whoever is signed in, and drops the
+/// registration when they sign out.
+///
+/// Watched from the app shell rather than called at sign-in, because a token
+/// also has to be registered on a cold start where the session was restored
+/// and no sign-in ever happened. Registration is idempotent — it rewrites one
+/// document per device — so running it on every auth change is correct rather
+/// than merely tolerable.
+///
+/// Returns void and never throws: a person who declined notifications must
+/// still get a working app.
+final pushRegistrationProvider = Provider<void>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  final service = ref.watch(notificationServiceProvider);
+
+  if (uid == null) return;
+  service.register(uid);
+
+  ref.onDispose(() {
+    // Deliberately not awaited: a provider disposal must not block, and a
+    // failed unregister costs a stale token that the server prunes the first
+    // time it tries to use it.
+    service.unregister(uid);
+  });
+});
+
 /// The signed-in user's PlaySphere profile, which is a different thing from
 /// their Firebase auth record: Google gives us a name and an email, but the
 /// date of birth that every age rule depends on only exists here.
@@ -81,6 +126,85 @@ final myMembershipsProvider = StreamProvider<List<Membership>>((ref) {
   final uid = ref.watch(currentUidProvider);
   if (uid == null) return Stream.value(const []);
   return ref.watch(orgRepositoryProvider).watchMyMemberships(uid);
+});
+
+/// Keeps `users/{uid}.orgIds` in step with the memberships that are the real
+/// record of who belongs where.
+///
+/// Watch this from any screen a signed-in user reliably reaches — it returns
+/// nothing and exists only for the write. `profileVisibility: community` is
+/// the default for every account, and `firestore.rules` can only honour it by
+/// checking the caller's membership against this mirror (rules cannot run a
+/// query). A profile whose mirror is stale is a profile its club-mates cannot
+/// open, so this runs wherever the memberships stream is already live rather
+/// than only at the moment of joining — an approval that flips a membership to
+/// `active` happens on somebody ELSE's device, and this user's profile has to
+/// catch up on their next visit.
+final profileOrgMirrorProvider = Provider<void>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  final me = ref.watch(currentUserProvider).valueOrNull;
+  final memberships = ref.watch(myMembershipsProvider).valueOrNull;
+  if (uid == null || me == null || memberships == null) return;
+
+  // Freshest first: the rule can only afford to look at the first few.
+  final active = memberships.where((m) => m.isActive).toList()
+    ..sort((a, b) {
+      final at = a.joinedAt;
+      final bt = b.joinedAt;
+      if (at == null && bt == null) return 0;
+      if (at == null) return 1;
+      if (bt == null) return -1;
+      return bt.compareTo(at);
+    });
+  final wanted = [for (final m in active) m.orgId];
+
+  if (wanted.length == me.orgIds.length) {
+    var same = true;
+    for (var i = 0; i < wanted.length; i++) {
+      if (wanted[i] != me.orgIds[i]) {
+        same = false;
+        break;
+      }
+    }
+    if (same) return;
+  }
+
+  // Not awaited and deliberately silent: this is housekeeping behind a screen
+  // the user opened for another reason, and a failed mirror must never
+  // surface as an error on it. The next visit tries again.
+  ref.read(userRepositoryProvider).mirrorOrgIds(uid, wanted).ignore();
+});
+
+/// Claims this person's player code if they do not have one yet.
+///
+/// Mounted on the app shell alongside [profileOrgMirrorProvider], for the same
+/// reason: every account created before codes existed needs one, and there is
+/// no server tier here to run a migration over the user collection. Doing it
+/// on the first screen anybody opens means a code appears without the person
+/// having to visit a settings page they have no reason to visit.
+///
+/// Runs at most once per account — `ensureCode` returns immediately when the
+/// profile already carries one, and the profile stream delivers the new code
+/// straight back, so the second build finds it set.
+final playerCodeProvider = Provider<void>((ref) {
+  final me = ref.watch(currentUserProvider).valueOrNull;
+  if (me == null) return;
+  if (me.playerCode != null && me.playerCode!.isNotEmpty) return;
+
+  // Not awaited and deliberately silent, exactly like the org mirror above:
+  // this is housekeeping behind a screen opened for another reason, and a
+  // collision or a dropped connection must never surface as an error on it.
+  ref.read(userRepositoryProvider).ensureCode(me).ignore();
+});
+
+/// Resolves a typed player code to the person who holds it.
+///
+/// A `FutureProvider.family` rather than a method call in the widget so a
+/// repeated lookup of the same code — a captain adding four players and
+/// re-checking one — is served from Riverpod's cache rather than re-read.
+final playerByCodeProvider =
+    FutureProvider.family<PlayerLookup?, String>((ref, code) {
+  return ref.watch(userRepositoryProvider).findByPlayerCode(code);
 });
 
 final organizationProvider =
@@ -165,9 +289,39 @@ final careerProvider =
 // its tests are correct and stay ready for that.
 
 /// Memories a player is tagged in, newest first.
+///
+/// The caller's own clubs are part of the query, not a post-filter: a
+/// collection-group read is authorized against the constraints the query
+/// carries, so the query has to state which audiences it is entitled to. A
+/// signed-out spectator names none and sees public clubs' memories only.
+/// Every memory from every match a club has played.
+///
+/// Distinct from [playerMemoriesProvider], which is a person's own timeline
+/// across whatever clubs they have belonged to. This is the club's own album.
+final clubFileRepositoryProvider =
+    Provider<ClubFileRepository>((ref) => const ClubFileRepository());
+
+/// Documents a club has shared with its members.
+final clubFilesProvider =
+    StreamProvider.family<List<ClubFile>, String>((ref, orgId) {
+  return ref.watch(clubFileRepositoryProvider).watch(orgId);
+});
+
+final clubMemoriesProvider =
+    StreamProvider.family<List<Memory>, String>((ref, orgId) {
+  return ref.watch(memoryRepositoryProvider).watchClubMemories(orgId);
+});
+
 final playerMemoriesProvider =
     StreamProvider.family<List<Memory>, String>((ref, uid) {
-  return ref.watch(memoryRepositoryProvider).watchPlayerMemories(uid);
+  final mine = ref.watch(myMembershipsProvider).valueOrNull ?? const [];
+  return ref.watch(memoryRepositoryProvider).watchPlayerMemories(
+        uid,
+        viewerOrgIds: [
+          for (final m in mine)
+            if (m.isActive) m.orgId,
+        ],
+      );
 });
 
 /// Memories attached to one match.
@@ -281,11 +435,44 @@ final fixtureProvider =
       .watchFixture(key.orgId, key.compId, key.fixtureId);
 });
 
+/// Members who have put their hand up for either club's side of a match.
+///
+/// One listener for both sides: a challenge has exactly two squads and they
+/// are shown together, so splitting this per side would double the reads to
+/// render one card.
+final squadEntriesProvider =
+    StreamProvider.family<List<SquadEntry>, FixtureRef>((ref, key) {
+  return ref
+      .watch(competitionRepositoryProvider)
+      .watchSquadEntries(key.orgId, key.compId, key.fixtureId);
+});
+
 final matchEventsProvider =
     StreamProvider.family<List<MatchEvent>, FixtureRef>((ref, key) {
   return ref
       .watch(scoringServiceProvider)
       .watchEvents(key.orgId, key.compId, key.fixtureId);
+});
+
+/// This person's own "let me score this" request for one match, if any.
+final myScoringRequestProvider =
+    StreamProvider.family<ScoringRequest?, FixtureRef>((ref, key) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(null);
+  return ref.watch(competitionRepositoryProvider).watchMyScoringRequest(
+        orgId: key.orgId,
+        compId: key.compId,
+        fixtureId: key.fixtureId,
+        uid: uid,
+      );
+});
+
+/// People waiting for this club to let them score something.
+final pendingScoringRequestsProvider =
+    StreamProvider.family<List<ScoringRequest>, String>((ref, orgId) {
+  return ref
+      .watch(competitionRepositoryProvider)
+      .watchPendingScoringRequests(orgId);
 });
 
 /// The league table, derived from the fixtures already being streamed.

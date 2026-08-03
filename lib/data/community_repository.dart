@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import '../core/errors/app_exception.dart';
 import '../core/firebase/firestore_refs.dart';
 import '../core/models/announcement.dart';
 import '../core/models/challenge.dart';
@@ -33,6 +34,37 @@ class CommunityRepository {
 
   Future<void> createAnnouncement(Announcement announcement) async {
     await Refs.announcements(announcement.orgId).add(announcement.toCreate());
+  }
+
+  /// Casting or changing a vote in a club poll.
+  ///
+  /// Written as a single field update on the votes map rather than a
+  /// read-modify-write of the whole poll: two members voting at the same
+  /// moment would otherwise each write back the map they read, and the second
+  /// would erase the first. Dotted field paths let Firestore merge them.
+  ///
+  /// Passing a null [optionIndex] withdraws a vote entirely — someone who said
+  /// they were coming and now cannot should be able to say so.
+  Future<void> voteInPoll({
+    required String orgId,
+    required String announcementId,
+    required String uid,
+    required int? optionIndex,
+  }) async {
+    await Refs.announcement(orgId, announcementId).update({
+      'poll.votes.$uid': optionIndex ?? FieldValue.delete(),
+    });
+  }
+
+  /// Closes a poll to further votes. The result stays visible — a closed poll
+  /// is the record of what the club decided, not something to be tidied away.
+  Future<void> closePoll({
+    required String orgId,
+    required String announcementId,
+  }) async {
+    await Refs.announcement(orgId, announcementId).update({
+      'poll.closed': true,
+    });
   }
 
   Stream<List<Announcement>> watchAnnouncements(String orgId) {
@@ -210,6 +242,26 @@ class CommunityRepository {
   /// re-issue the same challenge repeatedly and claim it was never answered.
   Future<void> declineChallenge(Challenge challenge) async {
     await Refs.challenge(challenge.id).update({'status': 'declined'});
+  }
+
+  /// Takes back a challenge the caller's club issued and the other club has
+  /// not yet answered.
+  ///
+  /// The counterpart to [declineChallenge], and its absence was a real hole:
+  /// a club that proposed three dates and then had its ground washed out
+  /// could neither cancel nor amend, so the only way out was for the other
+  /// club to decline an offer that was no longer real. Withdrawal is only
+  /// possible while the challenge is `pending` — after acceptance there is a
+  /// fixture in both clubs' schedules, and that is a match to be cancelled,
+  /// not an offer to be retracted.
+  Future<void> withdrawChallenge(Challenge challenge) async {
+    if (!challenge.isPending) {
+      throw const ValidationException(
+        'This challenge has already been answered, so it can no longer be '
+        'withdrawn.',
+      );
+    }
+    await Refs.challenge(challenge.id).update({'status': 'withdrawn'});
   }
 
   // --- Looking For Community Board ---------------------------------------

@@ -238,6 +238,7 @@ class KhoKhoPlugin extends ScoringPlugin {
         ),
       ];
 
+  @override
   BoxScore boxScore(
     Map<String, dynamic> state,
     ScoringContext ctx,
@@ -309,36 +310,47 @@ class KhoKhoPlugin extends ScoringPlugin {
       ScoreControlGroup(
         title: '${ctx.nameFor(attacking)} attacking',
         controls: [
-          ScoreControl(
-            action: 'tag',
-            label: 'Tag',
-            side: attacking,
-            style: ControlStyle.primary,
-            payload: const {'skill': 'regular'},
-            shortcut: 't',
-          ),
-          ScoreControl(
-            action: 'tag',
-            label: 'Pole dive',
-            side: attacking,
-            style: ControlStyle.primary,
-            payload: const {'skill': 'pole_dive'},
-            shortcut: 'p',
-          ),
-          ScoreControl(
-            action: 'tag',
-            label: 'Sky dive',
-            side: attacking,
-            style: ControlStyle.primary,
-            payload: const {'skill': 'sky_dive'},
-            shortcut: 'k',
-          ),
+          // A tag is two people: the attacker who made it, from the attacking
+          // batch, and the defender who went out, from the other side. The
+          // engine rejects it without the attacker ("Who made the tag?") and
+          // credits the defender's survival time when named — and neither was
+          // ever asked for, so every tag in every kho-kho match was refused.
+          //
+          // The defender is optional rather than required because a scorer
+          // watching a dive knows who dived long before they can say which of
+          // three runners it was; forcing the second name would stall the pad
+          // in the middle of the point.
+          for (final (label, skill, key) in const [
+            ('Tag', 'regular', 't'),
+            ('Pole dive', 'pole_dive', 'p'),
+            ('Sky dive', 'sky_dive', 'k'),
+          ])
+            ScoreControl(
+              action: 'tag',
+              label: label,
+              side: attacking,
+              style: ControlStyle.primary,
+              payload: {'skill': skill},
+              shortcut: key,
+              prompts: const [
+                PlayerPrompt(key: 'playerId', label: 'Who made the tag?'),
+                PlayerPrompt(
+                  key: 'defenderId',
+                  label: 'Who went out?',
+                  from: PromptSource.opposingSide,
+                  optional: true,
+                ),
+              ],
+            ),
           ScoreControl(
             action: 'kho',
             label: 'Kho',
             side: attacking,
             style: ControlStyle.subtle,
             shortcut: 'o',
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Who gave the kho?'),
+            ],
           ),
         ],
       ),

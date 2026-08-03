@@ -5,6 +5,7 @@ import '../core/models/fixture.dart';
 import '../core/models/match_player.dart';
 import '../domain/career/career_stats.dart';
 import '../domain/rating/glicko2.dart';
+import '../domain/scoring/match_award.dart';
 import '../domain/scoring/player_stats.dart';
 
 /// Service responsible for calculating sport-specific contribution weights,
@@ -63,96 +64,17 @@ class RatingService {
 
   /// What one unit of each statistic is worth when judging a contribution.
   ///
-  /// **These keys must match what the engines actually write.** They are the
-  /// same camelCase names the plugins use for [PlayerTally]; an entry that
-  /// does not correspond to a real tally key contributes nothing and silently
-  /// reduces that sport to pure win/loss distribution — which §8.1 forbids
-  /// explicitly, and which is exactly what happened while this table was
-  /// written in snake_case.
-  ///
-  /// `test/rating_service_test.dart` asserts every key here is emitted by at
-  /// least one registered engine, so the two cannot drift apart again.
-  static const contributionWeights = <String, double>{
-    // Goal sports — football, hockey.
-    //
-    // A clean sheet is deliberately absent: it is a property of the side at
-    // full time, not a counter on a player, so there is nothing in the tally
-    // to weight. It belongs in an award, not here.
-    'goals': 30.0,
-    'assists': 20.0,
-    'saves': 5.0,
-    'shotsOnTarget': 2.0,
-    'pcGoals': 25.0,
-
-    // Cricket.
-    'runsScored': 1.0,
-    'wickets': 20.0,
-    'catches': 10.0,
-    'stumpings': 10.0,
-    'runOuts': 10.0,
-    'runOutAssists': 5.0,
-    'maidens': 5.0,
-
-    // Basketball.
-    'points': 1.0,
-    'offRebounds': 1.5,
-    'defRebounds': 1.5,
-    'steals': 2.5,
-    'blocks': 2.5,
-
-    // Kabaddi.
-    'raidPoints': 5.0,
-    'tacklePoints': 5.0,
-    'superRaids': 10.0,
-    'superTackles': 10.0,
-
-    // Volleyball and racket sports.
-    'kills': 3.0,
-    'aces': 5.0,
-    'digs': 2.0,
-    'pointsWon': 1.0,
-    'serviceAces': 5.0,
-
-    // Kho-kho. Dives are counted by type rather than as one "dive points"
-    // bucket, because the two are worth different amounts in different
-    // rulesets — see the UKK and KKFI presets.
-    'touchPoints': 5.0,
-    'poleDives': 5.0,
-    'skyDives': 5.0,
-    'dreamRunPoints': 5.0,
-
-    // Mind and board sports.
-    'boardsWon': 20.0,
-    'queensCovered': 10.0,
-  };
-
-  /// A milestone worth a bonus on top of the per-unit weights, because a
-  /// fifty is worth more than fifty singles spread over a season.
-  static const _milestones = <String, ({num threshold, double bonus})>{
-    'runsScored': (threshold: 50, bonus: 15.0),
-    'wickets': (threshold: 5, bonus: 20.0),
-    'raidPoints': (threshold: 10, bonus: 15.0),
-    'tacklePoints': (threshold: 5, bonus: 15.0),
-    'points': (threshold: 30, bonus: 15.0),
-  };
+  /// Now a single definition shared with the MVP award — see
+  /// [ContributionScoring.weights]. It used to live here, which meant the
+  /// best player of a match and the biggest rating gain in that same match
+  /// were computed from two tables that could drift apart. Re-exported rather
+  /// than moved outright because `test/rating_service_test.dart` asserts
+  /// against this name that every key is emitted by a real engine.
+  static const contributionWeights = ContributionScoring.weights;
 
   /// Computes raw MVP contribution points from a player's tally.
-  double _computeContributionPoints(Map<String, num> tally) {
-    if (tally.isEmpty) return 0.0;
-
-    var pts = 0.0;
-    for (final entry in tally.entries) {
-      final weight = contributionWeights[entry.key];
-      if (weight != null) pts += entry.value * weight;
-    }
-    for (final m in _milestones.entries) {
-      final value = tally[m.key];
-      if (value != null && value >= m.value.threshold) {
-        pts += m.value.bonus;
-      }
-    }
-    return pts;
-  }
+  double _computeContributionPoints(Map<String, num> tally) =>
+      ContributionScoring.pointsFrom(tally);
 
   /// Reads a player's Glicko-2 rating for a sport from Firestore, returning
   /// default rating (1500, 350, 0.06) if unrated.
@@ -242,6 +164,18 @@ class RatingService {
 
     final batch = _firestore.batch();
 
+    // The provenance stamp every settlement write carries. `firestore.rules`
+    // reads it back, loads that fixture, and refuses the write unless the
+    // caller is one of its assigned scorers and the profile being written to
+    // belongs to somebody who actually played in it. Without it these writes
+    // are rejected — which is the point: they used to be open to any
+    // signed-in stranger.
+    final settledBy = <String, Object?>{
+      'orgId': orgId,
+      'compId': fixture.compId,
+      'fixtureId': fixture.id,
+    };
+
     // 7. Rate Side A players
     for (final player in sideAPlayers) {
       final uid = player.uid!;
@@ -253,7 +187,7 @@ class RatingService {
       );
       batch.set(
         Refs.userRating(uid, ratingKey),
-        updated.toMap(),
+        {...updated.toMap(), 'settledBy': settledBy},
         SetOptions(merge: true),
       );
     }
@@ -269,7 +203,7 @@ class RatingService {
       );
       batch.set(
         Refs.userRating(uid, ratingKey),
-        updated.toMap(),
+        {...updated.toMap(), 'settledBy': settledBy},
         SetOptions(merge: true),
       );
     }
@@ -290,6 +224,7 @@ class RatingService {
         // idempotent, which matters because a replayed finalize must not
         // duplicate a club.
         'clubsPlayedFor': FieldValue.arrayUnion([c.orgId]),
+        'settledBy': settledBy,
       };
       for (final entry in c.tally.entries) {
         fields['tally.${entry.key}'] = FieldValue.increment(entry.value);

@@ -20,6 +20,36 @@ class Refs {
   static DocumentReference<Map<String, dynamic>> user(String uid) =>
       users.doc(uid);
 
+  /// One document per claimed player code, id = the code itself.
+  ///
+  /// It does two jobs that a field on the user document cannot. Firestore has
+  /// no unique constraint, so uniqueness is bought by making the code a
+  /// DOCUMENT ID and claiming it with a create, which fails if it is taken.
+  /// And a code has to be resolvable by someone who cannot read the target's
+  /// profile — the point of a code is adding a player from another club — so
+  /// the lookup has to be a tiny public document holding a display name and a
+  /// photo, never the profile itself.
+  static CollectionReference<Map<String, dynamic>> get playerCodes =>
+      db.collection('playerCodes');
+
+  static DocumentReference<Map<String, dynamic>> playerCode(String code) =>
+      playerCodes.doc(code);
+
+  /// Devices a user has signed in on, so the server can reach them.
+  ///
+  /// One document per token rather than a single field on the user: a player
+  /// has a phone and a lab machine, and a scorer borrows the club tablet on
+  /// match day. A single field would mean only the most recent device ever
+  /// hears "your match starts in an hour".
+  static CollectionReference<Map<String, dynamic>> deviceTokens(String uid) =>
+      user(uid).collection('devices');
+
+  static DocumentReference<Map<String, dynamic>> deviceToken(
+    String uid,
+    String token,
+  ) =>
+      deviceTokens(uid).doc(token);
+
   static CollectionReference<Map<String, dynamic>> get umpires =>
       db.collection('umpires');
 
@@ -77,6 +107,10 @@ class Refs {
     String announcementId,
   ) =>
       announcements(orgId).doc(announcementId);
+
+  /// Documents a club has shared with its members.
+  static CollectionReference<Map<String, dynamic>> clubFiles(String orgId) =>
+      org(orgId).collection('files');
 
   static CollectionReference<Map<String, dynamic>> get challenges =>
       db.collection('challenges');
@@ -177,10 +211,55 @@ class Refs {
   ) =>
       fixture(orgId, compId, fixtureId).collection('events');
 
+  /// Members putting their hand up for their own club's side of a match.
+  ///
+  /// Hangs off the fixture rather than the competition because a challenge is
+  /// one fixture and two independent selection problems — see [SquadEntry].
+  static CollectionReference<Map<String, dynamic>> squadEntries(
+    String orgId,
+    String compId,
+    String fixtureId,
+  ) =>
+      fixture(orgId, compId, fixtureId).collection('squadEntries');
+
+  static DocumentReference<Map<String, dynamic>> squadEntry(
+    String orgId,
+    String compId,
+    String fixtureId,
+    String uid,
+  ) =>
+      squadEntries(orgId, compId, fixtureId).doc(uid);
+
   /// Every fixture across an organization, for "what is live right now" and
   /// "what am I scoring today" screens.
   static Query<Map<String, dynamic>> get allFixturesQuery =>
       db.collectionGroup('fixtures');
+
+  /// "Let me score this one" — one document per person per match.
+  ///
+  /// The document id is the requester's uid, which makes "one open request
+  /// per person per match" structural rather than something a repeated tap on
+  /// a village 4G connection could violate.
+  static CollectionReference<Map<String, dynamic>> scoringRequests(
+    String orgId,
+    String compId,
+    String fixtureId,
+  ) =>
+      fixture(orgId, compId, fixtureId).collection('scoringRequests');
+
+  static DocumentReference<Map<String, dynamic>> scoringRequest(
+    String orgId,
+    String compId,
+    String fixtureId,
+    String uid,
+  ) =>
+      scoringRequests(orgId, compId, fixtureId).doc(uid);
+
+  /// Every scoring request across a club, for the admin's "waiting on you"
+  /// list. Needs the collection-group index on (`orgId`, `status`) — a rule
+  /// alone is not enough, see firestore.indexes.json.
+  static Query<Map<String, dynamic>> get allScoringRequestsQuery =>
+      db.collectionGroup('scoringRequests');
 
   // --- Memories ---------------------------------------------------------
 

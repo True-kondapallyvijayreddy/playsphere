@@ -40,6 +40,7 @@ class Memory {
     required this.storagePath,
     required this.url,
     required this.kind,
+    required this.audience,
     this.caption,
     this.taggedUids = const [],
     this.width,
@@ -61,6 +62,29 @@ class Memory {
   final String url;
   final MemoryKind kind;
   final String? caption;
+
+  /// Who this memory may be listed to: the literal string `public`, or the id
+  /// of the club that owns it.
+  ///
+  /// It exists only because of how Firestore evaluates a collection-group
+  /// query. Rules for a `list` are checked against the QUERY's constraints,
+  /// not against the documents it would return, so a rule reading a field the
+  /// query does not constrain is an evaluation error and the whole query is
+  /// denied. The career-profile grid queries every club at once, so
+  /// "is this club public, or am I in it?" has to be answerable from a field
+  /// the query itself pins down — hence one denormalized value that the query
+  /// filters on directly.
+  ///
+  /// Set at creation from the club's visibility, and frozen thereafter; the
+  /// rules verify it against the club document on the way in, so it cannot be
+  /// self-declared as `public` by an uploader in an unlisted club.
+  final String audience;
+
+  static const publicAudience = 'public';
+
+  /// The [audience] value a club's memories take.
+  static String audienceFor({required String orgId, required bool orgIsPublic}) =>
+      orgIsPublic ? publicAudience : orgId;
 
   /// Players appearing in this memory. Drives the career profile grid.
   ///
@@ -95,6 +119,7 @@ class Memory {
       storagePath: Fs.str(d['storagePath']),
       url: Fs.str(d['url']),
       kind: MemoryKind.fromWire(Fs.strOrNull(d['kind'])),
+      audience: Fs.str(d['audience']),
       caption: Fs.strOrNull(d['caption']),
       taggedUids: Fs.strList(d['taggedUids']),
       width: d['width'] == null ? null : Fs.integer(d['width']),
@@ -112,6 +137,7 @@ class Memory {
         'storagePath': storagePath,
         'url': url,
         'kind': kind.wire,
+        'audience': audience,
         'caption': caption,
         'taggedUids': taggedUids,
         'width': width,

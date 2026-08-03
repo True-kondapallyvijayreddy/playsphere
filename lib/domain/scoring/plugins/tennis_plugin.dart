@@ -335,6 +335,7 @@ class TennisPlugin extends ScoringPlugin {
         ),
       ];
 
+  @override
   BoxScore boxScore(
     Map<String, dynamic> state,
     ScoringContext ctx,
@@ -416,6 +417,10 @@ class TennisPlugin extends ScoringPlugin {
       ];
     }
 
+    // Filled without asking in singles, asked in doubles — see the note on
+    // the badminton rally control for why the two differ.
+    const winner = [PlayerPrompt(key: 'playerId', label: 'Who won the point?')];
+
     List<ScoreControl> forSide(Side side, String key) => [
           ScoreControl(
             action: 'point',
@@ -423,18 +428,23 @@ class TennisPlugin extends ScoringPlugin {
             side: side,
             style: ControlStyle.primary,
             shortcut: key,
+            prompts: winner,
           ),
           ScoreControl(
             action: 'point',
             label: 'Ace',
             side: side,
             payload: const {'how': 'ace'},
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Who served the ace?'),
+            ],
           ),
           ScoreControl(
             action: 'point',
             label: 'Winner',
             side: side,
             payload: const {'how': 'winner'},
+            prompts: winner,
           ),
         ];
 

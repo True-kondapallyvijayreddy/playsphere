@@ -1,3 +1,4 @@
+import '../player_stats.dart';
 import '../scoring_plugin.dart';
 
 /// Set/game based scoring for badminton, volleyball, tennis and table tennis.
@@ -68,6 +69,23 @@ class SetBasedPlugin extends ScoringPlugin {
         var next = mutate(state, (s) {
           s[key] = ((s[key] as num?)?.toInt() ?? 0) + 1;
         });
+
+        // Credit the point to whoever won it, when the pad named somebody.
+        //
+        // Optional on purpose. This engine is the generic set/game scorer and
+        // it serves throwball as well as anything an organizer picks it for,
+        // so it cannot demand a player the way a sport-specific engine can —
+        // a scorer who only wants the score must still be able to keep it.
+        // But when the name IS supplied, dropping it was the whole bug:
+        // throwball recorded hundreds of points and its scorecard named
+        // nobody, because nothing here ever read `playerId`.
+        final scorer = action.payload['playerId'] as String?;
+        if (scorer != null) {
+          next = PlayerTally.addAll(next, scorer, {
+            _pointsWon: 1,
+            _rallies: 1,
+          });
+        }
         return ScoringResult.ok(_settleSet(next, ctx));
 
       case 'correct':
@@ -231,6 +249,9 @@ class SetBasedPlugin extends ScoringPlugin {
             side: Side.a,
             style: ControlStyle.primary,
             shortcut: 'a',
+            prompts: [
+              PlayerPrompt(key: 'playerId', label: 'Who won the point?'),
+            ],
           ),
           ScoreControl(
             action: 'correct',
@@ -250,6 +271,9 @@ class SetBasedPlugin extends ScoringPlugin {
             side: Side.b,
             style: ControlStyle.primary,
             shortcut: 'l',
+            prompts: [
+              PlayerPrompt(key: 'playerId', label: 'Who won the point?'),
+            ],
           ),
           ScoreControl(
             action: 'correct',
@@ -279,4 +303,27 @@ class SetBasedPlugin extends ScoringPlugin {
       ),
     ];
   }
+
+  static const _pointsWon = 'pointsWon';
+  static const _rallies = 'rallies';
+
+  /// Per-player lines, so a throwball player's record is not permanently
+  /// empty. Before this the engine had no box score at all: the points were
+  /// tallied nowhere and displayed nowhere, and the sport's whole per-player
+  /// history was a blank.
+  @override
+  BoxScore boxScore(
+    Map<String, dynamic> state,
+    ScoringContext ctx,
+    Side side,
+  ) =>
+      PlayerTally.boxScore(
+        state: state,
+        ctx: ctx,
+        side: side,
+        columns: const [
+          StatColumn(key: _pointsWon, label: 'Points won', shortLabel: 'PTS'),
+          StatColumn(key: _rallies, label: 'Rallies won', shortLabel: 'R'),
+        ],
+      );
 }

@@ -362,6 +362,7 @@ class KabaddiPlugin extends ScoringPlugin {
       ];
   }
 
+  @override
   BoxScore boxScore(
     Map<String, dynamic> state,
     ScoringContext ctx,
@@ -434,6 +435,25 @@ class KabaddiPlugin extends ScoringPlugin {
       ];
     }
 
+    // Every raid names its raider — the engine rejects one that does not
+    // ("Who raided?") — and until the controls declared it the pad never
+    // asked, so no kabaddi match could record a single point.
+    const raider = [PlayerPrompt(key: 'playerId', label: 'Who raided?')];
+
+    // The tackle button's side is the side that MADE the tackle, so the
+    // tackler comes from that side's own list.
+    // `defenderIds`, plural, and a multi-select. A raider is routinely held
+    // by three or four defenders and the engine splits the tackle points
+    // between all of them — asking for one would hand a super-tackle to a
+    // single player and quietly falsify everyone's High 5 count.
+    const tackler = [
+      PlayerPrompt(
+        key: 'defenderIds',
+        label: 'Who made the tackle?',
+        multiple: true,
+      ),
+    ];
+
     List<ScoreControl> raidControls(Side side) => [
           ScoreControl(
             action: 'raid',
@@ -441,6 +461,7 @@ class KabaddiPlugin extends ScoringPlugin {
             side: side,
             style: ControlStyle.primary,
             payload: const {'touched': 1},
+            prompts: raider,
           ),
           ScoreControl(
             action: 'raid',
@@ -448,12 +469,14 @@ class KabaddiPlugin extends ScoringPlugin {
             side: side,
             style: ControlStyle.primary,
             payload: const {'touched': 2},
+            prompts: raider,
           ),
           ScoreControl(
             action: 'raid',
             label: 'Bonus',
             side: side,
             payload: const {'touched': 0, 'bonus': true},
+            prompts: raider,
           ),
           ScoreControl(
             action: 'raid',
@@ -461,6 +484,7 @@ class KabaddiPlugin extends ScoringPlugin {
             side: side,
             style: ControlStyle.subtle,
             payload: const {'touched': 0},
+            prompts: raider,
           ),
           ScoreControl(
             action: 'raid',
@@ -468,6 +492,7 @@ class KabaddiPlugin extends ScoringPlugin {
             side: side,
             style: ControlStyle.danger,
             payload: const {'touched': 0, 'raiderOut': true},
+            prompts: raider,
           ),
         ];
 
@@ -488,12 +513,14 @@ class KabaddiPlugin extends ScoringPlugin {
             label: '${ctx.entrantAName} tackle',
             side: Side.a,
             style: ControlStyle.secondary,
+            prompts: tackler,
           ),
           ScoreControl(
             action: 'tackle',
             label: '${ctx.entrantBName} tackle',
             side: Side.b,
             style: ControlStyle.secondary,
+            prompts: tackler,
           ),
         ],
       ),

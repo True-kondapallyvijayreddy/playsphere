@@ -743,3 +743,100 @@ class RulePresets {
     return base.merge(overrides);
   }
 }
+
+/// Turns a rule key into something a scorer can be shown and can edit.
+///
+/// CLAUDE.md §2.3 says rules are configuration, not code — but a config only
+/// a developer can change is code with extra steps. An organizer running an
+/// eight-over tennis-ball match, or a school playing 15-point badminton
+/// because the hall is booked at seven, has to be able to say so at the point
+/// the match is set up, without waiting for a preset to be added here.
+///
+/// This deliberately describes keys rather than enumerating them. Everything
+/// in a preset is editable; [labelFor] falls back to un-camel-casing an
+/// unknown key, so adding a value to a preset makes it editable in the same
+/// commit, with no screen to update. [order] only decides what a scorer sees
+/// FIRST — the things that change most often, per sport.
+class RuleFields {
+  const RuleFields._();
+
+  /// Hand-written labels for the keys worth phrasing properly. Anything
+  /// missing is derived from the key itself.
+  static const _labels = <String, String>{
+    'oversPerInnings': 'Overs per innings',
+    'ballsPerOver': 'Balls per over',
+    'playersPerTeam': 'Players per team',
+    'maxOversPerBowler': 'Max overs per bowler',
+    'powerplayOvers': 'Powerplay overs',
+    'freeHitOnNoBall': 'Free hit after a no-ball',
+    'wideRuns': 'Runs for a wide',
+    'noBallRuns': 'Runs for a no-ball',
+    'boundaryFour': 'Runs for a four',
+    'boundarySix': 'Runs for a six',
+    'pointsPerSet': 'Points per game',
+    'setsToWin': 'Games to win the match',
+    'maxSets': 'Maximum games',
+    'winBy': 'Must win by',
+    'hardCap': 'Hard cap',
+    'intervalAt': 'Interval at',
+    'decidingSetPoints': 'Points in the deciding set',
+    'servesPerTurn': 'Serves per turn',
+    'servesPerTurnAtDeuce': 'Serves per turn at deuce',
+    'periodMinutes': 'Minutes per period',
+    'periods': 'Number of periods',
+    'periodLabel': 'What a period is called',
+    'halfLengthMinutes': 'Minutes per half',
+    'raidClockSeconds': 'Raid clock (seconds)',
+    'timeControl': 'Time control',
+    'baseMinutes': 'Base minutes',
+    'incrementSeconds': 'Increment (seconds)',
+    'matchTarget': 'Points to win',
+    'targetScore': 'Target score',
+    'allowDraw': 'Draws allowed',
+  };
+
+  /// What a scorer is most likely to want to change, per sport, in the order
+  /// they should meet it. Everything else follows alphabetically.
+  static const _order = <String, List<String>>{
+    'cricket': [
+      'oversPerInnings',
+      'ballsPerOver',
+      'playersPerTeam',
+      'maxOversPerBowler',
+      'freeHitOnNoBall',
+      'wideRuns',
+      'noBallRuns',
+    ],
+    'badminton': ['pointsPerSet', 'setsToWin', 'winBy', 'hardCap', 'intervalAt'],
+    'table_tennis': ['pointsPerSet', 'setsToWin', 'winBy', 'servesPerTurn'],
+    'tennis': ['gamesPerSet', 'setsToWin', 'noAd', 'tiebreakTo'],
+    'volleyball': ['pointsPerSet', 'setsToWin', 'decidingSetPoints', 'winBy'],
+    'football': ['periodMinutes', 'periods', 'playersPerTeam', 'extraTime'],
+    'basketball': ['periodMinutes', 'periods', 'shotClockSeconds', 'foulOutAt'],
+    'kabaddi': ['halfLengthMinutes', 'raidClockSeconds', 'playersOnCourt'],
+    'chess': ['timeControl', 'baseMinutes', 'incrementSeconds'],
+    'carrom': ['matchTarget', 'maxBoardPoints', 'queenPoints'],
+  };
+
+  static String labelFor(String key) => _labels[key] ?? _humanize(key);
+
+  /// `oversPerInnings` → `Overs per innings`. Not clever, and does not need to
+  /// be: it exists so an uncatalogued key is still legible rather than hidden.
+  static String _humanize(String key) {
+    final spaced = key.replaceAllMapped(
+      RegExp(r'(?<=[a-z0-9])(?=[A-Z])'),
+      (_) => ' ',
+    );
+    if (spaced.isEmpty) return key;
+    return spaced[0].toUpperCase() + spaced.substring(1).toLowerCase();
+  }
+
+  /// Every key in [config], most-edited first for [sportId].
+  static List<String> orderedKeys(String sportId, Map<String, dynamic> config) {
+    final priority = _order[sportId] ?? const <String>[];
+    final keys = config.keys.toList()..sort();
+    final head = [for (final k in priority) if (config.containsKey(k)) k];
+    final tail = [for (final k in keys) if (!head.contains(k)) k];
+    return [...head, ...tail];
+  }
+}

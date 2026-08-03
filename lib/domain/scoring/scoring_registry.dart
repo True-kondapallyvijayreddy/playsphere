@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart';
+
 import '../../core/models/enums.dart';
 import 'plugins/athletics_plugin.dart';
 import 'plugins/badminton_plugin.dart';
@@ -17,6 +19,280 @@ import 'plugins/table_tennis_plugin.dart';
 import 'plugins/tennis_plugin.dart';
 import 'rule_config.dart';
 import 'scoring_plugin.dart';
+
+/// How many people a side, and what that arrangement is called.
+///
+/// A sport does not have "a" squad size — badminton is one a side or two a
+/// side and the two are different competitions with different ratings;
+/// cricket is eleven but a tennis-ball gully game is eight and a school side
+/// might be six. Without this the setup screen has to guess, and the guess it
+/// made was one player per side for everything. That is not merely
+/// inconvenient: a one-man cricket team makes the engine reject the first
+/// delivery, because the same person cannot be on strike and at the other
+/// end.
+///
+/// [min] is the floor the engine genuinely needs, not the floor the rulebook
+/// prints. Cricket needs two batters to have a striker and a non-striker;
+/// football's rulebook says eleven but a five-a-side on a Sunday is still
+/// football and must still be scorable. Being stricter than the engine
+/// requires would block real matches, which is how a product gets abandoned
+/// at the ground.
+@immutable
+class SideFormat {
+  const SideFormat({
+    required this.id,
+    required this.name,
+    required this.min,
+    required this.max,
+    this.configOverrides = const {},
+    this.isDefault = false,
+  });
+
+  final String id;
+  final String name;
+
+  /// Fewest players a side the engine can actually score with.
+  final int min;
+
+  /// Most this arrangement admits. A squad, not a starting eleven — cricket
+  /// allows more than eleven named so substitutes appear on the scorecard.
+  final int max;
+
+  /// Rule values this arrangement implies, layered over the chosen preset.
+  /// Doubles is not a different point system, but it is a different serve
+  /// rotation, and the engines read that from config.
+  final Map<String, dynamic> configOverrides;
+
+  final bool isDefault;
+}
+
+/// The arrangements each sport is actually played in.
+///
+/// Keyed by sport id. Anything absent falls back to [SideFormats.generic],
+/// which is deliberately permissive — a sport we have not catalogued must
+/// never be a sport that cannot be played.
+class SideFormats {
+  const SideFormats._();
+
+  /// One against one, and nothing else on offer.
+  static const singlesOnly = [
+    SideFormat(id: 'singles', name: 'Singles', min: 1, max: 1, isDefault: true),
+  ];
+
+  /// Racquet and net sports: singles or doubles, and the engines need to know
+  /// which, because service rotation differs.
+  static const racquet = [
+    SideFormat(id: 'singles', name: 'Singles', min: 1, max: 1, isDefault: true),
+    SideFormat(
+      id: 'doubles',
+      name: 'Doubles',
+      min: 2,
+      max: 2,
+      configOverrides: {'doubles': true},
+    ),
+  ];
+
+  static const _map = <String, List<SideFormat>>{
+    // Two batters are a hard floor — a striker and a non-striker are two
+    // different people. Fifteen is a squad with substitutes, not a starting
+    // eleven, so the scorecard can name everyone who turned up.
+    'cricket': [
+      SideFormat(id: 'eleven', name: '11 a side', min: 2, max: 15,
+          configOverrides: {'playersPerTeam': 11}, isDefault: true),
+      SideFormat(id: 'eight', name: '8 a side (tennis ball)', min: 2, max: 12,
+          configOverrides: {'playersPerTeam': 8}),
+      SideFormat(id: 'six', name: '6 a side', min: 2, max: 10,
+          configOverrides: {'playersPerTeam': 6}),
+    ],
+    'badminton': racquet,
+    'table_tennis': racquet,
+    'tennis': racquet,
+    'carrom': [
+      SideFormat(id: 'singles', name: 'Singles', min: 1, max: 1,
+          isDefault: true),
+      SideFormat(id: 'doubles', name: 'Doubles', min: 2, max: 2,
+          configOverrides: {'doubles': true}),
+    ],
+    'chess': singlesOnly,
+    'football': [
+      SideFormat(id: 'eleven', name: '11 a side', min: 1, max: 18,
+          configOverrides: {'playersPerTeam': 11}, isDefault: true),
+      SideFormat(id: 'seven', name: '7 a side', min: 1, max: 12,
+          configOverrides: {'playersPerTeam': 7}),
+      SideFormat(id: 'five', name: '5 a side (futsal)', min: 1, max: 10,
+          configOverrides: {'playersPerTeam': 5}),
+    ],
+    'basketball': [
+      SideFormat(id: 'five', name: '5 a side', min: 1, max: 12,
+          configOverrides: {'playersPerTeam': 5}, isDefault: true),
+      SideFormat(id: 'three', name: '3x3', min: 1, max: 6,
+          configOverrides: {'playersPerTeam': 3}),
+    ],
+    'volleyball': [
+      SideFormat(id: 'six', name: '6 a side', min: 1, max: 14,
+          configOverrides: {'playersPerTeam': 6}, isDefault: true),
+      SideFormat(id: 'four', name: '4 a side', min: 1, max: 10,
+          configOverrides: {'playersPerTeam': 4}),
+    ],
+    'throwball': [
+      SideFormat(id: 'seven', name: '7 a side', min: 1, max: 14,
+          configOverrides: {'playersPerTeam': 7}, isDefault: true),
+    ],
+    'kabaddi': [
+      SideFormat(id: 'seven', name: '7 on court', min: 1, max: 12,
+          configOverrides: {'playersPerTeam': 7}, isDefault: true),
+    ],
+    'kho_kho': [
+      SideFormat(id: 'nine', name: '9 a side', min: 1, max: 15,
+          configOverrides: {'playersPerTeam': 9}, isDefault: true),
+    ],
+    'hockey': [
+      SideFormat(id: 'eleven', name: '11 a side', min: 1, max: 18,
+          configOverrides: {'playersPerTeam': 11}, isDefault: true),
+    ],
+  };
+
+  /// The escape hatch, and the shape of every performance sport: one entry
+  /// per side, up to a squad, with no arrangement worth naming.
+  static const generic = [
+    SideFormat(id: 'any', name: 'Any number', min: 1, max: 15,
+        isDefault: true),
+  ];
+
+  static List<SideFormat> forSport(String sportId) =>
+      _map[sportId] ?? generic;
+
+  static SideFormat defaultFor(String sportId) {
+    final list = forSport(sportId);
+    return list.firstWhere((f) => f.isDefault, orElse: () => list.first);
+  }
+
+  static SideFormat resolve(String sportId, String? formatId) {
+    final list = forSport(sportId);
+    return list.firstWhere(
+      (f) => f.id == formatId,
+      orElse: () => defaultFor(sportId),
+    );
+  }
+}
+
+/// What the side that wins the toss actually gets to choose.
+///
+/// Every match starts with one, and it is not "bat or field" outside cricket.
+/// A badminton umpire asks serve or receive; a football referee asks kick-off
+/// or ends; a kabaddi toss picks the raid or the court; chess is decided by
+/// colour, not by a toss at all. The dialog offered Bat and Field to all
+/// thirteen sports, which meant the record of every non-cricket match said
+/// something that had not happened.
+///
+/// [appliesTo] is what the choice DOES, and it is the reason this is not
+/// merely a label. Cricket's choice decides which side bats first and the
+/// engine reads it; badminton's decides who serves; football's decides
+/// nothing the engine needs. Only the first of those may write
+/// `battingFirst`.
+@immutable
+class TossChoice {
+  const TossChoice({
+    required this.id,
+    required this.label,
+    this.givesFirstTurn = true,
+  });
+
+  final String id;
+
+  /// As the umpire says it: "Bat", "Serve", "Kick off", "Raid first".
+  final String label;
+
+  /// Whether picking this means the winner goes first.
+  ///
+  /// "Bat" and "Serve" do; "Field", "Receive" and "Ends" hand the first turn
+  /// to the other side. It is what lets one piece of code work out who starts
+  /// without knowing anything about the sport.
+  final bool givesFirstTurn;
+}
+
+/// The toss, per sport.
+class TossOptions {
+  const TossOptions._();
+
+  static const _cricket = [
+    TossChoice(id: 'bat', label: 'Bat'),
+    TossChoice(id: 'field', label: 'Field', givesFirstTurn: false),
+  ];
+
+  static const _serveOrReceive = [
+    TossChoice(id: 'serve', label: 'Serve'),
+    TossChoice(id: 'receive', label: 'Receive', givesFirstTurn: false),
+    // Choosing ends is a real third option in badminton and table tennis, and
+    // it concedes the serve — which is exactly what `givesFirstTurn: false`
+    // records.
+    TossChoice(id: 'ends', label: 'Choose ends', givesFirstTurn: false),
+  ];
+
+  static const _kickOff = [
+    TossChoice(id: 'kick_off', label: 'Kick off'),
+    TossChoice(id: 'ends', label: 'Choose ends', givesFirstTurn: false),
+  ];
+
+  static const _map = <String, List<TossChoice>>{
+    'cricket': _cricket,
+    'badminton': _serveOrReceive,
+    'table_tennis': _serveOrReceive,
+    'tennis': [
+      TossChoice(id: 'serve', label: 'Serve'),
+      TossChoice(id: 'receive', label: 'Receive', givesFirstTurn: false),
+      TossChoice(id: 'ends', label: 'Choose ends', givesFirstTurn: false),
+    ],
+    'volleyball': _serveOrReceive,
+    'throwball': _serveOrReceive,
+    'football': _kickOff,
+    'hockey': [
+      TossChoice(id: 'push_back', label: 'Push back'),
+      TossChoice(id: 'ends', label: 'Choose ends', givesFirstTurn: false),
+    ],
+    'basketball': [
+      TossChoice(id: 'possession', label: 'First possession'),
+      TossChoice(id: 'ends', label: 'Choose ends', givesFirstTurn: false),
+    ],
+    'kabaddi': [
+      TossChoice(id: 'raid', label: 'Raid first'),
+      TossChoice(id: 'court', label: 'Choose court', givesFirstTurn: false),
+    ],
+    'kho_kho': [
+      TossChoice(id: 'chase', label: 'Chase first'),
+      TossChoice(id: 'defend', label: 'Defend first', givesFirstTurn: false),
+    ],
+    'chess': [
+      // Not a toss in the usual sense — the drawing of lots decides colour,
+      // and White moves first. Modelling it here rather than hiding it keeps
+      // "who started" answerable for every sport.
+      TossChoice(id: 'white', label: 'Play White'),
+      TossChoice(id: 'black', label: 'Play Black', givesFirstTurn: false),
+    ],
+    'carrom': [
+      TossChoice(id: 'break', label: 'Break'),
+      TossChoice(id: 'white', label: 'Take White', givesFirstTurn: false),
+    ],
+  };
+
+  /// The choices for a sport, or the generic pair for anything uncatalogued.
+  /// Never empty — a match must always be able to record who started.
+  static List<TossChoice> forSport(String sportId) =>
+      _map[sportId] ??
+      const [
+        TossChoice(id: 'start', label: 'Start'),
+        TossChoice(id: 'ends', label: 'Choose ends', givesFirstTurn: false),
+      ];
+
+  /// Whether this sport's toss decides who bats, which is the only case where
+  /// the choice writes `battingFirst` into the scoring config.
+  static bool decidesBatting(String sportId) => sportId == 'cricket';
+
+  static TossChoice resolve(String sportId, String? id) {
+    final list = forSport(sportId);
+    return list.firstWhere((c) => c.id == id, orElse: () => list.first);
+  }
+}
 
 /// One sport in the platform catalogue.
 ///
@@ -67,6 +343,12 @@ class SportSpec {
   final String? unit;
 
   bool get isPerformance => archetype == CompetitionArchetype.performance;
+
+  /// The arrangements this sport is played in — singles and doubles, 11 or 8
+  /// a side. See [SideFormat] for why a single number will not do.
+  List<SideFormat> get sideFormats => SideFormats.forSport(id);
+
+  SideFormat get defaultSideFormat => SideFormats.defaultFor(id);
 }
 
 /// The curated sport catalogue.

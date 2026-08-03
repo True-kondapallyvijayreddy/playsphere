@@ -9,6 +9,7 @@ import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/live_dot.dart';
 import '../scoring/widgets/live_score_card.dart';
 
 class OrgHomeScreen extends ConsumerWidget {
@@ -29,13 +30,31 @@ class OrgHomeScreen extends ConsumerWidget {
     return AppScaffold(
       orgId: orgId,
       title: 'Home',
-      floatingActionButton: !canCreate
-          ? null
-          : FloatingActionButton.extended(
-              onPressed: () => context.go(Routes.createCompetition(orgId)),
+      // Two buttons, and the smaller one is the more used. Starting a match
+      // between people who are already standing on the ground is the single
+      // most common thing a club does; running a tournament is the rarer,
+      // heavier act, so it keeps the labelled button and quick match takes the
+      // one beside it.
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          FloatingActionButton.small(
+            heroTag: 'quick-match',
+            tooltip: 'Quick match — play now',
+            onPressed: () => context.push(Routes.quickMatch(orgId)),
+            child: const Icon(Icons.sports_score),
+          ),
+          const SizedBox(height: 12),
+          if (canCreate)
+            FloatingActionButton.extended(
+              heroTag: 'new-event',
+              onPressed: () => context.push(Routes.createCompetition(orgId)),
               icon: const Icon(Icons.add),
               label: const Text('New event'),
             ),
+        ],
+      ),
       body: AsyncView(
         value: competitions,
         builder: (comps) {
@@ -56,7 +75,6 @@ class OrgHomeScreen extends ConsumerWidget {
                         value: pendingAsync,
                         what: 'join requests',
                       ),
-
                     if (pending.isNotEmpty &&
                         caps.contains(Capability.manageMembers))
                       Card(
@@ -69,15 +87,14 @@ class OrgHomeScreen extends ConsumerWidget {
                             'waiting to join',
                           ),
                           trailing: const Icon(Icons.chevron_right),
-                          onTap: () => context.go(Routes.members(orgId)),
+                          onTap: () => context.push(Routes.members(orgId)),
                         ),
                       ),
-
                     if (live.isNotEmpty) ...[
                       const SizedBox(height: 8),
                       Row(
                         children: [
-                          const _LiveDot(),
+                          const LiveDot(),
                           const SizedBox(width: 8),
                           Text(
                             'Live now',
@@ -91,20 +108,18 @@ class OrgHomeScreen extends ConsumerWidget {
                           padding: const EdgeInsets.only(bottom: 10),
                           child: LiveScoreCard(
                             fixture: f,
-                            onTap: () => context.go(
+                            onTap: () => context.push(
                               Routes.watch(orgId, f.compId, f.id),
                             ),
                           ),
                         ),
                       const SizedBox(height: 20),
                     ],
-
                     Text(
                       'Events',
                       style: Theme.of(context).textTheme.titleMedium,
                     ),
                     const SizedBox(height: 10),
-
                     if (comps.isEmpty)
                       Padding(
                         padding: const EdgeInsets.only(top: 32),
@@ -119,7 +134,7 @@ class OrgHomeScreen extends ConsumerWidget {
                               ? null
                               : FilledButton.icon(
                                   onPressed: () => context
-                                      .go(Routes.createCompetition(orgId)),
+                                      .push(Routes.createCompetition(orgId)),
                                   icon: const Icon(Icons.add),
                                   label: const Text('Create an event'),
                                 ),
@@ -152,7 +167,8 @@ class _CompetitionTile extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
         leading: CircleAvatar(
-          backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+          backgroundColor:
+              Theme.of(context).colorScheme.surfaceContainerHighest,
           child: Text(
             _sportEmoji(c.sportId),
             style: const TextStyle(fontSize: 18),
@@ -167,7 +183,7 @@ class _CompetitionTile extends StatelessWidget {
           ].join(' · '),
         ),
         trailing: _StatusChip(status: c.status),
-        onTap: () => context.go(Routes.competition(orgId, c.id)),
+        onTap: () => context.push(Routes.competition(orgId, c.id)),
       ),
     );
   }
@@ -222,42 +238,6 @@ class _StatusChip extends StatelessWidget {
             .textTheme
             .labelSmall
             ?.copyWith(color: fg, fontWeight: FontWeight.w600),
-      ),
-    );
-  }
-}
-
-class _LiveDot extends StatefulWidget {
-  const _LiveDot();
-
-  @override
-  State<_LiveDot> createState() => _LiveDotState();
-}
-
-class _LiveDotState extends State<_LiveDot>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 900),
-  )..repeat(reverse: true);
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return FadeTransition(
-      opacity: _controller.drive(Tween(begin: 0.35, end: 1.0)),
-      child: Container(
-        width: 10,
-        height: 10,
-        decoration: const BoxDecoration(
-          color: Color(0xFFDC2626),
-          shape: BoxShape.circle,
-        ),
       ),
     );
   }

@@ -4,10 +4,14 @@ import 'package:intl/intl.dart';
 
 import '../../core/layout/responsive.dart';
 import '../../core/models/fixture.dart';
+import '../../domain/scoring/match_award.dart';
 import '../../core/providers.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
 import '../profile/widgets/match_memories_section.dart';
+import 'widgets/ask_to_score.dart';
+import 'widgets/box_score_table.dart';
+import 'widgets/share_match_button.dart';
 
 /// The remote viewer's screen — a parent in an office, a class on a laptop.
 ///
@@ -45,6 +49,12 @@ class SpectatorScreen extends ConsumerWidget {
               Text(org.name, style: Theme.of(context).textTheme.bodySmall),
           ],
         ),
+        actions: [
+          // Watching is how most people arrive, and passing it on is how the
+          // next person arrives.
+          if (fixtureAsync.valueOrNull case final f?)
+            ShareMatchButton(fixture: f, compact: true),
+        ],
       ),
       body: AsyncView(
         value: fixtureAsync,
@@ -69,7 +79,18 @@ class SpectatorScreen extends ConsumerWidget {
           );
 
           final commentary = _Commentary(fixtureKey: key);
+          // This screen is where a club member who taps an unscored match
+          // ends up — the match list sends anyone without the pen to the
+          // spectator view. So it is the one place the offer to score has to
+          // exist, or the person nearest the pitch never sees it. Renders
+          // nothing for scorers, spectators from other clubs, and finished
+          // matches.
+          final askToScore = AskToScoreButton(fixture: fixture);
           final memories = MatchMemoriesSection(fixture: fixture);
+          // The scorecard, not just the score. A remote viewer following a
+          // school match wants to know who is batting and what they have
+          // made — the headline alone is what a scoreboard photo gives you.
+          final scorecard = MatchScorecard(fixture: fixture);
 
           // On a laptop the score sits beside the commentary; on a phone the
           // commentary scrolls beneath it. Same data, same code.
@@ -84,6 +105,10 @@ class SpectatorScreen extends ConsumerWidget {
                     child: ListView(
                       children: [
                         board,
+                        const SizedBox(height: 16),
+                        askToScore,
+                        const SizedBox(height: 24),
+                        scorecard,
                         const SizedBox(height: 24),
                         memories,
                       ],
@@ -104,6 +129,10 @@ class SpectatorScreen extends ConsumerWidget {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     board,
+                    const SizedBox(height: 16),
+                    askToScore,
+                    const SizedBox(height: 20),
+                    scorecard,
                     const SizedBox(height: 20),
                     commentary,
                     const SizedBox(height: 28),
@@ -221,6 +250,14 @@ class _BigScoreboard extends StatelessWidget {
                 style: theme.textTheme.bodyMedium,
               ),
             ],
+            // The best performer, once there is a result to attach it to.
+            // This is the part of a finished match people actually talk about
+            // afterwards, and it was the one panel of the flow's completion
+            // step with nothing behind it.
+            if (fixture.mvp != null && fixture.hasResult) ...[
+              const SizedBox(height: 20),
+              _MvpBadge(award: fixture.mvp!),
+            ],
             if (fixture.venue != null) ...[
               const SizedBox(height: 16),
               Text(
@@ -326,5 +363,48 @@ class _Commentary extends ConsumerWidget {
       'retire' => 'Retired',
       _ => e.type,
     };
+  }
+}
+
+/// Names the best performer of a finished match.
+///
+/// Deliberately understated. A grassroots scoreboard is read on a phone in
+/// sunlight and projected onto a wall in a college corridor; the award belongs
+/// under the score, not competing with it.
+class _MvpBadge extends StatelessWidget {
+  const _MvpBadge({required this.award});
+
+  final MatchAward award;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.secondaryContainer,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.star_rounded,
+            size: 18,
+            color: theme.colorScheme.onSecondaryContainer,
+          ),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              'Best performer: ${award.name}',
+              style: theme.textTheme.labelLarge?.copyWith(
+                color: theme.colorScheme.onSecondaryContainer,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }

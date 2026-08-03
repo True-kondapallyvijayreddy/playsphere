@@ -148,6 +148,17 @@ enum CompetitionFormat {
   groupThenKnockout('group_then_knockout', 'Groups + Knockout'),
   swiss('swiss', 'Swiss'),
   leagueTable('league_table', 'League Table'),
+
+  /// One match, no draw, no registration.
+  ///
+  /// The club's own Sunday game and two friends on a court are the most
+  /// common thing that happens in grassroots sport and the product could not
+  /// express either: every match had to arrive through create event → open
+  /// entries → register → close entries → generate draw, which is six steps
+  /// and a wait before a single ball. This format skips all of it — the two
+  /// sides are named at creation and the fixture exists immediately.
+  singleMatch('single_match', 'Single Match'),
+
   // Performance-archetype formats.
   finalOnly('final_only', 'Single Final'),
   heatsThenFinal('heats_then_final', 'Heats + Final');
@@ -165,6 +176,9 @@ enum CompetitionFormat {
   bool get isPerformanceFormat =>
       this == CompetitionFormat.finalOnly ||
       this == CompetitionFormat.heatsThenFinal;
+
+  /// Whether this format's fixtures are named at creation rather than drawn.
+  bool get isSingleMatch => this == CompetitionFormat.singleMatch;
 }
 
 enum CompetitionStatus {
@@ -189,6 +203,54 @@ enum CompetitionStatus {
   /// Fixtures may only be generated once entries are frozen.
   bool get acceptsRegistrations => this == CompetitionStatus.registrationOpen;
   bool get isLive => this == CompetitionStatus.inProgress;
+}
+
+/// How an event decides who is actually playing.
+///
+/// This is the difference between a product that fills a match and one that
+/// makes an organizer chase thirteen people over WhatsApp. A community
+/// cricket event on a Sunday morning does not want an approval queue — the
+/// first thirteen who tap Register are the team, and the fourteenth is the
+/// reserve. A school trial does: the coach picks. Most real events are
+/// neither, they are both at once — the captain names the seven regulars and
+/// throws the rest open.
+///
+/// The model is fixed when the event is created because it decides what
+/// tapping "Register" *means*, and that cannot be allowed to change under
+/// someone who has already tapped it.
+enum ParticipationModel {
+  /// First come, first in. A registration is confirmed the moment it is made,
+  /// until the capacity is reached; after that it is waitlisted if the
+  /// organizer allowed a waitlist, and refused if they did not.
+  open('open', 'Open — first come, first served'),
+
+  /// The organizer names some of the field directly and the remaining slots
+  /// are open to whoever registers first. `preselectedSlots` on the
+  /// competition says how many are reserved for the organizer's picks.
+  hybrid('hybrid', 'Hybrid — some picked, rest open'),
+
+  /// Every registration is an application. Nobody plays until an organizer
+  /// confirms them. This is the original behaviour, and the right one for
+  /// trials, selections and anything with an eligibility check that a
+  /// human has to make.
+  approval('approval', 'By approval — organizer confirms each entry');
+
+  const ParticipationModel(this.wire, this.label);
+  final String wire;
+  final String label;
+
+  static ParticipationModel fromWire(String? w) =>
+      ParticipationModel.values.firstWhere(
+        (e) => e.wire == w,
+        // Events created before this field existed were all approval-gated,
+        // because that was the only behaviour the app had. Defaulting to
+        // anything else would retroactively let people into old events.
+        orElse: () => ParticipationModel.approval,
+      );
+
+  /// True when a registration decides its own outcome rather than waiting for
+  /// an organizer — the open slots of an open or hybrid event.
+  bool get autoConfirms => this != ParticipationModel.approval;
 }
 
 enum RegistrationStatus {

@@ -266,6 +266,7 @@ class VolleyballPlugin extends ScoringPlugin {
         ),
       ];
 
+  @override
   BoxScore boxScore(
     Map<String, dynamic> state,
     ScoringContext ctx,
@@ -359,6 +360,10 @@ class VolleyballPlugin extends ScoringPlugin {
           )
         : null;
 
+    // A kill, a block and an ace are all somebody's — the engine asks "Who
+    // won the point with the attack?" and refuses without an answer. An
+    // opponent error is nobody's, which is why it is the one point button
+    // below that carries no prompt.
     List<ScoreControl> forSide(Side side, String killKey) => [
           ScoreControl(
             action: 'point',
@@ -367,18 +372,27 @@ class VolleyballPlugin extends ScoringPlugin {
             style: ControlStyle.primary,
             payload: const {'how': 'attack'},
             shortcut: killKey,
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Who hit it?'),
+            ],
           ),
           ScoreControl(
             action: 'point',
             label: 'Block',
             side: side,
             payload: const {'how': 'block'},
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Who blocked?'),
+            ],
           ),
           ScoreControl(
             action: 'point',
             label: 'Ace',
             side: side,
             payload: const {'how': 'ace'},
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Who served it?'),
+            ],
           ),
           ScoreControl(
             action: 'point',
@@ -387,7 +401,14 @@ class VolleyballPlugin extends ScoringPlugin {
             style: ControlStyle.subtle,
             payload: const {'how': 'opponent_error'},
           ),
-          ScoreControl(action: 'dig', label: 'Dig', side: side),
+          ScoreControl(
+            action: 'dig',
+            label: 'Dig',
+            side: side,
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Who dug it up?'),
+            ],
+          ),
           ScoreControl(
             action: 'correct',
             label: '−1',

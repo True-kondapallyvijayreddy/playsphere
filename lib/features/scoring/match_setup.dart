@@ -3,6 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/models/fixture.dart';
 import '../../core/models/match_player.dart';
+import '../../core/permissions/capability.dart';
+import '../../domain/scoring/scoring_plugin.dart';
+import '../../domain/scoring/scoring_registry.dart';
 import '../../core/providers.dart';
 import '../../shared/app_scaffold.dart';
 
@@ -36,6 +39,58 @@ class _LineupEditorState extends ConsumerState<LineupEditor> {
   int _tab = 0;
 
   List<MatchPlayer> get _current => _tab == 0 ? _a : _b;
+
+  /// Which sides this user is allowed to pick.
+  ///
+  /// In an ordinary competition the hosting club's organizers run both teams,
+  /// which is right — one person is setting up a house match. An inter-club
+  /// challenge is the opposite situation: two clubs that do not answer to
+  /// each other, and the visiting club must be able to name its own players
+  /// without handing the host the power to pick them. `firestore.rules`
+  /// enforces the same split, so this is the honest shape of the screen
+  /// rather than a courtesy.
+  Set<int> _editableSides(WidgetRef ref) {
+    final f = widget.fixture;
+    final sides = <int>{};
+
+    // Authority in the club that owns the fixture runs the whole match.
+    if (ref
+        .watch(myCapabilitiesProvider(f.orgId))
+        .contains(Capability.manageCompetitions)) {
+      sides.addAll({0, 1});
+    }
+
+    // Authority in either contesting club runs that club's own side.
+    if (f.participantOrgIds != null) {
+      if (ref
+          .watch(myCapabilitiesProvider(f.entrantAId))
+          .contains(Capability.manageCompetitions)) {
+        sides.add(0);
+      }
+      if (ref
+          .watch(myCapabilitiesProvider(f.entrantBId))
+          .contains(Capability.manageCompetitions)) {
+        sides.add(1);
+      }
+    }
+
+    return sides;
+  }
+
+  /// Whose member list to offer for a side.
+  ///
+  /// For a challenge match the two squads come from two different clubs, and
+  /// offering the host's members for both is how the visiting club ends up
+  /// with a team sheet full of strangers. For everything else both sides are
+  /// drawn from the club running the competition, as before.
+  String _memberOrgFor(int side) {
+    final f = widget.fixture;
+    if (f.participantOrgIds == null) return f.orgId;
+    return side == 0 ? f.entrantAId : f.entrantBId;
+  }
+
+  bool _lockedFor(int side) =>
+      side == 0 ? widget.fixture.squadLockedA : widget.fixture.squadLockedB;
 
   void _toggleMember(String uid, String name) {
     setState(() {
@@ -92,10 +147,20 @@ class _LineupEditorState extends ConsumerState<LineupEditor> {
   @override
   Widget build(BuildContext context) {
     final f = widget.fixture;
-    final membersAsync = ref.watch(orgMembersProvider(f.orgId));
+    final editable = _editableSides(ref);
+
+    // Land on a side this user may actually pick, so a visiting club's admin
+    // does not open the screen looking at the opposition's team sheet.
+    if (editable.isNotEmpty && !editable.contains(_tab)) {
+      _tab = editable.first;
+    }
+
+    final membersAsync = ref.watch(orgMembersProvider(_memberOrgFor(_tab)));
     final members = membersAsync.valueOrNull ?? const [];
     final active = members.where((m) => m.isActive).toList();
     final selectedIds = _current.map((p) => p.id).toSet();
+    final locked = _lockedFor(_tab);
+    final canEditThisSide = editable.contains(_tab) && !locked;
 
     return AlertDialog(
       title: const Text('Who is playing?'),
@@ -106,13 +171,32 @@ class _LineupEditorState extends ConsumerState<LineupEditor> {
           children: [
             SegmentedButton<int>(
               segments: [
-                ButtonSegment(value: 0, label: Text('${f.entrantAName} (${_a.length})')),
-                ButtonSegment(value: 1, label: Text('${f.entrantBName} (${_b.length})')),
+                ButtonSegment(
+                  value: 0,
+                  label: Text('${f.entrantAName} (${_a.length})'),
+                  icon: f.squadLockedA ? const Icon(Icons.lock, size: 14) : null,
+                ),
+                ButtonSegment(
+                  value: 1,
+                  label: Text('${f.entrantBName} (${_b.length})'),
+                  icon: f.squadLockedB ? const Icon(Icons.lock, size: 14) : null,
+                ),
               ],
               selected: {_tab},
               onSelectionChanged: (s) => setState(() => _tab = s.first),
             ),
             const SizedBox(height: 8),
+            if (!editable.contains(_tab))
+              const _SquadNotice(
+                icon: Icons.visibility_outlined,
+                message: 'This is the other club\'s squad. They pick it, '
+                    'you can see it.',
+              )
+            else if (locked)
+              const _SquadNotice(
+                icon: Icons.lock_outline,
+                message: 'This squad is locked. Reopen it to make changes.',
+              ),
             // Without this, a rejected member read leaves an empty checklist
             // and the scorer concludes the club has no players.
             AsyncErrorStrip(value: membersAsync, what: 'the member list'),
@@ -123,7 +207,9 @@ class _LineupEditorState extends ConsumerState<LineupEditor> {
                     CheckboxListTile(
                       dense: true,
                       value: selectedIds.contains(m.uid),
-                      onChanged: (_) => _toggleMember(m.uid, m.displayName),
+                      onChanged: canEditThisSide
+                          ? (_) => _toggleMember(m.uid, m.displayName)
+                          : null,
                       title: Text(m.displayName),
                     ),
                   // Guests already added to this side.
@@ -135,12 +221,14 @@ class _LineupEditorState extends ConsumerState<LineupEditor> {
                       subtitle: const Text('Guest'),
                       trailing: IconButton(
                         icon: const Icon(Icons.close),
-                        onPressed: () =>
-                            setState(() => _current.removeWhere((p) => p.id == g.id)),
+                        onPressed: canEditThisSide
+                            ? () => setState(
+                                () => _current.removeWhere((p) => p.id == g.id))
+                            : null,
                       ),
                     ),
                   TextButton.icon(
-                    onPressed: _addGuest,
+                    onPressed: canEditThisSide ? _addGuest : null,
                     icon: const Icon(Icons.person_add_alt),
                     label: const Text('Add a guest player'),
                   ),
@@ -155,30 +243,108 @@ class _LineupEditorState extends ConsumerState<LineupEditor> {
           onPressed: _busy ? null : () => Navigator.pop(context),
           child: const Text('Cancel'),
         ),
+        // Reopening a squad this club locked. Only offered to the club that
+        // locked it — the segment is not editable otherwise.
+        if (locked && editable.contains(_tab))
+          TextButton(
+            onPressed: _busy ? null : () => _save(unlockOnly: true),
+            child: const Text('Reopen squad'),
+          ),
+        // "Lock final squad" from the flow: one club telling the other it has
+        // finished picking. Only meaningful in an inter-club match, where
+        // there is another club to tell.
+        if (!locked && canEditThisSide && f.participantOrgIds != null)
+          TextButton(
+            onPressed: _busy || _current.isEmpty
+                ? null
+                : () => _save(lock: true),
+            child: const Text('Save & lock'),
+          ),
         FilledButton(
-          onPressed: _busy || _a.isEmpty || _b.isEmpty
+          onPressed: _busy || !canEditThisSide || !_hasEnoughPlayers()
               ? null
-              : () async {
-                  setState(() => _busy = true);
-                  try {
-                    await ref.read(competitionRepositoryProvider).setLineups(
-                          orgId: f.orgId,
-                          compId: f.compId,
-                          fixtureId: f.id,
-                          lineupA: _a,
-                          lineupB: _b,
-                        );
-                    if (context.mounted) Navigator.pop(context);
-                  } catch (e) {
-                    if (context.mounted) {
-                      setState(() => _busy = false);
-                      showError(context, e);
-                    }
-                  }
-                },
-          child: Text(_busy ? 'Saving…' : 'Save line-ups'),
+              : () => _save(),
+          child: Text(_busy ? 'Saving…' : _saveLabel()),
         ),
       ],
+    );
+  }
+
+  /// An internal match needs both sides before it can be scored; a club
+  /// picking only its own side is done when its own side is picked.
+  bool _hasEnoughPlayers() {
+    if (_restrictedToOneSide) return _current.isNotEmpty;
+    return _a.isNotEmpty && _b.isNotEmpty;
+  }
+
+  bool get _restrictedToOneSide =>
+      widget.fixture.participantOrgIds != null &&
+      _editableSides(ref).length == 1;
+
+  String _saveLabel() => _restrictedToOneSide ? 'Save our squad' : 'Save line-ups';
+
+  Future<void> _save({bool lock = false, bool unlockOnly = false}) async {
+    final f = widget.fixture;
+    setState(() => _busy = true);
+    try {
+      final repo = ref.read(competitionRepositoryProvider);
+
+      if (_restrictedToOneSide || lock || unlockOnly) {
+        // One club, one side. Which club this user is acting for is decided
+        // by the side they are on, not by anything they can type.
+        final orgId = _memberOrgFor(_tab);
+        await repo.setSideLineup(
+          fixture: f,
+          forOrgId: orgId,
+          lineup: unlockOnly
+              ? (_tab == 0 ? f.lineupA : f.lineupB)
+              : _current,
+          lock: unlockOnly ? false : (lock ? true : null),
+        );
+      } else {
+        await repo.setLineups(
+          orgId: f.orgId,
+          compId: f.compId,
+          fixtureId: f.id,
+          lineupA: _a,
+          lineupB: _b,
+        );
+      }
+      if (mounted) Navigator.pop(context);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _busy = false);
+        showError(context, e);
+      }
+    }
+  }
+}
+
+/// A short explanation of why this squad is not editable right now.
+class _SquadNotice extends StatelessWidget {
+  const _SquadNotice({required this.icon, required this.message});
+
+  final IconData icon;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: theme.colorScheme.onSurfaceVariant),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              message,
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -200,20 +366,29 @@ class TossDialog extends ConsumerStatefulWidget {
 
 class _TossDialogState extends ConsumerState<TossDialog> {
   String? _winnerId;
-  String _decision = 'bat';
+  late final List<TossChoice> _choices =
+      TossOptions.forSport(widget.fixture.sport);
+  late String _decision = _choices.first.id;
   bool _busy = false;
 
   @override
   Widget build(BuildContext context) {
     final f = widget.fixture;
+    final sport = SportCatalog.byId(f.sport);
 
     return AlertDialog(
-      title: const Text('Toss'),
+      // Chess has no toss; it has a drawing of lots for colour. Calling it
+      // "Toss" there would be the same error in the title that the Bat/Field
+      // buttons were in the body.
+      title: Text(f.sport == 'chess' ? 'Colours' : 'Toss'),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Who won it?'),
+          Text(
+            f.sport == 'chess' ? 'Who drew White?' : 'Who won it?',
+            style: Theme.of(context).textTheme.bodyMedium,
+          ),
           RadioListTile<String>(
             value: f.entrantAId,
             groupValue: _winnerId,
@@ -231,13 +406,26 @@ class _TossDialogState extends ConsumerState<TossDialog> {
           const Divider(),
           const Text('And chose to'),
           const SizedBox(height: 8),
-          SegmentedButton<String>(
-            segments: const [
-              ButtonSegment(value: 'bat', label: Text('Bat')),
-              ButtonSegment(value: 'field', label: Text('Field')),
+          // Declared by the sport, not by this screen. A badminton umpire
+          // asks serve or receive and a kabaddi one asks raid or court; the
+          // dialog offered Bat and Field to all thirteen sports, so the
+          // record of every non-cricket match said something that had not
+          // happened. See TossOptions.
+          Wrap(
+            spacing: 8,
+            children: [
+              for (final c in _choices)
+                ChoiceChip(
+                  label: Text(c.label),
+                  selected: _decision == c.id,
+                  onSelected: (_) => setState(() => _decision = c.id),
+                ),
             ],
-            selected: {_decision},
-            onSelectionChanged: (s) => setState(() => _decision = s.first),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '${sport.name} · ${_startsLabel(f)}',
+            style: Theme.of(context).textTheme.bodySmall,
           ),
         ],
       ),
@@ -251,12 +439,6 @@ class _TossDialogState extends ConsumerState<TossDialog> {
               ? null
               : () async {
                   setState(() => _busy = true);
-                  // The side that bats first is the toss winner if they chose
-                  // to bat, otherwise the other side.
-                  final winnerIsA = _winnerId == f.entrantAId;
-                  final battingFirst = _decision == 'bat'
-                      ? (winnerIsA ? 'a' : 'b')
-                      : (winnerIsA ? 'b' : 'a');
                   try {
                     await ref.read(competitionRepositoryProvider).recordToss(
                           orgId: f.orgId,
@@ -264,7 +446,12 @@ class _TossDialogState extends ConsumerState<TossDialog> {
                           fixtureId: f.id,
                           wonByEntrantId: _winnerId!,
                           decision: _decision,
-                          battingFirstSide: battingFirst,
+                          startingSide: _startingSide(f),
+                          // Only cricket's toss decides who bats, and only
+                          // cricket's engine reads `battingFirst`. Writing it
+                          // for a badminton match would put a meaningless key
+                          // into a frozen ruleset.
+                          decidesBatting: TossOptions.decidesBatting(f.sport),
                           scoringConfig: f.scoringConfig,
                         );
                     if (context.mounted) Navigator.pop(context);
@@ -280,6 +467,35 @@ class _TossDialogState extends ConsumerState<TossDialog> {
       ],
     );
   }
+
+  /// Which side actually starts, given who won and what they took.
+  ///
+  /// One rule for every sport: a choice that gives you the first turn means
+  /// you start, and one that does not hands it to the other side. Choosing
+  /// ends concedes the serve; fielding concedes the bat.
+  String _startingSide(Fixture f) {
+    final winnerIsA = _winnerId == f.entrantAId;
+    final choice = TossOptions.resolve(f.sport, _decision);
+    if (choice.givesFirstTurn) return winnerIsA ? 'a' : 'b';
+    return winnerIsA ? 'b' : 'a';
+  }
+
+  /// Spells the consequence back before it is saved, in the sport's own
+  /// words. "Bat" and "field" produce opposite starters and a scorer who
+  /// tapped the wrong chip has no other way to notice.
+  String _startsLabel(Fixture f) {
+    final startsA = _startingSide(f) == 'a';
+    final who = startsA ? f.entrantAName : f.entrantBName;
+    final verb = switch (f.sport) {
+      'cricket' => 'bats first',
+      'chess' => 'plays White',
+      'kabaddi' => 'raids first',
+      'kho_kho' => 'chases first',
+      'football' || 'hockey' => 'starts',
+      _ => 'serves first',
+    };
+    return '$who $verb';
+  }
 }
 
 /// Asks which player fills a role — the incoming batter, the next bowler, or
@@ -293,7 +509,15 @@ class PlayerPicker extends StatefulWidget {
     required this.title,
     required this.roles,
     required this.candidatesFor,
+    this.optionalRoles = const {},
+    this.multiRoles = const {},
+    this.values = const [],
   });
+
+  /// Numbers to collect alongside the people — a time, a distance, a wind
+  /// reading. Rendered after the roles, because "who" comes before "how
+  /// fast".
+  final List<ValuePrompt> values;
 
   final String title;
 
@@ -303,12 +527,72 @@ class PlayerPicker extends StatefulWidget {
   /// Which players may fill a given role.
   final List<MatchPlayer> Function(String roleKey) candidatesFor;
 
+  /// Roles the scorer may leave blank.
+  ///
+  /// An assist is the case that matters: plenty of goals have none, and a
+  /// picker that will not close without one teaches the scorer to name
+  /// whoever is nearest, which is worse than recording nothing. Anything not
+  /// listed here is required, because the engine will reject the event
+  /// without it.
+  final Set<String> optionalRoles;
+
+  /// Roles that name SEVERAL people and are written as a list.
+  ///
+  /// A kabaddi tackle is the case: three defenders get hold of the raider and
+  /// the engine splits the points between all of them, so a single dropdown
+  /// would hand a super-tackle to one player and falsify the rest.
+  final Set<String> multiRoles;
+
   @override
   State<PlayerPicker> createState() => _PlayerPickerState();
 }
 
 class _PlayerPickerState extends State<PlayerPicker> {
   final Map<String, String> _chosen = {};
+  final Map<String, Set<String>> _chosenMany = {};
+
+  bool _filled(String key) => widget.multiRoles.contains(key)
+      ? (_chosenMany[key]?.isNotEmpty ?? false)
+      : (_chosen[key]?.isNotEmpty ?? false);
+
+  /// Raw text per value field, kept as typed rather than as a parsed number.
+  ///
+  /// A half-typed "10." is not a double and must not be discarded on the
+  /// keystroke that produced it — parsing on submit rather than on change is
+  /// what lets somebody type a time without the field fighting them.
+  final Map<String, String> _typed = {};
+
+  double? _valueOf(ValuePrompt v) {
+    final text = _typed[v.key]?.trim() ?? '';
+    if (text.isEmpty) return null;
+    final parsed = double.tryParse(text);
+    if (parsed == null) return null;
+    if (v.min != null && parsed < v.min!) return null;
+    if (v.max != null && parsed > v.max!) return null;
+    return parsed;
+  }
+
+  bool get _complete =>
+      widget.roles.keys.every(
+        (key) => widget.optionalRoles.contains(key) || _filled(key),
+      ) &&
+      widget.values.every((v) => v.optional || _valueOf(v) != null);
+
+  /// Fills a role that has exactly one candidate, so the scorer is not asked
+  /// a question with one answer.
+  ///
+  /// Real on a ground: a five-a-side with one keeper, or a kho-kho batch down
+  /// to its last defender. Tapping through a dropdown of one during play is
+  /// the kind of friction that gets an app put down.
+  @override
+  void initState() {
+    super.initState();
+    for (final key in widget.roles.keys) {
+      if (widget.multiRoles.contains(key)) continue;
+      final only = widget.candidatesFor(key);
+      if (only.length == 1) _chosen[key] = only.first.id;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -320,20 +604,88 @@ class _PlayerPickerState extends State<PlayerPicker> {
           mainAxisSize: MainAxisSize.min,
           children: [
             for (final entry in widget.roles.entries)
+              if (widget.multiRoles.contains(entry.key))
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        entry.value,
+                        style: Theme.of(context).textTheme.labelLarge,
+                      ),
+                      const SizedBox(height: 4),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          for (final p in widget.candidatesFor(entry.key))
+                            FilterChip(
+                              label: Text(p.name),
+                              selected:
+                                  _chosenMany[entry.key]?.contains(p.id) ??
+                                      false,
+                              onSelected: (on) => setState(() {
+                                final set = _chosenMany.putIfAbsent(
+                                  entry.key,
+                                  () => <String>{},
+                                );
+                                if (on) {
+                                  set.add(p.id);
+                                } else {
+                                  set.remove(p.id);
+                                }
+                              }),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                )
+              else
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: DropdownButtonFormField<String>(
+                    value: _chosen[entry.key],
+                    isExpanded: true,
+                    decoration: InputDecoration(
+                      labelText: entry.value,
+                      helperText: widget.optionalRoles.contains(entry.key)
+                          ? 'Optional'
+                          : null,
+                      border: const OutlineInputBorder(),
+                    ),
+                    items: [
+                      if (widget.optionalRoles.contains(entry.key))
+                        const DropdownMenuItem(
+                          value: '',
+                          child: Text('Nobody'),
+                        ),
+                      for (final p in widget.candidatesFor(entry.key))
+                        DropdownMenuItem(value: p.id, child: Text(p.name)),
+                    ],
+                    onChanged: (v) =>
+                        setState(() => _chosen[entry.key] = v ?? ''),
+                  ),
+                ),
+            for (final v in widget.values)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 6),
-                child: DropdownButtonFormField<String>(
-                  value: _chosen[entry.key],
-                  isExpanded: true,
+                child: TextFormField(
+                  autofocus: widget.roles.isEmpty,
+                  keyboardType: TextInputType.numberWithOptions(
+                    decimal: !v.isInteger,
+                    // A wind reading can be negative; a time cannot. The
+                    // keyboard offers a minus sign only where one is legal.
+                    signed: (v.min ?? 0) < 0,
+                  ),
                   decoration: InputDecoration(
-                    labelText: entry.value,
+                    labelText: v.label,
+                    suffixText: v.unit,
+                    helperText: v.optional ? 'Optional' : null,
                     border: const OutlineInputBorder(),
                   ),
-                  items: [
-                    for (final p in widget.candidatesFor(entry.key))
-                      DropdownMenuItem(value: p.id, child: Text(p.name)),
-                  ],
-                  onChanged: (v) => setState(() => _chosen[entry.key] = v ?? ''),
+                  onChanged: (text) => setState(() => _typed[v.key] = text),
                 ),
               ),
           ],
@@ -345,11 +697,24 @@ class _PlayerPickerState extends State<PlayerPicker> {
           child: const Text('Cancel'),
         ),
         FilledButton(
-          // Every role must be filled: a half-named delivery is exactly the
-          // state the engine refuses.
-          onPressed: _chosen.length == widget.roles.length &&
-                  _chosen.values.every((v) => v.isNotEmpty)
-              ? () => Navigator.pop(context, Map<String, dynamic>.from(_chosen))
+          // Every REQUIRED role must be filled: a half-named delivery is
+          // exactly the state the engine refuses.
+          onPressed: _complete
+              ? () => Navigator.pop(context, <String, dynamic>{
+                    // Blank optional roles are dropped rather than sent as
+                    // empty strings — an engine checking `payload['assistId']
+                    // != null` would otherwise credit an assist to nobody.
+                    for (final e in _chosen.entries)
+                      if (e.value.isNotEmpty) e.key: e.value,
+                    for (final e in _chosenMany.entries)
+                      if (e.value.isNotEmpty) e.key: e.value.toList(),
+                    // Integers go over the wire as ints: a lane is lane 4,
+                    // not lane 4.0, and the engine reads `is num` either way
+                    // but the stored event should say what it means.
+                    for (final v in widget.values)
+                      if (_valueOf(v) case final n?)
+                        v.key: v.isInteger ? n.round() : n,
+                  })
               : null,
           child: const Text('Confirm'),
         ),

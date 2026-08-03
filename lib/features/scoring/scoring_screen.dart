@@ -15,6 +15,9 @@ import '../../core/models/match_player.dart';
 import '../../shared/app_scaffold.dart';
 import '../profile/widgets/match_memories_section.dart';
 import 'match_setup.dart';
+import 'widgets/ask_to_score.dart';
+import 'widgets/box_score_table.dart';
+import 'widgets/share_match_button.dart';
 
 /// The scoring pad.
 ///
@@ -77,73 +80,105 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
     super.dispose();
   }
 
-  /// Actions the engines cannot apply without knowing which people are
-  /// involved. The pad asks, rather than the plugin guessing — a delivery that
-  /// names nobody is refused by design.
-  static const _needsPlayers = {'open', 'new_batter', 'new_bowler'};
-
-  /// Asks who fills each role, returning the payload to merge into the action.
-  /// Null means the scorer backed out.
+  /// Asks who fills each role the plugin declared, returning the payload to
+  /// merge into the action. Null means the scorer backed out.
+  ///
+  /// The list of roles comes from the CONTROL, not from a set of action names
+  /// kept here. It used to be the latter — three cricket actions, recognised
+  /// by name — which meant every other engine's demand for a player went
+  /// unasked and unmet. Eleven of the thirteen refuse an action that names
+  /// nobody, so football's Goal, kho-kho's Tag, kabaddi's Raid and the rest
+  /// were rejected on every press: those sports had a full pad and no way to
+  /// record anything with it.
   Future<Map<String, dynamic>?> _askPlayers(
     Fixture fixture,
-    ScoreAction action,
+    ScoreControl control,
   ) async {
     final ctx = fixture.scoringContext();
-    // Which side is batting is plugin state, so it is read from the projection
-    // rather than assumed: after the innings break the sides swap over.
-    final innings = (fixture.scoreState['innings'] as List?) ?? const [];
-    final idx = (fixture.scoreState['inningsIndex'] as num?)?.toInt() ?? 0;
-    final battingSide = idx < innings.length
-        ? Side.fromWire((innings[idx] as Map)['battingSide'] as String?)
-        : Side.a;
-    final bowlingSide = battingSide.opposite;
 
-    List<MatchPlayer> forRole(String role) => role == 'bowler'
-        ? ctx.lineupFor(bowlingSide)
-        : ctx.lineupFor(battingSide);
+    /// The side a prompt draws from, resolved against the button's own side.
+    ///
+    /// `actingSide` is the button's side, so one declaration serves both
+    /// halves of the pad. A neutral control has no side of its own, so both
+    /// line-ups are offered rather than guessing one.
+    List<MatchPlayer> candidates(PlayerPrompt prompt) {
+      final acting = control.side;
+      if (acting == Side.neutral || prompt.from == PromptSource.eitherSide) {
+        return [...ctx.lineupFor(Side.a), ...ctx.lineupFor(Side.b)];
+      }
+      return switch (prompt.from) {
+        PromptSource.actingSide => ctx.lineupFor(acting),
+        PromptSource.opposingSide => ctx.lineupFor(acting.opposite),
+        PromptSource.eitherSide => const [],
+      };
+    }
 
-    final roles = switch (action.type) {
-      'open' => {
-          'striker': 'On strike',
-          'nonStriker': 'Non-striker',
-          'bowler': 'Bowling',
-        },
-      'new_batter' => {'playerId': 'Incoming batter'},
-      'new_bowler' => {'playerId': 'Next bowler'},
-      _ => <String, String>{},
-    };
+    final byKey = {for (final p in control.prompts) p.key: p};
+
+    // Singles needs no dialog. When every prompt has exactly one possible
+    // answer, asking is a tap that can only produce the answer already known
+    // — and in a singles badminton game that is one extra tap per rally, on
+    // top of the forty the scorer already makes. The side IS the player, so
+    // the pad fills it in and gets out of the way.
+    //
+    // Only when every prompt is REQUIRED. An optional one — an assist — has
+    // "nobody" as a real answer that no candidate count can imply, so a
+    // control carrying one is always worth asking about. A control that also
+    // wants a NUMBER can never be skipped: nothing about a line-up implies a
+    // time of 10.94.
+    final everyAnswerForced = control.values.isEmpty &&
+        control.prompts.every(
+          (p) => !p.optional && !p.multiple && candidates(p).length == 1,
+        );
+    if (everyAnswerForced) {
+      return {
+        for (final p in control.prompts) p.key: candidates(p).single.id,
+      };
+    }
 
     return showDialog<Map<String, dynamic>>(
       context: context,
       builder: (_) => PlayerPicker(
-        title: switch (action.type) {
-          'open' => 'Opening the innings',
-          'new_batter' => 'Next batter in',
-          _ => 'Change of bowler',
+        // The first question asked is the best title available and costs
+        // nothing to maintain — the plugin already had to phrase it. A
+        // control may ask only for a number (a wind reading), so this falls
+        // through to the values.
+        title: control.prompts.isNotEmpty
+            ? control.prompts.first.label
+            : control.values.first.label,
+        roles: {for (final p in control.prompts) p.key: p.label},
+        optionalRoles: {
+          for (final p in control.prompts)
+            if (p.optional) p.key,
         },
-        roles: roles,
-        candidatesFor: (role) =>
-            role == 'playerId' && action.type == 'new_bowler'
-                ? ctx.lineupFor(bowlingSide)
-                : forRole(role),
+        multiRoles: {
+          for (final p in control.prompts)
+            if (p.multiple) p.key,
+        },
+        candidatesFor: (key) => candidates(byKey[key]!),
+        values: control.values,
       ),
     );
   }
 
-  Future<void> _submit(Fixture fixture, ScoreAction action) async {
+  Future<void> _submit(Fixture fixture, ScoreControl control) async {
     if (_busy) return;
 
-    var resolved = action;
-    if (_needsPlayers.contains(action.type)) {
-      final payload = await _askPlayers(fixture, action);
+    var action = ScoreAction(
+      type: control.action,
+      side: control.side,
+      payload: control.payload,
+    );
+
+    if (control.needsInput) {
+      final payload = await _askPlayers(fixture, control);
       if (payload == null) return; // cancelled
-      resolved = ScoreAction(
+      action = ScoreAction(
         type: action.type,
         side: action.side,
         payload: {...action.payload, ...payload},
       );
     }
-    action = resolved;
 
     setState(() => _busy = true);
 
@@ -212,6 +247,12 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
       orgId: widget.orgId,
       title: 'Scoring',
       subtitle: competition?.name,
+      actions: [
+        // The scorer is the person standing next to the match, so they are
+        // the one everybody asks for the link.
+        if (fixtureAsync.valueOrNull case final f?)
+          ShareMatchButton(fixture: f, compact: true),
+      ],
       body: AsyncView(
         value: fixtureAsync,
         builder: (fixture) {
@@ -223,10 +264,15 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
           }
 
           if (myUid == null || !fixture.scorerUids.contains(myUid)) {
-            return const EmptyState(
+            // Was a dead end: it named the person who could fix it and gave
+            // no way to reach them. An umpire standing at the ground now asks
+            // from here, and the request lands on the admin's home screen.
+            return EmptyState(
               icon: Icons.lock_outline,
               title: 'You are not assigned to score this match',
-              message: 'An event manager can add you as a scorer.',
+              message: 'An admin of this club decides who holds the pen. You '
+                  'can ask them for it.',
+              action: AskToScoreButton(fixture: fixture, expanded: true),
             );
           }
 
@@ -274,16 +320,7 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
               if (event is! KeyDownEvent) return;
               final char = event.character?.toLowerCase();
               final control = char == null ? null : shortcuts[char];
-              if (control != null) {
-                _submit(
-                  fixture,
-                  ScoreAction(
-                    type: control.action,
-                    side: control.side,
-                    payload: control.payload,
-                  ),
-                );
-              }
+              if (control != null) _submit(fixture, control);
             },
             child: ListView(
               padding: const EdgeInsets.only(bottom: 32),
@@ -326,17 +363,16 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
                           controls: group.controls,
                           enabled: !_busy,
                           showShortcuts: !context.isCompact,
-                          onPressed: (c) => _submit(
-                            fixture,
-                            ScoreAction(
-                              type: c.action,
-                              side: c.side,
-                              payload: c.payload,
-                            ),
-                          ),
+                          onPressed: (c) => _submit(fixture, c),
                         ),
                       ],
                       const SizedBox(height: 24),
+                      // Below the pad, above the photos. A scorer checks the
+                      // card constantly — "how many has he faced", "who has
+                      // an over left" — and until now the only way to answer
+                      // either was to keep a paper book beside the phone.
+                      MatchScorecard(fixture: fixture),
+                      const SizedBox(height: 8),
                       // Below the pad on purpose. The scoring controls must be
                       // the first thing under the scoreboard — a scorer
                       // watching the pitch should never have to scroll past a

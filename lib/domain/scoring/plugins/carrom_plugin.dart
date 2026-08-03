@@ -273,6 +273,13 @@ class CarromPlugin extends ScoringPlugin {
     Map<String, dynamic> state,
     ScoringContext ctx,
   ) {
+    // Carrom's engine already tallied boards, points, coins and queens to
+    // `payload['playerId']` and nothing ever supplied one, so a doubles board
+    // credited nobody. In singles the pad fills it without asking — see the
+    // badminton rally control.
+    const winner = [PlayerPrompt(key: 'playerId', label: 'Who won the board?')];
+    const offender = [PlayerPrompt(key: 'playerId', label: 'Who fouled?')];
+
     if (state['complete'] == true) {
       return const [
         ScoreControlGroup(title: 'Match finished', controls: [
@@ -297,6 +304,7 @@ class CarromPlugin extends ScoringPlugin {
             action: 'board',
             label: ctx.entrantAName,
             side: Side.a,
+            prompts: winner,
             style: ControlStyle.primary,
             shortcut: 'a',
             tooltip: 'Record the board to ${ctx.entrantAName}',
@@ -305,6 +313,7 @@ class CarromPlugin extends ScoringPlugin {
             action: 'board',
             label: ctx.entrantBName,
             side: Side.b,
+            prompts: winner,
             style: ControlStyle.primary,
             shortcut: 'l',
             tooltip: 'Record the board to ${ctx.entrantBName}',
@@ -318,12 +327,14 @@ class CarromPlugin extends ScoringPlugin {
             action: 'foul',
             label: 'Foul ${ctx.entrantAName}',
             side: Side.a,
+            prompts: offender,
             style: ControlStyle.danger,
           ),
           ScoreControl(
             action: 'foul',
             label: 'Foul ${ctx.entrantBName}',
             side: Side.b,
+            prompts: offender,
             style: ControlStyle.danger,
           ),
         ],
@@ -358,6 +369,7 @@ class CarromPlugin extends ScoringPlugin {
         const StatColumn(key: _fouls, label: 'Fouls', shortLabel: 'F'),
       ];
 
+  @override
   BoxScore boxScore(
     Map<String, dynamic> state,
     ScoringContext ctx,

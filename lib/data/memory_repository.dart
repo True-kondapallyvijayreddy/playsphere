@@ -45,9 +45,53 @@ class MemoryRepository {
   ///
   /// Capped rather than unbounded: a profile grid shows a page, and an
   /// uncapped collectionGroup listener on a ten-year career is a bill.
-  Stream<List<Memory>> watchPlayerMemories(String uid, {int limit = 60}) {
+  ///
+  /// [viewerOrgIds] is the clubs the person LOOKING is an active member of.
+  /// It is a security constraint, not a filter for convenience: Firestore
+  /// checks a collection-group `list` against the query's own constraints
+  /// rather than against the documents it would return, so the query has to
+  /// name the audiences it is entitled to up front or the rules cannot
+  /// evaluate at all and deny everything. Passing a club the caller is not
+  /// really in gains nothing — the rule verifies the membership document.
+  ///
+  /// Trimmed to [_maxAudiences] because Firestore refuses a `whereIn` with
+  /// more values than that. Someone in more clubs than that sees memories
+  /// from their most recent ones, plus every public club.
+  static const int _maxAudiences = 29;
+
+  Stream<List<Memory>> watchPlayerMemories(
+    String uid, {
+    List<String> viewerOrgIds = const [],
+    int limit = 60,
+  }) {
+    final audiences = <String>[
+      Memory.publicAudience,
+      ...viewerOrgIds.take(_maxAudiences),
+    ];
+
     return Refs.allMemoriesQuery
         .where('taggedUids', arrayContains: uid)
+        .where('audience', whereIn: audiences)
+        .orderBy('createdAt', descending: true)
+        .limit(limit)
+        .snapshots()
+        .map((s) => s.docs.map(Memory.fromDoc).toList());
+  }
+
+  /// Every memory from every match this club has played — the club gallery.
+  ///
+  /// A collection-group query rather than a walk over the club's fixtures:
+  /// memories hang off fixtures, and a club with three seasons behind it would
+  /// otherwise need one read per match to show one screen.
+  ///
+  /// Scoped by `orgId` rather than by `audience`, because this is the club
+  /// looking at its own photographs. A member of the club is entitled to see
+  /// them whether or not the club is public — which is exactly what the
+  /// `audience` field is for on the *player* feed, where the viewer may be a
+  /// stranger.
+  Stream<List<Memory>> watchClubMemories(String orgId, {int limit = 120}) {
+    return Refs.allMemoriesQuery
+        .where('orgId', isEqualTo: orgId)
         .orderBy('createdAt', descending: true)
         .limit(limit)
         .snapshots()
@@ -68,6 +112,11 @@ class MemoryRepository {
     required Uint8List bytes,
     required String contentType,
     required MemoryKind kind,
+    /// Whether the owning club is publicly visible. Decides [Memory.audience],
+    /// which is what makes the memory listable on a career profile. The rules
+    /// re-derive it from the club document and reject a mismatch, so an
+    /// uploader cannot mark an unlisted club's photos as public.
+    required bool orgIsPublic,
     String? caption,
     List<String> taggedUids = const [],
     int? width,
@@ -112,6 +161,7 @@ class MemoryRepository {
         storagePath: path,
         url: url,
         kind: kind,
+        audience: Memory.audienceFor(orgId: orgId, orgIsPublic: orgIsPublic),
         caption: caption,
         taggedUids: taggedUids,
         width: width,

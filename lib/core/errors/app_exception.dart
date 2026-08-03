@@ -41,6 +41,22 @@ class ValidationException extends AppException {
   const ValidationException(super.message);
 }
 
+/// The server refused the QUERY rather than the caller — in practice a
+/// Firestore index that exists in `firestore.indexes.json` but was never
+/// deployed.
+///
+/// Worth its own type because it is the one failure a retry provably cannot
+/// fix, and the landing screen spent a release offering "Try again" against
+/// it: with offline persistence on, the cache answered first, so every tap
+/// repainted the dashboard for a frame before the server rejected it again.
+/// Naming it lets the UI say so instead of inviting that loop.
+class BackendNotReadyException extends AppException {
+  const BackendNotReadyException([
+    super.message = 'This part of the app is not finished setting up on the '
+        'server. Trying again will not help — please report it.',
+  ]);
+}
+
 class NotFoundException extends AppException {
   const NotFoundException([super.message = 'That no longer exists.']);
 }

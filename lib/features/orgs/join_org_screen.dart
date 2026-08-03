@@ -10,17 +10,32 @@ import '../../core/router/app_router.dart';
 import '../../shared/app_scaffold.dart';
 
 class JoinOrgScreen extends ConsumerStatefulWidget {
-  const JoinOrgScreen({super.key});
+  const JoinOrgScreen({super.key, this.initialCode});
+
+  /// Carried by an invite link or a scanned QR. Prefills the box and looks
+  /// the club up straight away; it never joins anything on its own.
+  final String? initialCode;
 
   @override
   ConsumerState<JoinOrgScreen> createState() => _JoinOrgScreenState();
 }
 
 class _JoinOrgScreenState extends ConsumerState<JoinOrgScreen> {
-  final _code = TextEditingController();
+  late final _code = TextEditingController(text: widget.initialCode ?? '');
   InviteTarget? _found;
   bool _busy = false;
   String? _notFound;
+
+  @override
+  void initState() {
+    super.initState();
+    // Arriving from an invite link, the code is already known. Looking it up
+    // straight away means the person sees the club they were invited to
+    // rather than a form they have to poke first.
+    if ((widget.initialCode ?? '').trim().length >= 4) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _lookup());
+    }
+  }
 
   @override
   void dispose() {
@@ -79,7 +94,10 @@ class _JoinOrgScreenState extends ConsumerState<JoinOrgScreen> {
           ),
         ),
       );
-      context.go(Routes.orgs);
+      // The join is done, so the form must not stay behind the club list —
+      // backing into it would invite a second request for a club already
+      // joined.
+      context.pushReplacement(Routes.orgs);
     } catch (e) {
       if (mounted) showError(context, e);
     } finally {

@@ -84,6 +84,8 @@ class PlannedFixture {
     this.groupId,
     this.qualifierA,
     this.qualifierB,
+    this.fillA = SlotFill.entrant,
+    this.fillB = SlotFill.entrant,
   });
 
   final int round;
@@ -131,12 +133,87 @@ class PlannedFixture {
   final QualifierSource? qualifierA;
   final QualifierSource? qualifierB;
 
-  /// True when one side is empty — either a genuine bracket bye (padding to
-  /// the next power of two) or a placeholder still waiting on an earlier
-  /// result. Callers that need to tell the two apart should check whether
-  /// the *other* side is populated: a real bye has exactly one side filled
-  /// at generation time and it never becomes a match that needs playing.
-  bool get isBye => entrantA == null || entrantB == null;
+  /// Why each side is empty, when it is. See [SlotFill].
+  ///
+  /// Derived once by [FixtureGenerator.generate] from the wiring the builders
+  /// already produce, never passed in — which is what stops it drifting from
+  /// the bracket it describes.
+  final SlotFill fillA;
+  final SlotFill fillB;
+
+  /// Nothing will ever play here: both sides are structural padding. Safe to
+  /// discard at persistence.
+  bool get isDeadBranch => fillA == SlotFill.bye && fillB == SlotFill.bye;
+
+  /// Exactly one side is real and the other is padding — a first-round bye.
+  ///
+  /// Not a match. The builders have already advanced the real entrant into
+  /// the next round (see `_buildKnockoutFixtures`), so persisting this would
+  /// put a permanent "Player vs To be decided" on the organizer's screen that
+  /// can never be played or removed.
+  bool get isWalkover =>
+      (fillA == SlotFill.entrant && fillB == SlotFill.bye) ||
+      (fillB == SlotFill.entrant && fillA == SlotFill.bye);
+
+  /// Whether this fixture should reach the database. Everything that is not
+  /// padding does — including placeholders with both sides unknown, which is
+  /// precisely what the old `isBye` check threw away.
+  bool get isPlayable => !isDeadBranch && !isWalkover;
+
+  PlannedFixture _withFills(SlotFill a, SlotFill b) => PlannedFixture(
+        round: round,
+        matchIndex: matchIndex,
+        roundLabel: roundLabel,
+        entrantA: entrantA,
+        entrantB: entrantB,
+        feedsWinnerToIndex: feedsWinnerToIndex,
+        feedsWinnerToSlot: feedsWinnerToSlot,
+        feedsLoserToIndex: feedsLoserToIndex,
+        feedsLoserToSlot: feedsLoserToSlot,
+        bracket: bracket,
+        groupId: groupId,
+        qualifierA: qualifierA,
+        qualifierB: qualifierB,
+        fillA: a,
+        fillB: b,
+      );
+}
+
+/// Why one side of a planned fixture is empty.
+///
+/// This exists because "empty" meant two opposite things and the codebase had
+/// one predicate for both. `PlannedFixture.isBye` was
+/// `entrantA == null || entrantB == null`, which is true for a genuine bracket
+/// bye AND for every placeholder still waiting on an earlier result — and
+/// `CompetitionRepository.generateDraw` used it to decide what NOT to write.
+///
+/// The consequence was severe and silent. For any format other than plain
+/// knockout, every unresolved placeholder was dropped before it reached
+/// Firestore, so a groups+knockout draw persisted its groups and simply had
+/// no knockout stage. Worse, the surviving fixtures still carried
+/// `feedsWinnerToFixtureId` pointing at documents that were never created, so
+/// when such a match finished, the advancement `batch.update()` hit a missing
+/// document, Firestore rejected the whole batch — and the score went with it.
+///
+/// The generator's own comment above `_buildKnockoutFixtures` warned that a
+/// generic "isBye" check was exactly the wrong way to make this decision.
+/// This enum is that warning made structural: the ambiguity can no longer be
+/// expressed, so it can no longer be got wrong.
+enum SlotFill {
+  /// A real, known entrant.
+  entrant,
+
+  /// Structural padding to the next power of two. Nobody plays here, ever.
+  bye,
+
+  /// Waiting on the winner of an earlier match.
+  awaitingWinner,
+
+  /// Waiting on the loser of a winners-bracket match (double elimination).
+  awaitingLoser,
+
+  /// Waiting on a group table position (groups + knockout).
+  awaitingQualifier,
 }
 
 /// Builds the draw for a competition.
@@ -201,7 +278,7 @@ class FixtureGenerator {
     final active = entrants.where((e) => !e.withdrawn).toList();
     if (active.length < 2) return const [];
 
-    return switch (format) {
+    return _assignSlotFills(switch (format) {
       CompetitionFormat.roundRobin ||
       CompetitionFormat.leagueTable =>
         _roundRobinFixtures(active, doubleLegged: doubleRoundRobin),
@@ -219,10 +296,72 @@ class FixtureGenerator {
           qualifiersPerGroup: qualifiersPerGroup,
         ),
       CompetitionFormat.swiss => _swissFirstRound(active, shuffleSeed),
+      // A single match names its two sides at creation, so there is nothing
+      // here to draw: `CompetitionRepository.createQuickMatch` writes the
+      // fixture in the same batch as the competition. Returning nothing is
+      // correct rather than unimplemented — running the generator over it at
+      // all would mean the draw had been asked for twice.
+      CompetitionFormat.singleMatch => const [],
       CompetitionFormat.finalOnly ||
       CompetitionFormat.heatsThenFinal =>
         const [],
-    };
+    });
+  }
+
+  /// Works out why each empty slot is empty, for the whole draw at once.
+  ///
+  /// Derived from the wiring rather than declared at each construction site,
+  /// and that is the point: every builder already records where a winner, a
+  /// loser or a qualifier goes, so "is anything feeding this slot?" is a fact
+  /// the draw already contains. Asking it here means the answer cannot
+  /// disagree with the bracket — a new format gets correct fills for free,
+  /// and a builder cannot forget to set one.
+  ///
+  /// A slot nothing feeds, holding nobody, is padding to the next power of
+  /// two. That is the only thing a bye ever was.
+  List<PlannedFixture> _assignSlotFills(List<PlannedFixture> planned) {
+    if (planned.isEmpty) return planned;
+
+    // (fixture index, slot) -> what fills it.
+    final fedBy = <int, Map<String, SlotFill>>{};
+    void record(int? index, String? slot, SlotFill fill) {
+      if (index == null || slot == null) return;
+      (fedBy[index] ??= {})[slot] = fill;
+    }
+
+    for (final p in planned) {
+      record(p.feedsWinnerToIndex, p.feedsWinnerToSlot, SlotFill.awaitingWinner);
+      record(p.feedsLoserToIndex, p.feedsLoserToSlot, SlotFill.awaitingLoser);
+    }
+
+    SlotFill fillFor({
+      required int index,
+      required String slot,
+      required Entrant? entrant,
+      required QualifierSource? qualifier,
+    }) {
+      if (entrant != null) return SlotFill.entrant;
+      if (qualifier != null) return SlotFill.awaitingQualifier;
+      return fedBy[index]?[slot] ?? SlotFill.bye;
+    }
+
+    return [
+      for (var i = 0; i < planned.length; i++)
+        planned[i]._withFills(
+          fillFor(
+            index: planned[i].matchIndex,
+            slot: 'a',
+            entrant: planned[i].entrantA,
+            qualifier: planned[i].qualifierA,
+          ),
+          fillFor(
+            index: planned[i].matchIndex,
+            slot: 'b',
+            entrant: planned[i].entrantB,
+            qualifier: planned[i].qualifierB,
+          ),
+        ),
+    ];
   }
 
   // ---------------------------------------------------------------------

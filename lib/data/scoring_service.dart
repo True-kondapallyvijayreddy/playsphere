@@ -11,6 +11,7 @@ import '../core/models/fixture.dart';
 import '../core/sync/sync_batch_planner.dart';
 import '../core/sync/sync_queue_entry.dart';
 import '../core/sync/uuid_v7.dart';
+import '../domain/scoring/match_award.dart';
 import '../domain/scoring/scoring_plugin.dart';
 import '../domain/scoring/scoring_registry.dart';
 import 'rating_service.dart';
@@ -198,6 +199,11 @@ class ScoringService {
         'isDraw': updated.isDraw,
         if (fixture.lastSeq == 0) 'startedAt': FieldValue.serverTimestamp(),
         if (outcome.isComplete) 'completedAt': FieldValue.serverTimestamp(),
+        // The best performer is decided in the SAME batch as the result. Any
+        // later and there is a window where the match is over but the award
+        // is still being worked out — and, worse, it would need a network
+        // round trip on a ground that may not have one.
+        if (outcome.isComplete) 'mvp': _awardFor(updated)?.toMap(),
       },
     );
 
@@ -345,6 +351,22 @@ class ScoringService {
       written: true,
     );
   }
+
+  /// The best performer of a finished match.
+  ///
+  /// Pure — it reads only the projection and the line-ups — so the same
+  /// fixture always produces the same award, whether it is being scored live,
+  /// replayed from the offline queue, or rebuilt from the event log after a
+  /// dispute. That property is the whole reason it is computed rather than
+  /// stored as an opinion.
+  MatchAward? _awardFor(Fixture f) => selectMvp(
+        scoreState: f.scoreState,
+        lineupA: f.lineupA,
+        lineupB: f.lineupB,
+        entrantAId: f.entrantAId,
+        entrantBId: f.entrantBId,
+        winnerEntrantId: f.winnerEntrantId,
+      );
 
   /// Withdraws an earlier event by appending a reversal, never by editing it.
   ///
@@ -792,6 +814,18 @@ class ScoringService {
           if (fixture.lastSeq == 0) 'startedAt': FieldValue.serverTimestamp(),
           if (outcome.isComplete)
             'completedAt': FieldValue.serverTimestamp(),
+          // Same award, same inputs, on the path a match takes when it was
+          // scored offline and only reaches the server on reconnect. A match
+          // must not get a different MVP for having been played out of signal.
+          if (outcome.isComplete)
+            'mvp': selectMvp(
+              scoreState: rebuilt,
+              lineupA: fixture.lineupA,
+              lineupB: fixture.lineupB,
+              entrantAId: fixture.entrantAId,
+              entrantBId: fixture.entrantBId,
+              winnerEntrantId: winnerEntrantId,
+            )?.toMap(),
         },
       );
       _maybeAdvanceWinner(batch, fixture, outcome, winnerEntrantId);

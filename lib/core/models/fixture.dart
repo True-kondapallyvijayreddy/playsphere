@@ -1,10 +1,12 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import '../../domain/scoring/match_award.dart';
 import '../../domain/scoring/scoring_plugin.dart';
 import 'enums.dart';
 import 'firestore_codec.dart';
 import 'match_official.dart';
 import 'match_player.dart';
+import 'squad_entry.dart';
 
 /// One scheduled contest between two entrants, at
 /// `orgs/{orgId}/competitions/{compId}/fixtures/{fixtureId}`.
@@ -48,6 +50,11 @@ class Fixture {
     this.scoringConfig = const {},
     this.lineupA = const [],
     this.lineupB = const [],
+    this.squadLockedA = false,
+    this.squadLockedB = false,
+    this.mvp,
+    this.squadCallA = const SquadCall(),
+    this.squadCallB = const SquadCall(),
     this.tossWonByEntrantId,
     this.tossDecision,
     this.feedsWinnerToFixtureId,
@@ -164,6 +171,81 @@ class Fixture {
 
   bool get hasLineups => lineupA.isNotEmpty && lineupB.isNotEmpty;
 
+  /// Whether each club has declared its side final.
+  ///
+  /// In an inter-club match the two squads are chosen by two different clubs
+  /// who do not answer to each other, and "we are done picking" is a real
+  /// event in that negotiation — the flow calls it locking the final squad.
+  /// Until a side is locked the other club is looking at a list that may
+  /// still change; once it is locked, only that club can reopen it.
+  ///
+  /// Not a substitute for the match itself locking. A squad lock is a
+  /// statement by a club before the toss; the scorecard freezing at the end
+  /// is a different thing entirely.
+  final bool squadLockedA;
+  final bool squadLockedB;
+
+  bool get bothSquadsLocked => squadLockedA && squadLockedB;
+
+  /// The best performer, decided at the final ball.
+  ///
+  /// Written into the same batch as the result it belongs to, so a scorecard
+  /// never exists in a state where the match is over but the award is still
+  /// being worked out — and so it is decided offline, on the ground, like
+  /// everything else on the scoring path.
+  ///
+  /// Null when there is nothing to judge on: a sport whose engine records no
+  /// per-player statistics, or a match where nobody's tally moved.
+  final MatchAward? mvp;
+
+  /// How each club is filling its own side — whether registration is open to
+  /// its members, how many places there are, and how many are taken.
+  ///
+  /// Lives on the fixture rather than the competition because in a challenge
+  /// there are two of them, owned by two different clubs. See [SquadCall].
+  final SquadCall squadCallA;
+  final SquadCall squadCallB;
+
+  SquadCall squadCallFor(String side) => side == 'a' ? squadCallA : squadCallB;
+
+  /// Whether the squad for [entrantId] has been declared final.
+  bool squadLockedFor(String entrantId) {
+    if (entrantId == entrantAId) return squadLockedA;
+    if (entrantId == entrantBId) return squadLockedB;
+    return false;
+  }
+
+  /// Which side of this fixture [orgId] is, in an inter-club match.
+  ///
+  /// A challenge fixture puts the two clubs' own ids in `entrantAId` and
+  /// `entrantBId` (see `CommunityRepository.acceptChallenge`), which is what
+  /// makes "this club may only pick its own players" answerable without a
+  /// second lookup — here, and identically in `firestore.rules`.
+  ///
+  /// Returns null for an ordinary internal competition, where the entrants
+  /// are players or club teams rather than clubs, and the hosting club's
+  /// organizers manage both sides as before.
+  String? sideForOrg(String orgId) {
+    if (participantOrgIds == null) return null;
+    if (entrantAId == orgId) return 'a';
+    if (entrantBId == orgId) return 'b';
+    return null;
+  }
+
+  /// Every registered account that actually played, flattened across both
+  /// sides. Guests (no account) contribute nothing here — nothing accrues to
+  /// them.
+  ///
+  /// Denormalized onto the document because `firestore.rules` has to answer
+  /// "did this player play in this match" when a scorer settles ratings and
+  /// career stats onto other people's profiles, and rules cannot reach inside
+  /// the lineup maps to find out. Derived rather than stored as a field so it
+  /// can never drift from the line-ups it summarises.
+  List<String> get playerUids => <String>{
+        for (final p in lineupA) ...[if (p.uid != null) p.uid!],
+        for (final p in lineupB) ...[if (p.uid != null) p.uid!],
+      }.toList(growable: false);
+
   /// Who won the toss, and what they chose — 'bat' or 'field'.
   ///
   /// Every match starts with one, and until now the app simply assumed side A
@@ -233,6 +315,21 @@ class Fixture {
       scoringConfig: Fs.map(d['scoringConfig']),
       lineupA: MatchPlayer.listFrom(d['lineupA']),
       lineupB: MatchPlayer.listFrom(d['lineupB']),
+      squadLockedA: Fs.boolean(d['squadLockedA']),
+      squadLockedB: Fs.boolean(d['squadLockedB']),
+      squadCallA: SquadCall.fromMap(
+        d['squadCallA'] is Map
+            ? Map<String, dynamic>.from(d['squadCallA'] as Map)
+            : null,
+      ),
+      squadCallB: SquadCall.fromMap(
+        d['squadCallB'] is Map
+            ? Map<String, dynamic>.from(d['squadCallB'] as Map)
+            : null,
+      ),
+      mvp: MatchAward.fromMap(
+        d['mvp'] is Map ? Map<String, dynamic>.from(d['mvp'] as Map) : null,
+      ),
       tossWonByEntrantId: Fs.strOrNull(d['tossWonByEntrantId']),
       tossDecision: Fs.strOrNull(d['tossDecision']),
       feedsWinnerToFixtureId: Fs.strOrNull(d['feedsWinnerToFixtureId']),
@@ -269,6 +366,12 @@ class Fixture {
         'scoringConfig': scoringConfig,
         'lineupA': MatchPlayer.listTo(lineupA),
         'lineupB': MatchPlayer.listTo(lineupB),
+        'squadLockedA': squadLockedA,
+        'squadLockedB': squadLockedB,
+        'mvp': mvp?.toMap(),
+        'squadCallA': squadCallA.toMap(),
+        'squadCallB': squadCallB.toMap(),
+        'playerUids': playerUids,
         'tossWonByEntrantId': tossWonByEntrantId,
         'tossDecision': tossDecision,
         'feedsWinnerToFixtureId': feedsWinnerToFixtureId,
@@ -327,6 +430,11 @@ class Fixture {
       scoringConfig: scoringConfig,
       lineupA: lineupA,
       lineupB: lineupB,
+      squadLockedA: squadLockedA,
+      squadLockedB: squadLockedB,
+      mvp: mvp,
+      squadCallA: squadCallA,
+      squadCallB: squadCallB,
       tossWonByEntrantId: tossWonByEntrantId,
       tossDecision: tossDecision,
       feedsWinnerToFixtureId: feedsWinnerToFixtureId,

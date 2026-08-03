@@ -11,7 +11,9 @@ import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/standings/tiebreak.dart';
 import '../../shared/app_scaffold.dart';
+import 'widgets/squad_call_card.dart';
 import '../scoring/widgets/live_score_card.dart';
+import '../scoring/widgets/share_match_button.dart';
 
 /// The event's control room: entries, the draw, and every fixture.
 ///
@@ -64,6 +66,10 @@ class CompetitionDetailScreen extends ConsumerWidget {
                     _Entries(competition: comp, canManage: canManage),
                     const SizedBox(height: 24),
                     _StandingsTable(competition: comp),
+                    // A challenge is one fixture and two independently-owned
+                    // squads, so the squad call belongs next to the match
+                    // rather than inside the competition-level entry list.
+                    if (comp.isInterClub) _InterClubSquads(competition: comp),
                     _Fixtures(competition: comp, canManage: canManage),
                   ],
                 ),
@@ -244,18 +250,35 @@ class _Entries extends ConsumerWidget {
     Future<void> enter() async {
       if (me == null) return;
       try {
-        await ref
+        // The repository decides the real outcome inside a transaction
+        // against fresh counts, and returns it. Reporting *that* rather than
+        // a generic "submitted" is the difference between a player knowing
+        // they are playing on Sunday and a player assuming it.
+        final outcome = await ref
             .read(competitionRepositoryProvider)
             .register(competition: c, user: me);
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Entry submitted.')),
+            SnackBar(content: Text(switch (outcome) {
+              RegistrationStatus.confirmed => 'You are in. See you there.',
+              RegistrationStatus.waitlisted =>
+                'Event is full — you are on the waitlist. '
+                    'You move up automatically if someone drops out.',
+              _ => 'Entry submitted. The organizer will confirm it.',
+            })),
           );
         }
       } catch (e) {
         if (context.mounted) showError(context, e);
       }
     }
+
+    // What the button will actually do, said before it is pressed.
+    final actionLabel = switch (c.outcomeOfRegisteringNow) {
+      RegistrationStatus.confirmed => 'Register',
+      RegistrationStatus.waitlisted => 'Join waitlist',
+      _ => 'Apply',
+    };
 
     final eligibility =
         me == null ? null : c.category.check(me, competitionStart: c.startDate);
@@ -272,15 +295,24 @@ class _Entries extends ConsumerWidget {
                     style: Theme.of(context).textTheme.titleMedium),
                 const Spacer(),
                 if (myReg != null)
-                  Chip(label: Text(myReg.status.label))
+                  Chip(
+                    label: Text(
+                      myReg.status == RegistrationStatus.waitlisted &&
+                              myReg.waitlistPosition != null
+                          ? 'Waitlist #${myReg.waitlistPosition}'
+                          : myReg.status.label,
+                    ),
+                  )
                 else if (c.registrationIsOpen && me != null)
                   FilledButton.tonal(
                     onPressed:
                         eligibility?.isEligible == true ? enter : null,
-                    child: const Text('Enter'),
+                    child: Text(actionLabel),
                   ),
               ],
             ),
+            const SizedBox(height: 4),
+            _SlotsLine(competition: c),
             // Telling someone exactly why they cannot enter is the difference
             // between a fair rule and an unexplained refusal.
             if (myReg == null &&
@@ -313,7 +345,18 @@ class _Entries extends ConsumerWidget {
                         : null,
                   ),
                   title: Text(r.displayName),
-                  subtitle: Text(r.status.label),
+                  subtitle: Text(
+                    [
+                      if (r.status == RegistrationStatus.waitlisted &&
+                          r.waitlistPosition != null)
+                        'Waitlist #${r.waitlistPosition}'
+                      else
+                        r.status.label,
+                      // Marked so the open registrants can see which slots
+                      // were ever really available to them.
+                      if (r.preselected) 'picked by organizer',
+                    ].join(' · '),
+                  ),
                   trailing: !canManage ||
                           r.status != RegistrationStatus.pending
                       ? null
@@ -370,6 +413,62 @@ class _Entries extends ConsumerWidget {
     } catch (e) {
       if (context.mounted) showError(context, e);
     }
+  }
+}
+
+/// How the field stands, in one line.
+///
+/// A registration limit that is only enforced at the moment someone taps
+/// Register is a limit nobody can plan around. Saying "4 of 13 slots left"
+/// up front is what lets a member decide to register now rather than
+/// discovering on Saturday night that they are third reserve.
+class _SlotsLine extends StatelessWidget {
+  const _SlotsLine({required this.competition});
+
+  final Competition competition;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = competition;
+    final theme = Theme.of(context);
+    final parts = <String>[];
+
+    final left = c.slotsRemaining;
+    if (left == null) {
+      parts.add('No limit on entries');
+    } else if (left > 0) {
+      parts.add('$left of ${c.openSlots} slots left');
+    } else {
+      parts.add('Field is full');
+    }
+
+    if (c.participationModel == ParticipationModel.hybrid &&
+        c.preselectedSlots > 0) {
+      parts.add('${c.preselectedSlots} picked by the organizer');
+    }
+
+    if (c.waitlistCount > 0) {
+      parts.add('${c.waitlistCount} on the waitlist');
+    } else if (c.waitlistEnabled && (left == null || left == 0)) {
+      parts.add('waitlist open');
+    }
+
+    if (!c.isFree) parts.add('₹${c.entryFeeRupees} entry');
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          parts.join(' · '),
+          style: theme.textTheme.bodySmall
+              ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+        ),
+        if (c.rulesNote != null && c.rulesNote!.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Text(c.rulesNote!, style: theme.textTheme.bodySmall),
+        ],
+      ],
+    );
   }
 }
 
@@ -684,7 +783,7 @@ class _Fixtures extends ConsumerWidget {
                     dense: true,
                     onTap: () {
                       final canScore = myUid != null && f.canBeScoredBy(myUid);
-                      context.go(
+                      context.push(
                         canScore
                             ? Routes.scoring(c.orgId, c.id, f.id)
                             : Routes.watch(c.orgId, c.id, f.id),
@@ -692,6 +791,11 @@ class _Fixtures extends ConsumerWidget {
                     },
                   ),
                 ),
+                // Only while there is something to watch. A link to a match
+                // that has not started shows an empty scoreboard, which is a
+                // worse thing to send someone than nothing.
+                if (f.isLive || f.hasResult)
+                  ShareMatchButton(fixture: f, compact: true),
                 if (canManage)
                   IconButton(
                     tooltip: f.scorerUids.isEmpty
@@ -714,6 +818,33 @@ class _Fixtures extends ConsumerWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+/// The squad call for a challenge match.
+///
+/// A challenge has exactly one fixture, so this finds it rather than making
+/// the reader pick one from a list of one.
+class _InterClubSquads extends ConsumerWidget {
+  const _InterClubSquads({required this.competition});
+
+  final Competition competition;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final fixtures = ref
+            .watch(fixturesProvider(CompRef(competition.orgId, competition.id)))
+            .valueOrNull ??
+        const <Fixture>[];
+    if (fixtures.isEmpty) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 24),
+      child: SquadCallCard(
+        competition: competition,
+        fixture: fixtures.first,
+      ),
     );
   }
 }

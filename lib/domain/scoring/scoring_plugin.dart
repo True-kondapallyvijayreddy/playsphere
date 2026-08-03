@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../../core/models/match_player.dart';
+import 'player_stats.dart';
 import 'rule_config.dart';
 
 /// Which side of the match a control or event belongs to.
@@ -26,6 +27,121 @@ enum Side {
 /// *intent* and the widget layer owns the actual colours and theming.
 enum ControlStyle { primary, secondary, danger, subtle }
 
+/// A person the pad must name before an action can be applied.
+///
+/// This exists because the engines and the pad disagreed, silently and
+/// completely. Eleven of the thirteen engines refuse an action that names
+/// nobody — `'Who scored?'`, `'Who made the tag?'`, `'Who raided?'` — and the
+/// pad only ever asked on three cricket actions, which it recognised from a
+/// hard-coded set of action names. So tapping Goal in a football match, or
+/// Tag in kho-kho, produced a rejection and no score. Those sports were not
+/// partially built; they were unscorable.
+///
+/// The fix has to be declarative rather than another list of action names in
+/// the screen, because the screen must not know what a raid is. A plugin
+/// states which people an action involves; the pad asks, in order, from the
+/// right line-up. Adding a sport stays a plugin, never a screen change.
+@immutable
+class PlayerPrompt {
+  const PlayerPrompt({
+    required this.key,
+    required this.label,
+    this.from = PromptSource.actingSide,
+    this.optional = false,
+    this.multiple = false,
+  });
+
+  /// Whether this names SEVERAL people, written as a list rather than an id.
+  ///
+  /// Kabaddi is why: a tackle is made by whoever got hold of the raider, which
+  /// is routinely three or four defenders, and the engine splits the tackle
+  /// points between all of them. Modelling it as one person would hand a
+  /// super-tackle to a single player and quietly falsify everyone's High 5
+  /// count.
+  final bool multiple;
+
+  /// Payload key the chosen player's id is written to — `playerId`,
+  /// `assistId`, `defenderId`. Matches what the engine reads in `apply`.
+  final String key;
+
+  /// Asked as the engine would ask it: "Who scored?", "Who assisted?".
+  final String label;
+
+  final PromptSource from;
+
+  /// Whether the scorer may skip it. An assist is optional — plenty of goals
+  /// have none, and forcing a name would make the scorer invent one. A goal
+  /// scorer is not: the engine rejects the event without them.
+  final bool optional;
+}
+
+/// A NUMBER the pad must collect before an action can be applied.
+///
+/// Athletics is why this exists, and until it did, athletics and swimming
+/// could not be scored at all. Every other sport's events are countable —
+/// a goal is one goal, a six is six runs — so a button and a payload constant
+/// carry the whole event. A track event is not: the thing being recorded IS
+/// the measurement, and 10.94 cannot be a button. The engine asked for a
+/// `value` and the pad had no way to supply one, so every mark was rejected
+/// with "A mark needs a time or a distance".
+///
+/// Deliberately generic rather than an athletics special case. A wind
+/// reading, a lane, a shot-clock correction and a dart score are the same
+/// shape, and the next sport that needs a number should not need a screen
+/// change either.
+@immutable
+class ValuePrompt {
+  const ValuePrompt({
+    required this.key,
+    required this.label,
+    this.unit,
+    this.decimals = 2,
+    this.min,
+    this.max,
+    this.optional = false,
+  });
+
+  /// Payload key the number is written to — `value`, `wind`, `lane`.
+  final String key;
+
+  /// Asked as the official would ask it: "Time", "Distance", "Wind".
+  final String label;
+
+  /// Shown beside the field: "seconds", "metres". Comes from the sport
+  /// catalogue's `unit`, so a swimming pad says seconds and a shot-put pad
+  /// says metres without either being written here.
+  final String? unit;
+
+  /// How precise the measurement is. Times are hundredths; a lane is an
+  /// integer. Zero means the field only accepts whole numbers.
+  final int decimals;
+
+  /// Bounds the pad enforces before the engine sees it. A negative wind
+  /// reading is legal; a negative time is not.
+  final double? min;
+  final double? max;
+
+  final bool optional;
+
+  bool get isInteger => decimals == 0;
+}
+
+/// Which line-up a [PlayerPrompt] draws its candidates from.
+///
+/// Relative rather than absolute, because a control is built for a side and
+/// the same declaration has to work for both. A tackle is made by the side
+/// that did not raid; a save is made by the side that was not shooting.
+enum PromptSource {
+  /// The side whose button this is.
+  actingSide,
+
+  /// The other side. Kho-kho's defender, football's fouled player.
+  opposingSide,
+
+  /// Either — used where the pad cannot know, e.g. a neutral control.
+  eitherSide,
+}
+
 /// A single button on the scoring pad, declared by the plugin rather than
 /// hand-built per sport in the UI.
 ///
@@ -43,7 +159,21 @@ class ScoreControl {
     this.payload = const {},
     this.shortcut,
     this.tooltip,
+    this.prompts = const [],
+    this.values = const [],
   });
+
+  /// People the pad must name before this action can be applied, in the order
+  /// the scorer should be asked. Empty for anything that names nobody — a
+  /// period boundary, an interval, a change of ends. See [PlayerPrompt].
+  final List<PlayerPrompt> prompts;
+
+  /// Numbers the pad must collect. Asked in the same dialog as [prompts],
+  /// after them, because "who" comes before "how fast". See [ValuePrompt].
+  final List<ValuePrompt> values;
+
+  /// Whether this button needs anything asked before it can be applied.
+  bool get needsInput => prompts.isNotEmpty || values.isNotEmpty;
 
   /// Action type handed back to [ScoringPlugin.apply].
   final String action;
@@ -242,6 +372,23 @@ abstract class ScoringPlugin {
 
   /// Secondary line of context: overs bowled, current set, period.
   String? statusLine(Map<String, dynamic> state, ScoringContext ctx) => null;
+
+  /// One side's per-player box score, or null for a sport that keeps no
+  /// per-player tally (a two-player rally game has nothing to break down).
+  ///
+  /// Declared on the contract rather than left as a convention across the
+  /// engines because the UI has to be able to ask for a scorecard without
+  /// knowing which sport it is holding. Twelve engines already computed a
+  /// [BoxScore] and no screen could reach one: the method existed only on the
+  /// concrete classes, so every spectator and every scorer saw a headline and
+  /// nothing else. Overriding it is the only thing an engine has to do to get
+  /// a rendered scorecard.
+  BoxScore? boxScore(
+    Map<String, dynamic> state,
+    ScoringContext ctx,
+    Side side,
+  ) =>
+      null;
 
   /// Result so far. [MatchOutcome.isComplete] flipping to true is what lets
   /// the scoring screen offer "finalize".

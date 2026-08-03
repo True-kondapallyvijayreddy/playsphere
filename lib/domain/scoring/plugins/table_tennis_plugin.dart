@@ -185,6 +185,7 @@ class TableTennisPlugin extends ScoringPlugin {
         const StatColumn(key: _errors, label: 'Errors', shortLabel: 'E'),
       ];
 
+  @override
   BoxScore boxScore(
     Map<String, dynamic> state,
     ScoringContext ctx,
@@ -268,6 +269,9 @@ class TableTennisPlugin extends ScoringPlugin {
             side: Side.a,
             style: ControlStyle.primary,
             shortcut: 'a',
+            prompts: [
+              PlayerPrompt(key: 'playerId', label: 'Who won the point?'),
+            ],
           ),
           ScoreControl(
             action: 'correct',
@@ -287,6 +291,9 @@ class TableTennisPlugin extends ScoringPlugin {
             side: Side.b,
             style: ControlStyle.primary,
             shortcut: 'l',
+            prompts: [
+              PlayerPrompt(key: 'playerId', label: 'Who won the point?'),
+            ],
           ),
           ScoreControl(
             action: 'correct',

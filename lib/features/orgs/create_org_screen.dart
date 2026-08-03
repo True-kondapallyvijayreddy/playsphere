@@ -58,7 +58,9 @@ class _CreateOrgScreenState extends ConsumerState<CreateOrgScreen> {
             ),
             founder: user,
           );
-      if (mounted) context.go(Routes.org(orgId));
+      // The club exists now; backing into a half-filled creation form would
+      // only offer to create a second one.
+      if (mounted) context.pushReplacement(Routes.org(orgId));
     } catch (e) {
       if (mounted) showError(context, e);
     } finally {

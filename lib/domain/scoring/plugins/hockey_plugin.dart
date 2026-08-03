@@ -222,6 +222,7 @@ class HockeyPlugin extends ScoringPlugin {
         const StatColumn(key: _reds, label: 'Red cards', shortLabel: 'RC'),
       ];
 
+  @override
   BoxScore boxScore(
     Map<String, dynamic> state,
     ScoringContext ctx,
@@ -280,6 +281,15 @@ class HockeyPlugin extends ScoringPlugin {
       ];
     }
 
+    // "Who scored?", "Which goalkeeper?", "Who was carded?" — all rejected
+    // without a name, so none of these buttons did anything until the
+    // controls declared what they need. Winning a penalty corner is the one
+    // event here that belongs to a side rather than a person.
+    const scorer = [
+      PlayerPrompt(key: 'playerId', label: 'Who scored?'),
+      PlayerPrompt(key: 'assistId', label: 'Assisted by', optional: true),
+    ];
+
     List<ScoreControl> forSide(Side side, String key) => [
           ScoreControl(
             action: 'goal',
@@ -288,6 +298,7 @@ class HockeyPlugin extends ScoringPlugin {
             style: ControlStyle.primary,
             payload: const {'how': 'field'},
             shortcut: key,
+            prompts: scorer,
           ),
           ScoreControl(
             action: 'goal',
@@ -295,12 +306,18 @@ class HockeyPlugin extends ScoringPlugin {
             side: side,
             style: ControlStyle.primary,
             payload: const {'how': 'penalty_corner'},
+            prompts: scorer,
           ),
           ScoreControl(
             action: 'goal',
             label: 'Stroke',
             side: side,
             payload: const {'how': 'penalty_stroke'},
+            // A penalty stroke is one player against the keeper. Nobody
+            // assists it, so asking would be asking for a wrong answer.
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Who took the stroke?'),
+            ],
           ),
           ScoreControl(
             action: 'penalty_corner',
@@ -308,13 +325,23 @@ class HockeyPlugin extends ScoringPlugin {
             side: side,
             style: ControlStyle.secondary,
           ),
-          ScoreControl(action: 'save', label: 'Save', side: side),
+          ScoreControl(
+            action: 'save',
+            label: 'Save',
+            side: side,
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Which goalkeeper?'),
+            ],
+          ),
           ScoreControl(
             action: 'card',
             label: 'Green',
             side: side,
             payload: const {'colour': 'green'},
             style: ControlStyle.subtle,
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Who was carded?'),
+            ],
           ),
           ScoreControl(
             action: 'card',
@@ -322,6 +349,9 @@ class HockeyPlugin extends ScoringPlugin {
             side: side,
             payload: const {'colour': 'red'},
             style: ControlStyle.danger,
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Who was sent off?'),
+            ],
           ),
         ];
 

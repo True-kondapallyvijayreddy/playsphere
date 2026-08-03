@@ -31,7 +31,12 @@ class Challenge {
   final String toOrgName;
   final String sportId;
 
-  /// 'pending', 'accepted', 'declined', 'rescheduled'
+  /// 'pending', 'accepted', 'declined', 'withdrawn', 'rescheduled'
+  ///
+  /// `declined` is the receiving club's answer; `withdrawn` is the issuing
+  /// club taking the offer back. Both are recorded rather than deleted so
+  /// neither club can quietly re-run a negotiation and claim the other never
+  /// responded.
   final String status;
 
   final List<DateTime> proposedSlots;
@@ -55,6 +60,16 @@ class Challenge {
   bool get isPending => status == 'pending';
   bool get isAccepted => status == 'accepted';
   bool get isDeclined => status == 'declined';
+  bool get isWithdrawn => status == 'withdrawn';
+
+  /// True when [orgId] is the club that issued this challenge, and so the one
+  /// that may take it back while it is still unanswered.
+  bool isOutgoingFor(String orgId) => orgId == fromOrgId;
+
+  /// Whether [orgId] can still withdraw. Once the other club has accepted
+  /// there is a real fixture in both clubs' schedules, and unpicking that is
+  /// a cancellation of a match rather than a withdrawal of an offer.
+  bool canBeWithdrawnBy(String orgId) => isPending && isOutgoingFor(orgId);
 
   /// True once the match exists and can be opened by either club.
   bool get hasMatch =>

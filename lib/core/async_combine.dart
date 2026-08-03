@@ -40,6 +40,25 @@ AsyncValue<T> combineAsync3<A, B, C, T>(
   return AsyncValue.data(build(a.requireValue, b.requireValue, c.requireValue));
 }
 
+/// Flattens one [AsyncValue] per club into a single list.
+///
+/// The home dashboard asks the same question of every club a person belongs to
+/// — what is live, what is scheduled — and there is no cross-club query to ask
+/// it with: a Firestore collection-group read has to be authorized against the
+/// constraints the query carries, and "the clubs this user is in" is not a
+/// constraint the rules can check. So the fan-out happens on the client, and
+/// this puts the answers back together.
+///
+/// Same precedence as [combineAsync2]: one club's read failing fails the whole
+/// combination. A dashboard that quietly drops a club is one that tells a
+/// player nothing is being played at the club they are standing in.
+AsyncValue<List<T>> combineAsyncAll<T>(List<AsyncValue<List<T>>> values) {
+  final failure = _firstError(values);
+  if (failure != null) return failure.cast<List<T>>();
+  if (values.any((v) => v.isLoading)) return const AsyncValue.loading();
+  return AsyncValue.data([for (final v in values) ...v.requireValue]);
+}
+
 AsyncError<Object>? _firstError(List<AsyncValue<Object?>> values) {
   for (final v in values) {
     if (v.hasError) {

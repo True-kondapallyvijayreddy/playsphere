@@ -22,6 +22,11 @@ class OrgPickerScreen extends ConsumerWidget {
     final memberships = ref.watch(myMembershipsProvider);
     final user = ref.watch(currentUserProvider).valueOrNull;
 
+    // Housekeeping, not UI: keeps the club mirror on this user's profile in
+    // step with their real memberships so club-mates can open their profile.
+    // Mounted here because this is the screen every signed-in user lands on.
+    ref.watch(profileOrgMirrorProvider);
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('My organizations'),
@@ -49,12 +54,12 @@ class OrgPickerScreen extends ConsumerWidget {
                 alignment: WrapAlignment.center,
                 children: [
                   FilledButton.icon(
-                    onPressed: () => context.go(Routes.joinOrg),
+                    onPressed: () => context.push(Routes.joinOrg),
                     icon: const Icon(Icons.vpn_key_outlined),
                     label: const Text('Join with a code'),
                   ),
                   OutlinedButton.icon(
-                    onPressed: () => context.go(Routes.createOrg),
+                    onPressed: () => context.push(Routes.createOrg),
                     icon: const Icon(Icons.add),
                     label: const Text('Create one'),
                   ),
@@ -97,7 +102,7 @@ class OrgPickerScreen extends ConsumerWidget {
                     children: [
                       Expanded(
                         child: OutlinedButton.icon(
-                          onPressed: () => context.go(Routes.joinOrg),
+                          onPressed: () => context.push(Routes.joinOrg),
                           icon: const Icon(Icons.vpn_key_outlined),
                           label: const Text('Join'),
                         ),
@@ -105,7 +110,7 @@ class OrgPickerScreen extends ConsumerWidget {
                       const SizedBox(width: 12),
                       Expanded(
                         child: OutlinedButton.icon(
-                          onPressed: () => context.go(Routes.createOrg),
+                          onPressed: () => context.push(Routes.createOrg),
                           icon: const Icon(Icons.add),
                           label: const Text('Create'),
                         ),
@@ -155,7 +160,7 @@ class _OrgTile extends ConsumerWidget {
             ? const Icon(Icons.hourglass_empty, size: 20)
             : const Icon(Icons.chevron_right),
         enabled: !pending,
-        onTap: pending ? null : () => context.go(Routes.org(orgId)),
+        onTap: pending ? null : () => context.push(Routes.org(orgId)),
       ),
     );
   }

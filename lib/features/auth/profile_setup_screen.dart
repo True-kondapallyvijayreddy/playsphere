@@ -27,6 +27,7 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
   final _nameController = TextEditingController();
   DateTime? _dateOfBirth;
   Gender _gender = Gender.preferNotToSay;
+  ProfileVisibility _visibility = ProfileVisibility.community;
   bool _busy = false;
   bool _prefilled = false;
 
@@ -65,15 +66,26 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
     setState(() => _busy = true);
     try {
       final existing = ref.read(currentUserProvider).valueOrNull;
-      final profile = AppUser(
-        uid: authUser.uid,
-        displayName: _nameController.text.trim(),
-        email: authUser.email ?? '',
-        dateOfBirth: _dateOfBirth!,
-        gender: _gender,
-        photoUrl: authUser.photoURL,
-        profileComplete: true,
-      );
+      // Edits build on the stored profile rather than on a fresh object, so
+      // fields this form does not show — the location that feeds the
+      // government aggregates, a phone number — survive a name change.
+      final profile = existing?.copyWith(
+            displayName: _nameController.text.trim(),
+            gender: _gender,
+            photoUrl: authUser.photoURL,
+            profileVisibility: _visibility,
+            profileComplete: true,
+          ) ??
+          AppUser(
+            uid: authUser.uid,
+            displayName: _nameController.text.trim(),
+            email: authUser.email ?? '',
+            dateOfBirth: _dateOfBirth!,
+            gender: _gender,
+            photoUrl: authUser.photoURL,
+            profileVisibility: _visibility,
+            profileComplete: true,
+          );
 
       final repo = ref.read(userRepositoryProvider);
       if (existing == null) {
@@ -97,8 +109,16 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
     // Seed the name from the Google account once, then leave it editable —
     // plenty of people sign in with an account named differently from how
     // they are known on a team sheet.
-    if (!_prefilled && authUser != null) {
-      _nameController.text = authUser.displayName ?? '';
+    // Waiting for the profile stream to settle before seeding the form is what
+    // makes this an EDIT screen as well as a setup screen: prefilling from a
+    // still-loading stream would blank every field the user already has.
+    final profileAsync = ref.watch(currentUserProvider);
+    final existing = profileAsync.valueOrNull;
+    if (!_prefilled && authUser != null && !profileAsync.isLoading) {
+      _nameController.text = existing?.displayName ?? authUser.displayName ?? '';
+      _visibility = existing?.profileVisibility ?? _visibility;
+      _dateOfBirth ??= existing?.dateOfBirth;
+      _gender = existing?.gender ?? _gender;
       _prefilled = true;
     }
 
@@ -180,6 +200,51 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
                   ],
                   onChanged: (v) => setState(() => _gender = v ?? _gender),
                 ),
+                const SizedBox(height: 20),
+                // Nothing anywhere in the app could set this before, so every
+                // account carried the `community` default and no screen ever
+                // told anyone it existed — a privacy control the owner cannot
+                // see is not a privacy control.
+                DropdownButtonFormField<ProfileVisibility>(
+                  value: _visibility,
+                  decoration: const InputDecoration(
+                    labelText: 'Who can see my profile',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: [
+                    for (final v in ProfileVisibility.values)
+                      DropdownMenuItem(value: v, child: Text(v.label)),
+                  ],
+                  onChanged: (v) => setState(() => _visibility = v ?? _visibility),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  switch (_visibility) {
+                    ProfileVisibility.private =>
+                      'Only you. Your results still count towards your club\'s '
+                          'records, but nobody can open your career page.',
+                    ProfileVisibility.community =>
+                      'Anyone in a club you belong to can open your career '
+                          'page. People outside them cannot.',
+                    ProfileVisibility.public =>
+                      'Anyone with the link can open your career page — what '
+                          'a scout or a selector would use.',
+                  },
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: Theme.of(context).hintColor,
+                      ),
+                ),
+                if (age != null && age < 18) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    'Under 18, this setting does nothing: your profile stays '
+                    'closed to everyone except a scout your guardian has '
+                    'approved. That protection is not yours to switch off.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.primary,
+                        ),
+                  ),
+                ],
                 const SizedBox(height: 32),
                 FilledButton(
                   onPressed: _busy ? null : _save,

@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -25,6 +26,15 @@ import 'l10n/app_localizations.dart';
 const _useFirestoreEmulator =
     bool.fromEnvironment('USE_FIRESTORE_EMULATOR');
 
+/// Whether crashes can be reported from this build.
+///
+/// Crashlytics has no web implementation — touching `FirebaseCrashlytics
+/// .instance` in a browser throws — and reporting from a debug session would
+/// bury real field crashes under a developer's own hot reloads. Both handlers
+/// below fall back to the console in those cases, which is exactly what they
+/// did before.
+bool get _crashReportingEnabled => !kIsWeb && !kDebugMode;
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -32,17 +42,11 @@ Future<void> main() async {
   // "something threw" and nothing else, and on the web the cause is only
   // visible in a browser console nobody has open. These two handlers turn any
   // build-time or uncaught async failure into something readable on screen.
+  //
+  // This one stays purely visual: by the time it runs, FlutterError.onError
+  // has already been handed the same FlutterErrorDetails, so reporting here
+  // too would file every build failure twice.
   ErrorWidget.builder = (details) => _ErrorPane(details: details);
-
-  FlutterError.onError = (details) {
-    FlutterError.presentError(details);
-    debugPrint('[PlaySphere] widget error: ${details.exception}');
-  };
-
-  PlatformDispatcher.instance.onError = (error, stack) {
-    debugPrint('[PlaySphere] uncaught async error: $error');
-    return true;
-  };
 
   // Clean URLs on the web, so a live match can be shared as
   // /org/abc/live/xyz rather than a fragment nobody trusts.
@@ -60,6 +64,31 @@ Future<void> main() async {
     runApp(_StartupFailure(error: error, stack: stack));
     return;
   }
+
+  // Installed AFTER Firebase.initializeApp, because Crashlytics needs the app
+  // to exist before it can be handed anything. Before this, all three
+  // handlers ended at debugPrint — a crash on a phone on a ground in a
+  // district we have never visited went to a console nobody would ever read,
+  // which meant the product had no idea what was breaking in the field.
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    if (_crashReportingEnabled) {
+      FirebaseCrashlytics.instance.recordFlutterError(details);
+    } else {
+      debugPrint('[PlaySphere] widget error: ${details.exception}');
+    }
+  };
+
+  PlatformDispatcher.instance.onError = (error, stack) {
+    if (_crashReportingEnabled) {
+      // Fatal: an uncaught async error is not something the app recovered
+      // from, and reporting it as non-fatal hides it in the wrong list.
+      FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
+    } else {
+      debugPrint('[PlaySphere] uncaught async error: $error');
+    }
+    return true;
+  };
 
   if (_useFirestoreEmulator && !kReleaseMode) {
     // An Android emulator reaches the host machine through 10.0.2.2; every
@@ -113,6 +142,13 @@ class PlaySphereApp extends ConsumerWidget {
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light,
       darkTheme: AppTheme.dark,
+      // Pinned to light on purpose. The palette IS the product's identity —
+      // turf green and ball red — and following the device setting meant a
+      // phone in dark mode rendered the whole app in near-black, which reads
+      // as a different app rather than as the same app at night. The dark
+      // theme is kept for a later, deliberate choice; it is not something a
+      // system toggle gets to make on the brand's behalf.
+      themeMode: ThemeMode.light,
       // Null follows the device language; a user who has picked one overrides
       // it. Telugu, Hindi and English ship from Phase 1 per CLAUDE.md §2.6.
       locale: ref.watch(localeControllerProvider),

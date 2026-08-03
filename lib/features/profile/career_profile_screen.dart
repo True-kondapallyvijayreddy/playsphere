@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -164,6 +165,34 @@ class _Identity extends StatelessWidget {
                 ].join(' · '),
                 style: theme.textTheme.bodyMedium,
               ),
+              // The player code, shown on every profile and copyable from
+              // one's own. It is the thing a person gives a captain who is
+              // filling in a team sheet, and a code nobody can find is a code
+              // nobody uses — so it lives beside the name rather than in a
+              // settings page.
+              if (user.playerCode case final code?) ...[
+                const SizedBox(height: 6),
+                ActionChip(
+                  avatar: const Icon(Icons.badge_outlined, size: 16),
+                  label: Text(code),
+                  visualDensity: VisualDensity.compact,
+                  side: BorderSide.none,
+                  backgroundColor: theme.colorScheme.primaryContainer,
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: code));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          isMe
+                              ? 'Your player code is copied. Give it to '
+                                  'whoever is filling in the team sheet.'
+                              : 'Player code copied.',
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ],
               if (user.isMinor) ...[
                 const SizedBox(height: 6),
                 Chip(

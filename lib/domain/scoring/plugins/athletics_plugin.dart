@@ -434,6 +434,17 @@ class AthleticsPlugin extends ScoringPlugin {
       ScoreControlGroup(
         title: isTrack ? 'Record a time' : 'Record an attempt',
         controls: [
+          // Athletics has no two sides — every athlete is in the same event,
+          // and the pad has to offer all of them. `eitherSide` is what says
+          // so; without it "Which athlete?" was rejected on every mark and
+          // no athletics event could record a single result.
+          //
+          // The measurement IS the event here, which is what makes this
+          // sport unlike every other one in the catalogue: a goal is one
+          // goal and a six is six runs, so a button carries the whole event,
+          // but 10.94 cannot be a button. The pad had no way to enter a
+          // number at all, so even with the athlete named every mark was
+          // still rejected with "A mark needs a time or a distance".
           ScoreControl(
             action: 'mark',
             label: isTrack ? 'Time' : 'Mark',
@@ -442,6 +453,40 @@ class AthleticsPlugin extends ScoringPlugin {
             tooltip: isTrack
                 ? 'Enter a finishing time'
                 : 'Enter a distance or height',
+            prompts: const [
+              PlayerPrompt(
+                key: 'athleteId',
+                label: 'Which athlete?',
+                from: PromptSource.eitherSide,
+              ),
+            ],
+            values: [
+              ValuePrompt(
+                key: 'value',
+                label: isTrack ? 'Time' : 'Distance',
+                unit: isTrack ? 'seconds' : 'metres',
+                // Precision is configuration, not a constant: hand timing is
+                // tenths, electronic timing is hundredths, and a school
+                // sports day is neither.
+                decimals: _decimals(ctx),
+                // The engine rejects anything at or below zero anyway; this
+                // stops the scorer discovering that after typing it.
+                min: 0.001,
+              ),
+              // Only where the ruleset says wind is recorded. A wind reading
+              // is what makes a sprint time a legal record or not, and it is
+              // the one value here that may legitimately be negative.
+              if (_recordWind(ctx))
+                const ValuePrompt(
+                  key: 'wind',
+                  label: 'Wind',
+                  unit: 'm/s',
+                  decimals: 1,
+                  min: -20,
+                  max: 20,
+                  optional: true,
+                ),
+            ],
           ),
           if (!isTrack)
             const ScoreControl(
@@ -450,6 +495,13 @@ class AthleticsPlugin extends ScoringPlugin {
               style: ControlStyle.danger,
               shortcut: 'x',
               tooltip: 'A failed attempt still counts as an attempt',
+              prompts: [
+                PlayerPrompt(
+                  key: 'athleteId',
+                  label: 'Which athlete?',
+                  from: PromptSource.eitherSide,
+                ),
+              ],
             ),
         ],
       ),
@@ -461,16 +513,37 @@ class AthleticsPlugin extends ScoringPlugin {
               action: 'false_start',
               label: 'False start',
               style: ControlStyle.danger,
+              prompts: [
+                PlayerPrompt(
+                  key: 'athleteId',
+                  label: 'Who false-started?',
+                  from: PromptSource.eitherSide,
+                ),
+              ],
             ),
           const ScoreControl(
             action: 'disqualify',
             label: 'Disqualify',
             style: ControlStyle.danger,
+            prompts: [
+              PlayerPrompt(
+                key: 'athleteId',
+                label: 'Who is disqualified?',
+                from: PromptSource.eitherSide,
+              ),
+            ],
           ),
           const ScoreControl(
             action: 'reinstate',
             label: 'Reinstate',
             style: ControlStyle.subtle,
+            prompts: [
+              PlayerPrompt(
+                key: 'athleteId',
+                label: 'Who is reinstated?',
+                from: PromptSource.eitherSide,
+              ),
+            ],
           ),
         ],
       ),
@@ -511,6 +584,7 @@ class AthleticsPlugin extends ScoringPlugin {
     ];
   }
 
+  @override
   BoxScore boxScore(
     Map<String, dynamic> state,
     ScoringContext ctx,

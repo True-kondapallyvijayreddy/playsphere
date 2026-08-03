@@ -213,7 +213,7 @@ class _ChallengeCardState extends ConsumerState<_ChallengeCard> {
       );
       // Straight to the match. An "accepted" toast that leaves the organizer
       // hunting for the fixture is where this flow used to lose people.
-      context.go(Routes.competition(comp.orgId, comp.id));
+      context.push(Routes.competition(comp.orgId, comp.id));
     } catch (e) {
       if (mounted) showError(context, e);
     } finally {
@@ -231,6 +231,50 @@ class _ChallengeCardState extends ConsumerState<_ChallengeCard> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Challenge declined.')),
+        );
+      }
+    } catch (e) {
+      if (mounted) showError(context, e);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _withdraw() async {
+    if (_busy) return;
+    // Confirmed because the other club has already been notified and may have
+    // booked a ground around it — and because the challenge cannot be
+    // un-withdrawn, only issued again.
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Withdraw this challenge?'),
+        content: Text(
+          '${widget.challenge.toOrgName} will see that you have taken it '
+          'back. You can challenge them again later.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Keep it'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Withdraw'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+
+    setState(() => _busy = true);
+    try {
+      await ref
+          .read(communityRepositoryProvider)
+          .withdrawChallenge(widget.challenge);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Challenge withdrawn.')),
         );
       }
     } catch (e) {
@@ -326,7 +370,7 @@ class _ChallengeCardState extends ConsumerState<_ChallengeCard> {
               Align(
                 alignment: Alignment.centerLeft,
                 child: FilledButton.tonalIcon(
-                  onPressed: () => context.go(
+                  onPressed: () => context.push(
                     Routes.competition(c.hostOrgId!, c.createdCompId!),
                   ),
                   icon: const Icon(Icons.sports_score),
@@ -347,6 +391,18 @@ class _ChallengeCardState extends ConsumerState<_ChallengeCard> {
                     child: const Text('Decline'),
                   ),
                 ],
+              )
+            // The other half of the negotiation. Until this existed, a club
+            // whose ground flooded could only wait for the opponent to
+            // decline an offer both sides knew was dead.
+            else if (c.canBeWithdrawnBy(widget.orgId) && widget.canManage)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: OutlinedButton.icon(
+                  onPressed: _busy ? null : _withdraw,
+                  icon: const Icon(Icons.undo, size: 18),
+                  label: Text(_busy ? 'Working…' : 'Withdraw'),
+                ),
               ),
           ],
         ),
@@ -367,6 +423,13 @@ class _StatusChip extends StatelessWidget {
     final (label, bg) = switch (challenge.status) {
       'accepted' => ('Accepted', scheme.primaryContainer),
       'declined' => ('Declined', scheme.surfaceContainerHighest),
+      // Reads from the perspective of whoever is looking: the club that took
+      // it back sees that it did, the club that was offered sees that the
+      // offer is gone rather than still owing them an answer.
+      'withdrawn' => (
+          incoming ? 'Withdrawn' : 'You withdrew',
+          scheme.surfaceContainerHighest,
+        ),
       _ => (incoming ? 'Your move' : 'Awaiting reply', scheme.tertiaryContainer),
     };
     return Chip(

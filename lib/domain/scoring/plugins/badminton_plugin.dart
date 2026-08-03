@@ -433,12 +433,26 @@ class BadmintonPlugin extends ScoringPlugin {
       ScoreControlGroup(
         title: 'Rally won by',
         controls: [
+          // `_awardRally` has always tallied the point to
+          // `payload['playerId']`, and nothing ever supplied one — so every
+          // rally was credited to nobody and a badminton career profile was
+          // permanently empty however many games were scored. This is a
+          // softer failure than the sports that rejected outright, and a
+          // worse one: it looked like it worked.
+          //
+          // In singles the pad fills this in without asking (see
+          // `ScoringScreen._askPlayers`) — the side IS the player, and one
+          // extra tap per rally across a 21-point game is not a trade worth
+          // making. In doubles it asks, because there the answer is real.
           ScoreControl(
             action: 'rally',
             label: ctx.entrantAName,
             side: Side.a,
             style: ControlStyle.primary,
             shortcut: 'a',
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Who won the rally?'),
+            ],
           ),
           ScoreControl(
             action: 'rally',
@@ -446,6 +460,9 @@ class BadmintonPlugin extends ScoringPlugin {
             side: Side.b,
             style: ControlStyle.primary,
             shortcut: 'l',
+            prompts: const [
+              PlayerPrompt(key: 'playerId', label: 'Who won the rally?'),
+            ],
           ),
         ],
       ),
@@ -544,6 +561,7 @@ class BadmintonPlugin extends ScoringPlugin {
         ),
       ];
 
+  @override
   BoxScore boxScore(
     Map<String, dynamic> state,
     ScoringContext ctx,
