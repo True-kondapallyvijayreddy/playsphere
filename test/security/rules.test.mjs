@@ -27,6 +27,8 @@ import {
   deleteDoc,
   getDoc,
   getDocs,
+  limit,
+  orderBy,
   query,
   setDoc,
   serverTimestamp,
@@ -109,6 +111,8 @@ const fixture = (orgId, compId, scorerUids, status = 'live') => ({
 // before the P0 fixes rather than being written to match them:
 //   RULES_FILE=/tmp/old.rules npm test
 const RULES_FILE = process.env.RULES_FILE ?? '../../firestore.rules';
+const STORAGE_RULES_FILE =
+  process.env.STORAGE_RULES_FILE ?? '../../storage.rules';
 
 before(async () => {
   testEnv = await initializeTestEnvironment({
@@ -117,6 +121,15 @@ before(async () => {
       rules: readFileSync(RULES_FILE, 'utf8'),
       host: '127.0.0.1',
       port: 8080,
+    },
+    // Cloud Storage holds the actual bytes of every memory and every club
+    // logo, and its rules are a completely separate ruleset with completely
+    // separate blind spots — it cannot read Firestore at all. Nothing
+    // exercised them before, which is how a world-writable logo path survived.
+    storage: {
+      rules: readFileSync(STORAGE_RULES_FILE, 'utf8'),
+      host: '127.0.0.1',
+      port: 9199,
     },
   });
 });
@@ -128,6 +141,12 @@ after(async () => {
 beforeEach(async () => {
   await testEnv.clearFirestore();
 });
+
+/** A tiny but genuine JPEG header, so contentType and bytes agree. */
+const jpegBytes = () =>
+  new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+
+const imageMeta = { contentType: 'image/jpeg' };
 
 /** Seeds data bypassing rules, for tests about *reading* it. */
 async function seed(fn) {
@@ -897,24 +916,115 @@ describe('guardian consent records', () => {
 describe('ratings & career_stats: write-lockdown', () => {
   const PLAYER = 'uid_rating_player';
   const OTHER_PLAYER = 'uid_rating_other_player';
+  const COMP = 'comp_rated';
+  const FIX = 'fx_rated';
+
+  // The provenance stamp the settlement batch now carries. Rules load this
+  // fixture and refuse the write unless the caller is one of its assigned
+  // scorers and the profile being written to is on its `playerUids`.
+  const settledBy = { orgId: PUBLIC_ORG, compId: COMP, fixtureId: FIX };
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', SCORER),
+        membership(SCORER, PUBLIC_ORG, 'judge_scorer'),
+      );
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP, 'fixtures', FIX),
+        {
+          ...fixture(PUBLIC_ORG, COMP, [SCORER], 'completed'),
+          playerUids: [PLAYER, OTHER_PLAYER],
+        },
+      );
+    });
+  });
 
   const ratingDoc = (overrides = {}) => ({
     rating: 1500,
     deviation: 350,
     volatility: 0.06,
     gamesPlayed: 0,
+    settledBy,
     ...overrides,
   });
 
-  it('lets a signed-in user write their own first rating doc', async () => {
-    const db = testEnv.authenticatedContext(PLAYER).firestore();
-    await assertSucceeds(
-      setDoc(doc(db, 'users', PLAYER, 'ratings', 'cricket'), ratingDoc({ gamesPlayed: 1 })),
+  // ---- The exploit these rules exist to stop -----------------------------
+
+  it('refuses a STRANGER overwriting another player\'s rating', async () => {
+    // Reproduced against the emulator before the fix: an account that had
+    // never been near a match wrote +500 to somebody's rating, because the
+    // rule asked for nothing but isSignedIn().
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
+        ratingDoc({ rating: 2000, gamesPlayed: 1 }),
+      ),
     );
   });
 
-  it('lets a match settler write a DIFFERENT player\'s first rating doc (the documented client-settlement flow)', async () => {
+  it('refuses a STRANGER inflating another player\'s career stats', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(doc(db, 'users', OTHER_PLAYER, 'career_stats', 'cricket'), {
+        uid: OTHER_PLAYER,
+        sportId: 'cricket',
+        matchesPlayed: 999,
+        lastPlayedAt: new Date(),
+        tally: { runsScored: 99999 },
+        settledBy,
+      }),
+    );
+  });
+
+  it('refuses a settlement write with no provenance at all', async () => {
+    const db = testEnv.authenticatedContext(SCORER).firestore();
+    const { settledBy: _drop, ...noProvenance } = ratingDoc({ gamesPlayed: 1 });
+    await assertFails(
+      setDoc(doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'), noProvenance),
+    );
+  });
+
+  it('refuses a scorer settling onto somebody who did not play in that match', async () => {
+    const db = testEnv.authenticatedContext(SCORER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'users', 'uid_never_played', 'ratings', 'cricket'),
+        ratingDoc({ gamesPlayed: 1 }),
+      ),
+    );
+  });
+
+  it('refuses provenance naming a fixture the caller does not score', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP, 'fixtures', 'fx_other'),
+        { ...fixture(PUBLIC_ORG, COMP, [OWNER], 'completed'), playerUids: [OTHER_PLAYER] },
+      );
+    });
+    const db = testEnv.authenticatedContext(SCORER).firestore();
+    await assertFails(
+      setDoc(doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'), {
+        ...ratingDoc({ gamesPlayed: 1 }),
+        settledBy: { orgId: PUBLIC_ORG, compId: COMP, fixtureId: 'fx_other' },
+      }),
+    );
+  });
+
+  it('refuses a user settling their OWN rating with no match behind it', async () => {
     const db = testEnv.authenticatedContext(PLAYER).firestore();
+    const { settledBy: _drop, ...noProvenance } = ratingDoc({ gamesPlayed: 1 });
+    await assertFails(
+      setDoc(doc(db, 'users', PLAYER, 'ratings', 'cricket'), noProvenance),
+    );
+  });
+
+  // ---- The flow that must keep working -----------------------------------
+
+  it('lets the ASSIGNED SCORER write a player\'s first rating doc', async () => {
+    const db = testEnv.authenticatedContext(SCORER).firestore();
     await assertSucceeds(
       setDoc(
         doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
@@ -924,7 +1034,7 @@ describe('ratings & career_stats: write-lockdown', () => {
   });
 
   it('refuses a rating write carrying an unrecognized extra field', async () => {
-    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    const db = testEnv.authenticatedContext(SCORER).firestore();
     await assertFails(
       setDoc(
         doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
@@ -934,7 +1044,7 @@ describe('ratings & career_stats: write-lockdown', () => {
   });
 
   it('refuses an absurd out-of-range rating value', async () => {
-    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    const db = testEnv.authenticatedContext(SCORER).firestore();
     await assertFails(
       setDoc(
         doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
@@ -947,7 +1057,7 @@ describe('ratings & career_stats: write-lockdown', () => {
     await seed(async (db) => {
       await setDoc(doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'), ratingDoc({ gamesPlayed: 1 }));
     });
-    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    const db = testEnv.authenticatedContext(SCORER).firestore();
     await assertFails(
       setDoc(doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'), ratingDoc({ gamesPlayed: 50 })),
     );
@@ -960,7 +1070,7 @@ describe('ratings & career_stats: write-lockdown', () => {
         ratingDoc({ rating: 1500, gamesPlayed: 1 }),
       );
     });
-    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    const db = testEnv.authenticatedContext(SCORER).firestore();
     await assertFails(
       setDoc(
         doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
@@ -976,7 +1086,7 @@ describe('ratings & career_stats: write-lockdown', () => {
         ratingDoc({ rating: 1500, gamesPlayed: 1 }),
       );
     });
-    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    const db = testEnv.authenticatedContext(SCORER).firestore();
     await assertSucceeds(
       setDoc(
         doc(db, 'users', OTHER_PLAYER, 'ratings', 'cricket'),
@@ -991,18 +1101,19 @@ describe('ratings & career_stats: write-lockdown', () => {
     matchesPlayed: 1,
     lastPlayedAt: new Date(),
     tally: { runsScored: 42 },
+    settledBy,
     ...overrides,
   });
 
-  it('lets a match settler write a career_stats doc whose identity fields match its own path', async () => {
-    const db = testEnv.authenticatedContext(PLAYER).firestore();
+  it('lets the assigned scorer write a career_stats doc whose identity fields match its own path', async () => {
+    const db = testEnv.authenticatedContext(SCORER).firestore();
     await assertSucceeds(
       setDoc(doc(db, 'users', OTHER_PLAYER, 'career_stats', 'cricket'), careerDoc(OTHER_PLAYER, 'cricket')),
     );
   });
 
   it('refuses a career_stats write whose uid field does not match the document\'s owner', async () => {
-    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    const db = testEnv.authenticatedContext(SCORER).firestore();
     await assertFails(
       // uid spoofed to the writer instead of the doc's own owner.
       setDoc(doc(db, 'users', OTHER_PLAYER, 'career_stats', 'cricket'), careerDoc(PLAYER, 'cricket')),
@@ -1010,7 +1121,7 @@ describe('ratings & career_stats: write-lockdown', () => {
   });
 
   it('refuses a future-dated lastPlayedAt', async () => {
-    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    const db = testEnv.authenticatedContext(SCORER).firestore();
     await assertFails(
       setDoc(
         doc(db, 'users', OTHER_PLAYER, 'career_stats', 'cricket'),
@@ -1020,7 +1131,7 @@ describe('ratings & career_stats: write-lockdown', () => {
   });
 
   it('refuses an extra field being smuggled into career_stats', async () => {
-    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    const db = testEnv.authenticatedContext(SCORER).firestore();
     await assertFails(
       setDoc(
         doc(db, 'users', OTHER_PLAYER, 'career_stats', 'cricket'),
@@ -1113,6 +1224,246 @@ describe('inter-club challenges', () => {
     await assertFails(
       updateDoc(doc(db, 'challenges', 'ch1'), { status: 'declined' }),
     );
+  });
+
+  // Withdrawal is the issuing club's counterpart to the receiving club's
+  // decline, and the asymmetry between them is the whole point of these.
+  describe('withdrawing', () => {
+    it('lets an admin of the FROM club withdraw an unanswered challenge', async () => {
+      await seed(async (db) => {
+        await setDoc(doc(db, 'challenges', 'ch1'), challengeDoc());
+      });
+      const db = testEnv.authenticatedContext(OWNER).firestore();
+      await assertSucceeds(
+        updateDoc(doc(db, 'challenges', 'ch1'), { status: 'withdrawn' }),
+      );
+    });
+
+    it('refuses the TO club withdrawing a challenge issued against it', async () => {
+      // The receiving club declines; it does not get to rewrite history as
+      // the other side having backed out.
+      await seed(async (db) => {
+        await setDoc(doc(db, 'challenges', 'ch1'), challengeDoc());
+      });
+      const db = testEnv.authenticatedContext(ADMIN).firestore();
+      await assertFails(
+        updateDoc(doc(db, 'challenges', 'ch1'), { status: 'withdrawn' }),
+      );
+    });
+
+    it('refuses withdrawing a challenge the other club already accepted', async () => {
+      // There is a fixture in both clubs' schedules by now. Reverting the
+      // challenge behind it would orphan that match.
+      await seed(async (db) => {
+        await setDoc(
+          doc(db, 'challenges', 'ch1'),
+          challengeDoc({ status: 'accepted' }),
+        );
+      });
+      const db = testEnv.authenticatedContext(OWNER).firestore();
+      await assertFails(
+        updateDoc(doc(db, 'challenges', 'ch1'), { status: 'withdrawn' }),
+      );
+    });
+
+    it('refuses a plain member of the FROM club withdrawing', async () => {
+      await seed(async (db) => {
+        await setDoc(doc(db, 'challenges', 'ch1'), challengeDoc());
+      });
+      const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+      await assertFails(
+        updateDoc(doc(db, 'challenges', 'ch1'), { status: 'withdrawn' }),
+      );
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scoring requests — "let me score this one", and who may grant it.
+//
+// The security property that matters: a request must never be able to grant
+// itself. Everything below is arranged around trying to make it.
+// ---------------------------------------------------------------------------
+describe('scoring requests', () => {
+  const COMP = 'comp_sr';
+  const FIXTURE = 'fx_sr';
+
+  const requestDoc = (uid, overrides = {}) => ({
+    uid,
+    orgId: PUBLIC_ORG,
+    compId: COMP,
+    fixtureId: FIXTURE,
+    displayName: 'Test Person',
+    matchLabel: 'Alice v Bhavya',
+    status: 'pending',
+    note: null,
+    createdAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  const requestRef = (db, uid) =>
+    doc(
+      db,
+      'orgs', PUBLIC_ORG,
+      'competitions', COMP,
+      'fixtures', FIXTURE,
+      'scoringRequests', uid,
+    );
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER),
+        membership(OWNER, PUBLIC_ORG, 'owner'),
+      );
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', SCORER),
+        membership(SCORER, PUBLIC_ORG, 'member'),
+      );
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP),
+        { orgId: PUBLIC_ORG, name: 'Test Comp', createdBy: OWNER },
+      );
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP, 'fixtures', FIXTURE),
+        fixture(PUBLIC_ORG, COMP, [], 'scheduled'),
+      );
+    });
+  });
+
+  it('lets an active member ask to score a match of their own club', async () => {
+    const db = testEnv.authenticatedContext(SCORER).firestore();
+    await assertSucceeds(setDoc(requestRef(db, SCORER), requestDoc(SCORER)));
+  });
+
+  it('refuses a non-member asking', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(setDoc(requestRef(db, OUTSIDER), requestDoc(OUTSIDER)));
+  });
+
+  it('refuses asking on somebody else\'s behalf', async () => {
+    // Doc id is the requester's uid, so this is also an attempt to write
+    // outside your own row.
+    const db = testEnv.authenticatedContext(SCORER).firestore();
+    await assertFails(setDoc(requestRef(db, OWNER), requestDoc(OWNER)));
+  });
+
+  it('refuses a request that arrives pre-approved', async () => {
+    const db = testEnv.authenticatedContext(SCORER).firestore();
+    await assertFails(
+      setDoc(requestRef(db, SCORER), requestDoc(SCORER, { status: 'approved' })),
+    );
+  });
+
+  it('refuses the requester approving their own pending request', async () => {
+    // The whole point. A member who can flip their own row to `approved`
+    // would not need an admin at all.
+    await seed(async (db) => {
+      await setDoc(requestRef(db, SCORER), requestDoc(SCORER));
+    });
+    const db = testEnv.authenticatedContext(SCORER).firestore();
+    await assertFails(
+      updateDoc(requestRef(db, SCORER), {
+        status: 'approved',
+        decidedBy: SCORER,
+      }),
+    );
+  });
+
+  it('lets an organizer approve, and add the scorer, in one batch', async () => {
+    await seed(async (db) => {
+      await setDoc(requestRef(db, SCORER), requestDoc(SCORER));
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    const batch = writeBatch(db);
+    batch.update(
+      doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP, 'fixtures', FIXTURE),
+      { scorerUids: [SCORER] },
+    );
+    batch.update(requestRef(db, SCORER), {
+      status: 'approved',
+      decidedBy: OWNER,
+    });
+    await assertSucceeds(batch.commit());
+  });
+
+  it('refuses an organizer recording somebody else as the decider', async () => {
+    // Who granted the pen has to be true, because it is the record a
+    // disputed result is settled against.
+    await seed(async (db) => {
+      await setDoc(requestRef(db, SCORER), requestDoc(SCORER));
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      updateDoc(requestRef(db, SCORER), {
+        status: 'approved',
+        decidedBy: ADMIN,
+      }),
+    );
+  });
+
+  it('lets the requester ask again after being declined', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        requestRef(db, SCORER),
+        requestDoc(SCORER, { status: 'declined', decidedBy: OWNER }),
+      );
+    });
+    const db = testEnv.authenticatedContext(SCORER).firestore();
+    await assertSucceeds(setDoc(requestRef(db, SCORER), requestDoc(SCORER)));
+  });
+
+  it('lets an organizer list every request waiting on their club', async () => {
+    await seed(async (db) => {
+      await setDoc(requestRef(db, SCORER), requestDoc(SCORER));
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    const snap = await assertSucceeds(
+      getDocs(
+        query(
+          collectionGroup(db, 'scoringRequests'),
+          where('orgId', '==', PUBLIC_ORG),
+          where('status', '==', 'pending'),
+        ),
+      ),
+    );
+    assert.equal(snap.size, 1);
+  });
+
+  it('refuses a plain member listing the club\'s requests', async () => {
+    await seed(async (db) => {
+      await setDoc(requestRef(db, SCORER), requestDoc(SCORER));
+    });
+    const db = testEnv.authenticatedContext(SCORER).firestore();
+    await assertFails(
+      getDocs(
+        query(
+          collectionGroup(db, 'scoringRequests'),
+          where('orgId', '==', PUBLIC_ORG),
+          where('status', '==', 'pending'),
+        ),
+      ),
+    );
+  });
+
+  it('lets the requester read their own request', async () => {
+    await seed(async (db) => {
+      await setDoc(requestRef(db, SCORER), requestDoc(SCORER));
+    });
+    const db = testEnv.authenticatedContext(SCORER).firestore();
+    await assertSucceeds(getDoc(requestRef(db, SCORER)));
+  });
+
+  it('refuses deleting a decided request', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        requestRef(db, SCORER),
+        requestDoc(SCORER, { status: 'declined', decidedBy: OWNER }),
+      );
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(deleteDoc(requestRef(db, SCORER)));
   });
 });
 
@@ -1568,6 +1919,8 @@ describe('match memories', () => {
     storagePath: `memories/${PUBLIC_ORG}/${FIX}/${uploaderUid}/${MEM}.jpg`,
     url: 'https://example.test/a.jpg',
     kind: 'photo',
+    // Derived from the club, not chosen: PUBLIC_ORG is a public club.
+    audience: 'public',
     caption: 'Winning raid',
     taggedUids: [MEMBER],
     width: 1600,
@@ -1687,10 +2040,23 @@ describe('match memories', () => {
 // ---------------------------------------------------------------------------
 describe('career stats clubsPlayedFor', () => {
   const PLAYER = 'uid_player';
+  const COMP = 'comp_clubs';
+  const FIX = 'fx_clubs';
   const statPath = ['users', PLAYER, 'career_stats', 'kabaddi'];
+  const settledBy = { orgId: PUBLIC_ORG, compId: COMP, fixtureId: FIX };
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP, 'fixtures', FIX),
+        { ...fixture(PUBLIC_ORG, COMP, [SCORER], 'completed'), playerUids: [PLAYER] },
+      );
+    });
+  });
 
   it('accepts the clubs timeline the finalize batch now writes', async () => {
-    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    const db = testEnv.authenticatedContext(SCORER).firestore();
     await assertSucceeds(
       setDoc(doc(db, ...statPath), {
         uid: PLAYER,
@@ -1699,12 +2065,13 @@ describe('career stats clubsPlayedFor', () => {
         lastPlayedAt: serverTimestamp(),
         tally: { raidPoints: 7 },
         clubsPlayedFor: ['org_a'],
+        settledBy,
       }),
     );
   });
 
   it('refuses an unbounded clubs list', async () => {
-    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    const db = testEnv.authenticatedContext(SCORER).firestore();
     const tooMany = Array.from({ length: 201 }, (_, i) => `org_${i}`);
     await assertFails(
       setDoc(doc(db, ...statPath), {
@@ -1714,12 +2081,13 @@ describe('career stats clubsPlayedFor', () => {
         lastPlayedAt: serverTimestamp(),
         tally: {},
         clubsPlayedFor: tooMany,
+        settledBy,
       }),
     );
   });
 
   it('still refuses a smuggled extra field', async () => {
-    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    const db = testEnv.authenticatedContext(SCORER).firestore();
     await assertFails(
       setDoc(doc(db, ...statPath), {
         uid: PLAYER,
@@ -1728,7 +2096,1876 @@ describe('career stats clubsPlayedFor', () => {
         lastPlayedAt: serverTimestamp(),
         tally: {},
         clubsPlayedFor: [],
+        settledBy,
         verificationTier: 'association_verified',
+      }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Collection-group query over memories — the photo grid on a career profile.
+//
+// A rule at the nested memories path does NOT apply to a
+// collectionGroup('memories') query. Without a /{path=**}/memories block,
+// MemoryRepository.watchPlayerMemories was permission-denied for everyone and
+// every profile's Memories section was permanently empty.
+// ---------------------------------------------------------------------------
+describe('memories collection-group query', () => {
+  const TAGGED = 'uid_tagged_player';
+  const COMP = 'comp_mem';
+
+  const memoryDoc = (orgId, fixtureId, audience, extra = {}) => ({
+    orgId,
+    compId: COMP,
+    fixtureId,
+    uploaderUid: OWNER,
+    storagePath: `memories/${orgId}/${fixtureId}/${OWNER}/m.jpg`,
+    url: 'https://example.test/a.jpg',
+    kind: 'photo',
+    audience,
+    caption: null,
+    taggedUids: [TAGGED],
+    createdAt: serverTimestamp(),
+    ...extra,
+  });
+
+  /// Exactly the query MemoryRepository.watchPlayerMemories builds: the
+  /// audiences the caller is entitled to, stated up front, because a
+  /// collection-group `list` is authorized against the query's constraints
+  /// rather than against the documents it returns.
+  const profileGrid = (db, audiences) =>
+    getDocs(
+      query(
+        collectionGroup(db, 'memories'),
+        where('taggedUids', 'array-contains', TAGGED),
+        where('audience', 'in', audiences),
+      ),
+    );
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(doc(db, 'orgs', PRIVATE_ORG), organization(OWNER, 'unlisted'));
+      await setDoc(
+        doc(db, 'orgs', PRIVATE_ORG, 'members', ADMIN),
+        membership(ADMIN, PRIVATE_ORG, 'admin'),
+      );
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP, 'fixtures', 'fx_pub'),
+        fixture(PUBLIC_ORG, COMP, [SCORER]),
+      );
+      await setDoc(
+        doc(db, 'orgs', PRIVATE_ORG, 'competitions', COMP, 'fixtures', 'fx_priv'),
+        fixture(PRIVATE_ORG, COMP, [SCORER]),
+      );
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP, 'fixtures', 'fx_pub', 'memories', 'm1'),
+        memoryDoc(PUBLIC_ORG, 'fx_pub', 'public'),
+      );
+      await setDoc(
+        doc(db, 'orgs', PRIVATE_ORG, 'competitions', COMP, 'fixtures', 'fx_priv', 'memories', 'm2'),
+        memoryDoc(PRIVATE_ORG, 'fx_priv', PRIVATE_ORG),
+      );
+    });
+  });
+
+  it('lets a member load every memory they are entitled to, across orgs', async () => {
+    // The regression this whole block exists for: before the
+    // /{path=**}/memories rule this was permission-denied for everyone and
+    // every profile's Memories section was empty no matter what was in it.
+    // The member of the unlisted club sees both — the public one because it
+    // is public, their own club's because they belong to it.
+    const db = testEnv.authenticatedContext(ADMIN).firestore();
+    const snap = await assertSucceeds(profileGrid(db, ['public', PRIVATE_ORG]));
+    assert.equal(snap.size, 2);
+  });
+
+  it('lets a signed-out spectator see the public club\'s memories', async () => {
+    const db = testEnv.unauthenticatedContext().firestore();
+    const snap = await assertSucceeds(profileGrid(db, ['public']));
+    assert.equal(snap.size, 1);
+  });
+
+  it('refuses an outsider asking for an UNLISTED club\'s memories', async () => {
+    // Claiming an audience is not the same as holding it: the rule checks the
+    // caller's real membership document for that club.
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(profileGrid(db, ['public', PRIVATE_ORG]));
+  });
+
+  it('refuses an unconstrained sweep of every memory in the database', async () => {
+    const db = testEnv.authenticatedContext(ADMIN).firestore();
+    await assertFails(getDocs(query(collectionGroup(db, 'memories'))));
+  });
+
+  // -------------------------------------------------------------------------
+  // The CLUB GALLERY reads the same collection group with a different
+  // constraint, and that difference broke it.
+  //
+  // `watchClubMemories` asks for one club's memories ordered by date, so it
+  // constrains `orgId` and never mentions `audience`. A `list` is authorized
+  // against the query rather than against the documents it returns, which
+  // made `resource.data.audience` undefined — an evaluation error — in both
+  // of the rule's original branches at once, with nothing left to rescue
+  // them. Every club gallery was permission-denied ("Property audience is
+  // undefined on object") regardless of how many photos the club had.
+  // -------------------------------------------------------------------------
+  const clubGallery = (db, orgId) =>
+    getDocs(
+      query(
+        collectionGroup(db, 'memories'),
+        where('orgId', '==', orgId),
+        orderBy('createdAt', 'desc'),
+        limit(120),
+      ),
+    );
+
+  it('lets anyone open a PUBLIC club\'s gallery', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    const snap = await assertSucceeds(clubGallery(db, PUBLIC_ORG));
+    assert.equal(snap.size, 1);
+  });
+
+  it('lets a member open their UNLISTED club\'s gallery', async () => {
+    const db = testEnv.authenticatedContext(ADMIN).firestore();
+    const snap = await assertSucceeds(clubGallery(db, PRIVATE_ORG));
+    assert.equal(snap.size, 1);
+  });
+
+  it('refuses an outsider opening an UNLISTED club\'s gallery', async () => {
+    // The orgId branch must not be a way around the membership check the
+    // audience branches enforce — it grants exactly the same thing.
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(clubGallery(db, PRIVATE_ORG));
+  });
+
+  it('refuses an uploader stamping an unlisted club\'s memory as public', async () => {
+    // The audience is derived from the club document on the way in, so it is
+    // not a field an uploader can use to promote a junior match's photos onto
+    // a world-readable profile grid.
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'orgs', PRIVATE_ORG, 'members', OUTSIDER),
+        membership(OUTSIDER, PRIVATE_ORG, 'member'),
+      );
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'orgs', PRIVATE_ORG, 'competitions', COMP, 'fixtures', 'fx_priv', 'memories', 'm3'),
+        memoryDoc(PRIVATE_ORG, 'fx_priv', 'public', { uploaderUid: OUTSIDER }),
+      ),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// profileVisibility: 'community' — the DEFAULT for every new account.
+//
+// The rules had no branch for it at all: only 'public' granted a cross-user
+// read, so out of the box nobody could open anybody else's profile. There is
+// no member directory, no opponent's record and no career page without this.
+// ---------------------------------------------------------------------------
+describe('profile visibility: community', () => {
+  const SUBJECT = 'uid_community_subject';
+  const CLUBMATE = 'uid_community_clubmate';
+
+  const profileOf = (uid, orgIds, overrides = {}) => ({
+    uid,
+    displayName: 'Test Person',
+    email: 'test@example.com',
+    dateOfBirth: new Date('1995-04-11'),
+    gender: 'female',
+    photoUrl: null,
+    phone: null,
+    profileVisibility: 'community',
+    profileComplete: true,
+    isMinor: false,
+    orgIds,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', SUBJECT),
+        membership(SUBJECT, PUBLIC_ORG, 'member'),
+      );
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', CLUBMATE),
+        membership(CLUBMATE, PUBLIC_ORG, 'member'),
+      );
+    });
+  });
+
+  it('lets a club-mate open a community profile', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', SUBJECT), profileOf(SUBJECT, [PUBLIC_ORG]));
+    });
+    const db = testEnv.authenticatedContext(CLUBMATE).firestore();
+    await assertSucceeds(getDoc(doc(db, 'users', SUBJECT)));
+  });
+
+  it('refuses a stranger with no shared club', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', SUBJECT), profileOf(SUBJECT, [PUBLIC_ORG]));
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(getDoc(doc(db, 'users', SUBJECT)));
+  });
+
+  it('refuses somebody whose membership is still PENDING approval', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', SUBJECT), profileOf(SUBJECT, [PUBLIC_ORG]));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OUTSIDER),
+        membership(OUTSIDER, PUBLIC_ORG, 'member', 'pending'),
+      );
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(getDoc(doc(db, 'users', SUBJECT)));
+  });
+
+  it('refuses a club-mate when the mirror has not been written yet', async () => {
+    // Fails closed: a profile with no `orgIds` is readable only by its owner,
+    // which is the pre-fix behaviour and the safe direction.
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', SUBJECT), profileOf(SUBJECT, []));
+    });
+    const db = testEnv.authenticatedContext(CLUBMATE).firestore();
+    await assertFails(getDoc(doc(db, 'users', SUBJECT)));
+  });
+
+  it('gives a padded mirror nothing: the CALLER still needs a real membership', async () => {
+    // The mirror is written by the profile's owner, so the only thing an
+    // inflated list can do is offer the profile to clubs the owner is not in
+    // — and the rule still demands a genuine active membership document from
+    // whoever is reading.
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'users', SUBJECT),
+        profileOf(SUBJECT, ['org_never_joined', 'org_also_fake']),
+      );
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(getDoc(doc(db, 'users', SUBJECT)));
+  });
+
+  it('never opens a MINOR\'s profile to a club-mate', async () => {
+    // The adult floor is not a visibility preference. A junior's profile is
+    // reachable only by its owner and by a guardian-consented scout,
+    // whatever the setting says.
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'users', SUBJECT),
+        profileOf(SUBJECT, [PUBLIC_ORG], {
+          dateOfBirth: new Date('2012-01-01'),
+          isMinor: true,
+        }),
+      );
+    });
+    const db = testEnv.authenticatedContext(CLUBMATE).firestore();
+    await assertFails(getDoc(doc(db, 'users', SUBJECT)));
+  });
+
+  it('still refuses a club-mate when the owner chose private', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'users', SUBJECT),
+        profileOf(SUBJECT, [PUBLIC_ORG], { profileVisibility: 'private' }),
+      );
+    });
+    const db = testEnv.authenticatedContext(CLUBMATE).firestore();
+    await assertFails(getDoc(doc(db, 'users', SUBJECT)));
+  });
+
+  it('lets the owner write their own club mirror, but not an unbounded one', async () => {
+    const db = testEnv.authenticatedContext(SUBJECT).firestore();
+    await assertSucceeds(
+      setDoc(doc(db, 'users', SUBJECT), profileOf(SUBJECT, [PUBLIC_ORG])),
+    );
+    const tooMany = Array.from({ length: 51 }, (_, i) => `org_${i}`);
+    await assertFails(
+      setDoc(
+        doc(db, 'users', SUBJECT),
+        profileOf(SUBJECT, tooMany),
+        { merge: true },
+      ),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The global rulebook. `allow write: if isSignedIn()` made the ICC's laws
+// world-writable and world-deletable by any account in the country.
+// ---------------------------------------------------------------------------
+describe('sportRules: the global rulebook is not client-writable', () => {
+  const rulePath = ['sportRules', 'cricket_no_ball'];
+
+  const ruleDoc = (overrides = {}) => ({
+    sportId: 'cricket',
+    category: 'Bowling',
+    title: 'No ball',
+    description: 'The official law.',
+    officialSource: 'ICC',
+    keywords: ['no ball'],
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, ...rulePath), ruleDoc());
+    });
+  });
+
+  it('stays world-readable, with or without an account', async () => {
+    const db = testEnv.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(db, ...rulePath)));
+  });
+
+  it('refuses a signed-in stranger defacing a rule', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(doc(db, ...rulePath), ruleDoc({ description: 'anything I like' })),
+    );
+  });
+
+  it('refuses a signed-in stranger DELETING a rule', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(deleteDoc(doc(db, ...rulePath)));
+  });
+
+  it('refuses even a club owner — the rulebook is not any club\'s to edit', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER),
+        membership(OWNER, PUBLIC_ORG, 'owner'),
+      );
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      setDoc(doc(db, ...rulePath), ruleDoc({ title: 'Rewritten' })),
+    );
+  });
+
+  it('admits a holder of the admin claim, which no app path can mint', async () => {
+    // The documented escape hatch: an operator with an admin custom claim, or
+    // the console/admin SDK. Nothing in the client can produce this token.
+    const db = testEnv
+      .authenticatedContext('uid_operator', { admin: true })
+      .firestore();
+    await assertSucceeds(
+      setDoc(doc(db, ...rulePath), ruleDoc({ description: 'Corrected text.' })),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cloud Storage rules — a separate ruleset with separate blind spots.
+//
+// Storage rules cannot read Firestore, so authorization here comes from the
+// path plus the caller's uid and nothing else. That is exactly why the club
+// logo path was a hole: `orgs/{orgId}/logo/{fileName}` is fully guessable from
+// an org id, and `write: if isSignedIn()` let any account in the world
+// overwrite or delete a school's logo.
+// ---------------------------------------------------------------------------
+describe('storage: club logos', () => {
+  const ORG_OWNER = 'uid_logo_owner';
+  const STRANGER = 'uid_logo_stranger';
+  const logoPath = (uid) => `orgs/${PUBLIC_ORG}/logo/${uid}/logo.jpg`;
+
+  it('lets a signed-in user write a logo under their OWN uid segment', async () => {
+    const storage = testEnv.authenticatedContext(ORG_OWNER).storage();
+    await assertSucceeds(
+      storage.ref(logoPath(ORG_OWNER)).put(jpegBytes(), imageMeta),
+    );
+  });
+
+  it('refuses a stranger overwriting somebody else\'s logo object', async () => {
+    // The exploit: the path is deterministic, so before the uid segment
+    // existed this succeeded for any account and defaced the club.
+    const storage = testEnv.authenticatedContext(STRANGER).storage();
+    await assertFails(
+      storage.ref(logoPath(ORG_OWNER)).put(jpegBytes(), imageMeta),
+    );
+  });
+
+  it('refuses a stranger DELETING somebody else\'s logo object', async () => {
+    const owner = testEnv.authenticatedContext(ORG_OWNER).storage();
+    await assertSucceeds(
+      owner.ref(logoPath(ORG_OWNER)).put(jpegBytes(), imageMeta),
+    );
+
+    const stranger = testEnv.authenticatedContext(STRANGER).storage();
+    await assertFails(stranger.ref(logoPath(ORG_OWNER)).delete());
+  });
+
+  it('refuses a signed-out visitor writing a logo at all', async () => {
+    const storage = testEnv.unauthenticatedContext().storage();
+    await assertFails(
+      storage.ref(logoPath(ORG_OWNER)).put(jpegBytes(), imageMeta),
+    );
+  });
+
+  it('refuses the old uid-less path, which is now matched by nothing', async () => {
+    const storage = testEnv.authenticatedContext(ORG_OWNER).storage();
+    await assertFails(
+      storage
+        .ref(`orgs/${PUBLIC_ORG}/logo/logo.jpg`)
+        .put(jpegBytes(), imageMeta),
+    );
+  });
+});
+
+describe('storage: profile photos and memories still work', () => {
+  const ME = 'uid_storage_me';
+  const SOMEBODY_ELSE = 'uid_storage_other';
+
+  it('lets a player replace their own profile photo', async () => {
+    const storage = testEnv.authenticatedContext(ME).storage();
+    await assertSucceeds(
+      storage.ref(`users/${ME}/profile/avatar.jpg`).put(jpegBytes(), imageMeta),
+    );
+  });
+
+  it('refuses replacing another player\'s face', async () => {
+    const storage = testEnv.authenticatedContext(ME).storage();
+    await assertFails(
+      storage
+        .ref(`users/${SOMEBODY_ELSE}/profile/avatar.jpg`)
+        .put(jpegBytes(), imageMeta),
+    );
+  });
+
+  it('lets an uploader add a memory under their own uid segment', async () => {
+    const storage = testEnv.authenticatedContext(ME).storage();
+    await assertSucceeds(
+      storage
+        .ref(`memories/${PUBLIC_ORG}/fx1/${ME}/mem1.jpg`)
+        .put(jpegBytes(), imageMeta),
+    );
+  });
+
+  it('refuses uploading a memory under somebody else\'s uid segment', async () => {
+    const storage = testEnv.authenticatedContext(ME).storage();
+    await assertFails(
+      storage
+        .ref(`memories/${PUBLIC_ORG}/fx1/${SOMEBODY_ELSE}/mem1.jpg`)
+        .put(jpegBytes(), imageMeta),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Participation models — "the first thirteen who register are the team"
+//
+// The promise is about a COUNT, and a count is the one thing a client cannot
+// be trusted with. These tests go at the rules directly, with no app in the
+// way, because that is exactly the position a determined client is in.
+// ---------------------------------------------------------------------------
+
+const PLAYER = 'uid_player';
+const PLAYER_TWO = 'uid_player_two';
+
+/** A competition document as `Competition.toCreate` writes it. */
+const competition = (orgId, overrides = {}) => ({
+  orgId,
+  name: 'Sunday Cricket',
+  nameLower: 'sunday cricket',
+  sportId: 'cricket',
+  sportName: 'Cricket',
+  archetype: 'versus',
+  entrantType: 'individual',
+  format: 'knockout',
+  status: 'registration_open',
+  category: { label: 'Open', dimensions: ['open'] },
+  scoringPluginKey: 'cricket',
+  description: null,
+  venue: null,
+  startDate: null,
+  endDate: null,
+  registrationClosesAt: null,
+  maxEntrants: 13,
+  entrantCount: 0,
+  fixtureCount: 0,
+  participationModel: 'open',
+  preselectedSlots: 0,
+  waitlistEnabled: true,
+  openToNonMembers: false,
+  entryFeeRupees: 0,
+  teamSize: null,
+  rulesNote: null,
+  confirmedCount: 0,
+  waitlistCount: 0,
+  verificationTier: 'casual',
+  rulesetVersion: 1,
+  pointsForWin: 3,
+  pointsForDraw: 1,
+  pointsForLoss: 0,
+  tiebreakChain: null,
+  participantOrgIds: null,
+  createdBy: OWNER,
+  createdAt: serverTimestamp(),
+  ...overrides,
+});
+
+/** A registration as `Registration.toCreate` writes it. */
+const registration = (uid, status, overrides = {}) => ({
+  uid,
+  displayName: 'Test Player',
+  photoUrl: null,
+  teamName: null,
+  status,
+  waitlistPosition: null,
+  preselected: false,
+  eligibilityNote: null,
+  createdAt: serverTimestamp(),
+  ...overrides,
+});
+
+/** Seeds an org with an active member, plus a competition. */
+async function seedEvent(overrides = {}) {
+  await seed(async (db) => {
+    await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+    await setDoc(
+      doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER),
+      membership(OWNER, PUBLIC_ORG, 'owner'),
+    );
+    for (const uid of [PLAYER, PLAYER_TWO]) {
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', uid),
+        membership(uid, PUBLIC_ORG, 'member'),
+      );
+    }
+    await setDoc(
+      doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1'),
+      competition(PUBLIC_ORG, overrides),
+    );
+  });
+}
+
+const regRef = (db, uid) =>
+  doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'registrations', uid);
+const compRef = (db) => doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1');
+
+describe('participation: open registration confirms itself while a slot is free', () => {
+  it('lets a member confirm themselves into an open event', async () => {
+    await seedEvent({ participationModel: 'open', confirmedCount: 0 });
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+
+    const batch = writeBatch(db);
+    batch.set(regRef(db, PLAYER), registration(PLAYER, 'confirmed'));
+    batch.update(compRef(db), { confirmedCount: 1 });
+    await assertSucceeds(batch.commit());
+  });
+
+  it('refuses a self-confirmation once the field is full', async () => {
+    await seedEvent({ participationModel: 'open', confirmedCount: 13 });
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+
+    const batch = writeBatch(db);
+    batch.set(regRef(db, PLAYER), registration(PLAYER, 'confirmed'));
+    batch.update(compRef(db), { confirmedCount: 14 });
+    await assertFails(batch.commit());
+  });
+
+  it('refuses a confirmation that does not move the counter at all', async () => {
+    // Otherwise capacity is enforced against a number nobody increments, and
+    // fourteen people each read "12 confirmed" and each write themselves in.
+    await seedEvent({ participationModel: 'open', confirmedCount: 12 });
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(
+      setDoc(regRef(db, PLAYER), registration(PLAYER, 'confirmed')),
+    );
+  });
+
+  it('refuses a counter bump of more than one', async () => {
+    await seedEvent({ participationModel: 'open', confirmedCount: 0 });
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+
+    const batch = writeBatch(db);
+    batch.set(regRef(db, PLAYER), registration(PLAYER, 'confirmed'));
+    batch.update(compRef(db), { confirmedCount: 5 });
+    await assertFails(batch.commit());
+  });
+
+  it('refuses a member editing anything else on the competition', async () => {
+    await seedEvent({ participationModel: 'open', confirmedCount: 0 });
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+
+    const batch = writeBatch(db);
+    batch.set(regRef(db, PLAYER), registration(PLAYER, 'confirmed'));
+    batch.update(compRef(db), { confirmedCount: 1, maxEntrants: 999 });
+    await assertFails(batch.commit());
+  });
+});
+
+describe('participation: the waitlist', () => {
+  it('queues a member once the open slots are gone', async () => {
+    await seedEvent({
+      participationModel: 'open',
+      confirmedCount: 13,
+      waitlistEnabled: true,
+    });
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+
+    const batch = writeBatch(db);
+    batch.set(
+      regRef(db, PLAYER),
+      registration(PLAYER, 'waitlisted', { waitlistPosition: 1 }),
+    );
+    batch.update(compRef(db), { waitlistCount: 1 });
+    await assertSucceeds(batch.commit());
+  });
+
+  it('refuses a waitlist entry when the organizer did not enable one', async () => {
+    await seedEvent({
+      participationModel: 'open',
+      confirmedCount: 13,
+      waitlistEnabled: false,
+    });
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+
+    const batch = writeBatch(db);
+    batch.set(regRef(db, PLAYER), registration(PLAYER, 'waitlisted'));
+    batch.update(compRef(db), { waitlistCount: 1 });
+    await assertFails(batch.commit());
+  });
+
+  it('refuses waitlisting while slots are still open', async () => {
+    // A reserve who is really in the team is a reserve nobody called up.
+    await seedEvent({ participationModel: 'open', confirmedCount: 2 });
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+
+    const batch = writeBatch(db);
+    batch.set(regRef(db, PLAYER), registration(PLAYER, 'waitlisted'));
+    batch.update(compRef(db), { waitlistCount: 1 });
+    await assertFails(batch.commit());
+  });
+
+  it('promotes the first reserve into a slot a withdrawal has freed', async () => {
+    await seedEvent({
+      participationModel: 'open',
+      confirmedCount: 12,
+      waitlistCount: 1,
+    });
+    await seed(async (db) => {
+      await setDoc(
+        regRef(db, PLAYER_TWO),
+        registration(PLAYER_TWO, 'waitlisted', { waitlistPosition: 1 }),
+      );
+    });
+
+    // The withdrawal has already committed, which is why a slot is free — the
+    // promotion is deliberately a SECOND transaction, because rules evaluate
+    // against pre-transaction state and the event was full until it landed.
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    const batch = writeBatch(db);
+    batch.update(regRef(db, PLAYER_TWO), {
+      status: 'confirmed',
+      waitlistPosition: null,
+      promotedFromWaitlistAt: serverTimestamp(),
+    });
+    batch.update(compRef(db), { confirmedCount: 13, waitlistCount: 0 });
+    await assertSucceeds(batch.commit());
+  });
+
+  it('refuses a promotion into an event that is still full', async () => {
+    await seedEvent({
+      participationModel: 'open',
+      confirmedCount: 13,
+      waitlistCount: 1,
+    });
+    await seed(async (db) => {
+      await setDoc(
+        regRef(db, PLAYER_TWO),
+        registration(PLAYER_TWO, 'waitlisted', { waitlistPosition: 1 }),
+      );
+    });
+
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    const batch = writeBatch(db);
+    batch.update(regRef(db, PLAYER_TWO), { status: 'confirmed' });
+    batch.update(compRef(db), { confirmedCount: 14, waitlistCount: 0 });
+    await assertFails(batch.commit());
+  });
+
+  it('refuses a member promoting someone straight past the queue into a changed row', async () => {
+    // The promotion branch is fenced to status/position/timestamp. It must not
+    // become a way to edit another player's registration generally.
+    await seedEvent({ participationModel: 'open', confirmedCount: 0 });
+    await seed(async (db) => {
+      await setDoc(
+        regRef(db, PLAYER_TWO),
+        registration(PLAYER_TWO, 'waitlisted', { waitlistPosition: 1 }),
+      );
+    });
+
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(
+      updateDoc(regRef(db, PLAYER_TWO), {
+        status: 'confirmed',
+        displayName: 'Renamed By Someone Else',
+      }),
+    );
+  });
+});
+
+describe('participation: hybrid and approval', () => {
+  it('refuses a self-confirmation into the organizer reserved block', async () => {
+    // 13 capacity, 8 reserved -> only 5 are open. The sixth must not get in.
+    await seedEvent({
+      participationModel: 'hybrid',
+      preselectedSlots: 8,
+      confirmedCount: 5,
+      waitlistEnabled: false,
+    });
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+
+    const batch = writeBatch(db);
+    batch.set(regRef(db, PLAYER), registration(PLAYER, 'confirmed'));
+    batch.update(compRef(db), { confirmedCount: 6 });
+    await assertFails(batch.commit());
+  });
+
+  it('lets the fifth open registrant into a hybrid event', async () => {
+    await seedEvent({
+      participationModel: 'hybrid',
+      preselectedSlots: 8,
+      confirmedCount: 4,
+    });
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+
+    const batch = writeBatch(db);
+    batch.set(regRef(db, PLAYER), registration(PLAYER, 'confirmed'));
+    batch.update(compRef(db), { confirmedCount: 5 });
+    await assertSucceeds(batch.commit());
+  });
+
+  it('refuses a self-confirmation into an approval event', async () => {
+    await seedEvent({ participationModel: 'approval', confirmedCount: 0 });
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+
+    const batch = writeBatch(db);
+    batch.set(regRef(db, PLAYER), registration(PLAYER, 'confirmed'));
+    batch.update(compRef(db), { confirmedCount: 1 });
+    await assertFails(batch.commit());
+  });
+
+  it('still accepts a plain application to an approval event', async () => {
+    await seedEvent({ participationModel: 'approval' });
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertSucceeds(
+      setDoc(regRef(db, PLAYER), registration(PLAYER, 'pending')),
+    );
+  });
+
+  it('refuses a member marking their own entry as an organizer pick', async () => {
+    await seedEvent({ participationModel: 'approval' });
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(
+      setDoc(
+        regRef(db, PLAYER),
+        registration(PLAYER, 'confirmed', { preselected: true }),
+      ),
+    );
+  });
+
+  it('lets an organizer preselect a player directly', async () => {
+    await seedEvent({ participationModel: 'hybrid', preselectedSlots: 8 });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      setDoc(
+        regRef(db, PLAYER),
+        registration(PLAYER, 'confirmed', { preselected: true }),
+      ),
+    );
+  });
+});
+
+describe('participation: events created before the model existed', () => {
+  it('still accepts a pending application with no participation fields', async () => {
+    // Every event already in the database lacks these fields. Reading a
+    // missing field in a rule is an ERROR, which denies — so without the
+    // `.get(field, default)` accessors this shipping change would have broken
+    // registration for every existing event.
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', PLAYER),
+        membership(PLAYER, PUBLIC_ORG, 'member'),
+      );
+      const legacy = competition(PUBLIC_ORG);
+      delete legacy.participationModel;
+      delete legacy.preselectedSlots;
+      delete legacy.waitlistEnabled;
+      delete legacy.confirmedCount;
+      delete legacy.waitlistCount;
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1'),
+        legacy,
+      );
+    });
+
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    const legacyReg = registration(PLAYER, 'pending');
+    delete legacyReg.preselected;
+    delete legacyReg.waitlistPosition;
+    await assertSucceeds(setDoc(regRef(db, PLAYER), legacyReg));
+  });
+
+  it('refuses a self-confirmation into a legacy event', async () => {
+    // A legacy event defaults to `approval`, which is the behaviour it always
+    // had. Anything else would retroactively admit an unvetted queue.
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', PLAYER),
+        membership(PLAYER, PUBLIC_ORG, 'member'),
+      );
+      const legacy = competition(PUBLIC_ORG);
+      delete legacy.participationModel;
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1'),
+        legacy,
+      );
+    });
+
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(
+      setDoc(regRef(db, PLAYER), registration(PLAYER, 'confirmed')),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Inter-club squads — ABC challenges XYZ, and XYZ picks its OWN players.
+//
+// A challenge fixture lives inside the HOSTING club's tenant, so every
+// pre-existing write path was anchored to authority there. These tests pin
+// the branch that lets the visiting club name its own side without letting
+// either club name the other's.
+// ---------------------------------------------------------------------------
+
+const HOST_ORG = 'org_host';
+const GUEST_ORG = 'org_guest';
+const HOST_ADMIN = 'uid_host_admin';
+const GUEST_ADMIN = 'uid_guest_admin';
+
+const challengeFixtureDoc = (overrides = {}) => ({
+  orgId: HOST_ORG,
+  compId: 'comp_challenge',
+  // For a challenge, the entrant ids ARE the clubs' ids. That is what makes
+  // "which side is mine" answerable from the fixture alone.
+  entrantAId: GUEST_ORG,
+  entrantBId: HOST_ORG,
+  entrantAName: 'Guest Club',
+  entrantBName: 'Host Club',
+  status: 'scheduled',
+  round: 1,
+  matchIndex: 0,
+  roundLabel: 'Challenge',
+  scheduledAt: null,
+  venue: null,
+  scorerUids: [HOST_ADMIN],
+  participantOrgIds: [GUEST_ORG, HOST_ORG],
+  officials: [],
+  scoreState: {},
+  summary: '',
+  lastSeq: 0,
+  winnerEntrantId: null,
+  isDraw: false,
+  rulesetVersion: 1,
+  scoringPluginKey: 'cricket',
+  sportId: 'cricket',
+  scoringConfig: {},
+  lineupA: [],
+  lineupB: [],
+  squadLockedA: false,
+  squadLockedB: false,
+  createdAt: serverTimestamp(),
+  ...overrides,
+});
+
+async function seedChallenge(overrides = {}) {
+  await seed(async (db) => {
+    for (const [orgId, admin] of [
+      [HOST_ORG, HOST_ADMIN],
+      [GUEST_ORG, GUEST_ADMIN],
+    ]) {
+      await setDoc(doc(db, 'orgs', orgId), organization(admin, 'public'));
+      await setDoc(
+        doc(db, 'orgs', orgId, 'members', admin),
+        membership(admin, orgId, 'owner'),
+      );
+    }
+    await setDoc(
+      doc(db, 'orgs', HOST_ORG, 'competitions', 'comp_challenge'),
+      competition(HOST_ORG, {
+        participantOrgIds: [GUEST_ORG, HOST_ORG],
+        status: 'scheduled',
+      }),
+    );
+    await setDoc(
+      doc(
+        db, 'orgs', HOST_ORG, 'competitions', 'comp_challenge',
+        'fixtures', 'fx_challenge',
+      ),
+      challengeFixtureDoc(overrides),
+    );
+  });
+}
+
+const fixRef = (db) =>
+  doc(
+    db, 'orgs', HOST_ORG, 'competitions', 'comp_challenge',
+    'fixtures', 'fx_challenge',
+  );
+
+const squad = (uid, name) => [{ id: uid, name, uid, isGuest: false }];
+
+describe('inter-club: each club picks its own squad', () => {
+  it('lets the VISITING club name side A', async () => {
+    // This is the case that did not work at all before: the guest club has no
+    // authority in the host's tenant, which is where the fixture lives.
+    await seedChallenge();
+    const db = testEnv.authenticatedContext(GUEST_ADMIN).firestore();
+    await assertSucceeds(
+      updateDoc(fixRef(db), {
+        lineupA: squad('u_guest', 'Guest Player'),
+        playerUids: ['u_guest'],
+      }),
+    );
+  });
+
+  it('refuses the visiting club naming the HOST club players', async () => {
+    await seedChallenge();
+    const db = testEnv.authenticatedContext(GUEST_ADMIN).firestore();
+    await assertFails(
+      updateDoc(fixRef(db), {
+        lineupB: squad('u_host', 'Host Player'),
+        playerUids: ['u_host'],
+      }),
+    );
+  });
+
+  it('refuses the visiting club touching the score under cover of a squad write', async () => {
+    await seedChallenge();
+    const db = testEnv.authenticatedContext(GUEST_ADMIN).firestore();
+    await assertFails(
+      updateDoc(fixRef(db), {
+        lineupA: squad('u_guest', 'Guest Player'),
+        playerUids: ['u_guest'],
+        lastSeq: 99,
+        summary: 'Guest Club won',
+      }),
+    );
+  });
+
+  it('refuses an unrelated club touching either squad', async () => {
+    await seedChallenge();
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      updateDoc(fixRef(db), { lineupA: squad('u_x', 'Nobody') }),
+    );
+  });
+});
+
+describe('inter-club: locking a final squad', () => {
+  it('lets a club lock its own side', async () => {
+    await seedChallenge();
+    const db = testEnv.authenticatedContext(GUEST_ADMIN).firestore();
+    await assertSucceeds(
+      updateDoc(fixRef(db), {
+        lineupA: squad('u_guest', 'Guest Player'),
+        playerUids: ['u_guest'],
+        squadLockedA: true,
+      }),
+    );
+  });
+
+  it('freezes a locked squad against the club that locked it', async () => {
+    await seedChallenge({ squadLockedA: true });
+    const db = testEnv.authenticatedContext(GUEST_ADMIN).firestore();
+    await assertFails(
+      updateDoc(fixRef(db), { lineupA: squad('u_late', 'Late Change') }),
+    );
+  });
+
+  it('freezes a locked squad against the HOSTING club too', async () => {
+    // The host has broad authority over a fixture in its own tenant. A squad
+    // the other club has declared final is the one thing that authority must
+    // not reach — otherwise "lock your final squad" means nothing.
+    await seedChallenge({ squadLockedA: true });
+    const db = testEnv.authenticatedContext(HOST_ADMIN).firestore();
+    await assertFails(
+      updateDoc(fixRef(db), { lineupA: squad('u_swapped', 'Swapped In') }),
+    );
+  });
+
+  it('lets the locking club reopen its own squad', async () => {
+    await seedChallenge({ squadLockedA: true });
+    const db = testEnv.authenticatedContext(GUEST_ADMIN).firestore();
+    await assertSucceeds(updateDoc(fixRef(db), { squadLockedA: false }));
+  });
+
+  it('refuses the host unlocking the visiting club squad', async () => {
+    await seedChallenge({ squadLockedA: true });
+    const db = testEnv.authenticatedContext(HOST_ADMIN).firestore();
+    await assertFails(updateDoc(fixRef(db), { squadLockedA: false }));
+  });
+
+  it('refuses an unlock that smuggles a changed team past the opponent', async () => {
+    await seedChallenge({
+      squadLockedA: true,
+      lineupA: squad('u_agreed', 'Agreed Player'),
+    });
+    const db = testEnv.authenticatedContext(GUEST_ADMIN).firestore();
+    await assertFails(
+      updateDoc(fixRef(db), {
+        squadLockedA: false,
+        lineupA: squad('u_ringer', 'Ringer'),
+      }),
+    );
+  });
+
+  it('leaves an ordinary internal fixture unaffected', async () => {
+    // Entrants there are houses, not clubs, and the hosting club's organizers
+    // run both sides exactly as before.
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER),
+        membership(OWNER, PUBLIC_ORG, 'owner'),
+      );
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1'),
+        competition(PUBLIC_ORG),
+      );
+      await setDoc(
+        doc(
+          db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1',
+          'fixtures', 'fx1',
+        ),
+        fixture(PUBLIC_ORG, 'comp1', [OWNER], 'scheduled'),
+      );
+    });
+
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      updateDoc(
+        doc(
+          db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1',
+          'fixtures', 'fx1',
+        ),
+        {
+          lineupA: squad('u1', 'Blue Player'),
+          lineupB: squad('u2', 'Red Player'),
+          playerUids: ['u1', 'u2'],
+        },
+      ),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Squad calls — "the first eleven of OUR members who register are playing".
+//
+// The per-side mirror of the participation model, and the half of flow step 6
+// that was missing: a challenged club opening its own side to its own members
+// instead of its admin naming eleven people by hand.
+// ---------------------------------------------------------------------------
+
+const GUEST_MEMBER = 'uid_guest_member';
+const HOST_MEMBER = 'uid_host_member';
+
+const squadCall = (over = {}) => ({
+  open: true,
+  capacity: 11,
+  confirmed: 0,
+  waitlisted: 0,
+  waitlistEnabled: true,
+  ...over,
+});
+
+async function seedSquadCall({ callA = squadCall(), callB = squadCall() } = {}) {
+  await seed(async (db) => {
+    for (const [orgId, admin, member] of [
+      [HOST_ORG, HOST_ADMIN, HOST_MEMBER],
+      [GUEST_ORG, GUEST_ADMIN, GUEST_MEMBER],
+    ]) {
+      await setDoc(doc(db, 'orgs', orgId), organization(admin, 'public'));
+      await setDoc(
+        doc(db, 'orgs', orgId, 'members', admin),
+        membership(admin, orgId, 'owner'),
+      );
+      await setDoc(
+        doc(db, 'orgs', orgId, 'members', member),
+        membership(member, orgId, 'member'),
+      );
+    }
+    await setDoc(
+      doc(db, 'orgs', HOST_ORG, 'competitions', 'comp_challenge'),
+      competition(HOST_ORG, {
+        participantOrgIds: [GUEST_ORG, HOST_ORG],
+        status: 'scheduled',
+      }),
+    );
+    await setDoc(
+      doc(
+        db, 'orgs', HOST_ORG, 'competitions', 'comp_challenge',
+        'fixtures', 'fx_challenge',
+      ),
+      challengeFixtureDoc({ squadCallA: callA, squadCallB: callB }),
+    );
+  });
+}
+
+const entryRef = (db, uid) =>
+  doc(
+    db, 'orgs', HOST_ORG, 'competitions', 'comp_challenge',
+    'fixtures', 'fx_challenge', 'squadEntries', uid,
+  );
+
+const squadEntry = (uid, orgId, side, status, over = {}) => ({
+  uid,
+  displayName: 'Squad Member',
+  photoUrl: null,
+  side,
+  orgId,
+  status,
+  waitlistPosition: null,
+  addedByAdmin: false,
+  createdAt: serverTimestamp(),
+  ...over,
+});
+
+describe('squad call: a club opening its own side to its own members', () => {
+  it('lets a guest-club member register for the guest club side', async () => {
+    await seedSquadCall();
+    const db = testEnv.authenticatedContext(GUEST_MEMBER).firestore();
+
+    const batch = writeBatch(db);
+    batch.set(
+      entryRef(db, GUEST_MEMBER),
+      squadEntry(GUEST_MEMBER, GUEST_ORG, 'a', 'confirmed'),
+    );
+    batch.update(fixRef(db), { squadCallA: squadCall({ confirmed: 1 }) });
+    await assertSucceeds(batch.commit());
+  });
+
+  it('refuses a member registering for the OTHER club side', async () => {
+    // The whole point. A member of ABC cannot put themselves in XYZ's eleven,
+    // however they craft the write — the side is checked against the club
+    // they are actually active in.
+    await seedSquadCall();
+    const db = testEnv.authenticatedContext(GUEST_MEMBER).firestore();
+
+    const batch = writeBatch(db);
+    batch.set(
+      entryRef(db, GUEST_MEMBER),
+      squadEntry(GUEST_MEMBER, GUEST_ORG, 'b', 'confirmed'),
+    );
+    batch.update(fixRef(db), { squadCallB: squadCall({ confirmed: 1 }) });
+    await assertFails(batch.commit());
+  });
+
+  it('refuses a member claiming to belong to a club they are not in', async () => {
+    await seedSquadCall();
+    const db = testEnv.authenticatedContext(GUEST_MEMBER).firestore();
+
+    const batch = writeBatch(db);
+    batch.set(
+      entryRef(db, GUEST_MEMBER),
+      squadEntry(GUEST_MEMBER, HOST_ORG, 'b', 'confirmed'),
+    );
+    batch.update(fixRef(db), { squadCallB: squadCall({ confirmed: 1 }) });
+    await assertFails(batch.commit());
+  });
+
+  it('refuses an outsider joining either side', async () => {
+    await seedSquadCall();
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(
+        entryRef(db, OUTSIDER),
+        squadEntry(OUTSIDER, GUEST_ORG, 'a', 'confirmed'),
+      ),
+    );
+  });
+
+  it('refuses registering when the club has not opened its side', async () => {
+    await seedSquadCall({ callA: squadCall({ open: false }) });
+    const db = testEnv.authenticatedContext(GUEST_MEMBER).firestore();
+
+    const batch = writeBatch(db);
+    batch.set(
+      entryRef(db, GUEST_MEMBER),
+      squadEntry(GUEST_MEMBER, GUEST_ORG, 'a', 'confirmed'),
+    );
+    batch.update(fixRef(db), {
+      squadCallA: squadCall({ open: false, confirmed: 1 }),
+    });
+    await assertFails(batch.commit());
+  });
+
+  it('refuses confirming into a side that is already full', async () => {
+    await seedSquadCall({ callA: squadCall({ confirmed: 11 }) });
+    const db = testEnv.authenticatedContext(GUEST_MEMBER).firestore();
+
+    const batch = writeBatch(db);
+    batch.set(
+      entryRef(db, GUEST_MEMBER),
+      squadEntry(GUEST_MEMBER, GUEST_ORG, 'a', 'confirmed'),
+    );
+    batch.update(fixRef(db), { squadCallA: squadCall({ confirmed: 12 }) });
+    await assertFails(batch.commit());
+  });
+
+  it('queues the twelfth member when the side is full', async () => {
+    await seedSquadCall({ callA: squadCall({ confirmed: 11 }) });
+    const db = testEnv.authenticatedContext(GUEST_MEMBER).firestore();
+
+    const batch = writeBatch(db);
+    batch.set(
+      entryRef(db, GUEST_MEMBER),
+      squadEntry(GUEST_MEMBER, GUEST_ORG, 'a', 'waitlisted', {
+        waitlistPosition: 1,
+      }),
+    );
+    batch.update(fixRef(db), {
+      squadCallA: squadCall({ confirmed: 11, waitlisted: 1 }),
+    });
+    await assertSucceeds(batch.commit());
+  });
+
+  it('refuses an entry that does not pay for its place', async () => {
+    // Without the getAfter() linkage a member could write eleven confirmed
+    // entries and never move the counter, and every one would pass.
+    await seedSquadCall();
+    const db = testEnv.authenticatedContext(GUEST_MEMBER).firestore();
+    await assertFails(
+      setDoc(
+        entryRef(db, GUEST_MEMBER),
+        squadEntry(GUEST_MEMBER, GUEST_ORG, 'a', 'confirmed'),
+      ),
+    );
+  });
+
+  it('refuses a registrant changing the call itself', async () => {
+    // Whether the side is open, and how many places it has, belongs to that
+    // club's admins — not to whoever happens to be registering.
+    await seedSquadCall();
+    const db = testEnv.authenticatedContext(GUEST_MEMBER).firestore();
+
+    const batch = writeBatch(db);
+    batch.set(
+      entryRef(db, GUEST_MEMBER),
+      squadEntry(GUEST_MEMBER, GUEST_ORG, 'a', 'confirmed'),
+    );
+    batch.update(fixRef(db), {
+      squadCallA: squadCall({ confirmed: 1, capacity: 99 }),
+    });
+    await assertFails(batch.commit());
+  });
+
+  it('refuses a registrant touching the other side counters', async () => {
+    await seedSquadCall();
+    const db = testEnv.authenticatedContext(GUEST_MEMBER).firestore();
+
+    const batch = writeBatch(db);
+    batch.set(
+      entryRef(db, GUEST_MEMBER),
+      squadEntry(GUEST_MEMBER, GUEST_ORG, 'a', 'confirmed'),
+    );
+    batch.update(fixRef(db), {
+      squadCallA: squadCall({ confirmed: 1 }),
+      squadCallB: squadCall({ confirmed: 5 }),
+    });
+    await assertFails(batch.commit());
+  });
+
+  it('lets a club admin add one of their own players directly', async () => {
+    await seedSquadCall();
+    const db = testEnv.authenticatedContext(GUEST_ADMIN).firestore();
+    await assertSucceeds(
+      setDoc(
+        entryRef(db, GUEST_MEMBER),
+        squadEntry(GUEST_MEMBER, GUEST_ORG, 'a', 'confirmed', {
+          addedByAdmin: true,
+        }),
+      ),
+    );
+  });
+
+  it('refuses the HOST admin adding a player to the guest club side', async () => {
+    await seedSquadCall();
+    const db = testEnv.authenticatedContext(HOST_ADMIN).firestore();
+    await assertFails(
+      setDoc(
+        entryRef(db, HOST_MEMBER),
+        squadEntry(HOST_MEMBER, GUEST_ORG, 'a', 'confirmed', {
+          addedByAdmin: true,
+        }),
+      ),
+    );
+  });
+
+  it('lets a member pull out of a squad they joined', async () => {
+    await seedSquadCall({ callA: squadCall({ confirmed: 1 }) });
+    await seed(async (db) => {
+      await setDoc(
+        entryRef(db, GUEST_MEMBER),
+        squadEntry(GUEST_MEMBER, GUEST_ORG, 'a', 'confirmed'),
+      );
+    });
+
+    const db = testEnv.authenticatedContext(GUEST_MEMBER).firestore();
+    const batch = writeBatch(db);
+    batch.update(entryRef(db, GUEST_MEMBER), {
+      status: 'withdrawn',
+      waitlistPosition: null,
+    });
+    batch.update(fixRef(db), { squadCallA: squadCall({ confirmed: 0 }) });
+    await assertSucceeds(batch.commit());
+  });
+
+  it('refuses a member withdrawing somebody else', async () => {
+    await seedSquadCall({ callA: squadCall({ confirmed: 1 }) });
+    await seed(async (db) => {
+      await setDoc(
+        entryRef(db, 'uid_someone_else'),
+        squadEntry('uid_someone_else', GUEST_ORG, 'a', 'confirmed'),
+      );
+    });
+
+    const db = testEnv.authenticatedContext(GUEST_MEMBER).firestore();
+    await assertFails(
+      updateDoc(entryRef(db, 'uid_someone_else'), { status: 'withdrawn' }),
+    );
+  });
+
+  it('promotes the first reserve into a place a withdrawal freed', async () => {
+    await seedSquadCall({
+      callA: squadCall({ confirmed: 10, waitlisted: 1 }),
+    });
+    await seed(async (db) => {
+      await setDoc(
+        entryRef(db, 'uid_reserve'),
+        squadEntry('uid_reserve', GUEST_ORG, 'a', 'waitlisted', {
+          waitlistPosition: 1,
+        }),
+      );
+    });
+
+    const db = testEnv.authenticatedContext(GUEST_MEMBER).firestore();
+    const batch = writeBatch(db);
+    batch.update(entryRef(db, 'uid_reserve'), {
+      status: 'confirmed',
+      waitlistPosition: null,
+      promotedFromWaitlistAt: serverTimestamp(),
+    });
+    batch.update(fixRef(db), {
+      squadCallA: squadCall({ confirmed: 11, waitlisted: 0 }),
+    });
+    await assertSucceeds(batch.commit());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Club polls — members answer, without being able to post.
+// ---------------------------------------------------------------------------
+
+const announcement = (over = {}) => ({
+  orgId: PUBLIC_ORG,
+  authorUid: OWNER,
+  authorName: 'Owner',
+  title: 'Which ground on Sunday?',
+  content: '',
+  isPinned: false,
+  createdAt: serverTimestamp(),
+  poll: {
+    options: ['Ground A', 'Ground B'],
+    votes: {},
+    closed: false,
+  },
+  ...over,
+});
+
+const annRef = (db) => doc(db, 'orgs', PUBLIC_ORG, 'announcements', 'a1');
+
+async function seedPoll(over = {}) {
+  await seed(async (db) => {
+    await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+    await setDoc(
+      doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER),
+      membership(OWNER, PUBLIC_ORG, 'owner'),
+    );
+    await setDoc(
+      doc(db, 'orgs', PUBLIC_ORG, 'members', PLAYER),
+      membership(PLAYER, PUBLIC_ORG, 'member'),
+    );
+    await setDoc(annRef(db), announcement(over));
+  });
+}
+
+describe('club polls', () => {
+  it('lets an ordinary member cast a vote', async () => {
+    await seedPoll();
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertSucceeds(
+      updateDoc(annRef(db), { [`poll.votes.${PLAYER}`]: 1 }),
+    );
+  });
+
+  it('refuses a member voting on somebody else behalf', async () => {
+    await seedPoll();
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(
+      updateDoc(annRef(db), { [`poll.votes.${OWNER}`]: 0 }),
+    );
+  });
+
+  it('refuses a member rewriting the question', async () => {
+    await seedPoll();
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(updateDoc(annRef(db), { title: 'Something else' }));
+  });
+
+  it('refuses a member rewriting the options', async () => {
+    await seedPoll();
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(
+      updateDoc(annRef(db), { 'poll.options': ['Only one answer now'] }),
+    );
+  });
+
+  it('refuses a member closing the poll', async () => {
+    await seedPoll();
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(updateDoc(annRef(db), { 'poll.closed': true }));
+  });
+
+  it('refuses votes once an admin has closed it', async () => {
+    await seedPoll({ poll: { options: ['A', 'B'], votes: {}, closed: true } });
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(
+      updateDoc(annRef(db), { [`poll.votes.${PLAYER}`]: 0 }),
+    );
+  });
+
+  it('refuses an outsider voting', async () => {
+    await seedPoll();
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      updateDoc(annRef(db), { [`poll.votes.${OUTSIDER}`]: 0 }),
+    );
+  });
+
+  it('still refuses a member posting an announcement', async () => {
+    // Voting must not have widened who can post to the club feed.
+    await seedPoll();
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(
+      setDoc(doc(db, 'orgs', PUBLIC_ORG, 'announcements', 'a2'), announcement()),
+    );
+  });
+
+  it('lets an admin close their own poll', async () => {
+    await seedPoll();
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(updateDoc(annRef(db), { 'poll.closed': true }));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Quick match — the club's own internal game, and one player against another.
+//
+// This is the only competition an ORDINARY MEMBER may create, so it is the
+// only place in the ruleset where the create path is not an organizer's. The
+// tests below are about where that widening stops.
+//
+// The competition and its single fixture are written in ONE batch, which is
+// what forces the fixture rule to use getAfter() rather than get(): at the
+// moment it is evaluated the parent does not exist committed yet.
+// ---------------------------------------------------------------------------
+describe('quick match: a member starting their own match', () => {
+  const QM_COMP = 'comp_quick';
+  const QM_FIX = 'fx_quick';
+  const MEMBER_A = 'uid_qm_member_a';
+  const MEMBER_B = 'uid_qm_member_b';
+
+  const player = (uid, name) => ({
+    id: uid,
+    name,
+    uid,
+    jerseyNumber: null,
+    isCaptain: false,
+    isKeeper: false,
+  });
+
+  /** A single-match competition as `Competition.toCreate` writes it. */
+  const quickComp = (creator, overrides = {}) =>
+    competition(PUBLIC_ORG, {
+      name: 'Aarav v Bhavya',
+      nameLower: 'aarav v bhavya',
+      sportId: 'badminton',
+      sportName: 'Badminton',
+      scoringPluginKey: 'set_based',
+      format: 'single_match',
+      status: 'in_progress',
+      participationModel: 'approval',
+      maxEntrants: null,
+      entrantCount: 2,
+      fixtureCount: 1,
+      createdBy: creator,
+      ...overrides,
+    });
+
+  /** Its one fixture, with both line-ups already named. */
+  const quickFixture = (creator, playerUids, overrides = {}) => ({
+    ...fixture(PUBLIC_ORG, QM_COMP, [creator], 'live'),
+    entrantAId: 'side_a',
+    entrantBId: 'side_b',
+    scoringPluginKey: 'set_based',
+    sportId: 'badminton',
+    lineupA: [player(playerUids[0], 'Aarav')],
+    lineupB: [player(playerUids[1], 'Bhavya')],
+    playerUids,
+    ...overrides,
+  });
+
+  /** Exactly what `createQuickMatch` commits: both documents, one batch. */
+  const startMatch = (db, creator, playerUids, opts = {}) => {
+    const batch = writeBatch(db);
+    batch.set(
+      doc(db, 'orgs', PUBLIC_ORG, 'competitions', QM_COMP),
+      quickComp(creator, opts.comp),
+    );
+    batch.set(
+      doc(db, 'orgs', PUBLIC_ORG, 'competitions', QM_COMP, 'fixtures', QM_FIX),
+      quickFixture(creator, playerUids, opts.fixture),
+    );
+    return batch.commit();
+  };
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      for (const uid of [MEMBER_A, MEMBER_B]) {
+        await setDoc(
+          doc(db, 'orgs', PUBLIC_ORG, 'members', uid),
+          membership(uid, PUBLIC_ORG, 'member'),
+        );
+      }
+    });
+  });
+
+  it('lets a plain member start a match they are playing in', async () => {
+    // The whole point of the feature. Before this branch existed, two club
+    // members could not record a game between themselves without finding an
+    // admin to create an event, open entries, close them and draw a bracket.
+    const db = testEnv.authenticatedContext(MEMBER_A).firestore();
+    await assertSucceeds(startMatch(db, MEMBER_A, [MEMBER_A, MEMBER_B]));
+  });
+
+  it('refuses a member manufacturing a match between two OTHER people', async () => {
+    // The real limit on the member branch. A finished match settles ratings
+    // and career statistics onto its players' profiles, so being able to
+    // invent matches you are not in is being able to write on other people's
+    // records.
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OUTSIDER),
+        membership(OUTSIDER, PUBLIC_ORG, 'member'),
+      );
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(startMatch(db, OUTSIDER, [MEMBER_A, MEMBER_B]));
+  });
+
+  it('lets an ORGANIZER start a match between two other people', async () => {
+    // An admin running the club's Sunday game is not playing in it. The
+    // organizer branch is unchanged and still applies.
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', ADMIN),
+        membership(ADMIN, PUBLIC_ORG, 'admin'),
+      );
+    });
+    const db = testEnv.authenticatedContext(ADMIN).firestore();
+    await assertSucceeds(startMatch(db, ADMIN, [MEMBER_A, MEMBER_B]));
+  });
+
+  it('refuses a NON-MEMBER starting a match in a club they do not belong to', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(startMatch(db, OUTSIDER, [OUTSIDER, MEMBER_A]));
+  });
+
+  it('refuses a member opening a TOURNAMENT through the same path', async () => {
+    // The format is what the member branch is scoped to. Without this check
+    // the widening would be "any member may create any competition".
+    const db = testEnv.authenticatedContext(MEMBER_A).firestore();
+    await assertFails(
+      startMatch(db, MEMBER_A, [MEMBER_A, MEMBER_B], {
+        comp: { format: 'knockout', status: 'registration_open' },
+      }),
+    );
+  });
+
+  it('refuses a member charging an entry fee for one', async () => {
+    // Taking money is an organizing act whatever the format says.
+    const db = testEnv.authenticatedContext(MEMBER_A).firestore();
+    await assertFails(
+      startMatch(db, MEMBER_A, [MEMBER_A, MEMBER_B], {
+        comp: { entryFeeRupees: 200 },
+      }),
+    );
+  });
+
+  it('refuses a member attributing the match to somebody else', async () => {
+    const db = testEnv.authenticatedContext(MEMBER_A).firestore();
+    await assertFails(startMatch(db, MEMBER_B, [MEMBER_A, MEMBER_B]));
+  });
+
+  it('refuses a member handing the pen to a third party', async () => {
+    // A quick match has no organizer to assign a scorer, so the creator is
+    // the scorer and nobody else. Otherwise this path would be a way to put
+    // an unrelated person in control of a live scoreboard.
+    const db = testEnv.authenticatedContext(MEMBER_A).firestore();
+    await assertFails(
+      startMatch(db, MEMBER_A, [MEMBER_A, MEMBER_B], {
+        fixture: { scorerUids: [MEMBER_A, OUTSIDER] },
+      }),
+    );
+  });
+
+  it('refuses a fixture that claims single-match status its parent does not have', async () => {
+    // The fixture rule re-reads the parent rather than trusting the fixture's
+    // own fields, so a member cannot write a fixture into somebody's real
+    // tournament by asserting the format on the fixture itself.
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp_real'),
+        competition(PUBLIC_ORG, { format: 'knockout', createdBy: OWNER }),
+      );
+    });
+    const db = testEnv.authenticatedContext(MEMBER_A).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp_real', 'fixtures', 'fx_x'),
+        {
+          ...quickFixture(MEMBER_A, [MEMBER_A, MEMBER_B]),
+          compId: 'comp_real',
+        },
+      ),
+    );
+  });
+
+  it('lets the creator score the match they started', async () => {
+    // The path is only worth anything if the next tap is a score.
+    const db = testEnv.authenticatedContext(MEMBER_A).firestore();
+    await assertSucceeds(startMatch(db, MEMBER_A, [MEMBER_A, MEMBER_B]));
+    await assertSucceeds(
+      setDoc(
+        doc(
+          db, 'orgs', PUBLIC_ORG, 'competitions', QM_COMP,
+          'fixtures', QM_FIX, 'events', '0000000001',
+        ),
+        {
+          seq: 1,
+          type: 'point',
+          side: 'a',
+          payload: {},
+          byUid: MEMBER_A,
+          clientEventId: 'evt-1',
+          at: serverTimestamp(),
+        },
+      ),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Player codes — `playerCodes/{PSOS-4K7M2}`.
+//
+// The code IS the document id, which is where uniqueness comes from: Firestore
+// has no unique constraint, but a create on an existing id fails, so claiming
+// is first-come by construction.
+//
+// The document is world-readable on purpose, and the tests below are about the
+// two things that makes acceptable: it carries a name and a photo and nothing
+// else, and it can never be reassigned once claimed.
+// ---------------------------------------------------------------------------
+describe('player codes', () => {
+  const CODE = 'PSOS-4K7M2';
+  const CLAIMER = 'uid_code_claimer';
+  const RIVAL = 'uid_code_rival';
+
+  const profile = (uid, overrides = {}) => ({
+    uid,
+    displayName: 'Aarav Reddy',
+    email: `${uid}@example.test`,
+    dateOfBirth: new Date('1996-04-02'),
+    gender: 'male',
+    photoUrl: null,
+    phone: null,
+    profileVisibility: 'community',
+    profileComplete: true,
+    geo: {},
+    orgIds: [],
+    playerCode: null,
+    isMinor: false,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  const reservation = (uid, overrides = {}) => ({
+    uid,
+    displayName: 'Aarav Reddy',
+    photoUrl: null,
+    createdAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  /** Exactly what `UserRepository.ensureCode` commits: both writes, one batch. */
+  const claim = (db, uid, code = CODE, opts = {}) => {
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'playerCodes', code), reservation(uid, opts.reservation));
+    batch.update(doc(db, 'users', uid), { playerCode: opts.pointAt ?? code });
+    return batch.commit();
+  };
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      for (const uid of [CLAIMER, RIVAL]) {
+        await setDoc(doc(db, 'users', uid), profile(uid));
+      }
+    });
+  });
+
+  it('lets a signed-in user claim a code and point their profile at it', async () => {
+    const db = testEnv.authenticatedContext(CLAIMER).firestore();
+    await assertSucceeds(claim(db, CLAIMER));
+  });
+
+  it('refuses a second claim on a code somebody already holds', async () => {
+    // This is the uniqueness guarantee, and it is structural rather than
+    // enforced: the id already exists, so the create fails. Without it two
+    // players share a public identity and every match record follows the
+    // wrong one.
+    const first = testEnv.authenticatedContext(CLAIMER).firestore();
+    await assertSucceeds(claim(first, CLAIMER));
+
+    const second = testEnv.authenticatedContext(RIVAL).firestore();
+    await assertFails(claim(second, RIVAL));
+  });
+
+  it('refuses claiming a code on somebody else\'s behalf', async () => {
+    const db = testEnv.authenticatedContext(RIVAL).firestore();
+    await assertFails(
+      setDoc(doc(db, 'playerCodes', CODE), reservation(CLAIMER)),
+    );
+  });
+
+  it('refuses a reservation whose profile does not point back at it', async () => {
+    // The two writes have to agree, or the reservation names a code the
+    // profile does not carry — a code burned for nobody.
+    const db = testEnv.authenticatedContext(CLAIMER).firestore();
+    await assertFails(claim(db, CLAIMER, CODE, { pointAt: 'PSOS-99999' }));
+  });
+
+  it('refuses a bare reservation with no profile write at all', async () => {
+    const db = testEnv.authenticatedContext(CLAIMER).firestore();
+    await assertFails(
+      setDoc(doc(db, 'playerCodes', CODE), reservation(CLAIMER)),
+    );
+  });
+
+  it('refuses a signed-out claim', async () => {
+    const db = testEnv.unauthenticatedContext().firestore();
+    await assertFails(
+      setDoc(doc(db, 'playerCodes', CODE), reservation(CLAIMER)),
+    );
+  });
+
+  it('lets a total stranger resolve a code', async () => {
+    // The entire point. A captain filling in a team sheet is adding somebody
+    // from another club, whose profile they cannot read — if the lookup
+    // required a shared club it would be a slower member list.
+    await seed(async (db) => {
+      await setDoc(doc(db, 'playerCodes', CODE), reservation(CLAIMER));
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    const snap = await assertSucceeds(getDoc(doc(db, 'playerCodes', CODE)));
+    assert.equal(snap.data().uid, CLAIMER);
+    // What the world may learn is a name and a photo. Anything more would
+    // make an enumerable collection a privacy problem rather than a directory.
+    assert.deepEqual(
+      Object.keys(snap.data()).sort(),
+      ['createdAt', 'displayName', 'photoUrl', 'uid'],
+    );
+  });
+
+  it('lets a signed-out spectator resolve one too', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'playerCodes', CODE), reservation(CLAIMER));
+    });
+    const db = testEnv.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(db, 'playerCodes', CODE)));
+  });
+
+  it('refuses reassigning a claimed code to somebody else', async () => {
+    // A reassignable code is two people able to trade public identities, and
+    // every match either had played would follow the swap.
+    await seed(async (db) => {
+      await setDoc(doc(db, 'playerCodes', CODE), reservation(CLAIMER));
+    });
+    const db = testEnv.authenticatedContext(RIVAL).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'playerCodes', CODE), { uid: RIVAL }),
+    );
+  });
+
+  it('refuses the holder editing or deleting their own reservation', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'playerCodes', CODE), reservation(CLAIMER));
+    });
+    const db = testEnv.authenticatedContext(CLAIMER).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'playerCodes', CODE), { displayName: 'Someone Else' }),
+    );
+    await assertFails(deleteDoc(doc(db, 'playerCodes', CODE)));
+  });
+
+  it('refuses a user changing the code on their own profile once set', async () => {
+    // The reservation makes a code unique; this is what stops it moving.
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', CLAIMER), profile(CLAIMER, { playerCode: CODE }));
+    });
+    const db = testEnv.authenticatedContext(CLAIMER).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'users', CLAIMER), { playerCode: 'PSOS-00000' }),
+    );
+  });
+
+  it('still lets a user edit the rest of their profile afterwards', async () => {
+    // Guards against the write-once rule being so blunt it freezes the whole
+    // document — profile editing has to keep working.
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', CLAIMER), profile(CLAIMER, { playerCode: CODE }));
+    });
+    const db = testEnv.authenticatedContext(CLAIMER).firestore();
+    await assertSucceeds(
+      updateDoc(doc(db, 'users', CLAIMER), {
+        displayName: 'Aarav R',
+        playerCode: CODE,
       }),
     );
   });

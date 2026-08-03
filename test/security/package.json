@@ -5,7 +5,7 @@
   "description": "Emulator-backed tests for firestore.rules",
   "scripts": {
     "//": "Uses the LOCAL firebase-tools, pinned to v13: v15+ requires JDK 21 and this machine has JDK 17. Keeping it local avoids touching the system toolchain.",
-    "test": "firebase emulators:exec --only firestore --project playsphere-test 'node --test rules.test.mjs'"
+    "test": "firebase emulators:exec --only firestore,storage --project playsphere-test 'node --test rules.test.mjs'"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^4.0.1",
