@@ -67,6 +67,8 @@ class Fixture {
     this.qualifierA,
     this.qualifierB,
     this.courtId,
+    this.resultType = MatchResultType.normal,
+    this.resultNote,
     this.startedAt,
     this.completedAt,
   });
@@ -333,8 +335,26 @@ class Fixture {
   /// the scheduler must not call it to a court.
   bool get hasBothEntrants => entrantAId.isNotEmpty && entrantBId.isNotEmpty;
 
+  /// How the match ended — see [MatchResultType]. Defaults to [normal], which
+  /// is what every fixture written before this field existed was.
+  final MatchResultType resultType;
+
+  /// Why, in the organizer's or referee's own words: "opponent did not arrive
+  /// by the 20-minute cut-off", "retired at 11-6 in game 2, ankle".
+  ///
+  /// `forceResult` has always written this field and no model has ever read
+  /// it, so every explanation an organizer typed went into Firestore and was
+  /// visible nowhere — which is exactly the record a protest needs weeks
+  /// later.
+  final String? resultNote;
+
   final DateTime? startedAt;
   final DateTime? completedAt;
+
+  /// Whether this result should award league points. See
+  /// [MatchResultType.countsForStandings].
+  bool get countsForStandings =>
+      status.isResulted && resultType.countsForStandings;
 
   bool get isLive => status == FixtureStatus.live;
   bool get hasResult => status.isResulted;
@@ -400,6 +420,8 @@ class Fixture {
       qualifierA: QualifierSource.fromWire(Fs.strOrNull(d['qualifierA'])),
       qualifierB: QualifierSource.fromWire(Fs.strOrNull(d['qualifierB'])),
       courtId: Fs.strOrNull(d['courtId']),
+      resultType: MatchResultType.fromWire(Fs.strOrNull(d['resultType'])),
+      resultNote: Fs.strOrNull(d['resultNote']),
       startedAt: Fs.dateOrNull(d['startedAt']),
       completedAt: Fs.dateOrNull(d['completedAt']),
     );
@@ -449,6 +471,8 @@ class Fixture {
         'qualifierA': qualifierA?.wire,
         'qualifierB': qualifierB?.wire,
         'courtId': courtId,
+        'resultType': resultType.wire,
+        'resultNote': resultNote,
         'createdAt': FieldValue.serverTimestamp(),
       };
 
@@ -470,6 +494,8 @@ class Fixture {
     DateTime? scheduledAt,
     String? venue,
     String? courtId,
+    MatchResultType? resultType,
+    String? resultNote,
   }) {
     return Fixture(
       id: id,
@@ -524,6 +550,8 @@ class Fixture {
       qualifierA: qualifierA,
       qualifierB: qualifierB,
       courtId: courtId ?? this.courtId,
+      resultType: resultType ?? this.resultType,
+      resultNote: resultNote ?? this.resultNote,
       startedAt: startedAt,
       completedAt: completedAt,
     );

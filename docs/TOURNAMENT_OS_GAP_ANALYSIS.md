@@ -372,10 +372,16 @@ Ordered by value ÷ cost. Every phase ships and is tested.
 
 **Still deliberately out of T1:** seeding from Glicko (T4), federation-style random draws (T4), result types (T2), and the cross-event scheduling that only a `Tournament` entity makes possible (T3). The schedule laid down here is per-competition and static — it does not yet reflow when a match runs late.
 
-### Phase T2 — Result integrity *(≈3 days, fixes silent data corruption)*
-8. `MatchResultType` enum: normal / walkover / retired / disqualified / no-show / abandoned / conceded
-9. Rating and career-stat pipelines respect it (a W/O must not feed Glicko)
-10. Withdrawal cascade — a team pulling out resolves its remaining fixtures
+### Phase T2 — Result integrity ✅ **DONE 2026-08-03**
+8. ✅ `MatchResultType` — normal / walkover / retired / disqualified / noShow / abandoned / conceded, with three separate predicates (`countsForStandings`, `countsForRating`, `countsForCareerStats`) because the three questions have genuinely different answers
+9. ✅ `RatingService.processMatchRatings` returns early unless `countsForRating`; `StandingsCalculator` reads `fixture.countsForStandings` instead of `status.isResulted`
+10. ✅ `CompetitionRepository.withdrawEntrant` — concedes every unplayed fixture to the opponent and carries the beneficiary forward through the bracket
+11. ✅ `resultNote` is now a real field. `forceResult` had always written it and no model had ever read it, so every explanation an organizer typed went into Firestore and displayed nowhere
+12. ✅ Result picker in the scoring pad offers all seven outcomes with a note field, and states inline whether the choice moves a rating
+
+**Correction to §2.2 as originally written:** a walkover did *not* in fact feed Glicko. `forceResult` wrote straight to Firestore and never called `processMatchRatings`, which is only reached from the scoring engine's `outcome.isComplete`. The protection was real but **accidental** — a consequence of which code path happened to be taken, not a decision anything expressed — and one refactor away from vanishing. It is now an explicit guard. The genuine losses were the missing retired/disqualified/no-show/conceded distinctions and the unread `resultNote`.
+
+**Tests:** `test/result_type_test.dart`, 15 new. Suite 608 → 623.
 
 ### Phase T3 — The tournament container *(≈2 weeks, the structural unlock)*
 11. `Tournament` entity owning many `Competition` draws; shared courts, dates, officials

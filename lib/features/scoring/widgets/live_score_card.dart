@@ -129,8 +129,28 @@ class LiveScoreCard extends StatelessWidget {
                   ),
                 ),
               ],
-              if (fixture.status == FixtureStatus.walkover ||
-                  fixture.status == FixtureStatus.abandoned) ...[
+              // The result TYPE, not the status. A retirement and a
+              // disqualification are both `completed` fixtures, so a card
+              // keyed on status alone showed them as ordinary wins and lost
+              // the one fact a reader needs.
+              if (fixture.resultType != MatchResultType.normal) ...[
+                const SizedBox(height: 6),
+                Center(
+                  child: Text(
+                    fixture.resultType.label,
+                    style: theme.textTheme.bodySmall,
+                  ),
+                ),
+                if (fixture.resultNote != null)
+                  Center(
+                    child: Text(
+                      fixture.resultNote!,
+                      textAlign: TextAlign.center,
+                      style: theme.textTheme.labelSmall
+                          ?.copyWith(color: theme.hintColor),
+                    ),
+                  ),
+              ] else if (fixture.status == FixtureStatus.abandoned) ...[
                 const SizedBox(height: 6),
                 Center(
                   child: Text(

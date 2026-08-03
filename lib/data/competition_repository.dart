@@ -977,6 +977,109 @@ class CompetitionRepository {
         return (compId: compRef.id, fixtureId: fixtureRef.id);
       });
 
+  /// Pulls an entrant out of a draw that has already been made, and resolves
+  /// every match they had left.
+  ///
+  /// ## Why this is not the same as [withdraw]
+  ///
+  /// [withdraw] moves a *registration* before the draw exists: the field is
+  /// still open, a reserve is promoted, and nobody has been drawn against
+  /// anybody. Once the draw is made there is no slot to give back — there are
+  /// fixtures, some of them days away, each with a real opponent who is
+  /// entitled to a result rather than a match that silently never happens.
+  ///
+  /// Before this existed a team that dropped out mid-tournament left their
+  /// remaining fixtures sitting as `scheduled` forever. The league table
+  /// counted matches nobody would ever play, the knockout bracket waited on a
+  /// winner who would never be decided, and an organizer's only recourse was
+  /// to open each one and force a walkover by hand.
+  ///
+  /// ## What it does not touch
+  ///
+  /// Anything already played or in progress. A completed match is history and
+  /// a live one has a scorer standing over it; withdrawing later does not
+  /// unmake either. Only fixtures that have not had a single event are
+  /// resolved, which is also what makes this safe to run at any point.
+  ///
+  /// A fixture whose *other* side is still unknown is skipped rather than
+  /// awarded — there is nobody to award it to yet. It resolves naturally when
+  /// the opponent arrives and this is run again, or when a later concession
+  /// reaches it.
+  Future<WithdrawalOutcome> withdrawEntrant({
+    required String orgId,
+    required String compId,
+    required String entrantId,
+    String? note,
+  }) =>
+      guard(() async {
+        final snap = await Refs.fixtures(orgId, compId).get();
+        final fixtures = snap.docs.map(Fixture.fromDoc).toList();
+
+        final batch = Refs.db.batch();
+        var conceded = 0;
+        var skipped = 0;
+
+        for (final f in fixtures) {
+          final isTheirs =
+              f.entrantAId == entrantId || f.entrantBId == entrantId;
+          if (!isTheirs) continue;
+          // Played, playing, or already resolved — not ours to rewrite.
+          if (f.status != FixtureStatus.scheduled || f.lastSeq > 0) continue;
+
+          final opponentId =
+              f.entrantAId == entrantId ? f.entrantBId : f.entrantAId;
+          if (opponentId.isEmpty) {
+            skipped++;
+            continue;
+          }
+          final opponentName =
+              f.entrantAId == entrantId ? f.entrantBName : f.entrantAName;
+
+          batch.update(Refs.fixture(orgId, compId, f.id), {
+            'status': FixtureStatus.walkover.wire,
+            // Conceded, not walkover: the difference is that the entrant left
+            // the competition rather than missing this one match, and a
+            // scorecard weeks later should say which.
+            'resultType': MatchResultType.conceded.wire,
+            'winnerEntrantId': opponentId,
+            'isDraw': false,
+            'summary': FixtureStatus.walkover.wire,
+            'resultNote': note ?? 'Opponent withdrew from the competition.',
+            'completedAt': FieldValue.serverTimestamp(),
+          });
+          conceded++;
+
+          // Carry the beneficiary forward, exactly as a played result would.
+          // Without this a concession in a quarter-final leaves the semi-final
+          // permanently waiting on a winner who has already been decided.
+          if (f.feedsWinnerToFixtureId != null &&
+              f.feedsWinnerToSlot != null) {
+            final slot = f.feedsWinnerToSlot == 'a' ? 'A' : 'B';
+            batch.update(
+              Refs.fixture(orgId, compId, f.feedsWinnerToFixtureId!),
+              {
+                'entrant${slot}Id': opponentId,
+                'entrant${slot}Name': opponentName,
+              },
+            );
+          }
+        }
+
+        batch.update(Refs.entrants(orgId, compId).doc(entrantId), {
+          'withdrawn': true,
+        });
+
+        // Not awaited — same reason as every other match-day write here.
+        unawaited(batch.commit().catchError((Object error) {
+          _writeFailures.add(_translateWriteFailure(error));
+        }));
+
+        return WithdrawalOutcome(
+          matchesConceded: conceded,
+          matchesWaiting: skipped,
+        );
+      });
+
   /// Fills the knockout phase of a groups+knockout draw from the group tables.
   ///
   /// This is the step that was missing entirely. The generator has always
@@ -1852,6 +1955,22 @@ class DrawOutcome {
   /// a large number on a non-knockout format usually means the field size is
   /// awkward rather than that anything went wrong.
   int get skipped => planned - written;
+}
+
+/// What pulling an entrant out of a live draw actually resolved.
+class WithdrawalOutcome {
+  const WithdrawalOutcome({
+    required this.matchesConceded,
+    required this.matchesWaiting,
+  });
+
+  /// Fixtures awarded to the opponent.
+  final int matchesConceded;
+
+  /// Fixtures skipped because the other side is not yet known — a knockout
+  /// placeholder further down the bracket. Reported rather than hidden so an
+  /// organizer knows to run this again once the bracket fills.
+  final int matchesWaiting;
 }
 
 /// What one pass of [CompetitionRepository.resolveQualifiers] achieved.

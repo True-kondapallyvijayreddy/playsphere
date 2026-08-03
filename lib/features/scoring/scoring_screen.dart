@@ -626,77 +626,257 @@ class _MatchDayActions extends ConsumerWidget {
   }
 }
 
-/// Walkover, abandonment and dispute — the outcomes every real tournament
-/// needs and most apps forget, leaving an organizer with a match they can
-/// neither finish nor delete.
+/// Walkover, retirement, disqualification, abandonment and dispute — the
+/// outcomes every real tournament needs and most apps forget, leaving an
+/// organizer with a match they can neither finish nor delete.
+///
+/// Each option records a [MatchResultType], not just a [FixtureStatus]. That
+/// distinction is what stops a walkover moving anyone's Glicko rating and
+/// what lets a scorecard still say "RET" a season later — a retirement and a
+/// straight-games win are both `completed` with a winner, and once written
+/// without a result type they are indistinguishable forever.
 class _AdminActions extends ConsumerWidget {
   const _AdminActions({required this.fixture});
   final Fixture fixture;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    Future<void> set(FixtureStatus status, {String? winnerId}) async {
-      final confirmed = await showDialog<bool>(
+    Future<void> set(
+      FixtureStatus status,
+      MatchResultType type, {
+      String? winnerId,
+    }) async {
+      final note = await showDialog<String?>(
         context: context,
-        builder: (context) => AlertDialog(
-          title: Text('Record as ${status.label.toLowerCase()}?'),
-          content: Text(
-            'This ends the match without a normal score. It will show as '
-            '"${status.label}" in the results and can only be changed by an '
-            'event manager.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Confirm'),
-            ),
-          ],
-        ),
+        builder: (context) => _OutcomeDialog(type: type),
       );
-      if (confirmed != true) return;
+      // Null is "cancelled". An empty string is "confirmed, no note" — the
+      // two must not collapse, or backing out of the dialog would end the
+      // match.
+      if (note == null) return;
 
       try {
         await ref.read(scoringServiceProvider).setFixtureOutcome(
               fixture: fixture,
               status: status,
+              resultType: type,
               winnerEntrantId: winnerId,
+              note: note.isEmpty ? null : note,
             );
       } catch (e) {
         if (context.mounted) showError(context, e);
       }
     }
 
+    final a = fixture.entrantAName;
+    final b = fixture.entrantBName;
+
     return ExpansionTile(
       title: const Text('Match did not play normally'),
-      subtitle: const Text('Walkover, abandoned or disputed'),
+      subtitle: const Text(
+        'Walkover, retirement, disqualification, abandonment or dispute',
+      ),
       children: [
-        ListTile(
-          leading: const Icon(Icons.directions_walk),
-          title: Text('Walkover to ${fixture.entrantAName}'),
-          onTap: () =>
-              set(FixtureStatus.walkover, winnerId: fixture.entrantAId),
+        _OutcomeGroup(
+          icon: Icons.directions_walk,
+          label: 'Walkover',
+          hint: 'One side never arrived. Awards the points; moves no rating.',
+          optionA: 'to $a',
+          optionB: 'to $b',
+          onA: () => set(
+            FixtureStatus.walkover,
+            MatchResultType.walkover,
+            winnerId: fixture.entrantAId,
+          ),
+          onB: () => set(
+            FixtureStatus.walkover,
+            MatchResultType.walkover,
+            winnerId: fixture.entrantBId,
+          ),
+        ),
+        _OutcomeGroup(
+          icon: Icons.healing_outlined,
+          label: 'Retired',
+          hint: 'Started and could not continue. A real result — the play '
+              'that happened still counts.',
+          optionA: '$a wins',
+          optionB: '$b wins',
+          onA: () => set(
+            FixtureStatus.completed,
+            MatchResultType.retired,
+            winnerId: fixture.entrantAId,
+          ),
+          onB: () => set(
+            FixtureStatus.completed,
+            MatchResultType.retired,
+            winnerId: fixture.entrantBId,
+          ),
+        ),
+        _OutcomeGroup(
+          icon: Icons.block_outlined,
+          label: 'Disqualified',
+          hint: 'Conduct, eligibility or equipment. The result stands; no '
+              'rating moves.',
+          optionA: '$b disqualified',
+          optionB: '$a disqualified',
+          onA: () => set(
+            FixtureStatus.completed,
+            MatchResultType.disqualified,
+            winnerId: fixture.entrantAId,
+          ),
+          onB: () => set(
+            FixtureStatus.completed,
+            MatchResultType.disqualified,
+            winnerId: fixture.entrantBId,
+          ),
         ),
         ListTile(
-          leading: const Icon(Icons.directions_walk),
-          title: Text('Walkover to ${fixture.entrantBName}'),
+          leading: const Icon(Icons.person_off_outlined),
+          title: const Text('Neither side arrived'),
+          subtitle: const Text('No winner, and nothing counts anywhere'),
           onTap: () =>
-              set(FixtureStatus.walkover, winnerId: fixture.entrantBId),
+              set(FixtureStatus.walkover, MatchResultType.noShow),
         ),
         ListTile(
           leading: const Icon(Icons.thunderstorm_outlined),
           title: const Text('Abandoned'),
-          subtitle: const Text('Rain, injury, or the match could not finish'),
-          onTap: () => set(FixtureStatus.abandoned),
+          subtitle: const Text('Rain, light, or the venue became unusable'),
+          onTap: () =>
+              set(FixtureStatus.abandoned, MatchResultType.abandoned),
         ),
         ListTile(
           leading: const Icon(Icons.gavel_outlined),
           title: const Text('Mark as disputed'),
           subtitle: const Text('Freezes the result pending a decision'),
-          onTap: () => set(FixtureStatus.disputed),
+          onTap: () =>
+              set(FixtureStatus.disputed, MatchResultType.normal),
+        ),
+      ],
+    );
+  }
+}
+
+/// One result type with a side to pick.
+class _OutcomeGroup extends StatelessWidget {
+  const _OutcomeGroup({
+    required this.icon,
+    required this.label,
+    required this.hint,
+    required this.optionA,
+    required this.optionB,
+    required this.onA,
+    required this.onB,
+  });
+
+  final IconData icon;
+  final String label;
+  final String hint;
+  final String optionA;
+  final String optionB;
+  final VoidCallback onA;
+  final VoidCallback onB;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 18),
+              const SizedBox(width: 8),
+              Text(label, style: theme.textTheme.titleSmall),
+            ],
+          ),
+          const SizedBox(height: 2),
+          Text(
+            hint,
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              OutlinedButton(onPressed: onA, child: Text(optionA)),
+              OutlinedButton(onPressed: onB, child: Text(optionB)),
+            ],
+          ),
+          const Divider(height: 24),
+        ],
+      ),
+    );
+  }
+}
+
+/// Confirms an unusual result and captures why.
+///
+/// The note is the point. `forceResult` has always accepted one and no screen
+/// ever offered a field to type it in, so the record a protest needs weeks
+/// later — "opponent did not arrive by the 20-minute cut-off" — was never
+/// captured at the one moment somebody knew it.
+class _OutcomeDialog extends StatefulWidget {
+  const _OutcomeDialog({required this.type});
+  final MatchResultType type;
+
+  @override
+  State<_OutcomeDialog> createState() => _OutcomeDialogState();
+}
+
+class _OutcomeDialogState extends State<_OutcomeDialog> {
+  final _note = TextEditingController();
+
+  @override
+  void dispose() {
+    _note.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = widget.type;
+    return AlertDialog(
+      title: Text('Record as ${t.label.toLowerCase()}?'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'This ends the match without a normal score. It can only be '
+            'changed by an event manager.',
+          ),
+          const SizedBox(height: 8),
+          Text(
+            t.countsForRating
+                ? 'Counts towards ratings and career statistics.'
+                : 'Does not move any rating or career statistic — nobody '
+                    'played.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _note,
+            autofocus: true,
+            maxLines: 2,
+            decoration: const InputDecoration(
+              labelText: 'Why (optional)',
+              hintText: 'Opponent did not arrive by the cut-off',
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, null),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, _note.text.trim()),
+          child: const Text('Confirm'),
         ),
       ],
     );

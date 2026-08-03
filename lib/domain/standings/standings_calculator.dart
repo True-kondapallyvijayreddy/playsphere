@@ -66,7 +66,13 @@ class StandingsCalculator {
       // Only decided matches count. A live or abandoned match must not move
       // the table — an abandoned game is not a draw, and treating it as one
       // silently awards a point nobody earned.
-      if (!fixture.status.isResulted) continue;
+      //
+      // The result TYPE is consulted as well as the status, because the two
+      // say different things: a walkover is a completed fixture that awards
+      // points to the side who turned up, and a no-show is a completed
+      // fixture that awards nothing to anyone. `status.isResulted` alone
+      // could not tell them apart.
+      if (!fixture.countsForStandings) continue;
 
       final a = rows[fixture.entrantAId];
       final b = rows[fixture.entrantBId];

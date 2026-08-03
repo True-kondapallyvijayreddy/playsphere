@@ -92,6 +92,20 @@ class RatingService {
     required Fixture fixture,
     required Map<String, dynamic> scoreState,
   }) async {
+    // A result nobody played is not evidence about anybody's skill.
+    //
+    // This guard is the point of `MatchResultType`. A walkover, a no-show, a
+    // disqualification and a concession all produce a winner, and rating that
+    // winner as though they had beaten someone is how a rating system stops
+    // meaning anything — a player could climb by drawing opponents who never
+    // turn up. Until this check existed nothing anywhere asked the question:
+    // forced results happened to skip the rating path by construction rather
+    // than by decision, so the protection was accidental and one refactor
+    // away from vanishing.
+    //
+    // A retirement passes deliberately. Somebody did play, the winner earned
+    // it, and every federation counts it.
+    if (!fixture.resultType.countsForRating) return;
     // Career statistics are kept per sport; ratings additionally split by
     // time control for chess. Keying either on the plugin would merge chess,
     // carrom, athletics and swimming into one pool, because they share

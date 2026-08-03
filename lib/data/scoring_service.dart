@@ -509,19 +509,34 @@ class ScoringService {
   /// Kept off the plugin path because none of these are scoring events — they
   /// are administrative decisions about a match that did not play out
   /// normally, and every real tournament needs them.
+  ///
+  /// [resultType] is what the rest of the system actually reads to decide
+  /// whether this counts towards a table, a rating, or a career profile. It
+  /// defaults from [status] so existing callers keep working, but a caller who
+  /// knows more should say so — "retired" and "disqualified" are both
+  /// `completed` fixtures with a winner and are otherwise indistinguishable
+  /// from a straight-sets win once written.
   Future<void> setFixtureOutcome({
     required Fixture fixture,
     required FixtureStatus status,
     String? winnerEntrantId,
     String? note,
+    MatchResultType? resultType,
   }) async {
     if (status.acceptsScoring) {
       throw const ValidationException(
         'Use the scoring pad to record a normal result.',
       );
     }
+    final type = resultType ??
+        switch (status) {
+          FixtureStatus.walkover => MatchResultType.walkover,
+          FixtureStatus.abandoned => MatchResultType.abandoned,
+          _ => MatchResultType.normal,
+        };
     await Refs.fixture(fixture.orgId, fixture.compId, fixture.id).update({
       'status': status.wire,
+      'resultType': type.wire,
       'winnerEntrantId': winnerEntrantId,
       'isDraw': false,
       // Stored as a stable token, never as a translated phrase.

@@ -305,6 +305,100 @@ enum FixtureStatus {
       this == FixtureStatus.scheduled || this == FixtureStatus.live;
 }
 
+/// *How* a match ended, as distinct from what state it is in.
+///
+/// [FixtureStatus] answers "where is this fixture in its lifecycle"; this
+/// answers "what kind of result is on the sheet". Conflating the two loses
+/// information a tournament cannot do without: a retirement and a clean
+/// straight-games win are both `completed` with a winner, and once written
+/// they are indistinguishable — so a scorecard cannot show "RET", a referee
+/// reviewing a protest cannot see what happened, and career statistics count
+/// a match that lasted four points as a full one.
+///
+/// ## Why each flag is separate
+///
+/// The three questions a result gets asked have genuinely different answers,
+/// and the codebase previously answered all three with `status.isResulted`:
+///
+/// - **Standings.** A walkover awards the points — the opponent's failure to
+///   appear is their loss, and a league table that ignored it would let a
+///   team improve its position by not turning up.
+/// - **Rating.** A walkover must NOT move Glicko. Nobody played, so there is
+///   no evidence about anyone's skill, and awarding a rating gain for an
+///   opponent's flat tyre is how a rating system stops meaning anything.
+/// - **Career statistics.** A retirement's partial figures are real and are
+///   kept; a walkover has no figures at all to keep.
+enum MatchResultType {
+  /// Played to its natural end.
+  normal('normal', 'Result'),
+
+  /// One side never appeared. The other advances without playing.
+  walkover('walkover', 'Walkover'),
+
+  /// Started, and one side could not continue — injury, most often.
+  ///
+  /// A real match with a real winner: the play that did happen counts.
+  retired('retired', 'Retired'),
+
+  /// Conduct, eligibility or equipment. The result stands against the
+  /// disqualified side, but it is not evidence of anyone's playing strength.
+  disqualified('disqualified', 'Disqualified'),
+
+  /// Neither side appeared. Nothing to award to anybody.
+  noShow('no_show', 'No show'),
+
+  /// Weather, light, or the venue becoming unusable. Not a draw — treating it
+  /// as one silently awards a point nobody earned.
+  abandoned('abandoned', 'Abandoned'),
+
+  /// The entrant withdrew from the competition, resolving this and every
+  /// other match still ahead of them.
+  conceded('conceded', 'Conceded');
+
+  const MatchResultType(this.wire, this.label);
+
+  final String wire;
+  final String label;
+
+  /// Defaults to [normal], which is what every fixture written before this
+  /// field existed was — anything unusual went through `forceResult`, which
+  /// set a distinct [FixtureStatus].
+  static MatchResultType fromWire(String? w) =>
+      MatchResultType.values.firstWhere(
+        (e) => e.wire == w,
+        orElse: () => MatchResultType.normal,
+      );
+
+  /// Whether the league table should award points for this.
+  ///
+  /// Everything except the two where nothing was decided: an abandoned match
+  /// is replayed or voided by the organizer, and a no-show has no winner to
+  /// award anything to.
+  bool get countsForStandings =>
+      this != MatchResultType.abandoned && this != MatchResultType.noShow;
+
+  /// Whether Glicko-2 should move on this result.
+  ///
+  /// Only where the two sides actually competed. This is the check that was
+  /// missing: nothing anywhere asked it, so the answer was whatever the
+  /// scoring engine happened to report, and a forced result bypassed the
+  /// question entirely rather than answering "no" deliberately.
+  bool get countsForRating =>
+      this == MatchResultType.normal || this == MatchResultType.retired;
+
+  /// Whether per-player figures from this match belong on a career profile.
+  ///
+  /// Same set as [countsForRating], and deliberately a separate getter: they
+  /// are the same answer for different reasons, and a future decision to
+  /// count disqualified matches' statistics (the play was real) while still
+  /// refusing to rate them should not have to disentangle one flag.
+  bool get countsForCareerStats =>
+      this == MatchResultType.normal || this == MatchResultType.retired;
+
+  /// Whether a human should be told why. A normal result explains itself.
+  bool get wantsNote => this != MatchResultType.normal;
+}
+
 /// Whether a result was produced under conditions we trust enough to move
 /// a rating aggressively. Casual community matches move ratings less than
 /// sanctioned, officiated ones.
