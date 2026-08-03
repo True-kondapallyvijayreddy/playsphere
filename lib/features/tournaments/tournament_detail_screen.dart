@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -174,6 +176,11 @@ class _Header extends ConsumerWidget {
                   child:
                       Text(t.name, style: theme.textTheme.headlineSmall),
                 ),
+                IconButton(
+                  icon: const Icon(Icons.ios_share),
+                  tooltip: 'Share the public link',
+                  onPressed: () => _sharePublicLink(context, orgId, t.id),
+                ),
                 if (canManage)
                   IconButton(
                     icon: const Icon(Icons.edit_outlined),
@@ -230,6 +237,29 @@ class _Header extends ConsumerWidget {
         ),
       ),
     );
+  }
+
+  /// One link that shows the whole tournament to anybody, signed in or not.
+  /// This is what replaces posting results to a Telegram channel.
+  static Future<void> _sharePublicLink(
+    BuildContext context,
+    String orgId,
+    String tournamentId,
+  ) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final url = Routes.publicTournamentUrl(orgId, tournamentId);
+    try {
+      await SharePlus.instance.share(
+        ShareParams(text: 'Follow the tournament live: $url'),
+      );
+    } catch (_) {
+      await Clipboard.setData(ClipboardData(text: url));
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(content: Text('Tournament link copied.')),
+        );
+    }
   }
 
   static String _dateRange(Tournament t) {

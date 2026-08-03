@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../features/venues/venues_screen.dart';
+import '../../features/tournaments/public_tournament_screen.dart';
 import '../../features/tournaments/tournaments_screen.dart';
 import '../../features/tournaments/tournament_detail_screen.dart';
 import '../../features/analytics/analytics_screen.dart';
@@ -131,6 +132,13 @@ class Routes {
   /// score, not a sign-in wall.
   static String watchUrl(String orgId, String compId, String fixtureId) =>
       '$publicOrigin${watch(orgId, compId, fixtureId)}';
+
+  /// The public, signed-out view of a whole tournament.
+  static String publicTournament(String orgId, String tournamentId) =>
+      '/org/$orgId/live-tournament/$tournamentId';
+
+  static String publicTournamentUrl(String orgId, String tournamentId) =>
+      '$publicOrigin${publicTournament(orgId, tournamentId)}';
 }
 
 /// Routes a signed-out visitor may still open.
@@ -140,6 +148,7 @@ class Routes {
 /// in to watch would defeat it.
 bool _isPublicRoute(String location) {
   if (location.startsWith(Routes.signIn)) return true;
+  if (RegExp(r'^/org/[^/]+/live-tournament/').hasMatch(location)) return true;
   return RegExp(r'^/org/[^/]+/event/[^/]+/watch/').hasMatch(location);
 }
 
@@ -279,6 +288,13 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             path: 'gallery',
             builder: (_, state) =>
                 ClubGalleryScreen(orgId: state.pathParameters['orgId']!),
+          ),
+          GoRoute(
+            path: 'live-tournament/:tournamentId',
+            builder: (_, state) => PublicTournamentScreen(
+              orgId: state.pathParameters['orgId']!,
+              tournamentId: state.pathParameters['tournamentId']!,
+            ),
           ),
           GoRoute(
             path: 'tournaments',
