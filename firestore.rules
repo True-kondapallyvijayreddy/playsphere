@@ -1611,6 +1611,51 @@ service cloud.firestore {
             && request.resource.data.lastSeq == 0
             && interClubShapeValid(request.resource.data, orgId);
 
+          // ---------------------------------------------------------
+          // Protests against this result
+          // ---------------------------------------------------------
+          //
+          // The event log is append-only and the scorer is locked, which makes
+          // the record tamper-proof but not right — a scorer can press the
+          // wrong button, a player can be a year too old. Somebody has to be
+          // able to say so, or the argument happens on WhatsApp and the app
+          // becomes the thing people argue about rather than the thing that
+          // settles it.
+          match /disputes/{disputeId} {
+            // Readable by anyone who can read the match. A protest decided in
+            // private is not a protest anybody accepts.
+            allow read: if orgIsReadable(orgId)
+              || isParticipantMember(resource.data);
+
+            // Any active member may raise one, against their own name only.
+            // Anonymous protests are not a thing a referee can act on.
+            allow create: if isActive(orgId)
+              && request.resource.data.raisedByUid == uid()
+              && request.resource.data.status == 'open'
+              && request.resource.data.fixtureId == fixtureId
+              && request.resource.data.compId == compId
+              && request.resource.data.orgId == orgId
+              && request.resource.data.resolvedByUid == null;
+
+            // Only an organizer decides one, and NEVER the person who raised
+            // it. That is the whole point of having a referee: a decision the
+            // complainant made themselves settles nothing.
+            allow update: if canManageCompetitions(orgId)
+              && resource.data.raisedByUid != uid()
+              && unchanged('raisedByUid')
+              && unchanged('fixtureId')
+              && unchanged('reason')
+              && resource.data.status == 'open'
+              && request.resource.data.resolvedByUid == uid()
+              // A decision without a reason is not one anybody can accept.
+              && request.resource.data.resolutionNote is string
+              && request.resource.data.resolutionNote.size() > 0;
+
+            // A protest is part of the record even once rejected. Withdrawing
+            // is a status change, not a deletion.
+            allow delete: if false;
+          }
+
           // Two distinct update paths with different authority:
           allow update: if
             // (a) Organizers may reschedule, assign officials, or force a

@@ -24,6 +24,7 @@ import 'models/venue.dart';
 import 'models/tournament.dart';
 import 'models/challenge.dart';
 import 'models/competition.dart';
+import 'models/dispute.dart';
 import 'models/memory.dart';
 import 'models/enums.dart';
 import 'models/fixture.dart';
@@ -329,6 +330,16 @@ final tournamentLeaderboardProvider = Provider.family<
     (events, fixtures) =>
         TournamentLeaderboard.from(events: events, fixtures: fixtures),
   );
+});
+
+/// Protests raised against one fixture's result.
+final disputesProvider = StreamProvider.family<List<Dispute>,
+    ({String orgId, String compId, String fixtureId})>((ref, key) {
+  return ref.watch(competitionRepositoryProvider).watchDisputes(
+        orgId: key.orgId,
+        compId: key.compId,
+        fixtureId: key.fixtureId,
+      );
 });
 
 /// Who a player has faced, and how they have done against each of them.

@@ -7,6 +7,7 @@ import '../core/firebase/chunked_batch.dart';
 import '../core/firebase/firestore_refs.dart';
 import '../core/models/app_user.dart';
 import '../core/models/competition.dart';
+import '../core/models/dispute.dart';
 import '../core/models/enums.dart';
 import '../core/models/fixture.dart';
 import '../core/models/match_player.dart';
@@ -1992,6 +1993,136 @@ class CompetitionRepository {
             _writeFailures.add(_translateWriteFailure(error));
           }),
         );
+      });
+
+  // --- Disputes ---------------------------------------------------------
+
+  Stream<List<Dispute>> watchDisputes({
+    required String orgId,
+    required String compId,
+    required String fixtureId,
+  }) =>
+      Refs.disputes(orgId, compId, fixtureId).snapshots().map(
+            (snap) => snap.docs.map(Dispute.fromDoc).toList()
+              ..sort((a, b) => (b.raisedAt ?? DateTime(0))
+                  .compareTo(a.raisedAt ?? DateTime(0))),
+          );
+
+  /// Raises a protest against a result.
+  ///
+  /// The event log is append-only and the scorer is locked, which makes the
+  /// record tamper-proof but not right: a scorer can press the wrong button
+  /// and a player can be a year too old for the category. Without a path to
+  /// say so, that argument happens on WhatsApp and the app becomes the thing
+  /// people argue about rather than the thing that settles it.
+  ///
+  /// Refused outside the protest window. A bracket cannot advance while an
+  /// earlier match might still be overturned, and a tournament where last
+  /// week's quarter-final can be reopened has no results at all.
+  Future<String> raiseDispute({
+    required Fixture fixture,
+    required String raisedByUid,
+    required String raisedByName,
+    required DisputeReason reason,
+    String? detail,
+    String? entrantId,
+  }) =>
+      guard(() async {
+        if (!fixture.hasResult) {
+          throw const ValidationException(
+            'There is no result to dispute yet.',
+          );
+        }
+        if (!withinProtestWindow(fixture.completedAt)) {
+          throw const ValidationException(
+            'The protest window for this match has closed.',
+          );
+        }
+
+        final ref = Refs.disputes(
+          fixture.orgId,
+          fixture.compId,
+          fixture.id,
+        ).doc();
+
+        final dispute = Dispute(
+          id: ref.id,
+          orgId: fixture.orgId,
+          compId: fixture.compId,
+          fixtureId: fixture.id,
+          raisedByUid: raisedByUid,
+          raisedByName: raisedByName,
+          entrantId: entrantId,
+          reason: reason,
+          status: DisputeStatus.open,
+          detail: detail,
+        );
+
+        final batch = Refs.db.batch();
+        batch.set(ref, dispute.toCreate());
+        // The fixture carries the flag so a bracket, a standings table and a
+        // spectator card can all see a result is under protest from the one
+        // document they already read.
+        batch.update(
+          Refs.fixture(fixture.orgId, fixture.compId, fixture.id),
+          {
+            'status': FixtureStatus.disputed.wire,
+            'updatedAt': FieldValue.serverTimestamp(),
+          },
+        );
+        await batch.commit();
+        return ref.id;
+      });
+
+  /// A referee's decision on a protest.
+  ///
+  /// [upheld] false leaves the result exactly as it was and returns the
+  /// fixture to completed. True marks it for correction — the actual
+  /// correction is a reversal event through the scoring pad, because the log
+  /// is append-only and a referee overwriting a score directly would be the
+  /// one write in the product that cannot be audited.
+  Future<void> resolveDispute({
+    required Dispute dispute,
+    required String refereeUid,
+    required bool upheld,
+    required String note,
+  }) =>
+      guard(() async {
+        if (refereeUid == dispute.raisedByUid) {
+          throw const ValidationException(
+            'A protest cannot be decided by the person who raised it.',
+          );
+        }
+        if (note.trim().isEmpty) {
+          throw const ValidationException(
+            'Say why. A decision without a reason is not a decision anybody '
+            'can accept.',
+          );
+        }
+
+        final batch = Refs.db.batch();
+        batch.update(
+          Refs.disputes(dispute.orgId, dispute.compId, dispute.fixtureId)
+              .doc(dispute.id),
+          {
+            'status': (upheld ? DisputeStatus.upheld : DisputeStatus.rejected)
+                .wire,
+            'resolvedByUid': refereeUid,
+            'resolutionNote': note.trim(),
+            'resolvedAt': FieldValue.serverTimestamp(),
+          },
+        );
+        batch.update(
+          Refs.fixture(dispute.orgId, dispute.compId, dispute.fixtureId),
+          {
+            // Upheld returns the match to the pad so the correction can be
+            // appended as a reversal; rejected simply restores the result.
+            'status': (upheld ? FixtureStatus.live : FixtureStatus.completed)
+                .wire,
+            'updatedAt': FieldValue.serverTimestamp(),
+          },
+        );
+        await batch.commit();
       });
 
   /// Moves one match. The organizer's override on everything the scheduler

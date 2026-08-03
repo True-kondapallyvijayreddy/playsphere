@@ -194,6 +194,14 @@ class Refs {
   ) =>
       venues(orgId).doc(venueId);
 
+  /// Protests against one fixture's result.
+  static CollectionReference<Map<String, dynamic>> disputes(
+    String orgId,
+    String compId,
+    String fixtureId,
+  ) =>
+      fixture(orgId, compId, fixtureId).collection('disputes');
+
   static CollectionReference<Map<String, dynamic>> tournaments(String orgId) =>
       org(orgId).collection('tournaments');
 

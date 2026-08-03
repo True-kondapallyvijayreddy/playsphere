@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'widgets/dispute_card.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -380,6 +381,7 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
                       MatchMemoriesSection(fixture: fixture),
                       const SizedBox(height: 24),
                       _MatchDayActions(fixture: fixture),
+                      DisputeCard(fixture: fixture),
                       _AdminActions(fixture: fixture),
                     ],
                   ),

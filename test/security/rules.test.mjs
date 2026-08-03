@@ -4250,3 +4250,136 @@ describe('ranking entries', () => {
     await assertFails(deleteDoc(doc(db, 'rankingEntries/e2')));
   });
 });
+
+// ---------------------------------------------------------------------------
+// Disputes
+// ---------------------------------------------------------------------------
+//
+// The event log is tamper-proof but not right — a scorer can press the wrong
+// button. The one rule that makes a protest mean anything is that the person
+// who raised it cannot be the person who decides it.
+describe('disputes', () => {
+  const COMP = 'comp_dispute';
+  const FIX = 'fix_dispute';
+  const MEMBER = 'uid_disputer';
+
+  const path = `orgs/${PUBLIC_ORG}/competitions/${COMP}/fixtures/${FIX}/disputes`;
+
+  const dispute = (uid, overrides = {}) => ({
+    orgId: PUBLIC_ORG,
+    compId: COMP,
+    fixtureId: FIX,
+    raisedByUid: uid,
+    raisedByName: 'Aarav',
+    entrantId: uid,
+    reason: 'wrong_score',
+    detail: 'Third set was 21-19, recorded as 21-18.',
+    status: 'open',
+    resolvedByUid: null,
+    resolutionNote: null,
+    raisedAt: serverTimestamp(),
+    resolvedAt: null,
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER),
+        membership(OWNER, PUBLIC_ORG, 'owner'),
+      );
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', MEMBER),
+        membership(MEMBER, PUBLIC_ORG, 'member'),
+      );
+    });
+  });
+
+  it('a member may raise a protest against their own name', async () => {
+    const db = testEnv.authenticatedContext(MEMBER).firestore();
+    await assertSucceeds(setDoc(doc(db, path, 'd1'), dispute(MEMBER)));
+  });
+
+  it('a protest cannot be raised in somebody else\'s name', async () => {
+    // An anonymous or forged protest is not one a referee can act on.
+    const db = testEnv.authenticatedContext(MEMBER).firestore();
+    await assertFails(setDoc(doc(db, path, 'd2'), dispute(OWNER)));
+  });
+
+  it('a protest cannot be created already decided', async () => {
+    const db = testEnv.authenticatedContext(MEMBER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, path, 'd3'),
+        dispute(MEMBER, { status: 'upheld', resolvedByUid: MEMBER }),
+      ),
+    );
+  });
+
+  it('a plain member cannot decide a protest', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db.app ? db : db, path, 'd4'), dispute(OWNER));
+    });
+    const db = testEnv.authenticatedContext(MEMBER).firestore();
+    await assertFails(
+      updateDoc(doc(db, path, 'd4'), {
+        status: 'rejected',
+        resolvedByUid: MEMBER,
+        resolutionNote: 'No.',
+      }),
+    );
+  });
+
+  it('an organizer cannot decide a protest they raised themselves', async () => {
+    // The whole point of a referee: a decision the complainant made
+    // themselves settles nothing.
+    await seed(async (db) => {
+      await setDoc(doc(db, path, 'd5'), dispute(OWNER));
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      updateDoc(doc(db, path, 'd5'), {
+        status: 'upheld',
+        resolvedByUid: OWNER,
+        resolutionNote: 'I was right.',
+      }),
+    );
+  });
+
+  it('an organizer decides somebody else\'s protest, with a reason', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, path, 'd6'), dispute(MEMBER));
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      updateDoc(doc(db, path, 'd6'), {
+        status: 'rejected',
+        resolvedByUid: OWNER,
+        resolutionNote: 'Scorecard matches the event log; result stands.',
+      }),
+    );
+  });
+
+  it('a decision without a reason is refused', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, path, 'd7'), dispute(MEMBER));
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      updateDoc(doc(db, path, 'd7'), {
+        status: 'rejected',
+        resolvedByUid: OWNER,
+        resolutionNote: '',
+      }),
+    );
+  });
+
+  it('a protest can never be deleted, even once rejected', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, path, 'd8'), dispute(MEMBER, { status: 'rejected' }));
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(deleteDoc(doc(db, path, 'd8')));
+  });
+});
