@@ -22,6 +22,8 @@ class DrawConfig {
     this.doubleRoundRobin = false,
     this.bracketReset = true,
     this.shuffleSeed,
+    this.method = 'ranked',
+    this.seedFromRatings = false,
   });
 
   /// Groups+knockout: how many groups. Takes priority over [groupSize].
@@ -47,6 +49,21 @@ class DrawConfig {
   /// will be asked, and the answer has to be checkable.
   final int? shuffleSeed;
 
+  /// `DrawMethod.wire` — how the field is arranged into the bracket.
+  ///
+  /// Stored as the raw token rather than the enum so this model stays free of
+  /// a domain import; the generator parses it. Defaults to a ranked ladder,
+  /// which is what every draw made before this field existed was.
+  final String method;
+
+  /// Whether seeds are computed from Glicko-2 at draw time.
+  ///
+  /// Off by default, because turning it on retroactively would reseed events
+  /// whose organizer chose their seeds by hand. When on, `generateDraw` ranks
+  /// the field by rating and refuses to seed anyone whose rating is not yet
+  /// evidence — see `SeedingPolicy`.
+  final bool seedFromRatings;
+
   static DrawConfig fromMap(Map<String, dynamic>? m) {
     if (m == null) return const DrawConfig();
     return DrawConfig(
@@ -59,6 +76,8 @@ class DrawConfig {
           ? m['bracketReset'] as bool
           : true,
       shuffleSeed: Fs.intOrNull(m['shuffleSeed']),
+      method: Fs.str(m['method'], 'ranked'),
+      seedFromRatings: Fs.boolean(m['seedFromRatings']),
     );
   }
 
@@ -69,6 +88,8 @@ class DrawConfig {
         'doubleRoundRobin': doubleRoundRobin,
         'bracketReset': bracketReset,
         'shuffleSeed': shuffleSeed,
+        'method': method,
+        'seedFromRatings': seedFromRatings,
       };
 
   DrawConfig copyWith({
@@ -78,6 +99,8 @@ class DrawConfig {
     bool? doubleRoundRobin,
     bool? bracketReset,
     int? shuffleSeed,
+    String? method,
+    bool? seedFromRatings,
   }) =>
       DrawConfig(
         numGroups: numGroups ?? this.numGroups,
@@ -86,6 +109,8 @@ class DrawConfig {
         doubleRoundRobin: doubleRoundRobin ?? this.doubleRoundRobin,
         bracketReset: bracketReset ?? this.bracketReset,
         shuffleSeed: shuffleSeed ?? this.shuffleSeed,
+        method: method ?? this.method,
+        seedFromRatings: seedFromRatings ?? this.seedFromRatings,
       );
 }
 

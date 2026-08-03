@@ -10,6 +10,7 @@ import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../core/models/draw_slot.dart';
+import '../../domain/draw/seeding.dart';
 import '../../domain/standings/standings_calculator.dart';
 import '../../domain/standings/tiebreak.dart';
 import '../../shared/app_scaffold.dart';
@@ -232,15 +233,22 @@ class _OrganizerActions extends ConsumerWidget {
                   entrants: entrants,
                   defaultScorerUids: uid == null ? const [] : [uid],
                 );
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        '${made.written} matches created'
-                        '${choices.schedule.hasCourts ? ' and scheduled across '
-                            '${choices.schedule.courts.length} courts' : ''}.',
-                      ),
+                if (!context.mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      '${made.written} matches created'
+                      '${choices.schedule.hasCourts ? ' and scheduled' : ''}.',
                     ),
+                  ),
+                );
+                // The seeding list, with a reason per player. A draw an
+                // organizer has to defend needs an answer to "why am I not
+                // seeded?" that is better than a shrug.
+                if (made.seeding.isNotEmpty) {
+                  await showDialog<void>(
+                    context: context,
+                    builder: (_) => _SeedingDialog(verdicts: made.seeding),
                   );
                 }
               }),
@@ -738,6 +746,75 @@ class _GroupTable extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Who was seeded, who was not, and why.
+///
+/// Shown once, straight after a draw that seeded from ratings. The reasons
+/// are the point: "you have played two of the five rated matches we need"
+/// is something an organizer can say to a player at the desk. A bracket that
+/// cannot explain itself gets argued with.
+class _SeedingDialog extends StatelessWidget {
+  const _SeedingDialog({required this.verdicts});
+
+  final List<SeedVerdict> verdicts;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final seeded = [
+      for (final v in verdicts)
+        if (v.isSeeded) v,
+    ]..sort((a, b) => a.seed!.compareTo(b.seed!));
+    final rest = [
+      for (final v in verdicts)
+        if (!v.isSeeded) v,
+    ];
+
+    return AlertDialog(
+      title: const Text('Seeding'),
+      content: SizedBox(
+        width: 420,
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            for (final v in seeded)
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: CircleAvatar(
+                  radius: 14,
+                  child: Text('${v.seed}',
+                      style: theme.textTheme.labelMedium),
+                ),
+                title: Text(v.entrantId),
+                subtitle: Text(v.reason, style: theme.textTheme.bodySmall),
+              ),
+            if (rest.isNotEmpty) ...[
+              const Divider(),
+              Text(
+                'Unseeded — drawn at random',
+                style: theme.textTheme.labelLarge,
+              ),
+              for (final v in rest)
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(v.entrantId),
+                  subtitle: Text(v.reason, style: theme.textTheme.bodySmall),
+                ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        FilledButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Done'),
+        ),
+      ],
     );
   }
 }

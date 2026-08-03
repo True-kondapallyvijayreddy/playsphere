@@ -17,6 +17,9 @@ import '../core/sync/uuid_v7.dart';
 import '../domain/draw/fixture_generator.dart';
 import '../domain/draw/match_scheduler.dart';
 import '../domain/draw/schedule_shift.dart';
+import '../domain/draw/seeding.dart';
+import '../domain/rating/glicko2.dart';
+import 'rating_service.dart';
 import '../domain/standings/standings_calculator.dart';
 import '../domain/scoring/scoring_plugin.dart';
 import '../domain/scoring/scoring_registry.dart';
@@ -691,15 +694,43 @@ class CompetitionRepository {
         // organizer chose, because there was no way to say otherwise and no
         // field to say it in.
         final draw = competition.drawConfig;
+
+        // Seeds from the ratings the product already computes, when the
+        // organizer asked for it. Until this existed, `Entrant.seed` was a
+        // hand-typed integer and the generator fell back to `Random(42)` when
+        // nobody had one — so an unseeded 38-player draw was a raffle, while
+        // Glicko-2 sat computed and ignored in the next folder.
+        var field = entrants;
+        List<SeedVerdict> seeding = const [];
+        if (draw.seedFromRatings) {
+          final ratings = <String, Rating>{};
+          for (final e in entrants) {
+            final uid = e.uid;
+            if (uid == null || e.withdrawn) continue;
+            ratings[e.id] = await const RatingService().getRating(
+              uid,
+              competition.sportId,
+            );
+          }
+          final result = const SeedingPolicy()
+              .assign(entrants: entrants, ratings: ratings);
+          seeding = result.verdicts;
+          final byId = result.seedsByEntrant;
+          field = [
+            for (final e in entrants) e.withSeed(byId[e.id]),
+          ];
+        }
+
         final planned = const FixtureGenerator().generate(
           format: competition.format,
-          entrants: entrants,
+          entrants: field,
           shuffleSeed: draw.shuffleSeed,
           doubleRoundRobin: draw.doubleRoundRobin,
           bracketReset: draw.bracketReset,
           groupSize: draw.groupSize,
           numGroups: draw.numGroups,
           qualifiersPerGroup: draw.qualifiersPerGroup,
+          method: DrawMethod.fromWire(draw.method),
         );
         if (planned.isEmpty) {
           throw const ValidationException(
@@ -834,11 +865,29 @@ class CompetitionRepository {
           _writeFailures.add(_translateWriteFailure(error));
         }));
 
+        // Seeds are persisted onto the entrants so the published seeding list
+        // and the bracket cannot disagree, and so regenerating after a
+        // withdrawal starts from the same ranking rather than recomputing one
+        // that has drifted.
+        if (seeding.isNotEmpty) {
+          final seedBatch = Refs.db.batch();
+          for (final v in seeding) {
+            seedBatch.update(
+              Refs.entrants(orgId, compId).doc(v.entrantId),
+              {'seed': v.seed},
+            );
+          }
+          unawaited(seedBatch.commit().catchError((Object error) {
+            _writeFailures.add(_translateWriteFailure(error));
+          }));
+        }
+
         return DrawOutcome(
           planned: planned.length,
           written: kept.length,
           chunks: batch.chunkCount,
           drawId: drawId,
+          seeding: seeding,
         );
       });
 
@@ -2024,6 +2073,7 @@ class DrawOutcome {
     required this.written,
     required this.chunks,
     required this.drawId,
+    this.seeding = const [],
   });
 
   /// Fixtures the generator produced, including byes and dead branches.
@@ -2037,6 +2087,11 @@ class DrawOutcome {
   final int chunks;
 
   final String drawId;
+
+  /// Who was seeded and why, when the draw seeded from ratings. Empty when the
+  /// organizer set seeds by hand. Shown to the organizer so a player asking
+  /// "why am I not seeded?" gets an answer rather than a shrug.
+  final List<SeedVerdict> seeding;
 
   bool get isAtomic => chunks <= 1;
 

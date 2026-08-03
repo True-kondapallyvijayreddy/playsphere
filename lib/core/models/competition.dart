@@ -721,6 +721,7 @@ class Entrant {
     this.photoUrl,
     this.seed,
     this.memberUids = const [],
+    this.clubId,
     this.withdrawn = false,
   });
 
@@ -739,6 +740,28 @@ class Entrant {
   /// Populated for team entrants.
   final List<String> memberUids;
 
+  /// Returns this entrant carrying [seed], for handing a freshly-computed
+  /// seeding to the draw generator without mutating what was read.
+  Entrant withSeed(int? seed) => Entrant(
+        id: id,
+        displayName: displayName,
+        entrantType: entrantType,
+        uid: uid,
+        photoUrl: photoUrl,
+        seed: seed,
+        memberUids: memberUids,
+        clubId: clubId,
+        withdrawn: withdrawn,
+      );
+
+  /// Which club this entrant represents, when the field spans several.
+  ///
+  /// Drives association protection in a federation draw — two players from
+  /// one club travelling to a district championship to meet each other in
+  /// round one is exactly what a draw is supposed to avoid. Null in a club's
+  /// own event, where everyone shares a club and protection means nothing.
+  final String? clubId;
+
   final bool withdrawn;
 
   factory Entrant.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
@@ -751,6 +774,7 @@ class Entrant {
       photoUrl: Fs.strOrNull(d['photoUrl']),
       seed: d['seed'] == null ? null : Fs.integer(d['seed']),
       memberUids: Fs.strList(d['memberUids']),
+      clubId: Fs.strOrNull(d['clubId']),
       withdrawn: Fs.boolean(d['withdrawn']),
     );
   }
@@ -762,6 +786,7 @@ class Entrant {
         'photoUrl': photoUrl,
         'seed': seed,
         'memberUids': memberUids,
+        'clubId': clubId,
         'withdrawn': withdrawn,
       };
 }

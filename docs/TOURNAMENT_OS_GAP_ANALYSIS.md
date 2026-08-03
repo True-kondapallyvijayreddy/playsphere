@@ -401,11 +401,15 @@ Never moved: a played match (its time is the record), a live match (someone is s
 
 **Tests:** `test/tournament_scheduler_test.dart` 17, `test/tournament_overview_test.dart` 14, `test/schedule_shift_test.dart` 16. Suite 623 → 670. Emulator rules 230 → 242.
 
-### Phase T4 — Fair draws & real seeding *(≈1 week)*
-17. Seed from Glicko-2 within (sport, category); unrated ⇒ unseeded, never seed 1
-18. Federation draw: seeds pinned, remainder randomised from a published seed
-19. Club/association protection in round one
-20. Draw sheet export (PDF/image), and a public draw page
+### Phase T4 — Fair draws & real seeding ✅ **DONE 2026-08-03**
+17. ✅ `SeedingPolicy` — ranks on Glicko-2 within the sport. **Unrated ⇒ unseeded, never seed 1**: a newcomer sits at 1500/RD 350, which is the algorithm saying it has no idea, and sorting on rating alone would place them above an established player rated 1400. Requires ≥5 rated matches and RD ≤ 150. Seed count is a quarter of the bracket — exactly the number the shape can keep apart until the quarter-finals
+18. ✅ `DrawMethod.federation` — seeds pinned in bands (1, 2, then 3–4, then 5–8 shuffled within each), everyone else drawn at random, reproducible from a recorded draw number. `DrawMethod.ranked` stays the default so no existing event's bracket changes
+19. ✅ Club protection via `Entrant.clubId`, best-effort: swaps an unseeded player where it fixes the clash without creating a new one, never moves a seed, gives up rather than searching exhaustively
+20. ⬜ Draw-sheet export and public draw page — not built (belongs with T5's public tournament page)
+
+Every unseeded player carries a **reason** — "2 of 5 rated matches played", "rating not settled enough (±500)" — shown to the organizer after the draw. A bracket that cannot explain itself gets argued with at the desk.
+
+**Tests:** `test/seeding_test.dart`, 18 new. Suite 670 → 688.
 
 ### Phase T5 — Recognition *(≈1 week, highest emotional return)*
 21. Public tournament page: draws, live results, schedule, medal table, one link

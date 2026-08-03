@@ -94,6 +94,11 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
     return requested.clamp(1, maxGroups < 1 ? 1 : maxGroups);
   }
 
+  /// A fresh draw number when the organizer has not fixed one, so a
+  /// supervised draw is genuinely drawn rather than repeating yesterday's.
+  late final int _suggestedSeed =
+      DateTime.now().millisecondsSinceEpoch % 100000;
+
   List<String> get _parsedCourts => _courts.text
       .split(',')
       .map((s) => s.trim())
@@ -186,6 +191,48 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
               ),
 
             const SizedBox(height: 8),
+            const _SectionLabel('Seeding and the draw'),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Seed from ratings'),
+              subtitle: const Text(
+                'Ranks the field on Glicko-2. A player without enough rated '
+                'matches is left unseeded and drawn at random rather than '
+                'being protected on a rating nobody has earned yet.',
+              ),
+              value: _draw.seedFromRatings,
+              onChanged: (v) =>
+                  setState(() => _draw = _draw.copyWith(seedFromRatings: v)),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Supervised draw'),
+              subtitle: const Text(
+                'Seeds pinned to their positions, everyone else drawn at '
+                'random, and two players from the same club kept apart in '
+                'round one where the bracket allows. Off, the bracket is a '
+                'ranked ladder — fine for a club event.',
+              ),
+              value: _draw.method == 'federation',
+              onChanged: (v) => setState(
+                () => _draw =
+                    _draw.copyWith(method: v ? 'federation' : 'ranked'),
+              ),
+            ),
+            if (_draw.method == 'federation')
+              Padding(
+                padding: const EdgeInsets.only(top: 4, bottom: 8),
+                child: Text(
+                  'Draw number ${_draw.shuffleSeed ?? _suggestedSeed}. '
+                  'Recorded with the draw so it can be re-run and checked — '
+                  '"it was random" is not an answer to "why did I get the top '
+                  'seed".',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                ),
+              ),
+            const SizedBox(height: 12),
+
             const _SectionLabel('Courts and timing'),
 
             // Real venues where the club has defined them, typed names where
@@ -289,7 +336,10 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
                 const Spacer(),
                 FilledButton(
                   onPressed: () => Navigator.of(context).pop((
-                    draw: _draw,
+                    draw: _draw.method == 'federation' &&
+                            _draw.shuffleSeed == null
+                        ? _draw.copyWith(shuffleSeed: _suggestedSeed)
+                        : _draw,
                     schedule: _schedule.copyWith(
                       courts: _venueIds.isEmpty ? _parsedCourts : const [],
                       venueIds: _venueIds.toList(),

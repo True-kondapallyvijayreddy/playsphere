@@ -6,6 +6,30 @@ import '../../core/models/enums.dart';
 
 export '../../core/models/draw_slot.dart' show Bracket, QualifierSource;
 
+/// How the field is arranged into the bracket.
+enum DrawMethod {
+  /// Sort everybody by seed (or a fixed shuffle when nobody is seeded), then
+  /// place by mirror order. Fully determined, reproducible, and right for a
+  /// club event where the players know each other and nobody is going to
+  /// challenge the bracket.
+  ranked('ranked', 'Ranked ladder'),
+
+  /// Seeds pinned to their bracket positions in bands, everyone else drawn at
+  /// random, same-club first-round meetings avoided where the bracket allows.
+  /// What a supervised championship draw actually does.
+  federation('federation', 'Supervised draw');
+
+  const DrawMethod(this.wire, this.label);
+
+  final String wire;
+  final String label;
+
+  static DrawMethod fromWire(String? w) => DrawMethod.values.firstWhere(
+        (e) => e.wire == w,
+        orElse: () => DrawMethod.ranked,
+      );
+}
+
 /// A fixture the generator produced, before it has been written to Firestore.
 class PlannedFixture {
   const PlannedFixture({
@@ -212,6 +236,9 @@ class FixtureGenerator {
     /// Groups+knockout: how many entrants from each group advance to the
     /// knockout phase.
     int qualifiersPerGroup = 2,
+
+    /// How the field is arranged into the bracket. See [DrawMethod].
+    DrawMethod method = DrawMethod.ranked,
   }) {
     final active = entrants.where((e) => !e.withdrawn).toList();
     if (active.length < 2) return const [];
@@ -220,7 +247,7 @@ class FixtureGenerator {
       CompetitionFormat.roundRobin ||
       CompetitionFormat.leagueTable =>
         _roundRobinFixtures(active, doubleLegged: doubleRoundRobin),
-      CompetitionFormat.knockout => _knockout(active, shuffleSeed),
+      CompetitionFormat.knockout => _knockout(active, shuffleSeed, method),
       CompetitionFormat.doubleElimination => _doubleElimination(
           active,
           shuffleSeed,
@@ -398,6 +425,11 @@ class FixtureGenerator {
   /// Seeds when any entrant carries one; otherwise a deterministic shuffle.
   /// Shared by every bracket format so "seeded if seeds exist, else a fixed
   /// shuffle" is a single rule rather than three copies that could drift.
+  ///
+  /// This produces a **ranked ladder**: every entrant's bracket position is
+  /// fully determined by their place in the order. That is right for a
+  /// club event and wrong for a championship — see [_federationOrder] for the
+  /// difference and why it matters.
   List<Entrant> _seedOrShuffle(List<Entrant> entrants, int? shuffleSeed) {
     final list = List<Entrant>.from(entrants);
     final anySeeded = list.any((e) => e.seed != null);
@@ -407,6 +439,120 @@ class FixtureGenerator {
       list.shuffle(Random(shuffleSeed ?? 42));
     }
     return list;
+  }
+
+  /// Orders the field the way a supervised federation draw does: seeds pinned,
+  /// everyone else drawn at random.
+  ///
+  /// ## How this differs from a ranked ladder
+  ///
+  /// [_seedOrShuffle] sorts *everybody*, so an unseeded player's first-round
+  /// opponent is decided by their position in a list — which, when nobody is
+  /// seeded, is a fixed shuffle. Two unseeded players of equal standing have
+  /// their draw decided by list order, and the same field always produces the
+  /// same bracket. That is a ladder, not a draw.
+  ///
+  /// A real draw is different in a way that matters to the people in it:
+  ///
+  /// 1. **Seeds occupy fixed positions, in bands.** Seed 1 at the top and seed
+  ///    2 at the bottom are pinned. Seeds 3 and 4 are drawn at random between
+  ///    the two remaining quarters; seeds 5–8 at random among the four
+  ///    remaining eighths, and so on. Within a band the placement is genuinely
+  ///    random, because the ratings that separate seed 5 from seed 8 are not
+  ///    precise enough to justify pretending otherwise.
+  /// 2. **Everyone else is drawn at random** into what is left. Nobody's
+  ///    opponent is a function of alphabetical order or registration time.
+  ///
+  /// [shuffleSeed] makes it reproducible: a draw an organizer must defend has
+  /// to be re-runnable, and "it was random" is not an answer to "why did I get
+  /// the top seed". Recording the seed turns randomness into something
+  /// checkable.
+  List<Entrant> _federationOrder(List<Entrant> entrants, int? shuffleSeed) {
+    final random = Random(shuffleSeed ?? 42);
+
+    final seeded = [
+      for (final e in entrants)
+        if (e.seed != null) e,
+    ]..sort((a, b) => a.seed!.compareTo(b.seed!));
+    final unseeded = [
+      for (final e in entrants)
+        if (e.seed == null) e,
+    ]..shuffle(random);
+
+    if (seeded.isEmpty) return unseeded;
+
+    // Bands of 1, 1, 2, 4, 8, … — the ranks that are interchangeable as far
+    // as the bracket is concerned, shuffled within each.
+    final ordered = <Entrant>[];
+    var index = 0;
+    var bandSize = 1;
+    while (index < seeded.length) {
+      final band = seeded.skip(index).take(bandSize).toList()..shuffle(random);
+      ordered.addAll(band);
+      index += bandSize;
+      // 1, then 1, then 2, 4, 8 …
+      bandSize = ordered.length == 1 ? 1 : ordered.length;
+    }
+
+    return [...ordered, ...unseeded];
+  }
+
+  /// Reduces same-club first-round meetings, where the bracket allows it.
+  ///
+  /// Two players from one club travelling to a district championship to play
+  /// each other in round one is the outcome a draw is supposed to avoid, and
+  /// it is the first thing an organizer is challenged on. Federations call
+  /// this association protection.
+  ///
+  /// Best-effort by design. It swaps an offending entrant with an unseeded
+  /// player from another pairing where doing so does not create a new clash,
+  /// and gives up rather than searching exhaustively — a field that is mostly
+  /// one club cannot be separated, and pretending otherwise would reshuffle a
+  /// bracket for no gain. Seeds are never moved: their positions are the
+  /// promise the seeding made.
+  List<Entrant?> _applyClubProtection(List<Entrant?> slots) {
+    bool clash(int pair) {
+      final a = slots[pair * 2];
+      final b = slots[pair * 2 + 1];
+      return a != null &&
+          b != null &&
+          a.clubId != null &&
+          a.clubId == b.clubId;
+    }
+
+    final pairCount = slots.length ~/ 2;
+    for (var pair = 0; pair < pairCount; pair++) {
+      if (!clash(pair)) continue;
+
+      // Move the unseeded half of the offending pair, never the seed.
+      final moveIndex =
+          slots[pair * 2]?.seed == null ? pair * 2 : pair * 2 + 1;
+      final moving = slots[moveIndex];
+      if (moving == null || moving.seed != null) continue;
+
+      for (var other = 0; other < pairCount; other++) {
+        if (other == pair) continue;
+        for (final side in const [0, 1]) {
+          final candidateIndex = other * 2 + side;
+          final candidate = slots[candidateIndex];
+          if (candidate == null || candidate.seed != null) continue;
+
+          final candidatePartner = slots[other * 2 + (1 - side)];
+          final stayingPartner = slots[pair * 2 + (1 - (moveIndex % 2))];
+
+          // The swap must fix this pair without breaking the other one.
+          final fixesHere = stayingPartner?.clubId != candidate.clubId;
+          final safeThere = candidatePartner?.clubId != moving.clubId;
+          if (!fixesHere || !safeThere) continue;
+
+          slots[moveIndex] = candidate;
+          slots[candidateIndex] = moving;
+          break;
+        }
+        if (!clash(pair)) break;
+      }
+    }
+    return slots;
   }
 
   int _nextPow2(int n) {
@@ -526,14 +672,23 @@ class FixtureGenerator {
   // ---------------------------------------------------------------------
 
   /// Single-elimination bracket sized to the next power of two.
-  List<PlannedFixture> _knockout(List<Entrant> entrants, int? shuffleSeed) {
-    final seeded = _seedOrShuffle(entrants, shuffleSeed);
+  List<PlannedFixture> _knockout(
+    List<Entrant> entrants,
+    int? shuffleSeed, [
+    DrawMethod method = DrawMethod.ranked,
+  ]) {
+    final seeded = method == DrawMethod.federation
+        ? _federationOrder(entrants, shuffleSeed)
+        : _seedOrShuffle(entrants, shuffleSeed);
     final bracketSize = _nextPow2(seeded.length);
     final slotOrder = _mirrorSlots(bracketSize);
-    final placed = List<Entrant?>.generate(
+    var placed = List<Entrant?>.generate(
       bracketSize,
       (i) => slotOrder[i] < seeded.length ? seeded[slotOrder[i]] : null,
     );
+    if (method == DrawMethod.federation) {
+      placed = _applyClubProtection(placed);
+    }
 
     final fixtures = <PlannedFixture>[];
     _buildKnockoutFixtures(
