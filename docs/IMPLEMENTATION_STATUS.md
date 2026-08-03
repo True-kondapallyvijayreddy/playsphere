@@ -3,7 +3,15 @@
 Audit of the codebase against `CLAUDE.md` (master spec) and the Telangana
 research PDF. Every row was verified against the code, not assumed.
 
-**Last audited:** 2026-07-28 · **Branch:** `fix/p0-blockers-and-rules-tests`
+**Last audited:** 2026-08-01 · **Branch:** `fix/p0-blockers-and-rules-tests`
+
+> Two passes audited the code against the end-to-end flow diagram (join → club
+> → grow → event → participation model → challenge → match day → live scoring
+> → edits → completion → memories). The 2026-07-31 pass closed the break at
+> steps 4–6; the 2026-08-01 pass closed steps 3 and 10, per-club registration
+> inside a challenge, and push notifications. **All eleven steps are now
+> implemented end to end** — see §6 for the step-by-step state and what
+> remains, which is depth rather than gaps.
 
 ---
 
@@ -54,7 +62,7 @@ stands.
 
 | Spec area | Status | Notes |
 |---|---|---|
-| Part 1 — Clubs & Events | **~35%** | Clubs, roles, invite codes, events, registration, draws work. No notifications, challenges, payments, RSVP, waitlist logic, sub-groups. |
+| Part 1 — Clubs & Events | **~80%** | Clubs, roles, invite code + link + QR, club feed with polls, files, gallery, events, participation models (open/hybrid/approval), capacity + waitlist with auto-promotion, per-club squads and squad calls in challenges, draws, FCM push. No payments, RSVP, sub-groups, geo discovery, WhatsApp/SMS fallback. |
 | Part 2 — Match day & scoring | **~25%** | Event-sourced scoring, 4 engines, live spectator view, league tables. No per-player stats, no team formation, no officials UI, no MVP/dispute. |
 | Part 3 — Memories & profiles | **~5%** | Winner recorded. No memories, no career profile, no verification tiers, no talent discovery. |
 | Part 4 — Government dashboards | **0%** | Not started. |
@@ -73,20 +81,21 @@ Legend: ✅ done · 🟡 partial · ❌ missing
 
 | Feature | Status | Detail |
 |---|---|---|
-| Create club, entity types | 🟡 | `OrgType` has school/college/academy/corporate/community/associations. **Missing `village` and `individual`** — both named in the spec. |
+| Create club, entity types | ✅ | 11 `OrgType`s, including `village` and `individual`. *(Corrected 2026-07-31: the earlier row said these were missing; they are in `enums.dart`.)* |
 | Invite by link / QR / phone | 🟡 | 6-char invite code only. No link, no QR, no phone invite. |
 | Roles | ✅ | 5 roles, enforced server-side in rules. Richer than the spec's 4. |
 | Join requests + approval | ✅ | Works. |
 | Sub-groups (age/team/gender) | ❌ | |
-| Club feed / announcements | ❌ | |
+| Club feed / announcements | ✅ | `announcement.dart`, `club_feed_tab.dart`. *(Corrected 2026-07-31.)* |
 | Internal events (free) | ✅ | Competition creation works. |
 | Member notification on event creation | ❌ | **No FCM at all.** Spec calls this the trigger for one-tap registration. |
 | One-tap registration | ✅ | |
 | RSVP going/maybe/no | ❌ | |
-| Capacity | ✅ | `maxEntrants` |
-| Waitlist | 🟡 | `RegistrationStatus.waitlisted` exists; no logic promotes anyone. |
+| Capacity | ✅ | `maxEntrants`, enforced in a transaction AND in `firestore.rules` against `confirmedCount`. |
+| Participation model (open / hybrid / approval) | ✅ | `ParticipationModel`. Open auto-confirms the first N; hybrid reserves a block for the organizer's picks and opens the rest; approval is the original behaviour and the default for every event created before the field existed. `test/participation_model_test.dart`. |
+| Waitlist | ✅ | Queued with a position when the open slots are full; the first reserve is promoted automatically when a confirmed player withdraws. Promotion is a second transaction — rules evaluate against pre-transaction state, so the slot only becomes provably free once the withdrawal commits. |
 | Skill filter | ❌ | |
-| Inter-club challenges | ❌ | **Architecturally blocked** — see §3. |
+| Inter-club challenges | 🟡 | Challenge → accept/decline/withdraw → competition + fixture ✅. Each club now picks and locks **its own** squad (`setSideLineup`, `squadLockedA/B`, rules branch (e)); a locked squad is frozen even to the hosting club's organizers. Still no per-club open registration to members for a challenge. |
 | Open events discoverable by geo | ❌ | No geolocation anywhere. |
 | Paid registration (Razorpay + Route) | ❌ | |
 | "Looking for" board | ❌ | |
@@ -98,16 +107,16 @@ Legend: ✅ done · 🟡 partial · ❌ missing
 |---|---|---|
 | Event-sourced match log | ✅ | Append-only, immutable, monotonic sequence. Meets §2.4. |
 | Scorer lock | ✅ | `scorerUids` + rules. |
-| Assign scorer/umpire/commentator | ❌ | `assignScorers` exists in the repo with **no UI caller**; only the draw creator can score. |
+| Assign scorer/umpire/commentator | ✅ | `assignScorers`, plus request → approve → assign (`ScoringRequest`, `ask_to_score.dart`) and an umpire registry. *(Corrected 2026-07-31.)* |
 | Manual team shuffle | ❌ | |
 | AI team balance | ❌ | Prototype had a snake draft — needs porting **and** upgrading to Glicko-2. |
 | Live share link, no install | ✅ | `/watch/` is public. |
-| Toss | ❌ | Named by you; absent from spec, prototype and build. |
+| Toss | ✅ | `TossDialog` + `recordToss`, frozen into the fixture's scoring config. *(Corrected 2026-07-31.)* |
 | MVP | ❌ | |
 | Dispute flow, scorecard lock | ❌ | |
 | Injury/substitution log | ❌ | |
 | Weather flag, equipment, venue status | ❌ | |
-| **Per-player statistics** | ❌ | **The largest single gap.** No engine records who did what — see below. |
+| **Per-player statistics** | 🟡 | Line-ups name players (`MatchPlayer`), `player_stats.dart` and the cricket scorecard project per-player figures, and `box_score_table.dart` renders them. Not yet uniform across all 13 engines. *(Corrected 2026-07-31 — no longer 'no player identity at all'.)* |
 
 #### Per-sport engines vs §7
 
@@ -250,3 +259,102 @@ Ordered by dependency, then value. Each ships and is tested.
 
 Not covered: repositories, `ScoringService`, offline behaviour, any screen
 other than org home.
+
+---
+
+## 6. The end-to-end flow (audited 2026-07-31)
+
+The product is one repeatable operating flow, and it is only worth as much as
+its weakest step. Audited against the flow diagram, step by step, against the
+code rather than against intent.
+
+| # | Step | State |
+|---|---|---|
+| 1 | Join / sign up → sports profile | ✅ |
+| 2 | Create club | ✅ 11 org types incl. village and individual |
+| 3 | Grow club | ✅ invite code + shareable link + QR, roles, join requests, feed, polls, files, club gallery |
+| 4 | Create event | ✅ sport, category, format, date **and time**, venue, capacity, team size, entry fee, rules text, open-vs-restricted |
+| 5 | Participation model | ✅ open (auto-fill) / hybrid (picked + open) / approval, capacity, waitlist with auto-promotion |
+| 6 | Challenge another club | ✅ challenge → accept → match; each club picks and locks **its own** squad, and can open its side to its own members (first N register, reserves auto-promote) |
+| 7 | Match-day control | ✅ scorer request → approve → assign, officials, toss, line-ups |
+| 8 | Live match workflow | ✅ 13 engines, event-sourced, offline queue, public watch link |
+| 9 | Edits during play | ✅ undo as reversal, rebuild from log, reschedule, line-up edits |
+| 10 | Match completion | ✅ winner, standings, Glicko, career stats, and best performer computed from the same contribution points that drive the ratings |
+| 11 | Memories | ✅ upload, album, match section, career profile |
+
+### Still missing on the flow
+
+All eleven steps are now implemented end to end. What remains is depth rather
+than gaps in the flow:
+
+1. **Per-player statistics are not uniform across all 13 engines.** Cricket and
+   the goal/point sports write rich tallies; the rest write less. The MVP award
+   and the rating weights read whatever an engine emits, so a sport that
+   records little produces a weaker award — never a wrong one, since a zero
+   tally is simply not a candidate.
+2. **WhatsApp/SMS fallback.** `NotificationType.isCritical` marks the three
+   events the spec says need it (event reminder, match start, result) and
+   nothing acts on that flag yet — FCM is the only channel. The distinction is
+   modelled; the second leg is not built.
+3. **Files accept images and PDFs via the image picker.** A dedicated file
+   picker is a new dependency for the minority case; the storage rules already
+   admit the wider document set when one is added.
+4. **Geo discovery of open events** (step 4's "open registration" at city
+   scale) still has no geolocation behind it.
+
+### Design notes worth not re-deriving
+
+- **Capacity is enforced in the rules, not just the client.** The count lives
+  on the competition document because `firestore.rules` cannot count
+  documents, and a self-registration must pay for its slot in the same atomic
+  write — `getAfter()` ties the registration and the counter increment
+  together. Without that linkage the capacity check is decorative: a client
+  can write thirty confirmed registrations and never move the counter.
+- **Waitlist promotion is a second transaction, deliberately.** Rules evaluate
+  a write against pre-transaction state, so at the moment a same-transaction
+  promotion would be checked the event is still full. The withdrawal has to
+  commit first for the slot to be provably free.
+- **Registration needs connectivity; scoring must not.** Transactions cannot
+  run offline. That trade is the right way round — registering happens at home
+  in the days before a match, scoring happens on a ground with no signal.
+- **Every new competition field is read through `.get(field, default)` in the
+  rules.** Reading a missing field in a rule is an error, which denies, so
+  without the defaults this change would have broken registration on every
+  event already in the database. The defaults reproduce the old behaviour
+  exactly: approval-gated, no waitlist, counts at zero.
+
+### Test coverage added
+
+| Suite | Count | Covers |
+|---|---|---|
+| `test/participation_model_test.dart` | 18 | Open / hybrid / approval arithmetic, the flow's 13-slot and 8+5 scenarios, wire compatibility |
+| `test/inter_club_squad_test.dart` | 12 | Which club owns which side, squad locks, `playerUids` across both squads |
+| `test/security/rules.test.mjs` (participation) | 18 | Capacity and waitlist enforced server-side, legacy events unaffected |
+| `test/security/rules.test.mjs` (inter-club) | 12 | Per-club squad writes, locks frozen against the host |
+
+### Test coverage added, second pass (2026-08-01)
+
+| Suite | Count | Covers |
+|---|---|---|
+| `test/match_award_test.dart` | 13 | Best-performer selection, tie-breaks, stability across rebuilds, one shared contribution table |
+| `test/squad_call_test.dart` | 11 | Per-side squad arithmetic and wire defaults |
+| `test/club_growth_test.dart` | 14 | Invite links, poll tallies, file sizes |
+| `test/security/rules.test.mjs` (squads) | 15 | A member of one club cannot register for the other's side |
+| `test/security/rules.test.mjs` (polls) | 9 | Members vote without being able to post or edit the question |
+
+`test/security/rules.test.mjs` stands at **205 passing**, and the Dart suite at
+**530**.
+
+### Push notifications
+
+`functions/index.js` — six Firestore triggers in asia-south1, deployed. This is
+the only server-side code in the product, and it exists because push is the one
+thing that cannot be done client-side: a client must never be able to make
+other people's phones buzz. Nothing there is callable; each function watches a
+write that already means something (an event opening, a match going live or
+finishing, a challenge arriving, a membership approved, a reserve being
+promoted) and fans it out.
+
+Device tokens live at `users/{uid}/devices/{token}` — one document per device,
+because a player has a phone and a lab machine and a scorer borrows the club
+tablet. Dead tokens are pruned as the server discovers them.

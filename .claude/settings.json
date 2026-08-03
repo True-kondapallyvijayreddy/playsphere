@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(java -version)",
+      "Bash(./gradlew :share_plus:compileDebugKotlin)",
+      "Bash(flutter build *)",
+      "Bash(firebase --version)",
+      "Bash(firebase projects:list)",
+      "Bash(firebase firestore:indexes)",
+      "Bash(firebase firestore:indexes --project playsphere-os)",
+      "Bash(firebase deploy *)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d.get\\('fieldOverrides',[]\\),indent=1\\)\\)\")",
+      "Bash(flutter --version)",
+      "Bash(python3 -)",
+      "Bash(flutter analyze *)",
+      "Bash(flutter test *)",
+      "Bash(grep -vE \"loading|^$\")",
+      "Bash(npx --no-install firebase --version)",
+      "Bash(npx --no-install firebase firestore:indexes --project playsphere-os)",
+      "Bash(npm test *)",
+      "Bash(npx --no-install firebase deploy --only firestore:indexes,firestore:rules --project playsphere-os --non-interactive)",
+      "Bash(python3 -c ' *)",
+      "Bash(awk 'NR>=985 && NR<=1075' firestore.rules)",
+      "Bash(python3 -c \"import json;d=json.load\\(open\\('firestore.indexes.json'\\)\\);print\\('valid json, indexes:',len\\(d['indexes']\\),'overrides:',len\\(d['fieldOverrides']\\)\\)\")"
+    ]
+  }
+}
