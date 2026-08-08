@@ -607,3 +607,79 @@ enum GiveNeedStatus {
   static GiveNeedStatus fromWire(String? w) => GiveNeedStatus.values
       .firstWhere((e) => e.wire == w, orElse: () => GiveNeedStatus.open);
 }
+
+// -----------------------------------------------------------------------------
+// Sponsor an Athlete / Sponsor a Team — the direct, ongoing, named-relationship
+// counterpart to Give above. See `lib/core/models/sponsorship.dart` for why
+// this is a distinct feature rather than another `GiveNeed` beneficiary type:
+// Give is "help sports generally, anonymously, one item at a time"; Sponsor is
+// "I am backing this specific person or team, and I get credited for it".
+// -----------------------------------------------------------------------------
+
+/// Who a sponsorship listing is for. Deliberately narrower than
+/// [GiveBeneficiaryType] — sponsorship is a named, ongoing relationship, and
+/// the vision this implements only ever describes two shapes for that:
+/// backing one athlete or backing one team's whole squad. A village raising
+/// general equipment for "the club" is Give's `club` need, not this.
+enum SponsorshipTargetType {
+  athlete('athlete', 'Athlete'),
+  team('team', 'Team');
+
+  const SponsorshipTargetType(this.wire, this.label);
+  final String wire;
+  final String label;
+
+  static SponsorshipTargetType fromWire(String? w) =>
+      SponsorshipTargetType.values
+          .firstWhere((e) => e.wire == w, orElse: () => SponsorshipTargetType.athlete);
+}
+
+/// What kind of support a listing is asking a sponsor to provide. [equipment]
+/// defers to [EquipmentCategory] for the specific item — this enum covers the
+/// broader set of asks a sponsorship carries that a one-off equipment
+/// donation never does: an ongoing coach's fee, a season of travel, a
+/// tournament's entry costs.
+enum SponsorshipSupportCategory {
+  equipment('equipment', 'Equipment', '🎽'),
+  coaching('coaching', 'Coaching', '🧑‍🏫'),
+  travel('travel', 'Travel to matches', '🚌'),
+  tournamentFees('tournament_fees', 'Tournament entry fees', '🏆'),
+  trainingCamp('training_camp', 'Training camp', '⛺'),
+  nutrition('nutrition', 'Nutrition', '🍎'),
+  groundFees('ground_fees', 'Ground / facility fees', '🏟️'),
+  other('other', 'Other support', '🤝');
+
+  const SponsorshipSupportCategory(this.wire, this.label, this.emoji);
+  final String wire;
+  final String label;
+  final String emoji;
+
+  static SponsorshipSupportCategory fromWire(String? w) =>
+      SponsorshipSupportCategory.values.firstWhere(
+        (e) => e.wire == w,
+        orElse: () => SponsorshipSupportCategory.other,
+      );
+}
+
+/// Where one sponsor's offer against a listing stands.
+///
+/// Deliberately not reused from anywhere else — a pledge's lifecycle
+/// (`pending` → `accepted`/`declined`, plus `withdrawn` and `completed`) is
+/// its own thing, distinct from [TrialInviteStatus] (a scout inviting a
+/// player to a trial) even though the shape looks similar, because the two
+/// features must be free to evolve their terminal states independently —
+/// see `lib/core/models/scout_access.dart`.
+enum SponsorPledgeStatus {
+  pending('pending', 'Awaiting response'),
+  accepted('accepted', 'Accepted'),
+  declined('declined', 'Declined'),
+  withdrawn('withdrawn', 'Withdrawn'),
+  completed('completed', 'Completed');
+
+  const SponsorPledgeStatus(this.wire, this.label);
+  final String wire;
+  final String label;
+
+  static SponsorPledgeStatus fromWire(String? w) => SponsorPledgeStatus.values
+      .firstWhere((e) => e.wire == w, orElse: () => SponsorPledgeStatus.pending);
+}

@@ -41,7 +41,15 @@ enum NotificationType {
   /// Not critical, for the same reason [challengeReceived] is not: it is an
   /// offer addressed to a club's organizers, it sits in their list until
   /// somebody answers it, and nothing is lost by finding it a day later.
-  tournamentInvite('tournament_invite', isCritical: false);
+  tournamentInvite('tournament_invite', isCritical: false),
+
+  /// A sponsor has offered to back this listing. Same shape as
+  /// [challengeReceived]: an offer sitting in an inbox until the listing
+  /// owner answers it, so missing it for a day costs nothing.
+  sponsorPledgeReceived('sponsor_pledge_received', isCritical: false),
+
+  /// The listing owner has accepted or declined this sponsor's offer.
+  sponsorPledgeResolved('sponsor_pledge_resolved', isCritical: false);
 
   const NotificationType(this.wire, {required this.isCritical});
 

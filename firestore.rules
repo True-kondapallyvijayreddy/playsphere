@@ -2963,6 +2963,124 @@ service cloud.firestore {
     }
 
     // -------------------------------------------------------------------
+    // Sponsor an Athlete / Sponsor a Team.
+    //
+    // A listing is world-readable, same trust shape as `giveNeeds` above —
+    // it carries no more than a chosen display name, a sport, a district and
+    // a story, never a birth date or contact details (see `SponsorshipListing`'s
+    // class doc). The one thing this feature adds beyond Give's precedent:
+    // when the listing is FOR a minor, only that minor's own linked guardian
+    // may publish it. A minor may not self-publish a sponsorship listing —
+    // unlike a Give player-need, this is a named, ongoing, publicly credited
+    // relationship, and that higher stakes level earns a stricter authorship
+    // check than a one-off equipment ask.
+    // -------------------------------------------------------------------
+
+    // The guardian linked to userId's own profile, or null if none is set /
+    // the profile does not exist. Mirrors the `guardianUid` check already
+    // used on `/users/{userId}` create/update above.
+    function linkedGuardianOf(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId))
+        ? get(/databases/$(database)/documents/users/$(userId)).data.get('guardianUid', null)
+        : null;
+    }
+
+    // Whether `subjectUid` is an adult, read live off their own profile —
+    // never off any flag this listing document itself might carry. Absent
+    // profile (should not happen for a real uid) fails closed as "not adult".
+    function subjectIsAdult(subjectUid) {
+      return exists(/databases/$(database)/documents/users/$(subjectUid))
+        && isAdult(get(/databases/$(database)/documents/users/$(subjectUid)).data.dateOfBirth);
+    }
+
+    match /sponsorshipListings/{listingId} {
+      allow read: if true;
+
+      allow create: if isSignedIn()
+        && request.resource.data.createdByUid == uid()
+        && request.resource.data.status == 'open'
+        && request.resource.data.sponsorsCount == 0
+        && request.resource.data.targetType in ['athlete', 'team']
+        && request.resource.data.sport is string
+        && request.resource.data.sport.size() > 0
+        && request.resource.data.headline is string
+        && request.resource.data.headline.size() > 0
+        && (
+          request.resource.data.targetType == 'athlete'
+            ? (
+                request.resource.data.subjectUid is string
+                // Adults publish their own listing; a minor's listing may
+                // only be published by their linked guardian — never by the
+                // minor themselves, and never by an unrelated adult.
+                && (
+                  subjectIsAdult(request.resource.data.subjectUid)
+                    ? request.resource.data.subjectUid == uid()
+                    : uid() == linkedGuardianOf(request.resource.data.subjectUid)
+                )
+              )
+            // A team listing requires the same competition-management
+            // authority Give requires for a club need — a stranger cannot
+            // publish a sponsorship ask in a village club's name.
+            : canManageCompetitions(request.resource.data.orgId)
+        );
+
+      // Refreshing a story/asks/achievement summary is the owner's to do;
+      // `sponsorsCount` and `status` move only through the pledge functions
+      // below (Cloud Function, admin SDK, bypasses rules) — a listing owner
+      // marking their own pledge count up would make "3 sponsors" meaningless.
+      allow update: if isSignedIn()
+        && resource.data.createdByUid == uid()
+        && request.resource.data.createdByUid == uid()
+        && unchanged('subjectUid')
+        && unchanged('orgId')
+        && unchanged('targetType')
+        && unchanged('sponsorsCount')
+        && unchanged('status');
+      allow delete: if false;
+    }
+
+    match /sponsorPledges/{pledgeId} {
+      // A sponsor reads their own offers; a listing owner reads what has
+      // been offered against their own listing. Nobody else — an offer's
+      // message is between the two of them, mediated by the app, never a
+      // public document (contrast with the listing itself, which is public).
+      allow read: if isSignedIn() && (
+        resource.data.sponsorUid == uid()
+        || get(/databases/$(database)/documents/sponsorshipListings/$(resource.data.listingId)).data.createdByUid == uid()
+      );
+
+      allow create: if isSignedIn()
+        && request.resource.data.sponsorUid == uid()
+        && request.resource.data.status == 'pending'
+        && request.resource.data.respondedAt == null
+        && request.resource.data.listingId is string
+        && exists(/databases/$(database)/documents/sponsorshipListings/$(request.resource.data.listingId));
+
+      // Two, and only two, parties may ever move a pledge, and each may only
+      // make the move that belongs to them: the listing owner accepts or
+      // declines; the sponsor withdraws their own still-pending offer. A
+      // sponsor cannot self-accept, and an owner cannot withdraw on a
+      // sponsor's behalf.
+      allow update: if isSignedIn()
+        && unchanged('listingId')
+        && unchanged('sponsorUid')
+        && unchanged('createdAt')
+        && (
+          (
+            get(/databases/$(database)/documents/sponsorshipListings/$(resource.data.listingId)).data.createdByUid == uid()
+            && resource.data.status == 'pending'
+            && request.resource.data.status in ['accepted', 'declined']
+          )
+          || (
+            resource.data.sponsorUid == uid()
+            && resource.data.status == 'pending'
+            && request.resource.data.status == 'withdrawn'
+          )
+        );
+      allow delete: if false;
+    }
+
+    // -------------------------------------------------------------------
     // Grounds — the rentable-venue marketplace.
     //
     // Deliberately top-level and deliberately not under /orgs: a ground owner

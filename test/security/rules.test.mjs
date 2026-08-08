@@ -5285,3 +5285,418 @@ describe('give: impact stats — Cloud Function only, no client escape hatch', (
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Sponsor an Athlete / Sponsor a Team.
+// ---------------------------------------------------------------------------
+describe('sponsorship listings: adult self-publish, guardian-only for a minor', () => {
+  const ADULT = 'uid_sponsor_adult_athlete';
+  const MINOR_UID = 'uid_sponsor_minor_athlete';
+  const GUARDIAN = 'uid_sponsor_guardian';
+
+  const adultProfile = (uid) => ({
+    uid,
+    displayName: 'Adult Athlete',
+    email: 'adult@example.com',
+    dateOfBirth: new Date('1998-01-01'),
+    gender: 'female',
+    photoUrl: null,
+    phone: null,
+    profileVisibility: 'public',
+    profileComplete: true,
+    isMinor: false,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+
+  const minorProfile = (guardianUid) => ({
+    uid: MINOR_UID,
+    displayName: 'Young Athlete',
+    email: 'minor-athlete@example.com',
+    dateOfBirth: new Date('2012-01-01'),
+    gender: 'male',
+    photoUrl: null,
+    phone: null,
+    profileVisibility: 'private',
+    profileComplete: true,
+    isMinor: true,
+    guardianUid: guardianUid ?? null,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+
+  const athleteListing = (overrides = {}) => ({
+    targetType: 'athlete',
+    subjectUid: null,
+    subjectDisplayName: 'A. Athlete',
+    orgId: null,
+    orgName: null,
+    sport: 'Athletics',
+    geo: { district: 'Warangal' },
+    headline: 'State U-16 100m champion',
+    story: 'Trains before school every day.',
+    achievementSummary: [],
+    ratingPercentile: null,
+    verificationTier: null,
+    asks: [],
+    status: 'open',
+    sponsorsCount: 0,
+    createdByUid: null,
+    createdAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  const teamListing = (overrides = {}) => ({
+    targetType: 'team',
+    subjectUid: null,
+    subjectDisplayName: null,
+    orgId: PUBLIC_ORG,
+    orgName: 'Test Organization',
+    sport: 'Cricket',
+    geo: { district: 'Nalgonda' },
+    headline: '27 wins in 32 matches this season',
+    story: '',
+    achievementSummary: [],
+    ratingPercentile: null,
+    verificationTier: null,
+    asks: [],
+    status: 'open',
+    sponsorsCount: 0,
+    createdByUid: null,
+    createdAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  it('lets an adult publish their own athlete listing', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', ADULT), adultProfile(ADULT));
+    });
+    const db = testEnv.authenticatedContext(ADULT).firestore();
+    await assertSucceeds(
+      setDoc(
+        doc(db, 'sponsorshipListings', 'listing_adult'),
+        athleteListing({ subjectUid: ADULT, createdByUid: ADULT }),
+      ),
+    );
+  });
+
+  it('refuses an adult publishing a listing naming someone else as the subject', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', ADULT), adultProfile(ADULT));
+      await setDoc(doc(db, 'users', OUTSIDER), adultProfile(OUTSIDER));
+    });
+    const db = testEnv.authenticatedContext(ADULT).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'sponsorshipListings', 'listing_adult'),
+        athleteListing({ subjectUid: OUTSIDER, createdByUid: ADULT }),
+      ),
+    );
+  });
+
+  it('refuses a minor publishing their own listing, even naming themselves', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', MINOR_UID), minorProfile(null));
+    });
+    const db = testEnv.authenticatedContext(MINOR_UID).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'sponsorshipListings', 'listing_minor'),
+        athleteListing({ subjectUid: MINOR_UID, createdByUid: MINOR_UID }),
+      ),
+    );
+  });
+
+  it('lets the minor\'s linked guardian publish a listing on their behalf', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', MINOR_UID), minorProfile(GUARDIAN));
+    });
+    const db = testEnv.authenticatedContext(GUARDIAN).firestore();
+    await assertSucceeds(
+      setDoc(
+        doc(db, 'sponsorshipListings', 'listing_minor'),
+        athleteListing({ subjectUid: MINOR_UID, createdByUid: GUARDIAN }),
+      ),
+    );
+  });
+
+  it('refuses an unrelated adult publishing a minor\'s listing', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', MINOR_UID), minorProfile(GUARDIAN));
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'sponsorshipListings', 'listing_minor'),
+        athleteListing({ subjectUid: MINOR_UID, createdByUid: OUTSIDER }),
+      ),
+    );
+  });
+
+  it('refuses publishing a minor\'s listing before any guardian is linked at all', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', MINOR_UID), minorProfile(null));
+    });
+    const db = testEnv.authenticatedContext(GUARDIAN).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'sponsorshipListings', 'listing_minor'),
+        athleteListing({ subjectUid: MINOR_UID, createdByUid: GUARDIAN }),
+      ),
+    );
+  });
+
+  it('lets a club owner publish a listing for their own team', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER),
+        membership(OWNER, PUBLIC_ORG, 'owner'),
+      );
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      setDoc(
+        doc(db, 'sponsorshipListings', 'listing_team'),
+        teamListing({ createdByUid: OWNER }),
+      ),
+    );
+  });
+
+  it('refuses an ordinary member publishing a team listing in the club\'s name', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OUTSIDER),
+        membership(OUTSIDER, PUBLIC_ORG, 'member'),
+      );
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'sponsorshipListings', 'listing_team'),
+        teamListing({ createdByUid: OUTSIDER }),
+      ),
+    );
+  });
+
+  it('is world-readable', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', ADULT), adultProfile(ADULT));
+      await setDoc(
+        doc(db, 'sponsorshipListings', 'listing_adult'),
+        athleteListing({ subjectUid: ADULT, createdByUid: ADULT }),
+      );
+    });
+    const anon = testEnv.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(anon, 'sponsorshipListings', 'listing_adult')));
+  });
+
+  it('lets the owner edit the story, but not sponsorsCount or status', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', ADULT), adultProfile(ADULT));
+      await setDoc(
+        doc(db, 'sponsorshipListings', 'listing_adult'),
+        athleteListing({ subjectUid: ADULT, createdByUid: ADULT }),
+      );
+    });
+    const db = testEnv.authenticatedContext(ADULT).firestore();
+    await assertSucceeds(
+      updateDoc(doc(db, 'sponsorshipListings', 'listing_adult'), {
+        story: 'Updated story.',
+      }),
+    );
+    await assertFails(
+      updateDoc(doc(db, 'sponsorshipListings', 'listing_adult'), {
+        sponsorsCount: 5,
+      }),
+    );
+    await assertFails(
+      updateDoc(doc(db, 'sponsorshipListings', 'listing_adult'), {
+        status: 'closed',
+      }),
+    );
+  });
+
+  it('refuses a non-owner editing the listing at all', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', ADULT), adultProfile(ADULT));
+      await setDoc(
+        doc(db, 'sponsorshipListings', 'listing_adult'),
+        athleteListing({ subjectUid: ADULT, createdByUid: ADULT }),
+      );
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'sponsorshipListings', 'listing_adult'), {
+        story: 'Hijacked.',
+      }),
+    );
+  });
+});
+
+describe('sponsorship pledges: two parties, two moves', () => {
+  const SPONSOR = 'uid_sponsor_backer';
+  const LISTING_OWNER = 'uid_sponsor_listing_owner';
+
+  const pledge = (overrides = {}) => ({
+    listingId: 'listing_1',
+    sponsorUid: SPONSOR,
+    sponsorDisplayName: 'A Backer',
+    message: 'Happy to help with kit.',
+    offeredCategories: ['equipment'],
+    amountPaise: null,
+    anonymous: false,
+    status: 'pending',
+    createdAt: serverTimestamp(),
+    respondedAt: null,
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', LISTING_OWNER), {
+        uid: LISTING_OWNER,
+        displayName: 'Owner',
+        email: 'owner@example.com',
+        dateOfBirth: new Date('1990-01-01'),
+        gender: 'male',
+        photoUrl: null,
+        phone: null,
+        profileVisibility: 'public',
+        profileComplete: true,
+        isMinor: false,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      await setDoc(doc(db, 'sponsorshipListings', 'listing_1'), {
+        targetType: 'athlete',
+        subjectUid: LISTING_OWNER,
+        subjectDisplayName: 'Owner Athlete',
+        orgId: null,
+        orgName: null,
+        sport: 'Athletics',
+        geo: { district: 'Warangal' },
+        headline: 'Rising sprinter',
+        story: '',
+        achievementSummary: [],
+        ratingPercentile: null,
+        verificationTier: null,
+        asks: [],
+        status: 'open',
+        sponsorsCount: 0,
+        createdByUid: LISTING_OWNER,
+        createdAt: serverTimestamp(),
+      });
+    });
+  });
+
+  it('lets a signed-in sponsor offer against an existing listing', async () => {
+    const db = testEnv.authenticatedContext(SPONSOR).firestore();
+    await assertSucceeds(setDoc(doc(db, 'sponsorPledges', 'pledge_1'), pledge()));
+  });
+
+  it('refuses a pledge claiming to be from somebody else', async () => {
+    const db = testEnv.authenticatedContext(SPONSOR).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'sponsorPledges', 'pledge_1'),
+        pledge({ sponsorUid: OUTSIDER }),
+      ),
+    );
+  });
+
+  it('refuses a pledge that pre-sets its own status past pending', async () => {
+    const db = testEnv.authenticatedContext(SPONSOR).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'sponsorPledges', 'pledge_1'),
+        pledge({ status: 'accepted' }),
+      ),
+    );
+  });
+
+  it('refuses a pledge against a listing that does not exist', async () => {
+    const db = testEnv.authenticatedContext(SPONSOR).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'sponsorPledges', 'pledge_ghost'),
+        pledge({ listingId: 'no_such_listing' }),
+      ),
+    );
+  });
+
+  it('lets the sponsor and the listing owner read the pledge, refuses a stranger', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'sponsorPledges', 'pledge_1'), pledge());
+    });
+
+    const asSponsor = testEnv.authenticatedContext(SPONSOR).firestore();
+    await assertSucceeds(getDoc(doc(asSponsor, 'sponsorPledges', 'pledge_1')));
+
+    const asOwner = testEnv.authenticatedContext(LISTING_OWNER).firestore();
+    await assertSucceeds(getDoc(doc(asOwner, 'sponsorPledges', 'pledge_1')));
+
+    const asStranger = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(getDoc(doc(asStranger, 'sponsorPledges', 'pledge_1')));
+  });
+
+  it('lets the listing owner accept a pending pledge, refuses the sponsor self-accepting', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'sponsorPledges', 'pledge_1'), pledge());
+    });
+
+    const asSponsor = testEnv.authenticatedContext(SPONSOR).firestore();
+    await assertFails(
+      updateDoc(doc(asSponsor, 'sponsorPledges', 'pledge_1'), {
+        status: 'accepted',
+        respondedAt: serverTimestamp(),
+      }),
+    );
+
+    const asOwner = testEnv.authenticatedContext(LISTING_OWNER).firestore();
+    await assertSucceeds(
+      updateDoc(doc(asOwner, 'sponsorPledges', 'pledge_1'), {
+        status: 'accepted',
+        respondedAt: serverTimestamp(),
+      }),
+    );
+  });
+
+  it('lets the sponsor withdraw their own pending pledge, refuses the owner withdrawing it', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'sponsorPledges', 'pledge_1'), pledge());
+    });
+
+    const asOwner = testEnv.authenticatedContext(LISTING_OWNER).firestore();
+    await assertFails(
+      updateDoc(doc(asOwner, 'sponsorPledges', 'pledge_1'), {
+        status: 'withdrawn',
+        respondedAt: serverTimestamp(),
+      }),
+    );
+
+    const asSponsor = testEnv.authenticatedContext(SPONSOR).firestore();
+    await assertSucceeds(
+      updateDoc(doc(asSponsor, 'sponsorPledges', 'pledge_1'), {
+        status: 'withdrawn',
+        respondedAt: serverTimestamp(),
+      }),
+    );
+  });
+
+  it('refuses moving a pledge that is no longer pending', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'sponsorPledges', 'pledge_1'),
+        pledge({ status: 'accepted', respondedAt: serverTimestamp() }),
+      );
+    });
+    const asOwner = testEnv.authenticatedContext(LISTING_OWNER).firestore();
+    await assertFails(
+      updateDoc(doc(asOwner, 'sponsorPledges', 'pledge_1'), {
+        status: 'declined',
+      }),
+    );
+  });
+});

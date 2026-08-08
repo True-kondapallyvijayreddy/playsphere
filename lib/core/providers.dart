@@ -16,6 +16,7 @@ import '../data/ground_repository.dart';
 import '../data/org_repository.dart';
 import '../data/give_repository.dart';
 import '../data/shop_repository.dart';
+import '../data/sponsor_repository.dart';
 import '../data/scoring_service.dart';
 import '../data/umpire_repository.dart';
 import '../domain/career/head_to_head.dart';
@@ -50,6 +51,7 @@ import 'models/give_collection_center.dart';
 import 'models/give_donation.dart';
 import 'models/give_impact_stats.dart';
 import 'models/give_need.dart';
+import 'models/sponsorship.dart';
 import 'models/club_file.dart';
 import 'models/squad_entry.dart';
 import 'notifications/notification_model.dart';
@@ -222,6 +224,69 @@ final orgNeedsProvider =
 /// fresh/quiet network reads as "just getting started", not as broken.
 final giveImpactStatsProvider = StreamProvider<GiveImpactStats>((ref) {
   return ref.watch(giveRepositoryProvider).watchImpactStats();
+});
+
+final sponsorRepositoryProvider =
+    Provider((ref) => const SponsorRepository());
+
+/// Filter state for the sponsorship browse screen, one value object so the
+/// screen can watch a single provider rather than three independent ones.
+class SponsorBrowseFilter {
+  const SponsorBrowseFilter({this.sport, this.targetType, this.district});
+
+  final String? sport;
+  final SponsorshipTargetType? targetType;
+  final String? district;
+
+  SponsorBrowseFilter copyWith({
+    String? Function()? sport,
+    SponsorshipTargetType? Function()? targetType,
+    String? Function()? district,
+  }) =>
+      SponsorBrowseFilter(
+        sport: sport != null ? sport() : this.sport,
+        targetType: targetType != null ? targetType() : this.targetType,
+        district: district != null ? district() : this.district,
+      );
+}
+
+final sponsorBrowseFilterProvider =
+    StateProvider((ref) => const SponsorBrowseFilter());
+
+final sponsorshipListingsProvider =
+    StreamProvider<List<SponsorshipListing>>((ref) {
+  final filter = ref.watch(sponsorBrowseFilterProvider);
+  return ref.watch(sponsorRepositoryProvider).watchListings(
+        sport: filter.sport,
+        targetType: filter.targetType,
+        district: filter.district,
+      );
+});
+
+final sponsorshipListingProvider =
+    StreamProvider.family<SponsorshipListing?, String>((ref, listingId) {
+  return ref.watch(sponsorRepositoryProvider).watchListing(listingId);
+});
+
+/// Listings this person owns — as athlete, guardian, or team admin.
+final mySponsorshipListingsProvider =
+    StreamProvider<List<SponsorshipListing>>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(const []);
+  return ref.watch(sponsorRepositoryProvider).watchMyListings(uid);
+});
+
+/// Offers this person has made as a sponsor.
+final myPledgesProvider = StreamProvider<List<SponsorPledge>>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(const []);
+  return ref.watch(sponsorRepositoryProvider).watchMyPledges(uid);
+});
+
+/// Offers waiting on one listing — its owner's inbox.
+final pledgesForListingProvider =
+    StreamProvider.family<List<SponsorPledge>, String>((ref, listingId) {
+  return ref.watch(sponsorRepositoryProvider).watchPledgesForListing(listingId);
 });
 
 final communityRepositoryProvider =

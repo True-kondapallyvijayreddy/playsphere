@@ -223,6 +223,8 @@ class ActivityCard extends ConsumerWidget {
     NotificationType.eventCancelled: Icons.event_busy_outlined,
     NotificationType.tournamentAnnounced: Icons.campaign_outlined,
     NotificationType.tournamentInvite: Icons.mail_outline,
+    NotificationType.sponsorPledgeReceived: Icons.volunteer_activism_outlined,
+    NotificationType.sponsorPledgeResolved: Icons.handshake_outlined,
   };
 
   @override

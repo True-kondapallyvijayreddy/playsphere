@@ -99,6 +99,12 @@ class MoreMenuScreen extends ConsumerWidget {
             onTap: () => context.push(Routes.give),
           ),
           _MenuItemTile(
+            icon: Icons.handshake_outlined,
+            title: 'Sponsor an Athlete / Team',
+            subtitle: 'Back a rising player or team, directly and by name',
+            onTap: () => context.push(Routes.sponsor),
+          ),
+          _MenuItemTile(
             icon: Icons.person_search_outlined,
             title: 'Looking For Board',
             subtitle: 'Find players, teams, or match partners',

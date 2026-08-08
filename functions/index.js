@@ -1259,3 +1259,68 @@ export const onNeedStatusChanged = onDocumentUpdated(
     );
   },
 );
+
+/**
+ * Sponsor an Athlete / Sponsor a Team.
+ *
+ * `sponsorshipListings.sponsorsCount` is function-written for the same
+ * reason `GiveImpactStats` is: a client incrementing its own credit count is
+ * a client deciding how impressive it looks, not a fact anyone can trust.
+ * See `firestore.rules` on `sponsorshipListings` — the client cannot move
+ * this field itself.
+ */
+
+export const onSponsorPledgeCreated = onDocumentCreated(
+  'sponsorPledges/{pledgeId}',
+  async (event) => {
+    const data = event.data?.data();
+    if (!data) return;
+
+    const listingSnap = await db.doc(`sponsorshipListings/${data.listingId}`).get();
+    const listing = listingSnap.data();
+    if (!listing?.createdByUid) return;
+
+    await sendToUsers([listing.createdByUid], notification({
+      id: `sponsor_pledge_${event.params.pledgeId}`,
+      type: 'sponsor_pledge_received',
+      title: `${data.sponsorDisplayName ?? 'A sponsor'} has offered to help`,
+      body: data.message?.trim() ? data.message : 'Review the offer and respond.',
+      route: '/sponsor/listings/:listingId/offers',
+      params: { listingId: data.listingId },
+    }));
+  },
+);
+
+export const onSponsorPledgeStatusChanged = onDocumentUpdated(
+  'sponsorPledges/{pledgeId}',
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (!before || !after || before.status === after.status) return;
+
+    // Only the transition INTO accepted moves the count — a pledge later
+    // withdrawn or re-saved must not have been possible from `accepted` in
+    // the first place (rules only allow accepted/declined from pending), so
+    // this increment fires exactly once per pledge, ever.
+    if (after.status === 'accepted') {
+      await db.doc(`sponsorshipListings/${after.listingId}`).set(
+        { sponsorsCount: FieldValue.increment(1) },
+        { merge: true },
+      );
+    }
+
+    if (after.status === 'accepted' || after.status === 'declined') {
+      await sendToUsers([after.sponsorUid], notification({
+        id: `sponsor_pledge_resolved_${event.params.pledgeId}`,
+        type: 'sponsor_pledge_resolved',
+        title: after.status === 'accepted'
+          ? 'Your sponsorship offer was accepted'
+          : 'Your sponsorship offer was declined',
+        body: after.status === 'accepted'
+          ? 'Thank you for backing them — you are now a recognised sponsor.'
+          : 'The listing owner chose not to proceed this time.',
+        route: '/sponsor/mine',
+      }));
+    }
+  },
+);

@@ -37,6 +37,13 @@ import '../../features/grounds/my_grounds_screen.dart';
 import '../../features/home/home_screen.dart';
 import '../../features/more/more_menu_screen.dart';
 import '../../features/notifications/notifications_screen.dart';
+import '../../features/sponsor/sponsor_home_screen.dart';
+import '../../features/sponsor/sponsor_browse_screen.dart';
+import '../../features/sponsor/sponsor_create_listing_screen.dart';
+import '../../features/sponsor/sponsor_my_listings_screen.dart';
+import '../../features/sponsor/sponsor_my_pledges_screen.dart';
+import '../../features/sponsor/sponsor_listing_detail_screen.dart';
+import '../../features/sponsor/sponsor_incoming_offers_screen.dart';
 import '../../features/orgs/club_files_screen.dart';
 import '../../features/orgs/club_gallery_screen.dart';
 import '../../features/orgs/create_org_screen.dart';
@@ -150,6 +157,19 @@ class Routes {
   static const giveNeeds = '/give/needs';
   static const giveRaiseNeed = '/give/needs/raise';
   static const giveImpact = '/give/impact';
+
+  /// Sponsor an Athlete / Sponsor a Team. Org-free like [give] — a sponsor
+  /// acts as themselves, and a listing's owner (athlete, guardian, or team
+  /// admin) manages it from here rather than from the club dashboard,
+  /// because a listing outlives any one club membership.
+  static const sponsor = '/sponsor';
+  static const sponsorBrowse = '/sponsor/browse';
+  static const sponsorCreate = '/sponsor/create';
+  static const sponsorMine = '/sponsor/mine';
+  static const sponsorMyPledges = '/sponsor/mine/pledges';
+  static String sponsorListing(String listingId) => '/sponsor/listings/$listingId';
+  static String sponsorOffers(String listingId) =>
+      '/sponsor/listings/$listingId/offers';
 
   /// Grounds available to hire, searchable by city, sport and time.
   ///
@@ -449,6 +469,41 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.giveImpact,
         builder: (_, __) => const GiveImpactScreen(),
+      ),
+      // Sponsor an Athlete / Sponsor a Team. `sponsorBrowse`/`sponsorCreate`/
+      // `sponsorMine` are declared before the `:listingId` routes for the
+      // same reason `giveDonate`/`giveRaiseNeed` are declared before `give`.
+      GoRoute(
+        path: Routes.sponsor,
+        builder: (_, __) => const SponsorHomeScreen(),
+      ),
+      GoRoute(
+        path: Routes.sponsorBrowse,
+        builder: (_, __) => const SponsorBrowseScreen(),
+      ),
+      GoRoute(
+        path: Routes.sponsorCreate,
+        builder: (_, __) => const SponsorCreateListingScreen(),
+      ),
+      GoRoute(
+        path: Routes.sponsorMine,
+        builder: (_, __) => const SponsorMyListingsScreen(),
+      ),
+      GoRoute(
+        path: Routes.sponsorMyPledges,
+        builder: (_, __) => const SponsorMyPledgesScreen(),
+      ),
+      GoRoute(
+        path: '/sponsor/listings/:listingId/offers',
+        builder: (_, state) => SponsorIncomingOffersScreen(
+          listingId: state.pathParameters['listingId']!,
+        ),
+      ),
+      GoRoute(
+        path: '/sponsor/listings/:listingId',
+        builder: (_, state) => SponsorListingDetailScreen(
+          listingId: state.pathParameters['listingId']!,
+        ),
       ),
       // "Matches" and "Sports" are destinations in their own right, not
       // anchors on the profile. Both home-screen tiles used to push `/me`,

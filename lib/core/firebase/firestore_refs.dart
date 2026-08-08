@@ -532,4 +532,30 @@ class Refs {
   /// function-written, not client-computed.
   static DocumentReference<Map<String, dynamic>> get giveImpactStats =>
       db.collection('give').doc('impactStats');
+
+  // --- Sponsor an Athlete / Sponsor a Team --------------------------------
+
+  /// Discoverable sponsorship listings, at `sponsorshipListings/{listingId}`.
+  /// Top-level for the same reason [grounds] is: "athletes in Warangal
+  /// playing kabaddi" has to be a query, not a scan of every org in the
+  /// country.
+  static CollectionReference<Map<String, dynamic>> get sponsorshipListings =>
+      db.collection('sponsorshipListings');
+
+  static DocumentReference<Map<String, dynamic>> sponsorshipListing(
+    String listingId,
+  ) =>
+      sponsorshipListings.doc(listingId);
+
+  /// Every pledge, at `sponsorPledges/{pledgeId}`. Top-level rather than a
+  /// subcollection of the listing — see `SponsorPledge`'s class doc: both
+  /// "every pledge I've made" (by `sponsorUid`) and "every pledge waiting on
+  /// my listing" (by `listingId`) need to be direct queries.
+  static CollectionReference<Map<String, dynamic>> get sponsorPledges =>
+      db.collection('sponsorPledges');
+
+  static DocumentReference<Map<String, dynamic>> sponsorPledge(
+    String pledgeId,
+  ) =>
+      sponsorPledges.doc(pledgeId);
 }
