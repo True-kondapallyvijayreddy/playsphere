@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 700" width="1200" height="700" style="background:#0f172a; font-family:'Segoe UI', Roboto, sans-serif;">
+  <text x="600" y="45" font-size="24" font-weight="bold" fill="#f8fafc" text-anchor="middle">PLAYSPHERE — COMPLETE SCREEN NAVIGATION FLOW</text>
+  <text x="600" y="75" font-size="14" fill="#94a3b8" text-anchor="middle">User Onboarding ➔ Club Dashboard ➔ Match Day Scoring ➔ Spectator Stream &amp; Career Resume</text>
+
+  <!-- Auth & Onboarding -->
+  <rect x="50" y="120" width="220" height="90" rx="10" fill="#1e293b" stroke="#3b82f6" stroke-width="2"/>
+  <text x="160" y="155" font-size="14" font-weight="bold" fill="#60a5fa" text-anchor="middle">SignInScreen</text>
+  <text x="160" y="180" font-size="12" fill="#94a3b8" text-anchor="middle">/sign-in (Phone OTP)</text>
+
+  <line x1="270" y1="165" x2="330" y2="165" stroke="#3b82f6" stroke-width="2"/>
+  <polygon points="335,165 325,160 325,170" fill="#3b82f6"/>
+
+  <rect x="340" y="120" width="220" height="90" rx="10" fill="#1e293b" stroke="#3b82f6" stroke-width="2"/>
+  <text x="450" y="155" font-size="14" font-weight="bold" fill="#60a5fa" text-anchor="middle">ProfileSetupScreen</text>
+  <text x="450" y="180" font-size="12" fill="#94a3b8" text-anchor="middle">/welcome (DOB &amp; Name)</text>
+
+  <line x1="560" y1="165" x2="620" y2="165" stroke="#3b82f6" stroke-width="2"/>
+  <polygon points="625,165 615,160 615,170" fill="#3b82f6"/>
+
+  <!-- HomeScreen -->
+  <rect x="630" y="110" width="240" height="110" rx="10" fill="#16a34a" stroke="#4ade80" stroke-width="3"/>
+  <text x="750" y="145" font-size="16" font-weight="bold" fill="#ffffff" text-anchor="middle">HomeScreen</text>
+  <text x="750" y="170" font-size="12" fill="#dcfce7" text-anchor="middle">/home (Member Hub)</text>
+  <text x="750" y="195" font-size="11" fill="#f0fdf4" text-anchor="middle">My Clubs | Live Ticker | Actions</text>
+
+  <!-- Branch to Navigation Hub -->
+  <line x1="750" y1="220" x2="750" y2="280" stroke="#4ade80" stroke-width="2"/>
+  <polygon points="750,285 745,275 755,275" fill="#4ade80"/>
+
+  <!-- OrgHomeScreen -->
+  <rect x="610" y="290" width="280" height="100" rx="10" fill="#1e293b" stroke="#16a34a" stroke-width="2"/>
+  <text x="750" y="325" font-size="15" font-weight="bold" fill="#4ade80" text-anchor="middle">OrgHomeScreen</text>
+  <text x="750" y="350" font-size="12" fill="#cbd5e1" text-anchor="middle">/org/:orgId (Club Dashboard)</text>
+  <text x="750" y="370" font-size="11" fill="#94a3b8" text-anchor="middle">Feed | Events | Challenges | Sub-nav</text>
+
+  <!-- Split: Quick Match vs Event Flow -->
+  <line x1="680" y1="390" x2="450" y2="460" stroke="#f59e0b" stroke-width="2"/>
+  <polygon points="445,462 452,452 458,461" fill="#f59e0b"/>
+
+  <line x1="820" y1="390" x2="1000" y2="460" stroke="#38bdf8" stroke-width="2"/>
+  <polygon points="1005,462 997,461 1002,452" fill="#38bdf8"/>
+
+  <!-- QuickMatchScreen -->
+  <rect x="310" y="460" width="280" height="110" rx="10" fill="#7c2d12" stroke="#f97316" stroke-width="2"/>
+  <text x="450" y="495" font-size="15" font-weight="bold" fill="#ffedd5" text-anchor="middle">QuickMatchScreen</text>
+  <text x="450" y="520" font-size="12" fill="#fed7aa" text-anchor="middle">/quick-match (1-Screen Setup)</text>
+  <text x="450" y="545" font-size="11" fill="#ffedd5" text-anchor="middle">Sport | Members | AI Auto-Balance</text>
+
+  <!-- CompetitionDetailScreen -->
+  <rect x="860" y="460" width="280" height="110" rx="10" fill="#0369a1" stroke="#38bdf8" stroke-width="2"/>
+  <text x="1000" y="495" font-size="15" font-weight="bold" fill="#e0f2fe" text-anchor="middle">CompetitionDetailScreen</text>
+  <text x="1000" y="520" font-size="12" fill="#bae6fd" text-anchor="middle">/event/:compId (Tournament Event)</text>
+  <text x="1000" y="545" font-size="11" fill="#e0f2fe" text-anchor="middle">Fixtures | Standings | Waitlist</text>
+
+  <!-- Both point to ScoringScreen -->
+  <line x1="450" y1="570" x2="600" y2="620" stroke="#f97316" stroke-width="2"/>
+  <polygon points="605,622 595,618 600,610" fill="#f97316"/>
+
+  <line x1="1000" y1="570" x2="840" y2="620" stroke="#38bdf8" stroke-width="2"/>
+  <polygon points="835,622 840,610 845,618" fill="#38bdf8"/>
+
+  <!-- ScoringScreen & SpectatorScreen -->
+  <rect x="580" y="600" width="280" height="85" rx="10" fill="#15803d" stroke="#4ade80" stroke-width="3"/>
+  <text x="720" y="630" font-size="15" font-weight="bold" fill="#ffffff" text-anchor="middle">ScoringScreen</text>
+  <text x="720" y="652" font-size="12" fill="#dcfce7" text-anchor="middle">/score/:fixtureId (Scoring Pad)</text>
+  <text x="720" y="670" font-size="11" fill="#f0fdf4" text-anchor="middle">1-Tap Controls | 1-Tap UNDO | Box Score</text>
+</svg>

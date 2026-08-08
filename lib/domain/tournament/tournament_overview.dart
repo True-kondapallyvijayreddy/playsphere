@@ -106,7 +106,10 @@ class TournamentOverview {
     for (final event in events) {
       final own = byComp[event.id] ?? const <Fixture>[];
       final ownPlayed = own.where((f) => f.status.isResulted).length;
-      final ownLive = own.where((f) => f.isLive).length;
+      // Activity-aware: a count of "live matches" that includes scoreboards
+      // nobody has touched since last week is a number an organizer learns to
+      // ignore. See [Fixture.isLiveAt].
+      final ownLive = own.where((f) => f.isLiveAt(clock)).length;
 
       total += own.length;
       played += ownPlayed;
@@ -135,7 +138,7 @@ class TournamentOverview {
       liveMatches: live,
       onCourtNow: [
         for (final f in fixtures)
-          if (f.isLive) f,
+          if (f.isLiveAt(clock)) f,
       ],
       upNext: [
         for (final f in fixtures)

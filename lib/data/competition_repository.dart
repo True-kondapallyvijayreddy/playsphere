@@ -10,6 +10,7 @@ import '../core/models/competition.dart';
 import '../core/models/dispute.dart';
 import '../core/models/enums.dart';
 import '../core/models/fixture.dart';
+import '../core/models/group_entry.dart';
 import '../core/models/match_player.dart';
 import '../core/models/scoring_request.dart';
 import '../core/models/squad_entry.dart';
@@ -70,17 +71,23 @@ class CompetitionRepository {
   }) {
     Query<Map<String, dynamic>> q = Refs.competitions(orgId);
     if (status != null) q = q.where('status', isEqualTo: status.wire);
-    return q.snapshots().map(
-          (snap) => snap.docs.map(Competition.fromDoc).toList()
-            ..sort((a, b) => (b.createdAt ?? DateTime(0))
-                .compareTo(a.createdAt ?? DateTime(0))),
-        );
+    // By the date the event happens, most recent first — not by when it was
+    // typed in. See [Competition.sortDate]; the dashboard orders on the same
+    // key, so the two lists cannot disagree about what "latest" means.
+    return guardStream(
+      () => q.snapshots().map(
+            (snap) => snap.docs.map(Competition.fromDoc).toList()
+              ..sort((a, b) => b.sortDate.compareTo(a.sortDate)),
+          ),
+    );
   }
 
   Stream<Competition?> watchCompetition(String orgId, String compId) =>
-      Refs.competition(orgId, compId).snapshots().map(
-            (doc) => doc.exists ? Competition.fromDoc(doc) : null,
-          );
+      guardStream(
+        () => Refs.competition(orgId, compId).snapshots().map(
+              (doc) => doc.exists ? Competition.fromDoc(doc) : null,
+            ),
+      );
 
   Stream<List<Registration>> watchRegistrations(
     String orgId,
@@ -89,45 +96,55 @@ class CompetitionRepository {
   }) {
     Query<Map<String, dynamic>> q = Refs.registrations(orgId, compId);
     if (status != null) q = q.where('status', isEqualTo: status.wire);
-    return q.snapshots().map(
-          (snap) => snap.docs.map(Registration.fromDoc).toList(),
-        );
+    return guardStream(
+      () => q.snapshots().map(
+            (snap) => snap.docs.map(Registration.fromDoc).toList(),
+          ),
+    );
   }
 
   Stream<List<Entrant>> watchEntrants(String orgId, String compId) =>
-      Refs.entrants(orgId, compId).snapshots().map(
-            (snap) => snap.docs.map(Entrant.fromDoc).toList(),
-          );
+      guardStream(
+        () => Refs.entrants(orgId, compId).snapshots().map(
+              (snap) => snap.docs.map(Entrant.fromDoc).toList(),
+            ),
+      );
 
   Stream<List<Fixture>> watchFixtures(String orgId, String compId) =>
-      Refs.fixtures(orgId, compId).snapshots().map(
-            (snap) => snap.docs.map(Fixture.fromDoc).toList()
-              ..sort((a, b) {
-                final r = a.round.compareTo(b.round);
-                return r != 0 ? r : a.matchIndex.compareTo(b.matchIndex);
-              }),
-          );
+      guardStream(
+        () => Refs.fixtures(orgId, compId).snapshots().map(
+              (snap) => snap.docs.map(Fixture.fromDoc).toList()
+                ..sort((a, b) {
+                  final r = a.round.compareTo(b.round);
+                  return r != 0 ? r : a.matchIndex.compareTo(b.matchIndex);
+                }),
+            ),
+      );
 
   /// Live matches across an entire organization — powers the spectator
   /// "what's on right now" screen that remote viewers land on.
   Stream<List<Fixture>> watchLiveFixtures(String orgId) {
-    return Refs.allFixturesQuery
-        .where('orgId', isEqualTo: orgId)
-        .where('status', isEqualTo: FixtureStatus.live.wire)
-        .snapshots()
-        .map((snap) => snap.docs.map(Fixture.fromDoc).toList());
+    return guardStream(
+      () => Refs.allFixturesQuery
+          .where('orgId', isEqualTo: orgId)
+          .where('status', isEqualTo: FixtureStatus.live.wire)
+          .snapshots()
+          .map((snap) => snap.docs.map(Fixture.fromDoc).toList()),
+    );
   }
 
   /// Fixtures a specific person is assigned to score.
   Stream<List<Fixture>> watchMyScoringAssignments(String uid) {
-    return Refs.allFixturesQuery
-        .where('scorerUids', arrayContains: uid)
-        .where('status', whereIn: [
-          FixtureStatus.scheduled.wire,
-          FixtureStatus.live.wire,
-        ])
-        .snapshots()
-        .map((snap) => snap.docs.map(Fixture.fromDoc).toList());
+    return guardStream(
+      () => Refs.allFixturesQuery
+          .where('scorerUids', arrayContains: uid)
+          .where('status', whereIn: [
+            FixtureStatus.scheduled.wire,
+            FixtureStatus.live.wire,
+          ])
+          .snapshots()
+          .map((snap) => snap.docs.map(Fixture.fromDoc).toList()),
+    );
   }
 
   // --- Competition lifecycle -------------------------------------------
@@ -169,6 +186,385 @@ class CompetitionRepository {
             'status': status.wire,
             'updatedAt': FieldValue.serverTimestamp(),
           }));
+
+  /// Calls an event off, on the record, and tells everybody who had entered.
+  ///
+  /// ## Why cancelling is not deleting
+  ///
+  /// The obvious implementation is a delete. It is the wrong one twice over.
+  ///
+  /// An event that has been played has results hanging off it — fixtures,
+  /// scorecards, ratings already settled, career stats already rolled up. A
+  /// delete either orphans all of that or cascades through it, and a player's
+  /// lifelong record (§2.5) is not something an organizer's stray tap should
+  /// be able to punch a hole in.
+  ///
+  /// Even for an event with nothing played, the people who registered are owed
+  /// an explanation, and a deleted document cannot deliver one. So this is a
+  /// state transition that keeps the document, keeps the entry list, and keeps
+  /// [reason] where the notification and the event page can both read it.
+  ///
+  /// [reason] is required and refused when blank — see
+  /// [Competition.cancelReason] for why that is the point rather than
+  /// friction. The push itself is sent by the `onEventCancelled` Cloud
+  /// Function watching this transition, so it reaches people whose phones are
+  /// off and does not depend on this client staying alive.
+  Future<void> cancelCompetition({
+    required String orgId,
+    required String compId,
+    required String reason,
+    required String byUid,
+  }) =>
+      guard(() async {
+        final text = reason.trim();
+        if (text.isEmpty) {
+          throw const ValidationException(
+            'Give a reason. Everyone who entered will be told, and an event '
+            'that disappears without one reads as a fault in the app.',
+          );
+        }
+        if (text.length > 500) {
+          throw const ValidationException('Keep the reason under 500 characters.');
+        }
+
+        final snap = await Refs.competition(orgId, compId).get();
+        if (!snap.exists) throw const NotFoundException('That event is gone.');
+        final existing = Competition.fromDoc(snap);
+        if (existing.status == CompetitionStatus.cancelled) {
+          throw const ValidationException('This event is already cancelled.');
+        }
+        if (existing.status == CompetitionStatus.completed) {
+          throw const ValidationException(
+            'This event has already been played. Cancelling it now would '
+            'erase results that count towards people\'s records.',
+          );
+        }
+
+        await Refs.competition(orgId, compId).update({
+          'status': CompetitionStatus.cancelled.wire,
+          'cancelReason': text,
+          'cancelledBy': byUid,
+          'cancelledAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      });
+
+  /// Sends a note about an event to everyone who entered it, without changing
+  /// anything about the event.
+  ///
+  /// The half of Feature #15 that is not cancellation: "the ground is soft,
+  /// bring studs", "we start at 7 not 8". Organizers were sending these on
+  /// WhatsApp to a group that never contains everyone who registered, so the
+  /// two people who found the event through the app never heard.
+  ///
+  /// Stored on the competition rather than sent directly, for the same reason
+  /// as [cancelCompetition]: the Cloud Function delivers it, and the note
+  /// stays readable on the event page afterwards for anyone who missed the
+  /// push.
+  Future<void> noteToEntrants({
+    required String orgId,
+    required String compId,
+    required String note,
+    required String byUid,
+  }) =>
+      guard(() async {
+        final text = note.trim();
+        if (text.isEmpty) {
+          throw const ValidationException('Write something to send.');
+        }
+        if (text.length > 500) {
+          throw const ValidationException('Keep the note under 500 characters.');
+        }
+
+        await Refs.competition(orgId, compId).update({
+          'organizerNote': {
+            'text': text,
+            'byUid': byUid,
+            'at': FieldValue.serverTimestamp(),
+            // Bumped so the Cloud Function can tell a NEW note from an edit to
+            // the competition that happens to carry the old one along.
+            'seq': FieldValue.increment(1),
+          },
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      });
+
+  // --- Global discovery -------------------------------------------------
+
+  /// Every event on the platform that is open for outside entries.
+  ///
+  /// ## Why this exists as its own read
+  ///
+  /// Every other list in the product answers "what is happening in MY club",
+  /// which is right for a member and useless for the thing clubs actually
+  /// need: finding a tournament to enter. A district badminton open exists in
+  /// one club's tenant, and until now the only people who could see it were
+  /// that club's own members — who are the one group that does not need to
+  /// discover it.
+  ///
+  /// The filters are applied in Dart rather than in the query, and that is a
+  /// deliberate trade. Firestore allows one range and a limited number of
+  /// equalities per composite index; sport, state, district, category and
+  /// date-window in every combination is a combinatorial explosion of indexes
+  /// nobody will maintain. What the QUERY pins down is the pair that actually
+  /// bounds the result set — open to outsiders, still accepting entries — and
+  /// that is a few hundred documents nationally, not a few hundred thousand.
+  /// Filtering those in memory is instant and costs one index.
+  ///
+  /// `openToNonMembers == true` is also the security boundary, not just a
+  /// filter: the collection-group rule refuses any query that does not pin it,
+  /// so this cannot be widened by accident into reading private draws.
+  Stream<List<Competition>> watchGlobalEvents({int limit = 200}) => guardStream(
+        () => Refs.allCompetitionsQuery
+            .where('openToNonMembers', isEqualTo: true)
+            .where('status', whereIn: [
+              CompetitionStatus.registrationOpen.wire,
+              CompetitionStatus.registrationClosed.wire,
+            ])
+            .orderBy('startDate')
+            .limit(limit)
+            .snapshots()
+            .map((s) => s.docs.map(Competition.fromDoc).toList()),
+      );
+
+  /// Matches your clubmates are playing right now, wherever they are playing
+  /// them.
+  ///
+  /// ## The gap this fills
+  ///
+  /// Every live list in the product is scoped to a club's own competitions, so
+  /// a member turning out for a district side, a college team or a friend's
+  /// club vanished from their own club's view entirely. The people most likely
+  /// to want to follow that match — the clubmates who know them — were the
+  /// only ones who could not.
+  ///
+  /// ## Why it is capped, and why the cap is where it is
+  ///
+  /// `arrayContainsAny` takes at most 30 values, so this can watch 30 people,
+  /// not a club of four hundred. That is a real limit and it is stated rather
+  /// than hidden: [memberUids] should be the clubmates worth following — the
+  /// caller passes the most recently active — and the screen says how many it
+  /// is watching.
+  ///
+  /// The alternative shapes are worse. A fan-out of one listener per member is
+  /// four hundred listeners on a ₹8k phone. A denormalized "my clubmates are
+  /// playing" collection is a write amplification on the hottest document in
+  /// the product, paid on every ball of every match. A capped query costs one
+  /// listener and one index, and is honest about what it covers.
+  ///
+  /// Privacy comes free: the collection-group fixture rule already requires
+  /// the host org to be readable, so a clubmate playing inside a private club
+  /// you do not belong to simply does not appear.
+  Stream<List<Fixture>> watchClubmateLiveFixtures({
+    required List<String> memberUids,
+    int limit = 30,
+  }) {
+    final watching = memberUids.take(limit).toList();
+    if (watching.isEmpty) return Stream.value(const []);
+
+    return guardStream(
+      () => Refs.allFixturesQuery
+          .where('playerUids', arrayContainsAny: watching)
+          .where('status', isEqualTo: FixtureStatus.live.wire)
+          .snapshots()
+          .map((s) {
+        final now = DateTime.now();
+        return s.docs
+            .map(Fixture.fromDoc)
+            // Same activity test as everywhere else: a scoreboard nobody has
+            // touched in six hours is not a match anyone should be told to
+            // watch (Bug #1 / #15).
+            .where((f) => f.isLiveAt(now))
+            .toList();
+      }),
+    );
+  }
+
+  // --- Group entries ----------------------------------------------------
+
+  Stream<List<GroupEntry>> watchGroupEntries({
+    required String orgId,
+    required String compId,
+  }) =>
+      guardStream(
+        () => Refs.groupEntries(orgId, compId).snapshots().map(
+              (s) => s.docs.map(GroupEntry.fromDoc).toList()
+                ..sort((a, b) => (a.createdAt ?? DateTime(0))
+                    .compareTo(b.createdAt ?? DateTime(0))),
+            ),
+      );
+
+  /// Proposes a group entry. Everyone named still has to agree.
+  ///
+  /// Deliberately does NOT create any registrations. A group that reaches the
+  /// field before its members have accepted is a group of people who did not
+  /// choose to be there, and withdrawing them afterwards would already have
+  /// moved the event's counters.
+  Future<String> createGroupEntry({
+    required String orgId,
+    required String compId,
+    required String name,
+    required String leaderUid,
+    required String leaderName,
+    required Map<String, String> members,
+  }) =>
+      guard(() async {
+        final groupName = name.trim();
+        if (groupName.isEmpty) {
+          throw const ValidationException('Give the group a name.');
+        }
+
+        // The leader is a member of their own group. Adding them here rather
+        // than asking the caller to remember means a group of five is five
+        // everywhere it is counted.
+        final all = {leaderUid: leaderName, ...members};
+        if (all.length < 2) {
+          throw const ValidationException(
+            'A group needs at least one other person. To enter on your own, '
+            'register as an individual.',
+          );
+        }
+
+        final ref = Refs.groupEntries(orgId, compId).doc();
+        await ref.set(
+          GroupEntry(
+            id: ref.id,
+            name: groupName,
+            leaderUid: leaderUid,
+            leaderName: leaderName,
+            memberUids: all.keys.toList(),
+            memberNames: all,
+            status: GroupEntryStatus.forming,
+          ).toCreate(),
+        );
+        return ref.id;
+      });
+
+  /// A named member accepting or declining their place.
+  ///
+  /// This write is what proves the person is a member of the club at all —
+  /// `firestore.rules` only lets an active member make it, and only about
+  /// themselves. That is how "a group may contain only club members" is
+  /// enforced without the rules having to walk a list, which they cannot do:
+  /// a non-member can be named and can never accept, so a complete group is a
+  /// group of members by construction.
+  ///
+  /// Moving the group to `pending_approval` once the last person accepts is
+  /// done here rather than by a trigger, because the accepting client already
+  /// holds the document and the transition is a pure function of it. A stale
+  /// client cannot force it early: the rules re-check that every uid in
+  /// `memberUids` is in `acceptedUids` before allowing the status to move.
+  Future<void> answerGroupInvite({
+    required String orgId,
+    required String compId,
+    required String groupId,
+    required String uid,
+    required bool accept,
+  }) =>
+      guard(() async {
+        final ref = Refs.groupEntry(orgId, compId, groupId);
+
+        await Refs.db.runTransaction((tx) async {
+          final snap = await tx.get(ref);
+          if (!snap.exists) {
+            throw const NotFoundException('That group is gone.');
+          }
+          final group = GroupEntry.fromDoc(snap);
+
+          if (group.status != GroupEntryStatus.forming) {
+            throw const ValidationException(
+              'This group has already been settled.',
+            );
+          }
+          if (!group.memberUids.contains(uid)) {
+            throw const ValidationException('You are not in this group.');
+          }
+
+          if (!accept) {
+            // One decline ends it. The alternative is a leader waiting
+            // indefinitely on somebody who has already said no, and a field
+            // slot held open for a group that cannot be completed.
+            tx.update(ref, {
+              'declinedUids': FieldValue.arrayUnion([uid]),
+              'status': GroupEntryStatus.withdrawn.wire,
+            });
+            return;
+          }
+
+          final accepted = {...group.acceptedUids, uid};
+          final complete = group.memberUids.every(accepted.contains);
+
+          tx.update(ref, {
+            'acceptedUids': FieldValue.arrayUnion([uid]),
+            if (complete) 'status': GroupEntryStatus.pendingApproval.wire,
+          });
+        });
+      });
+
+  /// The organizer's decision on a complete group.
+  ///
+  /// Approving writes one registration per member, in the same batch as the
+  /// status change. Separate writes would let a group be marked approved while
+  /// half its members never reached the entry list — and the half that did
+  /// would be holding slots the organizer never agreed to give them.
+  ///
+  /// Every member lands `confirmed`: the organizer has just looked at the
+  /// group as a whole and said yes, and putting some of them into a queue
+  /// afterwards would split exactly the thing that was approved for being
+  /// together.
+  Future<void> decideGroupEntry({
+    required String orgId,
+    required String compId,
+    required String groupId,
+    required bool approve,
+    required String byUid,
+    String? note,
+  }) =>
+      guard(() async {
+        final snap = await Refs.groupEntry(orgId, compId, groupId).get();
+        if (!snap.exists) {
+          throw const NotFoundException('That group is gone.');
+        }
+        final group = GroupEntry.fromDoc(snap);
+
+        if (group.status != GroupEntryStatus.pendingApproval) {
+          throw const ValidationException(
+            'This group is still waiting on its own members.',
+          );
+        }
+
+        final batch = Refs.db.batch();
+        batch.update(Refs.groupEntry(orgId, compId, groupId), {
+          'status': approve
+              ? GroupEntryStatus.approved.wire
+              : GroupEntryStatus.rejected.wire,
+          'decidedBy': byUid,
+          if (note != null && note.trim().isNotEmpty)
+            'decisionNote': note.trim(),
+        });
+
+        if (approve) {
+          for (final uid in group.memberUids) {
+            batch.set(
+              Refs.registration(orgId, compId, uid),
+              Registration(
+                uid: uid,
+                displayName: group.nameFor(uid),
+                status: RegistrationStatus.confirmed,
+                // The group's name, so the draw shows "Ravi's XI" rather than
+                // five unrelated individuals who happen to have entered.
+                teamName: group.name,
+              ).toCreate(status: RegistrationStatus.confirmed),
+            );
+          }
+          batch.update(Refs.competition(orgId, compId), {
+            'confirmedCount': FieldValue.increment(group.size),
+            'entrantCount': FieldValue.increment(group.size),
+          });
+        }
+
+        await batch.commit();
+      });
 
   // --- Registration -----------------------------------------------------
 
@@ -740,6 +1136,10 @@ class CompetitionRepository {
         }
 
         final sport = SportCatalog.byId(competition.sportId);
+        // The organizer's edits layered over the sport preset, resolved once
+        // for the whole draw so every fixture in it is created under one set
+        // of rules.
+        final effectiveConfig = competition.effectiveScoringConfig(sport.config);
 
         // ---- Pass 1: decide what is actually being written. ----
         //
@@ -830,9 +1230,9 @@ class CompetitionRepository {
             rulesetVersion: competition.rulesetVersion,
             // Frozen here so every surface that renders this match reads the
             // rules it was actually played under, without a second read.
-            scoringConfig: sport.config,
+            scoringConfig: effectiveConfig,
             scoreState: ScoringRegistry.resolve(competition.scoringPluginKey)
-                .initialState(_contextFor(p, sport)),
+                .initialState(_contextFor(p, effectiveConfig)),
             feedsWinnerToFixtureId: idFor(p.feedsWinnerToIndex),
             feedsWinnerToSlot: p.feedsWinnerToSlot,
             // The rest of the draw's wiring, which the generator has always
@@ -889,6 +1289,12 @@ class CompetitionRepository {
           chunks: batch.chunkCount,
           drawId: drawId,
           seeding: seeding,
+          // The scheduler already worked out which matches it could not place —
+          // no court free inside the day, a rest gap it could not honour — and
+          // this method computed the list and dropped it on the floor. The
+          // organizer was told "38 matches created" and left to discover at the
+          // ground that six of them had a provisional time and no court.
+          scheduleProblems: timetable.problems,
         );
       });
 
@@ -1002,10 +1408,18 @@ class CompetitionRepository {
           entrantBId: entrantBId,
           entrantAName: sideAName,
           entrantBName: sideBName,
-          // Live from the first moment. A quick match that opened
-          // `scheduled` would need somebody to remember to start it, and the
-          // person who set it up is already standing on the court.
-          status: FixtureStatus.live,
+          // Scheduled until somebody scores something. Nobody has to remember
+          // to start it: the first accepted action flips it to live, in
+          // `ScoringService.apply`.
+          //
+          // This used to open `live` on the argument that the person setting
+          // it up is already standing on the court. But a match that is set
+          // up and not yet under way is exactly what "Live now" must not
+          // contain — a fixture created for a game starting in an hour, or
+          // one abandoned during setup, sat in every follower's live list
+          // showing 0-0 with nothing happening. Live means a scorecard has
+          // started.
+          status: FixtureStatus.scheduled,
           roundLabel: 'Match',
           venue: venue,
           scheduledAt: startsAt ?? DateTime.now(),
@@ -1024,7 +1438,11 @@ class CompetitionRepository {
               lineupB: lineupB,
             ),
           ),
-          startedAt: DateTime.now(),
+          // No `startedAt`. It contradicted the `scheduled` status three lines
+          // above and the comment explaining why that status is deliberate: a
+          // match that has been set up has not started. `ScoringService.submit`
+          // stamps it on the first accepted action, which is the moment it
+          // becomes true.
         );
 
         final batch = Refs.db.batch();
@@ -1110,7 +1528,12 @@ class CompetitionRepository {
             'resultType': MatchResultType.conceded.wire,
             'winnerEntrantId': opponentId,
             'isDraw': false,
-            'summary': FixtureStatus.walkover.wire,
+            // The wire token, not a sentence — the same convention
+            // `ScoringService.setFixtureOutcome` documents at length. A
+            // persisted English phrase would freeze one scorer's language onto
+            // the document and show it to a Telugu spectator forever; the UI
+            // translates the token at render time.
+            'summary': MatchResultType.conceded.wire,
             'resultNote': note ?? 'Opponent withdrew from the competition.',
             'completedAt': FieldValue.serverTimestamp(),
           });
@@ -1132,9 +1555,18 @@ class CompetitionRepository {
           }
         }
 
-        batch.update(Refs.entrants(orgId, compId).doc(entrantId), {
-          'withdrawn': true,
-        });
+        // `set(merge: true)`, not `update`.
+        //
+        // An `update` on a document that does not exist fails, and in a batch
+        // it takes every other write with it — so a competition whose entrant
+        // documents were never created (a challenge fixture names clubs
+        // directly, and a quick match names sides) would lose the whole
+        // concession, silently, along with every walkover it had just awarded.
+        batch.set(
+          Refs.entrants(orgId, compId).doc(entrantId),
+          {'withdrawn': true},
+          SetOptions(merge: true),
+        );
 
         // Not awaited — same reason as every other match-day write here.
         unawaited(batch.commit().catchError((Object error) {
@@ -1380,11 +1812,21 @@ class CompetitionRepository {
     );
   }
 
-  ScoringContext _contextFor(PlannedFixture p, SportSpec sport) =>
+  /// The context a freshly-planned fixture's opening state is built from.
+  ///
+  /// [config] is the competition's EFFECTIVE rules, not the sport's raw
+  /// preset. The two used to be the same thing, and the opening state was
+  /// therefore built from a 20-over default even for an event the organizer
+  /// had set to 8 — the fixture's stored `scoringConfig` said 8 and the state
+  /// beside it had already been shaped for 20.
+  ScoringContext _contextFor(
+    PlannedFixture p,
+    Map<String, dynamic> config,
+  ) =>
       ScoringContext(
         entrantAName: p.entrantA?.displayName ?? 'A',
         entrantBName: p.entrantB?.displayName ?? 'B',
-        config: sport.config,
+        config: config,
       );
 
   Future<void> assignScorers({
@@ -1969,10 +2411,27 @@ class CompetitionRepository {
   /// [decidesBatting] gates the one key that is cricket's alone. The dialog
   /// used to write `battingFirst` for all thirteen sports, so a badminton
   /// fixture carried a frozen ruleset asserting which side batted.
+  ///
+  /// ## Why the opening state is rebuilt here
+  ///
+  /// Writing `battingFirst` into the config is not enough on its own, and for a
+  /// long time that is all this did. An engine reads its rules at
+  /// `initialState`, which runs ONCE — when the draw is generated, or when a
+  /// quick match is created — long before anybody tosses a coin. Cricket's
+  /// opening innings was therefore built from a config with no `battingFirst`
+  /// in it, defaulted to side A, and stayed there: side B could win the toss
+  /// and elect to bat and the scorecard would still open with side A batting,
+  /// carrying that error through the innings break, the target, the result and
+  /// every net run rate the match fed.
+  ///
+  /// So the config and the state it determines are written together. Safe
+  /// because this is only ever reachable before the first ball — the fixture
+  /// still has `lastSeq == 0`, which is also the exact condition
+  /// `firestore.rules` allows a scorer to write a line-up or a toss under. Once
+  /// a delivery exists there is a log to honour and the opening state is no
+  /// longer ours to rewrite.
   Future<void> recordToss({
-    required String orgId,
-    required String compId,
-    required String fixtureId,
+    required Fixture fixture,
     required String wonByEntrantId,
     required String decision,
     required String startingSide,
@@ -1980,15 +2439,36 @@ class CompetitionRepository {
     required Map<String, dynamic> scoringConfig,
   }) =>
       guard(() async {
+        if (fixture.lastSeq > 0) {
+          throw const ValidationException(
+            'This match has already started. The toss cannot be changed once '
+            'a ball has been scored.',
+          );
+        }
+
+        final config = <String, dynamic>{
+          ...scoringConfig,
+          'startingSide': startingSide,
+          if (decidesBatting) 'battingFirst': startingSide,
+        };
+
+        final plugin = ScoringRegistry.resolve(fixture.scoringPluginKey);
+        final rebuiltState = plugin.initialState(
+          ScoringContext(
+            entrantAName: fixture.entrantAName,
+            entrantBName: fixture.entrantBName,
+            config: config,
+            lineupA: fixture.lineupA,
+            lineupB: fixture.lineupB,
+          ),
+        );
+
         unawaited(
-          Refs.fixture(orgId, compId, fixtureId).update({
+          Refs.fixture(fixture.orgId, fixture.compId, fixture.id).update({
             'tossWonByEntrantId': wonByEntrantId,
             'tossDecision': decision,
-            'scoringConfig': {
-              ...scoringConfig,
-              'startingSide': startingSide,
-              if (decidesBatting) 'battingFirst': startingSide,
-            },
+            'scoringConfig': config,
+            'scoreState': rebuiltState,
           }).catchError((Object error) {
             _writeFailures.add(_translateWriteFailure(error));
           }),
@@ -2002,11 +2482,13 @@ class CompetitionRepository {
     required String compId,
     required String fixtureId,
   }) =>
-      Refs.disputes(orgId, compId, fixtureId).snapshots().map(
-            (snap) => snap.docs.map(Dispute.fromDoc).toList()
-              ..sort((a, b) => (b.raisedAt ?? DateTime(0))
-                  .compareTo(a.raisedAt ?? DateTime(0))),
-          );
+      guardStream(
+        () => Refs.disputes(orgId, compId, fixtureId).snapshots().map(
+              (snap) => snap.docs.map(Dispute.fromDoc).toList()
+                ..sort((a, b) => (b.raisedAt ?? DateTime(0))
+                    .compareTo(a.raisedAt ?? DateTime(0))),
+            ),
+      );
 
   /// Raises a protest against a result.
   ///
@@ -2063,10 +2545,19 @@ class CompetitionRepository {
         // The fixture carries the flag so a bracket, a standings table and a
         // spectator card can all see a result is under protest from the one
         // document they already read.
+        //
+        // `openDisputeId` is not decoration. `firestore.rules` cannot run a
+        // query, so a member flagging a finished match has to NAME the protest
+        // that justifies it — the rule then reads that document (via
+        // `getAfter`, since it is created in this same batch) and checks the
+        // caller really did raise it. Without it the only branches that admit
+        // this write require organizer authority, which meant the protest flow
+        // was denied to every competitor it was built for.
         batch.update(
           Refs.fixture(fixture.orgId, fixture.compId, fixture.id),
           {
             'status': FixtureStatus.disputed.wire,
+            'openDisputeId': ref.id,
             'updatedAt': FieldValue.serverTimestamp(),
           },
         );
@@ -2119,6 +2610,10 @@ class CompetitionRepository {
             // appended as a reversal; rejected simply restores the result.
             'status': (upheld ? FixtureStatus.live : FixtureStatus.completed)
                 .wire,
+            // Cleared with the decision it belonged to. Left behind, it would
+            // keep pointing at a settled protest — and every later read of the
+            // fixture would say a decided match was still under one.
+            'openDisputeId': null,
             'updatedAt': FieldValue.serverTimestamp(),
           },
         );
@@ -2144,6 +2639,64 @@ class CompetitionRepository {
             if (courtId != null) 'courtId': courtId,
             'updatedAt': FieldValue.serverTimestamp(),
           }));
+
+  /// Pulls a scheduled match forward and plays it now.
+  ///
+  /// ## Why this is a write and not just a navigation
+  ///
+  /// A match set for next Tuesday that is actually played today is not a
+  /// scheduled match that happened to start early — it is a match played on a
+  /// different day, possibly with a different ball, possibly with a side that
+  /// had to borrow a player. Sending the organizer straight to the scoring pad
+  /// records none of that: the fixture keeps insisting it is due on Tuesday,
+  /// every "running late" calculation reads it as three days overdue, and the
+  /// agreement the two captains actually made exists nowhere.
+  ///
+  /// So this does three things in one write:
+  ///
+  ///  - moves `scheduledAt` to now, which is what makes the match honest to
+  ///    every screen that sorts, groups or flags by it;
+  ///  - stores [checks] — the sport's own pre-match questions and how they
+  ///    were answered — under `startedEarly`, so "we agreed the same eleven"
+  ///    is answerable three weeks later;
+  ///  - records who agreed to it and when.
+  ///
+  /// Refused once a ball has been bowled. At that point the match is not being
+  /// started, it is being rewritten, and the scheduled time it was played
+  /// against is part of the record.
+  Future<void> startMatchEarly({
+    required Fixture fixture,
+    required Map<String, bool> checks,
+    required String byUid,
+    String? note,
+  }) =>
+      guard(() async {
+        if (fixture.lastSeq > 0) {
+          throw const ValidationException(
+            'This match has already started.',
+          );
+        }
+        if (fixture.hasResult) {
+          throw const ValidationException(
+            'This match has already been played.',
+          );
+        }
+
+        final now = DateTime.now();
+        await Refs.fixture(fixture.orgId, fixture.compId, fixture.id).update({
+          'scheduledAt': Timestamp.fromDate(now),
+          'startedEarly': {
+            'originalScheduledAt': fixture.scheduledAt == null
+                ? null
+                : Timestamp.fromDate(fixture.scheduledAt!),
+            'byUid': byUid,
+            'at': Timestamp.fromDate(now),
+            'checks': checks,
+            if (note != null && note.trim().isNotEmpty) 'note': note.trim(),
+          },
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      });
 
   /// Moves the remaining schedule of one standalone event.
   ///
@@ -2205,7 +2758,18 @@ class DrawOutcome {
     required this.chunks,
     required this.drawId,
     this.seeding = const [],
+    this.scheduleProblems = const [],
   });
+
+  /// Matches the scheduler could not place on a real court at a real time, and
+  /// why — "Semi-final 1: no court free before the day ends".
+  ///
+  /// These fixtures still exist and still carry a provisional "not before"
+  /// time; what they do not have is a court. Reported rather than swallowed
+  /// because the alternative is an organizer discovering it at the venue.
+  final List<String> scheduleProblems;
+
+  bool get hasScheduleProblems => scheduleProblems.isNotEmpty;
 
   /// Fixtures the generator produced, including byes and dead branches.
   final int planned;

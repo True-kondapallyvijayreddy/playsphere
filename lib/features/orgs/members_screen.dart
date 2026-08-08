@@ -11,6 +11,7 @@ import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../shared/app_scaffold.dart';
+import 'widgets/ownership_actions.dart';
 
 /// Roster and approval queue.
 ///
@@ -280,10 +281,22 @@ class _MemberTile extends ConsumerWidget {
     // just avoids offering an action that would be rejected.
     final assignable =
         myRole == null ? <MembershipRole>[] : PermissionMatrix.assignableBy(myRole);
+    final iAmOwner = myRole == MembershipRole.owner;
+    final targetIsOwner = member.role == MembershipRole.owner;
+
+    // An owner's role is not changed by a menu pick. Appointing one is
+    // ordinary (it is in `assignable` now), but removing one takes a vote —
+    // see `OwnerVote` — and stepping down is the person's own decision. So an
+    // owner row gets its own controls rather than the role dropdown.
     final editable = canManage &&
         !isSelf &&
-        member.role != MembershipRole.owner &&
+        !targetIsOwner &&
         assignable.isNotEmpty;
+
+    // Only another owner can move a motion, and only against somebody who is
+    // actually an owner.
+    final canProposeRemoval = iAmOwner && targetIsOwner && !isSelf;
+    final canStepDown = iAmOwner && targetIsOwner && isSelf;
 
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
@@ -297,7 +310,13 @@ class _MemberTile extends ConsumerWidget {
         ),
         title: Text(member.displayName + (isSelf ? ' (you)' : '')),
         subtitle: Text(member.role.label),
-        trailing: !editable
+        trailing: canProposeRemoval || canStepDown
+            ? OwnershipActions(
+                orgId: orgId,
+                member: member,
+                isSelf: isSelf,
+              )
+            : !editable
             ? Chip(
                 label: Text(member.role.label),
                 visualDensity: VisualDensity.compact,

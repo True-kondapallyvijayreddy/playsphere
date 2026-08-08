@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:firebase_auth/firebase_auth.dart' as fb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../data/billing_repository.dart';
 import '../data/career_repository.dart';
 import '../data/tournament_repository.dart';
 import '../data/community_repository.dart';
@@ -10,29 +11,48 @@ import '../data/competition_repository.dart';
 import '../data/memory_composer.dart';
 import '../data/club_file_repository.dart';
 import '../data/memory_repository.dart';
+import '../data/notification_repository.dart';
+import '../data/ground_repository.dart';
 import '../data/org_repository.dart';
+import '../data/give_repository.dart';
+import '../data/shop_repository.dart';
 import '../data/scoring_service.dart';
 import '../data/umpire_repository.dart';
 import '../domain/career/head_to_head.dart';
 import '../domain/standings/standings_calculator.dart';
 import '../domain/tournament/tournament_leaderboard.dart';
 import '../domain/tournament/tournament_overview.dart';
+import 'ads/promo.dart';
 import 'async_combine.dart';
 import 'auth/auth_service.dart';
+import 'sync/sync_driver.dart';
 import 'models/app_user.dart';
+import 'models/billing.dart';
 import 'models/venue.dart';
 import 'models/tournament.dart';
+import 'models/tournament_invite.dart';
+import 'models/tournament_official.dart';
 import 'models/challenge.dart';
 import 'models/competition.dart';
 import 'models/dispute.dart';
 import 'models/memory.dart';
 import 'models/enums.dart';
 import 'models/fixture.dart';
+import 'models/ground.dart';
+import '../domain/cheer.dart';
+import 'models/group_entry.dart';
 import 'models/organization.dart';
+import 'models/owner_proposal.dart';
 import 'models/ranking_entry.dart';
 import 'models/scoring_request.dart';
+import 'models/shop_product.dart';
+import 'models/give_collection_center.dart';
+import 'models/give_donation.dart';
+import 'models/give_impact_stats.dart';
+import 'models/give_need.dart';
 import 'models/club_file.dart';
 import 'models/squad_entry.dart';
+import 'notifications/notification_model.dart';
 import 'notifications/notification_service.dart';
 import 'permissions/capability.dart';
 
@@ -45,7 +65,165 @@ final userRepositoryProvider = Provider((ref) => const UserRepository());
 final orgRepositoryProvider = Provider((ref) => const OrgRepository());
 final competitionRepositoryProvider =
     Provider((ref) => const CompetitionRepository());
-final scoringServiceProvider = Provider((ref) => ScoringService());
+/// One [ScoringService] for the container, disposed with it.
+///
+/// It owns two broadcast `StreamController`s — the write-failure feed the
+/// scoring pad listens on, and the pending-queue count — and nothing closed
+/// either. A `Provider` alone leaks them for the lifetime of the process,
+/// which in a test harness is every test that builds a container.
+final scoringServiceProvider = Provider<ScoringService>((ref) {
+  final service = ScoringService();
+  ref.onDispose(service.dispose);
+  return service;
+});
+/// Buying and reading plans.
+///
+/// The gateway is injected here and nowhere else, which is the whole point of
+/// the seam: switching PlaySphere from the launch offer to real Razorpay
+/// charges is a one-line change in this provider, and every screen that sells
+/// something keeps working untouched. Tests override this provider with a
+/// gateway that records what it was asked to collect.
+final billingRepositoryProvider =
+    Provider((ref) => const BillingRepository());
+
+/// Whether the signed-in player currently holds Premium.
+///
+/// A provider rather than a getter on the screen so the answer is computed
+/// once per profile change instead of once per widget, and so the ad slots,
+/// the drawer entry and the profile badge can never disagree about it.
+final isPremiumProvider = Provider<bool>((ref) {
+  final me = ref.watch(currentUserProvider).valueOrNull;
+  if (me == null) return false;
+  return me.hasPremiumAt(DateTime.now());
+});
+
+/// This person's receipts — plan purchases and ground bookings.
+final myPaymentsProvider = StreamProvider<List<PlanPayment>>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(const []);
+  return ref.watch(billingRepositoryProvider).watchMyPayments(uid);
+});
+
+/// The sports this player actually plays, for promo targeting.
+///
+/// Read off the career record rather than asked for. The whole argument for
+/// PlaySphere selling its own ad inventory is that it knows the sport without
+/// running a survey — a badminton player should see badminton, and that fact
+/// is already sitting in `users/{uid}/career_stats`.
+///
+/// Returns an empty list rather than an error or a spinner while the career
+/// is loading: an untargeted banner is a fine outcome, a banner slot that
+/// throws is not.
+final myPromoSportIdsProvider = Provider<List<String>>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return const [];
+  final career = ref.watch(careerProvider(uid)).valueOrNull;
+  if (career == null) return const [];
+  return sportIdsFor(career.map((c) => c.sportId));
+});
+
+final groundRepositoryProvider = Provider((ref) => const GroundRepository());
+
+/// The grounds the signed-in person owns. Empty for the vast majority of
+/// accounts — most people are players, not ground owners.
+final myGroundsProvider = StreamProvider<List<Ground>>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(const []);
+  return ref.watch(groundRepositoryProvider).watchMyGrounds(uid);
+});
+
+final groundProvider =
+    StreamProvider.family<Ground?, String>((ref, groundId) {
+  return ref.watch(groundRepositoryProvider).watchGround(groundId);
+});
+
+/// Every booking against one ground, for its owner's calendar.
+final groundBookingsProvider =
+    StreamProvider.family<List<GroundBooking>, String>((ref, groundId) {
+  return ref.watch(groundRepositoryProvider).watchGroundBookings(groundId);
+});
+
+/// Bookings this person has made, across every ground.
+final myGroundBookingsProvider =
+    StreamProvider<List<GroundBooking>>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(const []);
+  return ref.watch(groundRepositoryProvider).watchMyBookings(uid);
+});
+
+/// One ground search: a city, and optionally a sport.
+///
+/// A value class with equality rather than a raw string, so
+/// `family` caches "cricket grounds in Hyderabad" separately from "any ground
+/// in Hyderabad" instead of treating them as the same subscription.
+class GroundQuery {
+  const GroundQuery({required this.city, this.sportId});
+
+  final String city;
+  final String? sportId;
+
+  @override
+  bool operator ==(Object other) =>
+      other is GroundQuery && other.city == city && other.sportId == sportId;
+
+  @override
+  int get hashCode => Object.hash(city, sportId);
+}
+
+final groundSearchProvider =
+    StreamProvider.family<List<Ground>, GroundQuery>((ref, q) {
+  if (q.city.trim().isEmpty) return Stream.value(const []);
+  return ref
+      .watch(groundRepositoryProvider)
+      .searchGrounds(city: q.city, sportId: q.sportId);
+});
+
+final shopRepositoryProvider = Provider((ref) => const ShopRepository());
+
+/// The shop catalog. Falls back to the bundled Decathlon listings when the
+/// collection is empty or unreachable — see [ShopRepository].
+final shopProductsProvider = StreamProvider<List<ShopProduct>>((ref) {
+  return ref.watch(shopRepositoryProvider).watchProducts();
+});
+
+final giveRepositoryProvider = Provider((ref) => const GiveRepository());
+
+/// One donor's own donations, newest first — empty (not an error) for a
+/// signed-out viewer, since a donation always belongs to somebody.
+final myDonationsProvider = StreamProvider<List<GiveDonation>>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(const []);
+  return ref.watch(giveRepositoryProvider).watchMyDonations(uid);
+});
+
+/// Active collection centers, optionally filtered to one city. Null/empty
+/// city returns every center — used by the donation form's picker before a
+/// city has been chosen.
+final giveCollectionCentersProvider =
+    StreamProvider.family<List<GiveCollectionCenter>, String?>((ref, city) {
+  return ref.watch(giveRepositoryProvider).watchCollectionCenters(city: city);
+});
+
+/// The public needs board: verified needs only, optionally by city. See
+/// `GiveRepository.watchVerifiedNeeds` for why unverified needs never reach
+/// this provider.
+final giveNeedsBoardProvider =
+    StreamProvider.family<List<GiveNeed>, String?>((ref, city) {
+  return ref.watch(giveRepositoryProvider).watchVerifiedNeeds(city: city);
+});
+
+/// Needs a club has raised, verified or not — the club's own management view.
+final orgNeedsProvider =
+    StreamProvider.family<List<GiveNeed>, String>((ref, orgId) {
+  return ref.watch(giveRepositoryProvider).watchOrgNeeds(orgId);
+});
+
+/// The network's headline numbers. See [GiveImpactStats.empty] for why a
+/// fresh/quiet network reads as "just getting started", not as broken.
+final giveImpactStatsProvider = StreamProvider<GiveImpactStats>((ref) {
+  return ref.watch(giveRepositoryProvider).watchImpactStats();
+});
+
 final communityRepositoryProvider =
     Provider((ref) => const CommunityRepository());
 final umpireRepositoryProvider = Provider((ref) => const UmpireRepository());
@@ -58,6 +236,24 @@ final umpireRepositoryProvider = Provider((ref) => const UmpireRepository());
 final pendingScoreEventsProvider = StreamProvider<int>(
   (ref) => ref.watch(scoringServiceProvider).pendingCountStream,
 );
+
+/// Drives the offline queue: replays it on start, on resume, and on a retry
+/// tick while anything is still waiting.
+///
+/// Mounted once by the app shell. Until this existed, `reconcileQueue` was
+/// called from exactly one place — `initState` on the scoring pad — so a
+/// queued action was only ever retried if the scorer reopened THAT match's
+/// pad, which is the last thing anyone does with a finished match. Matches
+/// sat unsynced for days on a phone with full signal (Bug #9).
+final syncDriverProvider = Provider<SyncDriver>((ref) {
+  final service = ref.watch(scoringServiceProvider);
+  final driver = SyncDriver(
+    reconcile: service.reconcileQueue,
+    pendingCount: service.pendingCount,
+  );
+  ref.onDispose(driver.dispose);
+  return driver;
+});
 
 // ---------------------------------------------------------------------------
 // Session
@@ -108,6 +304,29 @@ final pushRegistrationProvider = Provider<void>((ref) {
     // time it tries to use it.
     service.unregister(uid);
   });
+});
+
+/// The durable inbox behind a push — see `NotificationRepository` for why
+/// `NotificationService` alone left a member's Notifications screen empty.
+final notificationRepositoryProvider =
+    Provider((ref) => const NotificationRepository());
+
+/// Every club activity this person has ever been sent a push about, newest
+/// first: event reminders, match starts, results, membership approvals,
+/// challenges, tournament announcements and invites. This is what makes
+/// "Notifications" a real history rather than only a live list of things
+/// still needing a decision.
+final myNotificationFeedProvider =
+    StreamProvider<List<AppNotification>>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(const []);
+  return ref.watch(notificationRepositoryProvider).watchFeed(uid);
+});
+
+/// How many of those this person has not yet opened, for the bell badge.
+final unreadNotificationCountProvider = Provider<int>((ref) {
+  final feed = ref.watch(myNotificationFeedProvider).valueOrNull ?? const [];
+  return feed.where((n) => !n.read).length;
 });
 
 /// The signed-in user's PlaySphere profile, which is a different thing from
@@ -248,6 +467,45 @@ final orgMembersProvider =
   return ref.watch(orgRepositoryProvider).watchMembers(orgId);
 });
 
+/// The club's owners, from the member rows rather than a denormalized list —
+/// the role is what the security rules check, so it is what the UI must count.
+/// Groups entering one competition together. See [GroupEntry].
+final groupEntriesProvider =
+    StreamProvider.family<List<GroupEntry>, CompRef>((ref, key) {
+  return ref.watch(competitionRepositoryProvider).watchGroupEntries(
+        orgId: key.orgId,
+        compId: key.compId,
+      );
+});
+
+/// Live cheer tally for one match. See [Cheer].
+final cheersProvider =
+    StreamProvider.family<CheerTally, FixtureRef>((ref, key) {
+  return ref.watch(scoringServiceProvider).watchCheers(
+        orgId: key.orgId,
+        compId: key.compId,
+        fixtureId: key.fixtureId,
+        myUid: ref.watch(currentUidProvider),
+      );
+});
+
+/// Every event on the platform open to outside entries. See
+/// `GlobalEventsScreen`.
+final globalEventsProvider = StreamProvider<List<Competition>>((ref) {
+  return ref.watch(competitionRepositoryProvider).watchGlobalEvents();
+});
+
+final orgOwnersProvider =
+    StreamProvider.family<List<Membership>, String>((ref, orgId) {
+  return ref.watch(orgRepositoryProvider).watchOwners(orgId);
+});
+
+/// Open motions to remove an owner. See `OwnerVote`.
+final ownerProposalsProvider =
+    StreamProvider.family<List<OwnerProposal>, String>((ref, orgId) {
+  return ref.watch(orgRepositoryProvider).watchOwnerProposals(orgId);
+});
+
 final pendingMembersProvider =
     StreamProvider.family<List<Membership>, String>((ref, orgId) {
   return ref
@@ -301,10 +559,36 @@ final tournamentEventsProvider = StreamProvider.family<List<Competition>,
       .watchEvents(key.orgId, key.tournamentId);
 });
 
+/// The clubs this tournament has invited, and what each has said.
+final tournamentInvitesProvider = StreamProvider.family<List<TournamentInvite>,
+    ({String orgId, String tournamentId})>((ref, key) {
+  return ref.watch(tournamentRepositoryProvider).watchInvitesForTournament(
+        orgId: key.orgId,
+        tournamentId: key.tournamentId,
+      );
+});
+
+/// Tournaments other clubs have invited this one into, still unanswered.
+final incomingTournamentInvitesProvider =
+    StreamProvider.family<List<TournamentInvite>, String>((ref, orgId) {
+  return ref.watch(tournamentRepositoryProvider).watchIncomingInvites(orgId);
+});
+
 /// Every match across every event of one tournament.
-final tournamentFixturesProvider =
-    StreamProvider.family<List<Fixture>, String>((ref, tournamentId) {
-  return ref.watch(tournamentRepositoryProvider).watchFixtures(tournamentId);
+final tournamentFixturesProvider = StreamProvider.family<List<Fixture>,
+    ({String orgId, String tournamentId})>((ref, key) {
+  return ref
+      .watch(tournamentRepositoryProvider)
+      .watchFixtures(key.orgId, key.tournamentId);
+});
+
+/// The season owner's officiating panel — who has been pre-assigned to this
+/// tournament, ahead of any fixture existing.
+final tournamentOfficialsProvider = StreamProvider.family<
+    List<TournamentOfficial>, ({String orgId, String tournamentId})>((ref, key) {
+  return ref
+      .watch(tournamentRepositoryProvider)
+      .watchOfficials(key.orgId, key.tournamentId);
 });
 
 /// The derived high-level state of a tournament — progress, what is on court,
@@ -313,7 +597,7 @@ final tournamentOverviewProvider = Provider.family<AsyncValue<TournamentOverview
     ({String orgId, String tournamentId})>((ref, key) {
   return combineAsync2(
     ref.watch(tournamentEventsProvider(key)),
-    ref.watch(tournamentFixturesProvider(key.tournamentId)),
+    ref.watch(tournamentFixturesProvider(key)),
     (events, fixtures) =>
         TournamentOverview.from(events: events, fixtures: fixtures),
   );
@@ -326,7 +610,7 @@ final tournamentLeaderboardProvider = Provider.family<
     ({String orgId, String tournamentId})>((ref, key) {
   return combineAsync2(
     ref.watch(tournamentEventsProvider(key)),
-    ref.watch(tournamentFixturesProvider(key.tournamentId)),
+    ref.watch(tournamentFixturesProvider(key)),
     (events, fixtures) =>
         TournamentLeaderboard.from(events: events, fixtures: fixtures),
   );
@@ -392,15 +676,68 @@ final careerProvider =
   return ref.watch(careerRepositoryProvider).watchCareer(uid);
 });
 
+/// Every match a player has appeared in, newest first.
+///
+/// `watchPlayerFixtures` has existed since head-to-head shipped, but only
+/// [headToHeadProvider] read it, and only to fold the matches into an
+/// opponent tally — the matches themselves were never shown anywhere. This
+/// exposes the same single query as a list, so the Matches destination has
+/// something to be a destination for.
+///
+/// Sorted here rather than in the query: the collection-group read is capped
+/// by `limit`, and ordering server-side would need a composite index per
+/// field. The cap is a few hundred documents, so the client sorts them for
+/// free.
+final playerFixturesProvider =
+    StreamProvider.family<List<Fixture>, String>((ref, uid) {
+  return ref.watch(careerRepositoryProvider).watchPlayerFixtures(uid).map(
+    (fixtures) {
+      final sorted = [...fixtures];
+      sorted.sort((a, b) {
+        final at = a.completedAt ?? a.startedAt ?? a.scheduledAt;
+        final bt = b.completedAt ?? b.startedAt ?? b.scheduledAt;
+        // Matches with no date at all sink to the bottom rather than
+        // scattering through the list at whatever order Firestore returned.
+        if (at == null && bt == null) return 0;
+        if (at == null) return 1;
+        if (bt == null) return -1;
+        return bt.compareTo(at);
+      });
+      return sorted;
+    },
+  );
+});
+
+/// One player's matches in a single sport.
+///
+/// Filters [playerFixturesProvider] rather than issuing its own query: a
+/// second collection-group listener per sport would multiply reads by however
+/// many sports a player has, to answer a question the first listener's data
+/// already contains.
+final playerSportFixturesProvider = Provider.family<AsyncValue<List<Fixture>>,
+    ({String uid, String sportId})>((ref, key) {
+  // A rating id is not always a sport id — chess is rated per time control
+  // (`chess:blitz`, see §7.11) — so compare on the base sport.
+  final base = key.sportId.split(':').first;
+  return ref.watch(playerFixturesProvider(key.uid)).whenData(
+        (fixtures) => [
+          for (final f in fixtures)
+            if (f.sport.split(':').first == base) f,
+        ],
+      );
+});
+
 // NOTE — the Cross-Sport Index (§8.2) is deliberately NOT wired here.
 //
 // `CrossSportIndex.compute` needs a `SportPopulation` per sport: every rated
 // player's rating in that sport, to turn a raw Glicko number into a percentile.
-// The client cannot obtain that. A `ratings` document stores only
-// rating/deviation/volatility/gamesPlayed — `firestore.rules` enforces exactly
-// those keys with `hasOnly`, so there is no `sportId` field to query a
-// collectionGroup by, and reading every rating on the platform to compute a
-// percentile is precisely the unbounded read pattern being removed elsewhere.
+// The client cannot obtain that. A `ratings` document is keyed by sport in its
+// PATH and carries no `sportId` field to query a collectionGroup by, and
+// reading every rating on the platform to compute a percentile is precisely the
+// unbounded read pattern being removed elsewhere. (This note used to cite a
+// `hasOnly` field check in `firestore.rules` as the reason; that check is gone —
+// ratings became `write: if false` when settlement moved into `onMatchSettled`
+// — but the conclusion is unchanged and rests on the path, not the rule.)
 //
 // Without a population, `percentileOf` returns 50 for everybody and the index
 // collapses to a constant. Surfacing that as a headline "Sports OS Index" would
@@ -452,6 +789,16 @@ final fixtureMemoriesProvider =
         orgId: key.orgId,
         compId: key.compId,
         fixtureId: key.fixtureId,
+      );
+});
+
+/// Every memory from every match of one season — the book a season owner or
+/// a player opens once it is done.
+final tournamentMemoriesProvider = StreamProvider.family<List<Memory>,
+    ({String orgId, String tournamentId})>((ref, key) {
+  return ref.watch(memoryRepositoryProvider).watchTournamentMemories(
+        orgId: key.orgId,
+        tournamentId: key.tournamentId,
       );
 });
 
@@ -649,9 +996,38 @@ final groupStandingsProvider =
 
 /// Everything currently being played in an organization — the screen a remote
 /// spectator opens first.
+///
+/// The underlying query asks Firestore for `status == live`, which is the
+/// most it can do: Firestore cannot express "and the scoreboard moved
+/// recently". A fixture enters `live` on its first ball and only leaves on the
+/// event that completes it, so every match a scorer walked away from stays in
+/// that query forever — which is why this list was showing matches that had
+/// finished days earlier. The activity filter is applied here, once, so every
+/// screen reading live matches gets the same honest answer.
 final liveFixturesProvider =
     StreamProvider.family<List<Fixture>, String>((ref, orgId) {
-  return ref.watch(competitionRepositoryProvider).watchLiveFixtures(orgId);
+  return ref.watch(competitionRepositoryProvider).watchLiveFixtures(orgId).map(
+        (fixtures) => [
+          for (final f in fixtures)
+            if (f.isLiveAt(DateTime.now())) f,
+        ],
+      );
+});
+
+/// Matches an organization left mid-scoreboard: still `live` on paper, quiet
+/// long enough that nobody would call them live.
+///
+/// Kept separate from [liveFixturesProvider] rather than merged into it,
+/// because these need the opposite treatment — hidden from spectators, but
+/// surfaced to organizers, who are the only people who can close them out.
+final staleLiveFixturesProvider =
+    StreamProvider.family<List<Fixture>, String>((ref, orgId) {
+  return ref.watch(competitionRepositoryProvider).watchLiveFixtures(orgId).map(
+        (fixtures) => [
+          for (final f in fixtures)
+            if (f.isStaleLiveAt(DateTime.now())) f,
+        ],
+      );
 });
 
 /// Matches the signed-in user has been assigned to score.

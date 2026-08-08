@@ -2,6 +2,64 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'firestore_codec.dart';
 
+/// One contest inside a challenge — a sport, played in one particular
+/// arrangement.
+///
+/// ## Why a challenge needed more than a sport id
+///
+/// A challenge carried exactly one `sportId`, which made it possible to say
+/// "we challenge you at cricket" and nothing else. That is not how clubs
+/// challenge each other. A village club messaging another proposes a
+/// Saturday and a list: table tennis singles, badminton doubles, and a
+/// leather-ball cricket match. Sending three separate challenges gets three
+/// separate negotiations, three separate accept taps, and no way to say the
+/// three are one fixture list on one afternoon.
+///
+/// [sideFormatId] is what makes "TT singles" different from "TT doubles"
+/// without inventing a second sport. It is a `SideFormat.id` from the scoring
+/// registry, and its `configOverrides` are what the engine actually reads —
+/// so a doubles leg is scored with doubles service rotation because the leg
+/// said so, not because somebody remembered to set it later.
+class ChallengeLeg {
+  const ChallengeLeg({
+    required this.sportId,
+    required this.sportName,
+    required this.sideFormatId,
+    required this.sideFormatName,
+  });
+
+  final String sportId;
+  final String sportName;
+  final String sideFormatId;
+  final String sideFormatName;
+
+  /// "Table tennis · Doubles". What the receiving club reads in the list.
+  String get label => '$sportName · $sideFormatName';
+
+  static ChallengeLeg fromMap(Map<String, dynamic> m) => ChallengeLeg(
+        sportId: Fs.str(m['sportId'], 'cricket'),
+        sportName: Fs.str(m['sportName'], 'Cricket'),
+        sideFormatId: Fs.str(m['sideFormatId']),
+        sideFormatName: Fs.str(m['sideFormatName']),
+      );
+
+  Map<String, Object?> toMap() => {
+        'sportId': sportId,
+        'sportName': sportName,
+        'sideFormatId': sideFormatId,
+        'sideFormatName': sideFormatName,
+      };
+
+  @override
+  bool operator ==(Object other) =>
+      other is ChallengeLeg &&
+      other.sportId == sportId &&
+      other.sideFormatId == sideFormatId;
+
+  @override
+  int get hashCode => Object.hash(sportId, sideFormatId);
+}
+
 /// Top-level inter-club challenge (`challenges/{challengeId}`).
 ///
 /// Unblocks cross-club matches (school-vs-school, village-vs-village) by placing
@@ -15,11 +73,13 @@ class Challenge {
     required this.toOrgName,
     required this.sportId,
     required this.status,
+    this.legs = const [],
     this.proposedSlots = const [],
     this.venue,
     this.createdFixtureId,
     this.createdCompId,
     this.hostOrgId,
+    this.createdTournamentId,
     this.agreedSlot,
     this.createdAt,
   });
@@ -29,7 +89,35 @@ class Challenge {
   final String toOrgId;
   final String fromOrgName;
   final String toOrgName;
+  /// The FIRST leg's sport, kept as a plain field.
+  ///
+  /// Redundant with `legs.first.sportId` and deliberately still written. Every
+  /// challenge created before [legs] existed has only this, and the list rows,
+  /// the notification and the accept path all have to keep working for those
+  /// documents without a migration. [resolvedLegs] is what code should read.
   final String sportId;
+
+  /// Every contest in this challenge. Empty on documents written before
+  /// multi-sport challenges existed — use [resolvedLegs].
+  final List<ChallengeLeg> legs;
+
+  /// The legs to actually play, however old the document is.
+  ///
+  /// A pre-[legs] challenge resolves to a single leg built from [sportId] with
+  /// the sport's default arrangement, which is exactly what it always meant.
+  List<ChallengeLeg> resolvedLegs(String Function(String) sportNameOf) =>
+      legs.isNotEmpty
+          ? legs
+          : [
+              ChallengeLeg(
+                sportId: sportId,
+                sportName: sportNameOf(sportId),
+                sideFormatId: '',
+                sideFormatName: '',
+              ),
+            ];
+
+  bool get isMultiSport => legs.length > 1;
 
   /// 'pending', 'accepted', 'declined', 'withdrawn', 'rescheduled'
   ///
@@ -51,6 +139,12 @@ class Challenge {
   final String? createdFixtureId;
   final String? createdCompId;
   final String? hostOrgId;
+
+  /// For a multi-sport challenge: the tournament grouping every leg's
+  /// competition, so both clubs open one fixture list rather than hunting for
+  /// three unrelated events. Null for a single-sport challenge, which needs no
+  /// container.
+  final String? createdTournamentId;
 
   /// Which of [proposedSlots] the accepting club chose.
   final DateTime? agreedSlot;
@@ -94,11 +188,16 @@ class Challenge {
       toOrgName: Fs.str(d['toOrgName'], 'Opponent Club'),
       sportId: Fs.str(d['sportId'], 'cricket'),
       status: Fs.str(d['status'], 'pending'),
+      legs: [
+        for (final raw in (d['legs'] is List ? d['legs'] as List : const []))
+          if (raw is Map) ChallengeLeg.fromMap(Map<String, dynamic>.from(raw)),
+      ],
       proposedSlots: Fs.dateList(d['proposedSlots']),
       venue: Fs.strOrNull(d['venue']),
       createdFixtureId: Fs.strOrNull(d['createdFixtureId']),
       createdCompId: Fs.strOrNull(d['createdCompId']),
       hostOrgId: Fs.strOrNull(d['hostOrgId']),
+      createdTournamentId: Fs.strOrNull(d['createdTournamentId']),
       agreedSlot: Fs.dateOrNull(d['agreedSlot']),
       createdAt: Fs.dateOrNull(d['createdAt']),
     );
@@ -111,11 +210,13 @@ class Challenge {
         'toOrgName': toOrgName,
         'sportId': sportId,
         'status': status,
+        'legs': legs.map((l) => l.toMap()).toList(),
         'proposedSlots': proposedSlots.map(Fs.ts).toList(),
         'venue': venue,
         'createdFixtureId': createdFixtureId,
         'createdCompId': createdCompId,
         'hostOrgId': hostOrgId,
+        'createdTournamentId': createdTournamentId,
         'agreedSlot': Fs.ts(agreedSlot),
         'createdAt': FieldValue.serverTimestamp(),
       };

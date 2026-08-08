@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" width="1200" height="800" style="background:#0f172a; font-family:'Segoe UI', Roboto, sans-serif;">
+  <text x="600" y="45" font-size="24" font-weight="bold" fill="#f8fafc" text-anchor="middle">PLAYSPHERE — ENTITY RELATIONSHIP TOPOLOGY (ERD)</text>
+  <text x="600" y="75" font-size="14" fill="#94a3b8" text-anchor="middle">Cloud Firestore Document Schema &amp; Relational Topology</text>
+
+  <!-- Entity: Users -->
+  <rect x="50" y="120" width="250" height="220" rx="8" fill="#1e293b" stroke="#3b82f6" stroke-width="2"/>
+  <rect x="50" y="120" width="250" height="35" rx="8" fill="#1d4ed8"/>
+  <text x="175" y="143" font-size="15" font-weight="bold" fill="#ffffff" text-anchor="middle">users</text>
+  <text x="65" y="175" font-size="12" fill="#93c5fd">● uid (PK)</text>
+  <text x="65" y="195" font-size="12" fill="#cbd5e1">phone, name</text>
+  <text x="65" y="215" font-size="12" fill="#cbd5e1">dateOfBirth</text>
+  <text x="65" y="235" font-size="12" fill="#cbd5e1">profileVisibility</text>
+  <text x="65" y="255" font-size="12" fill="#cbd5e1">verificationTier</text>
+  <text x="65" y="275" font-size="12" fill="#cbd5e1">district, mandal</text>
+  <text x="65" y="295" font-size="11" fill="#94a3b8">guardianUserIds[]</text>
+
+  <!-- Entity: Orgs -->
+  <rect x="475" y="120" width="250" height="220" rx="8" fill="#1e293b" stroke="#16a34a" stroke-width="2"/>
+  <rect x="475" y="120" width="250" height="35" rx="8" fill="#15803d"/>
+  <text x="600" y="143" font-size="15" font-weight="bold" fill="#ffffff" text-anchor="middle">orgs</text>
+  <text x="490" y="175" font-size="12" fill="#86efac">● id (PK)</text>
+  <text x="490" y="195" font-size="12" fill="#cbd5e1">name, type</text>
+  <text x="490" y="215" font-size="12" fill="#cbd5e1">location (geo)</text>
+  <text x="490" y="235" font-size="12" fill="#cbd5e1">inviteCode</text>
+  <text x="490" y="255" font-size="12" fill="#cbd5e1">settings (json)</text>
+  <text x="490" y="275" font-size="12" fill="#cbd5e1">created_at</text>
+
+  <!-- Entity: Memberships -->
+  <rect x="260" y="220" width="170" height="110" rx="8" fill="#1e293b" stroke="#a855f7" stroke-width="2"/>
+  <rect x="260" y="220" width="170" height="30" rx="8" fill="#7e22ce"/>
+  <text x="345" y="240" font-size="13" font-weight="bold" fill="#ffffff" text-anchor="middle">memberships</text>
+  <text x="270" y="265" font-size="11" fill="#e9d5ff">● uid (FK)</text>
+  <text x="270" y="283" font-size="11" fill="#e9d5ff">● orgId (FK)</text>
+  <text x="270" y="300" font-size="11" fill="#cbd5e1">role, status</text>
+
+  <!-- Connections Users & Orgs to Memberships -->
+  <line x1="300" y1="230" x2="260" y2="250" stroke="#a855f7" stroke-width="2"/>
+  <line x1="475" y1="230" x2="430" y2="250" stroke="#a855f7" stroke-width="2"/>
+
+  <!-- Entity: Competitions -->
+  <rect x="900" y="120" width="250" height="220" rx="8" fill="#1e293b" stroke="#eab308" stroke-width="2"/>
+  <rect x="900" y="120" width="250" height="35" rx="8" fill="#ca8a04"/>
+  <text x="1025" y="143" font-size="15" font-weight="bold" fill="#ffffff" text-anchor="middle">competitions</text>
+  <text x="915" y="175" font-size="12" fill="#fef08a">● id (PK)</text>
+  <text x="915" y="195" font-size="12" fill="#fef08a">● orgId (FK)</text>
+  <text x="915" y="215" font-size="12" fill="#cbd5e1">sportId, format</text>
+  <text x="915" y="235" font-size="12" fill="#cbd5e1">status</text>
+  <text x="915" y="255" font-size="12" fill="#cbd5e1">ruleConfig (json)</text>
+
+  <!-- Connections Orgs to Competitions -->
+  <line x1="725" y1="200" x2="900" y2="200" stroke="#16a34a" stroke-width="2"/>
+
+  <!-- Entity: Fixtures -->
+  <rect x="900" y="450" width="250" height="240" rx="8" fill="#1e293b" stroke="#ea580c" stroke-width="2"/>
+  <rect x="900" y="450" width="250" height="35" rx="8" fill="#c2410c"/>
+  <text x="1025" y="473" font-size="15" font-weight="bold" fill="#ffffff" text-anchor="middle">fixtures</text>
+  <text x="915" y="505" font-size="12" fill="#ffedd5">● id (PK)</text>
+  <text x="915" y="525" font-size="12" fill="#ffedd5">● competitionId (FK)</text>
+  <text x="915" y="545" font-size="12" fill="#cbd5e1">entrantAId, entrantBId</text>
+  <text x="915" y="565" font-size="12" fill="#cbd5e1">scorerUid, lastSeq</text>
+  <text x="915" y="585" font-size="12" fill="#cbd5e1">status, resultType</text>
+  <text x="915" y="605" font-size="12" fill="#cbd5e1">scoreState (json)</text>
+  <text x="915" y="625" font-size="11" fill="#94a3b8">mvp (json)</text>
+
+  <!-- Connections Competitions to Fixtures -->
+  <line x1="1025" y1="340" x2="1025" y2="450" stroke="#eab308" stroke-width="2"/>
+
+  <!-- Entity: MatchEvents -->
+  <rect x="475" y="450" width="260" height="240" rx="8" fill="#1e293b" stroke="#ec4899" stroke-width="2"/>
+  <rect x="475" y="450" width="260" height="35" rx="8" fill="#be185d"/>
+  <text x="605" y="473" font-size="15" font-weight="bold" fill="#ffffff" text-anchor="middle">match_events (Append-Only)</text>
+  <text x="490" y="505" font-size="12" fill="#fbcfe8">● docId (000001 PK)</text>
+  <text x="490" y="525" font-size="12" fill="#fbcfe8">● fixtureId (FK)</text>
+  <text x="490" y="545" font-size="12" fill="#cbd5e1">seq (int)</text>
+  <text x="490" y="565" font-size="12" fill="#cbd5e1">type (runs|wicket|undo)</text>
+  <text x="490" y="585" font-size="12" fill="#cbd5e1">payload (json)</text>
+  <text x="490" y="605" font-size="12" fill="#cbd5e1">byUid, clientEventId</text>
+
+  <!-- Connections Fixtures to MatchEvents -->
+  <line x1="900" y1="570" x2="735" y2="570" stroke="#ea580c" stroke-width="2"/>
+
+  <!-- Entity: Ratings -->
+  <rect x="50" y="450" width="250" height="240" rx="8" fill="#1e293b" stroke="#06b6d4" stroke-width="2"/>
+  <rect x="50" y="450" width="250" height="35" rx="8" fill="#0891b2"/>
+  <text x="175" y="473" font-size="15" font-weight="bold" fill="#ffffff" text-anchor="middle">ratings (Glicko-2)</text>
+  <text x="65" y="505" font-size="12" fill="#cff4fc">● sportId (PK)</text>
+  <text x="65" y="525" font-size="12" fill="#cff4fc">● uid (FK)</text>
+  <text x="65" y="545" font-size="12" fill="#cbd5e1">rating (r default 1500)</text>
+  <text x="65" y="565" font-size="12" fill="#cbd5e1">deviation (RD default 350)</text>
+  <text x="65" y="585" font-size="12" fill="#cbd5e1">volatility (sigma default 0.06)</text>
+  <text x="65" y="605" font-size="12" fill="#cbd5e1">settledFixtures[]</text>
+
+  <!-- Connection Users to Ratings -->
+  <line x1="175" y1="340" x2="175" y2="450" stroke="#3b82f6" stroke-width="2"/>
+</svg>

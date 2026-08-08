@@ -14,10 +14,14 @@ import '../../domain/draw/seeding.dart';
 import '../../domain/standings/standings_calculator.dart';
 import '../../domain/standings/tiebreak.dart';
 import '../../shared/app_scaffold.dart';
+import 'widgets/cancel_event_sheet.dart';
+import 'widgets/competition_rule_editor.dart';
 import 'widgets/draw_setup_sheet.dart';
+import 'widgets/group_entry_sheet.dart';
 import 'widgets/move_match_sheet.dart';
 import '../tournaments/widgets/running_late_card.dart';
 import 'widgets/squad_call_card.dart';
+import 'widgets/start_early_sheet.dart';
 import '../scoring/widgets/live_score_card.dart';
 import '../scoring/widgets/share_match_button.dart';
 
@@ -93,7 +97,16 @@ class CompetitionDetailScreen extends ConsumerWidget {
                         ),
                       ),
                     const SizedBox(height: 16),
-                    _Entries(competition: comp, canManage: canManage),
+                    // Bug #10: a single match names both sides at creation
+                    // and has no registration phase. Showing "Entries (0)" and
+                    // "Nobody has entered yet" was confusing and incorrect.
+                    if (!comp.format.isSingleMatch) ...[
+                      _Entries(competition: comp, canManage: canManage),
+                      GroupEntriesSection(
+                        competition: comp,
+                        canManage: canManage,
+                      ),
+                    ],
                     const SizedBox(height: 24),
                     _StandingsTable(competition: comp),
                     // A challenge is one fixture and two independently-owned
@@ -134,7 +147,10 @@ class _Header extends StatelessWidget {
                 Chip(label: Text(c.sportName)),
                 Chip(label: Text(c.category.label)),
                 Chip(label: Text(c.format.label)),
-                Chip(label: Text(c.status.label)),
+                // Derived, not stored: nothing writes the status field when a
+                // registration deadline passes, so a closed event went on
+                // advertising "Registration Open" (Bug #6).
+                Chip(label: Text(c.displayStatus().label)),
               ],
             ),
             if (c.venue != null) ...[
@@ -238,10 +254,23 @@ class _OrganizerActions extends ConsumerWidget {
                   SnackBar(
                     content: Text(
                       '${made.written} matches created'
-                      '${choices.schedule.hasCourts ? ' and scheduled' : ''}.',
+                      '${choices.schedule.hasCourts ? ' and scheduled' : ''}.'
+                      // "38 matches created" was the whole message, even when
+                      // six of them had nowhere to be played. The scheduler
+                      // knew; nothing asked it.
+                      '${made.hasScheduleProblems ? ' ${made.scheduleProblems.length} could not be given a court.' : ''}',
                     ),
                   ),
                 );
+                if (made.hasScheduleProblems) {
+                  await showDialog<void>(
+                    context: context,
+                    builder: (_) => _ScheduleProblemsDialog(
+                      problems: made.scheduleProblems,
+                    ),
+                  );
+                  if (!context.mounted) return;
+                }
                 // The seeding list, with a reason per player. A draw an
                 // organizer has to defend needs an answer to "why am I not
                 // seeded?" that is better than a shrug.
@@ -274,7 +303,42 @@ class _OrganizerActions extends ConsumerWidget {
       _ => ('', '', null),
     };
 
-    if (onPressed == null) return const SizedBox.shrink();
+    // A cancelled event still has a card, and it is the most important one it
+    // will ever show: the reason. Entrants arriving from the push land here.
+    if (c.isCancelled) {
+      return Card(
+        color: Theme.of(context).colorScheme.errorContainer,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(Icons.event_busy_outlined),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'This event was cancelled',
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(c.cancelReason ?? 'No reason was given.'),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // A completed event has no primary action left, but calling it off is not
+    // the only thing an organizer can still do — and neither is nothing.
+    final canStillCancel = c.status != CompetitionStatus.completed;
+
+    if (onPressed == null && !canStillCancel) return const SizedBox.shrink();
 
     return Card(
       color: Theme.of(context).colorScheme.secondaryContainer,
@@ -283,9 +347,41 @@ class _OrganizerActions extends ConsumerWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(description),
-            const SizedBox(height: 12),
-            FilledButton(onPressed: onPressed, child: Text(label)),
+            if (onPressed != null) ...[
+              Text(description),
+              const SizedBox(height: 12),
+            ],
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                if (onPressed != null)
+                  FilledButton(onPressed: onPressed, child: Text(label)),
+                OutlinedButton.icon(
+                  onPressed: () => CompetitionRuleEditor.show(
+                    context,
+                    competition: c,
+                  ),
+                  icon: const Icon(Icons.settings_outlined, size: 18),
+                  label: const Text('Rules'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () => EventNoteSheet.show(context, competition: c),
+                  icon: const Icon(Icons.campaign_outlined, size: 18),
+                  label: const Text('Send a note'),
+                ),
+                if (canStillCancel)
+                  TextButton.icon(
+                    onPressed: () =>
+                        CancelEventSheet.show(context, competition: c),
+                    icon: const Icon(Icons.event_busy_outlined, size: 18),
+                    label: const Text('Cancel event'),
+                    style: TextButton.styleFrom(
+                      foregroundColor: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+              ],
+            ),
           ],
         ),
       ),
@@ -312,6 +408,17 @@ class _Entries extends ConsumerWidget {
         ? null
         : regs.where((r) => r.uid == me.uid).firstOrNull;
 
+    // Whether the person about to tap the button is entering as a guest —
+    // signed in, but not a member of this club at all. Only meaningful when
+    // the organizer has actually opened the door (`openToNonMembers`); a
+    // pending/removed membership on a closed event is still just "not
+    // eligible", not "entering as a guest".
+    final membership = me == null
+        ? null
+        : ref.watch(myMembershipProvider(c.orgId)).valueOrNull;
+    final enteringAsGuest =
+        c.openToNonMembers && me != null && membership?.isActive != true;
+
     Future<void> enter() async {
       if (me == null) return;
       try {
@@ -329,6 +436,9 @@ class _Entries extends ConsumerWidget {
               RegistrationStatus.waitlisted =>
                 'Event is full — you are on the waitlist. '
                     'You move up automatically if someone drops out.',
+              _ when enteringAsGuest =>
+                "You're entering as a guest, outside this club. "
+                    'The organizer will review and confirm your entry.',
               _ => 'Entry submitted. The organizer will confirm it.',
             })),
           );
@@ -342,11 +452,28 @@ class _Entries extends ConsumerWidget {
     final actionLabel = switch (c.outcomeOfRegisteringNow) {
       RegistrationStatus.confirmed => 'Register',
       RegistrationStatus.waitlisted => 'Join waitlist',
-      _ => 'Apply',
+      _ => enteringAsGuest ? 'Apply as guest' : 'Apply',
     };
 
     final eligibility =
         me == null ? null : c.category.check(me, competitionStart: c.startDate);
+    final theme = Theme.of(context);
+
+    // What used to be implicit in whether the Enter/Apply button happened to
+    // be showing — an organizer or a spectator had to infer "closed" from a
+    // missing button, and nothing at all said how the field currently splits
+    // between confirmed, pending and waitlisted.
+    final confirmedCount =
+        regs.where((r) => r.status == RegistrationStatus.confirmed).length;
+    final pendingCount =
+        regs.where((r) => r.status == RegistrationStatus.pending).length;
+    final waitlistedCount =
+        regs.where((r) => r.status == RegistrationStatus.waitlisted).length;
+    final breakdown = [
+      if (confirmedCount > 0) '$confirmedCount confirmed',
+      if (pendingCount > 0) '$pendingCount pending',
+      if (waitlistedCount > 0) '$waitlistedCount waitlisted',
+    ].join(' · ');
 
     return Card(
       child: Padding(
@@ -369,11 +496,62 @@ class _Entries extends ConsumerWidget {
                     ),
                   )
                 else if (c.registrationIsOpen && me != null)
-                  FilledButton.tonal(
-                    onPressed:
-                        eligibility?.isEligible == true ? enter : null,
-                    child: Text(actionLabel),
+                  Wrap(
+                    spacing: 6,
+                    children: [
+                      FilledButton.tonal(
+                        onPressed:
+                            eligibility?.isEligible == true ? enter : null,
+                        child: Text(actionLabel),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: eligibility?.isEligible == true
+                            ? () => GroupEntrySheet.show(
+                                  context,
+                                  competition: c,
+                                )
+                            : null,
+                        icon: const Icon(Icons.groups_outlined, size: 16),
+                        label: const Text('Enter as a group'),
+                      ),
+                    ],
                   ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Icon(
+                  c.registrationIsOpen
+                      ? Icons.lock_open_outlined
+                      : Icons.lock_outline,
+                  size: 16,
+                  color: c.registrationIsOpen
+                      ? theme.colorScheme.primary
+                      : theme.colorScheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  c.registrationIsOpen
+                      ? 'Registration open'
+                      : 'Registration closed',
+                  style: theme.textTheme.labelLarge?.copyWith(
+                    fontWeight: FontWeight.w600,
+                    color: c.registrationIsOpen
+                        ? theme.colorScheme.primary
+                        : theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                if (breakdown.isNotEmpty) ...[
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '· $breakdown',
+                      style: theme.textTheme.bodySmall,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
               ],
             ),
             const SizedBox(height: 4),
@@ -669,11 +847,15 @@ class _QualifierCardState extends ConsumerState<_QualifierCard> {
 /// that does not answer it makes everyone ask the organizer instead.
 class _GroupTable extends StatelessWidget {
   const _GroupTable({
+    required this.orgId,
+    required this.compId,
     required this.groupId,
     required this.rows,
     required this.qualifiers,
   });
 
+  final String orgId;
+  final String compId;
   final String groupId;
   final List<Standing> rows;
   final int qualifiers;
@@ -705,7 +887,14 @@ class _GroupTable extends StatelessWidget {
                       ),
                     ),
                   ),
-                  Expanded(child: Text(rows[i].displayName)),
+                  Expanded(
+                    child: InkWell(
+                      onTap: () => context.push(
+                        Routes.entrant(orgId, compId, rows[i].entrantId),
+                      ),
+                      child: Text(rows[i].displayName),
+                    ),
+                  ),
                   Text('${rows[i].played}',
                       style: theme.textTheme.bodySmall),
                   const SizedBox(width: 16),
@@ -756,6 +945,56 @@ class _GroupTable extends StatelessWidget {
 /// are the point: "you have played two of the five rated matches we need"
 /// is something an organizer can say to a player at the desk. A bracket that
 /// cannot explain itself gets argued with.
+/// Matches the scheduler could not place, and why.
+///
+/// The generator has always produced this list and `generateDraw` has always
+/// discarded it, so an organizer was told "38 matches created" and found out at
+/// the ground that six of them had a provisional time and no court. A draw that
+/// does not fit the courts and hours available is a normal thing to happen —
+/// what is not acceptable is finding out on the day.
+class _ScheduleProblemsDialog extends StatelessWidget {
+  const _ScheduleProblemsDialog({required this.problems});
+
+  final List<String> problems;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AlertDialog(
+      title: const Text('Some matches have no court'),
+      content: SizedBox(
+        width: 420,
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            Text(
+              'These matches were created and carry a provisional "not before" '
+              'time, but the scheduler could not fit them onto a court within '
+              'the hours you set. Add a court, lengthen the day, or move them '
+              'by hand.',
+              style: theme.textTheme.bodySmall,
+            ),
+            const SizedBox(height: 12),
+            for (final p in problems)
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.event_busy_outlined, size: 18),
+                title: Text(p, style: theme.textTheme.bodyMedium),
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Got it'),
+        ),
+      ],
+    );
+  }
+}
+
 class _SeedingDialog extends StatelessWidget {
   const _SeedingDialog({required this.verdicts});
 
@@ -854,6 +1093,8 @@ class _StandingsTable extends ConsumerWidget {
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: _GroupTable(
+                orgId: competition.orgId,
+                compId: competition.id,
                 groupId: id,
                 rows: tables[id]!,
                 qualifiers: competition.drawConfig.qualifiersPerGroup,
@@ -968,6 +1209,13 @@ class _StandingsTable extends ConsumerWidget {
                               child: Text(
                                 row.displayName,
                                 overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            onTap: () => context.push(
+                              Routes.entrant(
+                                competition.orgId,
+                                competition.id,
+                                row.entrantId,
                               ),
                             ),
                           ),
@@ -1135,69 +1383,118 @@ class _Fixtures extends ConsumerWidget {
       );
     }
 
+    Widget matchRow(Fixture f) => Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(
+                child: LiveScoreCard(
+                  fixture: f,
+                  dense: true,
+                  onTap: () {
+                    final canScore = myUid != null &&
+                        f.canBeScoredBy(myUid, isOrgManager: canManage);
+                    context.push(
+                      canScore
+                          ? Routes.scoring(c.orgId, c.id, f.id)
+                          : Routes.watch(c.orgId, c.id, f.id),
+                    );
+                  },
+                ),
+              ),
+              // Only while there is something to watch. A link to a match
+              // that has not started shows an empty scoreboard, which is a
+              // worse thing to send someone than nothing.
+              // Bug #1 / #15: use activity-aware isLiveAt rather than the
+              // raw status field, so a match abandoned by its scorer days
+              // ago is not treated as in-progress.
+              if (f.isLiveAt(DateTime.now()) || f.hasResult)
+                ShareMatchButton(fixture: f, compact: true),
+              // A match already played is history; one in progress has a
+              // scorer standing over it. Neither is the organizer's to move.
+              if (canManage && !f.hasResult && !f.isLiveAt(DateTime.now())) ...[
+                IconButton(
+                  tooltip: 'Start this match early',
+                  icon: const Icon(Icons.play_circle_outline, color: Colors.green),
+                  onPressed: () => StartEarlySheet.show(
+                    context,
+                    fixture: f,
+                    sportId: c.sportId,
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Move this match',
+                  icon: const Icon(Icons.edit_calendar_outlined),
+                  onPressed: () => MoveMatchSheet.show(
+                    context,
+                    fixture: f,
+                    siblings: fixtures,
+                  ),
+                ),
+              ],
+              if (canManage)
+                IconButton(
+                  tooltip: f.scorerUids.isEmpty
+                      ? 'No scorer assigned'
+                      : '${f.scorerUids.length} scorer(s) assigned',
+                  icon: Icon(
+                    f.scorerUids.isEmpty
+                        ? Icons.person_off_outlined
+                        : Icons.how_to_reg_outlined,
+                    color: f.scorerUids.isEmpty
+                        ? Theme.of(context).colorScheme.error
+                        : null,
+                  ),
+                  onPressed: () => showDialog<void>(
+                    context: context,
+                    builder: (_) => _AssignScorersDialog(fixture: f),
+                  ),
+                ),
+            ],
+          ),
+        );
+
+    // Grouped so the schedule reads the same way the standings already do —
+    // `_StandingsTable` has shown one table per group since groups existed;
+    // this list showing all of "Group A" and "Group B" interleaved, with no
+    // way to tell which match belongs to which table, was the one place the
+    // schedule and the standings disagreed about whether groups exist.
+    final byGroup = <String?, List<Fixture>>{};
+    for (final f in fixtures) {
+      byGroup.putIfAbsent(f.groupId, () => []).add(f);
+    }
+    final groupIds = byGroup.keys.whereType<String>().toList()..sort();
+    final ungrouped = byGroup[null] ?? const <Fixture>[];
+    int byRound(Fixture a, Fixture b) => a.round != b.round
+        ? a.round.compareTo(b.round)
+        : a.matchIndex.compareTo(b.matchIndex);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Text('Matches', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 10),
-        for (final f in fixtures)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 10),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                Expanded(
-                  child: LiveScoreCard(
-                    fixture: f,
-                    dense: true,
-                    onTap: () {
-                      final canScore = myUid != null && f.canBeScoredBy(myUid);
-                      context.push(
-                        canScore
-                            ? Routes.scoring(c.orgId, c.id, f.id)
-                            : Routes.watch(c.orgId, c.id, f.id),
-                      );
-                    },
-                  ),
-                ),
-                // Only while there is something to watch. A link to a match
-                // that has not started shows an empty scoreboard, which is a
-                // worse thing to send someone than nothing.
-                if (f.isLive || f.hasResult)
-                  ShareMatchButton(fixture: f, compact: true),
-                // A match already played is history; one in progress has a
-                // scorer standing over it. Neither is the organizer's to move.
-                if (canManage && !f.hasResult && !f.isLive)
-                  IconButton(
-                    tooltip: 'Move this match',
-                    icon: const Icon(Icons.edit_calendar_outlined),
-                    onPressed: () => MoveMatchSheet.show(
-                      context,
-                      fixture: f,
-                      siblings: fixtures,
-                    ),
-                  ),
-                if (canManage)
-                  IconButton(
-                    tooltip: f.scorerUids.isEmpty
-                        ? 'No scorer assigned'
-                        : '${f.scorerUids.length} scorer(s) assigned',
-                    icon: Icon(
-                      f.scorerUids.isEmpty
-                          ? Icons.person_off_outlined
-                          : Icons.how_to_reg_outlined,
-                      color: f.scorerUids.isEmpty
-                          ? Theme.of(context).colorScheme.error
-                          : null,
-                    ),
-                    onPressed: () => showDialog<void>(
-                      context: context,
-                      builder: (_) => _AssignScorersDialog(fixture: f),
-                    ),
-                  ),
-              ],
+        if (groupIds.isEmpty)
+          for (final f in [...fixtures]..sort(byRound)) matchRow(f)
+        else ...[
+          for (final id in groupIds) ...[
+            Padding(
+              padding: const EdgeInsets.only(top: 4, bottom: 6),
+              child: Text('Group $id', style: Theme.of(context).textTheme.titleSmall),
             ),
-          ),
+            for (final f in [...byGroup[id]!]..sort(byRound)) matchRow(f),
+          ],
+          // The knockout stage of a groups+knockout draw — everything left
+          // once every group bucket above has taken its matches.
+          if (ungrouped.isNotEmpty) ...[
+            Padding(
+              padding: const EdgeInsets.only(top: 4, bottom: 6),
+              child: Text('Knockout', style: Theme.of(context).textTheme.titleSmall),
+            ),
+            for (final f in [...ungrouped]..sort(byRound)) matchRow(f),
+          ],
+        ],
       ],
     );
   }

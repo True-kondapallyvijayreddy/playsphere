@@ -10,6 +10,7 @@ import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/live_dot.dart';
+import '../home/event_feed.dart';
 import '../scoring/widgets/live_score_card.dart';
 
 class OrgHomeScreen extends ConsumerWidget {
@@ -141,8 +142,28 @@ class OrgHomeScreen extends ConsumerWidget {
                         ),
                       )
                     else
-                      for (final c in comps)
-                        _CompetitionTile(orgId: orgId, competition: c),
+                      // A season's sports gather behind one card here instead
+                      // of one each — see [groupEventFeed] — so a club that
+                      // just ran through `CreateSeasonScreen` sees the season
+                      // it created, not a wall of same-named sport rows.
+                      for (final item in groupEventFeed(comps))
+                        switch (item) {
+                          EventFeedSingle(:final competition) =>
+                            _CompetitionTile(
+                              orgId: orgId,
+                              competition: competition,
+                            ),
+                          EventFeedSeason(
+                            :final tournamentId,
+                            :final competitions
+                          ) =>
+                            SeasonCard(
+                              orgId: orgId,
+                              tournamentId: tournamentId,
+                              competitions: competitions,
+                              showOrg: false,
+                            ),
+                        },
                   ],
                 ),
               ),
@@ -182,7 +203,7 @@ class _CompetitionTile extends StatelessWidget {
             '${c.entrantCount} entered',
           ].join(' · '),
         ),
-        trailing: _StatusChip(status: c.status),
+        trailing: _StatusChip(status: c.displayStatus()),
         onTap: () => context.push(Routes.competition(orgId, c.id)),
       ),
     );

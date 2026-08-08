@@ -1,15 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/layout/responsive.dart';
 import '../../core/models/fixture.dart';
+import '../../core/router/app_router.dart';
 import '../../domain/scoring/match_award.dart';
 import '../../core/providers.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
 import '../profile/widgets/match_memories_section.dart';
 import 'widgets/ask_to_score.dart';
+import 'widgets/cheer_bar.dart';
 import 'widgets/box_score_table.dart';
 import 'widgets/share_match_button.dart';
 
@@ -91,6 +94,10 @@ class SpectatorScreen extends ConsumerWidget {
           // school match wants to know who is batting and what they have
           // made — the headline alone is what a scoreboard photo gives you.
           final scorecard = MatchScorecard(fixture: fixture);
+          // The part that makes a live link something other than a read-only
+          // number. See [CheerBar] — it renders nothing once the match is
+          // over, or for anyone not signed in.
+          final cheers = CheerBar(fixture: fixture);
 
           // On a laptop the score sits beside the commentary; on a phone the
           // commentary scrolls beneath it. Same data, same code.
@@ -107,6 +114,8 @@ class SpectatorScreen extends ConsumerWidget {
                         board,
                         const SizedBox(height: 16),
                         askToScore,
+                        const SizedBox(height: 12),
+                        cheers,
                         const SizedBox(height: 24),
                         scorecard,
                         const SizedBox(height: 24),
@@ -131,6 +140,8 @@ class SpectatorScreen extends ConsumerWidget {
                     board,
                     const SizedBox(height: 16),
                     askToScore,
+                    const SizedBox(height: 12),
+                    cheers,
                     const SizedBox(height: 20),
                     scorecard,
                     const SizedBox(height: 20),
@@ -171,7 +182,10 @@ class _BigScoreboard extends StatelessWidget {
         padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 20),
         child: Column(
           children: [
-            if (fixture.isLive)
+            // Activity-aware, not the raw status field — see
+            // [Fixture.isLiveAt]. A spectator who opened a link to a match
+            // abandoned last Tuesday must not be told it is happening now.
+            if (fixture.isLiveAt(DateTime.now()))
               Container(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
@@ -191,7 +205,13 @@ class _BigScoreboard extends StatelessWidget {
               )
             else
               Text(
-                fixture.status.label.toUpperCase(),
+                // Bug #1 / #15: a stale-live match — one whose scorer closed
+                // the app days ago — must not echo its stored status label,
+                // which is the word "Live". Show "PAUSED" instead so the
+                // spectator knows the scoreboard has gone quiet.
+                fixture.isStaleLiveAt(DateTime.now())
+                    ? 'PAUSED'
+                    : fixture.status.label.toUpperCase(),
                 style: theme.textTheme.labelMedium
                     ?.copyWith(color: theme.hintColor, letterSpacing: 1),
               ),
@@ -199,25 +219,19 @@ class _BigScoreboard extends StatelessWidget {
             Row(
               children: [
                 Expanded(
-                  child: Text(
-                    fixture.entrantAName,
-                    textAlign: TextAlign.center,
-                    style: theme.textTheme.titleLarge?.copyWith(
-                      fontWeight: winner == fixture.entrantAId
-                          ? FontWeight.w800
-                          : FontWeight.w500,
-                    ),
+                  child: _EntrantName(
+                    fixture: fixture,
+                    entrantId: fixture.entrantAId,
+                    name: fixture.entrantAName,
+                    isWinner: winner == fixture.entrantAId,
                   ),
                 ),
                 Expanded(
-                  child: Text(
-                    fixture.entrantBName,
-                    textAlign: TextAlign.center,
-                    style: theme.textTheme.titleLarge?.copyWith(
-                      fontWeight: winner == fixture.entrantBId
-                          ? FontWeight.w800
-                          : FontWeight.w500,
-                    ),
+                  child: _EntrantName(
+                    fixture: fixture,
+                    entrantId: fixture.entrantBId,
+                    name: fixture.entrantBName,
+                    isWinner: winner == fixture.entrantBId,
                   ),
                 ),
               ],
@@ -267,6 +281,43 @@ class _BigScoreboard extends StatelessWidget {
               ),
             ],
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// One side's name on the big scoreboard — tappable through to that
+/// entrant's page, the same tap `LiveScoreCard` offers everywhere else.
+class _EntrantName extends StatelessWidget {
+  const _EntrantName({
+    required this.fixture,
+    required this.entrantId,
+    required this.name,
+    required this.isWinner,
+  });
+
+  final Fixture fixture;
+  final String entrantId;
+  final String name;
+  final bool isWinner;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return InkWell(
+      onTap: () => context.push(
+        Routes.entrant(fixture.orgId, fixture.compId, entrantId),
+      ),
+      borderRadius: BorderRadius.circular(4),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Text(
+          name,
+          textAlign: TextAlign.center,
+          style: theme.textTheme.titleLarge?.copyWith(
+            fontWeight: isWinner ? FontWeight.w800 : FontWeight.w500,
+          ),
         ),
       ),
     );

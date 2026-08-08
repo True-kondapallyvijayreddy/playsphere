@@ -72,6 +72,8 @@ class Fixture {
     this.resultNote,
     this.startedAt,
     this.completedAt,
+    this.lastEventAt,
+    this.startedEarly = const {},
   });
 
   final String id;
@@ -257,6 +259,32 @@ class Fixture {
         for (final p in lineupB) ...[if (p.uid != null) p.uid!],
       }.toList(growable: false);
 
+  /// The registered accounts of everyone officiating — umpires, referees,
+  /// the third umpire.
+  ///
+  /// Deliberately NOT folded into [playerUids]: that list is what
+  /// `firestore.rules` checks before letting a scorer write ratings and career
+  /// statistics onto somebody's profile, and an umpire did not play, so a
+  /// result must never accrue to them.
+  List<String> get officialUids => <String>{
+        for (final o in officials) ...[if (o.uid.isNotEmpty) o.uid],
+      }.toList(growable: false);
+
+  /// Everyone who was actually at this match — both line-ups and the
+  /// officials.
+  ///
+  /// This is the "detected participants" set a memory tags. An umpire who
+  /// stood for a district final was there; the photo is as much theirs as
+  /// anyone's, and before this they could not even be offered as a tag
+  /// because only line-up entries were listed.
+  ///
+  /// Order is stable — side A, then side B, then officials — so a tag dialog
+  /// does not reshuffle its chips between builds.
+  List<String> get participantUids => <String>{
+        ...playerUids,
+        ...officialUids,
+      }.toList(growable: false);
+
   /// Who won the toss, and what they chose — 'bat' or 'field'.
   ///
   /// Every match starts with one, and until now the app simply assumed side A
@@ -361,16 +389,86 @@ class Fixture {
   final DateTime? startedAt;
   final DateTime? completedAt;
 
+  /// When the scoreboard last actually moved — written on every scoring
+  /// action, including undos.
+  ///
+  /// Exists because [status] alone cannot answer "is this match live *now*".
+  /// A fixture enters [FixtureStatus.live] on its first ball and only leaves
+  /// on the event the plugin calls complete, so any match a scorer walks away
+  /// from — a phone dies, rain stops play, the last over is never entered —
+  /// stays `live` in Firestore forever. Those abandoned matches were showing a
+  /// red LIVE badge days later, which is what made the badge worthless: if
+  /// half the LIVE matches are not live, nobody trusts any of them.
+  final DateTime? lastEventAt;
+
+  /// The record of a match that was pulled forward and played ahead of its
+  /// scheduled time — who agreed to it, when, and how the sport's pre-match
+  /// questions were answered.
+  ///
+  /// Empty for the overwhelming majority of fixtures, which were played when
+  /// they said they would be. Present, it is the only place that records that
+  /// a Tuesday fixture was actually played on Saturday with a different ball,
+  /// which is exactly the context a disputed scorecard turns on. See
+  /// `CompetitionRepository.startMatchEarly`.
+  final Map<String, dynamic> startedEarly;
+
+  /// Whether this match was played ahead of its original slot.
+  bool get wasStartedEarly => startedEarly.isNotEmpty;
+
+  /// How long a scoreboard may sit untouched before it stops claiming to be
+  /// live.
+  ///
+  /// Six hours, chosen to be longer than any single grassroots session — a
+  /// full-day cricket match has a lunch break, a badminton court waits on the
+  /// previous rubber — while still being far shorter than the days-long
+  /// staleness users actually reported. A match legitimately paused this long
+  /// has, for a spectator's purposes, stopped.
+  static const Duration liveStaleAfter = Duration(hours: 6);
+
   /// Whether this result should award league points. See
   /// [MatchResultType.countsForStandings].
   bool get countsForStandings =>
       status.isResulted && resultType.countsForStandings;
 
+  /// The stored lifecycle claim: what the document says about itself.
+  ///
+  /// Use this for scoring permissions and state transitions. For anything a
+  /// spectator READS — a badge, a live list, a blinking dot — use
+  /// [isLiveAt] instead, which also requires the scoreboard to be warm.
   bool get isLive => status == FixtureStatus.live;
+
+  /// Whether this match should be presented as Live at [now].
+  ///
+  /// Three things must all hold, matching how a person on the ground would
+  /// answer the question:
+  ///
+  /// - the fixture claims to be live,
+  /// - scoring has actually begun (a fixture with no events has not started,
+  ///   whatever its status field says), and
+  /// - the scoreboard moved recently enough to still be running.
+  bool isLiveAt(DateTime now) {
+    if (status != FixtureStatus.live) return false;
+    if (lastSeq <= 0) return false;
+    final beat = lastEventAt ?? startedAt;
+    if (beat == null) return false;
+    // A negative difference means the heartbeat is ahead of this device's
+    // clock, which happens routinely: the beat is a server timestamp and the
+    // reader is a cheap phone with a drifting clock. That is still a live
+    // match, so the comparison is deliberately one-sided.
+    return now.difference(beat) < liveStaleAfter;
+  }
+
+  /// Claims to be live but has gone quiet — an abandoned or forgotten
+  /// scoreboard. Shown as paused, and offered to organizers to close out.
+  bool isStaleLiveAt(DateTime now) =>
+      status == FixtureStatus.live && !isLiveAt(now);
+
   bool get hasResult => status.isResulted;
 
-  bool canBeScoredBy(String uid) =>
-      status.acceptsScoring && scorerUids.contains(uid);
+  /// Feature #17: Dynamic role-based scoring access.
+  /// A fixture can be scored if the user is in [scorerUids] OR holds manager access.
+  bool canBeScoredBy(String uid, {bool isOrgManager = false}) =>
+      status.acceptsScoring && (scorerUids.contains(uid) || isOrgManager);
 
   factory Fixture.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
     final d = doc.data() ?? const {};
@@ -435,6 +533,8 @@ class Fixture {
       resultNote: Fs.strOrNull(d['resultNote']),
       startedAt: Fs.dateOrNull(d['startedAt']),
       completedAt: Fs.dateOrNull(d['completedAt']),
+      lastEventAt: Fs.dateOrNull(d['lastEventAt']),
+      startedEarly: Fs.map(d['startedEarly']),
     );
   }
 
@@ -508,6 +608,8 @@ class Fixture {
     String? courtId,
     MatchResultType? resultType,
     String? resultNote,
+    DateTime? lastEventAt,
+    Map<String, dynamic>? startedEarly,
   }) {
     return Fixture(
       id: id,
@@ -567,6 +669,8 @@ class Fixture {
       resultNote: resultNote ?? this.resultNote,
       startedAt: startedAt,
       completedAt: completedAt,
+      lastEventAt: lastEventAt ?? this.lastEventAt,
+      startedEarly: startedEarly ?? this.startedEarly,
     );
   }
 }

@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 
+import 'package:playsphere/core/errors/app_exception.dart';
 import 'package:playsphere/core/models/app_user.dart';
 import 'package:playsphere/core/models/challenge.dart';
 import 'package:playsphere/core/models/competition.dart';
@@ -10,10 +11,14 @@ import 'package:playsphere/core/models/enums.dart';
 import 'package:playsphere/core/models/fixture.dart';
 import 'package:playsphere/core/models/organization.dart';
 import 'package:playsphere/core/models/scoring_request.dart';
+import 'package:playsphere/core/layout/responsive.dart';
+import 'package:playsphere/core/notifications/notification_model.dart';
 import 'package:playsphere/core/permissions/capability.dart';
 import 'package:playsphere/core/providers.dart';
 import 'package:playsphere/data/career_repository.dart';
 import 'package:playsphere/features/home/home_screen.dart';
+import 'package:playsphere/features/notifications/notifications_screen.dart';
+import 'package:playsphere/shared/account_button.dart';
 import 'package:playsphere/shared/live_dot.dart';
 import 'package:playsphere/shared/module_drawer.dart';
 import 'package:playsphere/shared/playsphere_logo.dart';
@@ -94,11 +99,20 @@ void main() {
     List<Fixture> live = const [],
     List<Competition> competitions = const [],
     List<ScoringRequest> scoringRequests = const [],
+    /// Clubs whose live-fixtures read is refused, to exercise Bug #4.
+    Set<String> liveReadFailsFor = const {},
   }) {
     final router = GoRouter(
       initialLocation: '/home',
       routes: [
         GoRoute(path: '/home', builder: (_, __) => const HomeScreen()),
+        // The real screen, not a stub: what used to sit in the middle of the
+        // dashboard now lives here, and these tests still have to prove it
+        // reaches the person it is waiting on.
+        GoRoute(
+          path: '/notifications',
+          builder: (_, __) => const NotificationsScreen(),
+        ),
         // Destinations the dashboard links to. Each renders its own path so a
         // test can assert WHERE a tap landed, not merely that it did not
         // crash.
@@ -107,8 +121,15 @@ void main() {
           '/orgs/join',
           '/orgs/new',
           '/me',
+          // Matches and Sports are separate destinations. They both used to
+          // resolve to '/me', which is exactly what these routes now prove
+          // they no longer do (Bug #2).
+          '/me/matches',
+          '/me/sports',
           '/org/:orgId',
           '/org/:orgId/live',
+          '/live',
+          '/events/mine',
         ])
           GoRoute(
             path: path,
@@ -134,7 +155,12 @@ void main() {
         ),
         competitionsProvider.overrideWith((ref, id) => Stream.value(competitions)),
         liveFixturesProvider.overrideWith(
-          (ref, id) => Stream.value(id == orgA ? live : const []),
+          (ref, id) => liveReadFailsFor.contains(id)
+              ? Stream<List<Fixture>>.error(
+                  const PermissionDeniedException(),
+                  StackTrace.empty,
+                )
+              : Stream.value(id == orgA ? live : const []),
         ),
         pendingMembersProvider.overrideWith((ref, id) => Stream.value(const [])),
         incomingChallengesProvider.overrideWith(
@@ -149,6 +175,12 @@ void main() {
         playerMemoriesProvider.overrideWith((ref, uid) => Stream.value(const [])),
         pendingScoringRequestsProvider.overrideWith(
           (ref, id) => Stream.value(scoringRequests),
+        ),
+        // The durable activity feed behind the bell and the Notifications
+        // screen — see NotificationRepository. Left un-mocked this reaches
+        // real Firestore, which is not initialised under `flutter test`.
+        myNotificationFeedProvider.overrideWith(
+          (ref) => Stream.value(const <AppNotification>[]),
         ),
       ],
       child: MaterialApp.router(routerConfig: router),
@@ -222,8 +254,9 @@ void main() {
     await settle(tester);
   }
 
-  testWidgets('greets the member and lists every club they belong to',
-      (tester) async {
+  testWidgets(
+      'shows the date, no name salutation, and lists every club they '
+      'belong to', (tester) async {
     await pump(
       tester,
       harness(
@@ -235,7 +268,11 @@ void main() {
     );
 
     expect(tester.takeException(), isNull);
-    expect(find.textContaining('Ravi'), findsWidgets);
+    // Deliberately no "Good morning/evening, Ravi" salutation — it used to
+    // be the single largest thing on the dashboard for a fact the member
+    // already knows. See _Greeting's doc comment.
+    expect(find.textContaining('Ravi'), findsNothing);
+    expect(find.textContaining('Good '), findsNothing);
     expect(find.text('Nizampet High School'), findsOneWidget);
     expect(find.text('Kompally Sports Academy'), findsOneWidget);
 
@@ -336,6 +373,31 @@ void main() {
         matching: find.byType(Card),
       );
 
+  /// The counter tile with this label, as opposed to any other place the same
+  /// words appear on the page.
+  ///
+  /// "Live now" is both a counter and the heading over the live ticker that
+  /// sits above it, so a bare `find.text` matches two widgets and `.first`
+  /// silently picks the heading. Scoping to the grid names the one we mean.
+  Finder statTile(String label) => find.descendant(
+        of: find.byType(AdaptiveGrid),
+        matching: find.text(label),
+      );
+
+  /// Taps a counter, scrolling it into view first.
+  ///
+  /// The counters sit below the live ticker and the "Play match now" button
+  /// since those moved to the top, which puts them off a 900px test viewport
+  /// on a page with any content on it at all.
+  Future<void> tapStatTile(WidgetTester tester, String label) async {
+    final tile = statTile(label);
+    await tester.ensureVisible(tile);
+    // settle(), not pumpAndSettle(): the live dot pulses for as long as a
+    // match is live, so there is no frame at which the tree goes quiet.
+    await settle(tester);
+    await tester.tap(tile);
+  }
+
   testWidgets('the counters open the page each one is counting',
       (tester) async {
     await pump(
@@ -343,12 +405,15 @@ void main() {
       harness(memberships: [membership(orgA, MembershipRole.member)]),
     );
 
-    await tester.tap(find.text('Clubs'));
+    await tapStatTile(tester, 'Clubs');
     await settle(tester);
     expect(find.text('AT /orgs'), findsOneWidget);
   });
 
-  testWidgets('a counter with a club behind it opens that club',
+  // The "Live now" counter is a sum across every club, not one club's own —
+  // so unlike a per-club tile it opens the cross-club Live Now hub rather
+  // than any single organization's live page.
+  testWidgets('the Live now counter opens the cross-club live hub',
       (tester) async {
     await pump(
       tester,
@@ -358,20 +423,144 @@ void main() {
       ),
     );
 
-    await tester.tap(find.text('Live now').first);
+    await tapStatTile(tester, 'Live now');
     await settle(tester);
-    expect(find.text('AT /org/$orgA/live'), findsOneWidget);
+    expect(find.text('AT /live'), findsOneWidget);
   });
 
-  testWidgets('the career counters open the career profile', (tester) async {
+  // A member with a lot going on at once must not have live scorecards push
+  // clubs, events and the rest of the dashboard off several screens' worth
+  // of scrolling. The preview stops at three; everything past that is one
+  // tap away on the cross-club hub rather than simply missing.
+  testWidgets('caps the live preview at three and offers the rest via More',
+      (tester) async {
+    final live = [
+      for (var i = 0; i < 5; i++)
+        Fixture(
+          id: 'fx$i',
+          orgId: orgA,
+          compId: 'comp1',
+          entrantAId: 'a$i',
+          entrantBId: 'b$i',
+          entrantAName: 'Team A$i',
+          entrantBName: 'Team B$i',
+          status: FixtureStatus.live,
+        ),
+    ];
+
+    await pump(
+      tester,
+      harness(
+        memberships: [membership(orgA, MembershipRole.member)],
+        live: live,
+      ),
+    );
+    await settle(tester);
+
+    expect(find.text('Team A0'), findsOneWidget);
+    expect(find.text('Team A1'), findsOneWidget);
+    expect(find.text('Team A2'), findsOneWidget);
+    expect(find.text('Team A3'), findsNothing);
+    expect(find.text('Team A4'), findsNothing);
+
+    final more = find.text('More · 2 more live');
+    expect(more, findsOneWidget);
+    await tester.tap(more);
+    await settle(tester);
+    expect(find.text('AT /live'), findsOneWidget);
+  });
+
+  // Only registration-open events belong on the dashboard — a scheduled or
+  // already-running event is not something a member can act on today, and
+  // clutters the one section meant to answer "what can I enter right now".
+  // Six clubs' open entry windows must not push the rest of the dashboard
+  // down several screens either, so the preview caps at five with the same
+  // "More" pattern as Live now.
+  testWidgets(
+      'shows only open-for-entry events, caps the preview at five, and '
+      'offers the rest via More', (tester) async {
+    Competition comp(String id, CompetitionStatus status) => Competition(
+          id: id,
+          orgId: orgA,
+          name: 'Event $id',
+          sportId: 'badminton',
+          sportName: 'Badminton',
+          archetype: CompetitionArchetype.versus,
+          entrantType: EntrantType.individual,
+          format: CompetitionFormat.roundRobin,
+          status: status,
+          category: const CompetitionCategory(label: 'Open'),
+          scoringPluginKey: 'set_based',
+        );
+
+    final competitions = [
+      for (var i = 0; i < 6; i++) comp('open$i', CompetitionStatus.registrationOpen),
+      comp('running', CompetitionStatus.inProgress),
+      comp('later', CompetitionStatus.scheduled),
+    ];
+
+    await pump(
+      tester,
+      harness(
+        memberships: [membership(orgA, MembershipRole.member)],
+        competitions: competitions,
+      ),
+    );
+    await settle(tester);
+
+    // Only open-for-entry events show — the running and scheduled ones do
+    // not belong on the dashboard at all.
+    expect(find.text('Event running'), findsNothing);
+    expect(find.text('Event later'), findsNothing);
+    for (var i = 0; i < 5; i++) {
+      expect(find.text('Event open$i'), findsOneWidget);
+    }
+    expect(find.text('Event open5'), findsNothing);
+
+    final more = find.text('More · 1 more open');
+    expect(more, findsOneWidget);
+    await tester.scrollUntilVisible(
+      more,
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.ensureVisible(more);
+    await settle(tester);
+    await tester.tap(more);
+    await settle(tester);
+    expect(find.text('AT /events/mine'), findsOneWidget);
+  });
+
+  // Bug #2. These two tiles carry different labels and different numbers, and
+  // both used to push '/me' — so tapping either landed on the career profile
+  // and neither showed the thing it had just counted. The point of the pair
+  // of tests is that they now land in DIFFERENT places.
+  testWidgets('the Matches counter opens the matches list', (tester) async {
     await pump(
       tester,
       harness(memberships: [membership(orgA, MembershipRole.member)]),
     );
 
-    await tester.tap(find.text('Matches'));
+    await tapStatTile(tester, 'Matches');
     await settle(tester);
-    expect(find.text('AT /me'), findsOneWidget);
+
+    expect(find.text('AT /me/matches'), findsOneWidget);
+    expect(find.text('AT /me'), findsNothing);
+  });
+
+  testWidgets('the Sports counter opens the sports list', (tester) async {
+    await pump(
+      tester,
+      harness(memberships: [membership(orgA, MembershipRole.member)]),
+    );
+
+    // The label is singular at a count of one, which is what this fixture
+    // has — the tile helper matches on whatever is rendered.
+    await tapStatTile(tester, 'Sports');
+    await settle(tester);
+
+    expect(find.text('AT /me/sports'), findsOneWidget);
+    expect(find.text('AT /me/matches'), findsNothing);
   });
 
   testWidgets('a counter with no club behind it goes nowhere', (tester) async {
@@ -380,7 +569,7 @@ void main() {
     // "Events" is club-scoped, and this person has no club for it to point
     // at. It still shows its zero; it just must not navigate into a route
     // built from a club id that does not exist.
-    await tester.tap(find.text('Events'));
+    await tapStatTile(tester, 'Events');
     await settle(tester);
 
     expect(find.textContaining('AT '), findsNothing);
@@ -399,9 +588,28 @@ void main() {
     // here are the fixed extents, not ratios, so they hold at every width.
     expect(tester.getSize(cardAround('Clubs')).height, lessThanOrEqualTo(84));
     expect(
-      tester.getSize(cardAround('Rules library')).height,
+      // Was 'Rules library', which has since moved off the dashboard into the
+      // module menu (Bug #7). Any Explore tile proves the same fixed extent.
+      tester.getSize(cardAround('Career profile')).height,
       lessThanOrEqualTo(70),
     );
+  });
+
+  testWidgets('the Rules library is in the menu, not on the dashboard',
+      (tester) async {
+    // Bug #7: reference material somebody opens once a season was taking a
+    // tile in the most valuable space in the app, duplicating a module-menu
+    // entry that was already there.
+    await pump(
+      tester,
+      harness(memberships: [membership(orgA, MembershipRole.member)]),
+      size: drawerView,
+    );
+
+    expect(find.text('Rules library'), findsNothing);
+
+    await openMenu(tester);
+    expect(inDrawer('Rules library'), findsOneWidget);
   });
 
   testWidgets('an Explore tile opens its page', (tester) async {
@@ -429,11 +637,57 @@ void main() {
   });
 
   // -------------------------------------------------------------------------
-  // Somebody asking to score, and the admin answering without leaving home.
+  // Somebody asking to score, and the admin answering from the bell.
+  //
+  // These obligations used to sit in the middle of the dashboard. They now
+  // live behind the notification bell, so what these tests pin down is that
+  // moving them did not lose them: the dashboard stays clear, the bell says
+  // how many are waiting, and the request is still answerable in one tap.
   // -------------------------------------------------------------------------
 
-  testWidgets('shows an admin who is waiting to score, and what they said',
+  Future<void> openBell(WidgetTester tester) async {
+    await tester.tap(find.byIcon(Icons.notifications_outlined).first);
+    await settle(tester);
+  }
+
+  testWidgets('the dashboard itself no longer carries pending actions',
       (tester) async {
+    await pump(
+      tester,
+      harness(
+        memberships: [membership(orgB, MembershipRole.eventManager)],
+        scoringRequests: [scoringRequest(orgB)],
+      ),
+    );
+
+    // Neither the old wording nor the new one belongs on the dashboard —
+    // pending actions live behind the bell (Bug #5).
+    expect(find.text('Waiting on you'), findsNothing);
+    expect(find.text('Needs your action'), findsNothing);
+    expect(find.text('Lakshmi N wants to score'), findsNothing);
+  });
+
+  testWidgets('the bell sits beside the profile photo', (tester) async {
+    // Bug #5 asked for the bell "beside profile Photo on top right". Pinned
+    // by horizontal position rather than by reading the widget list, because
+    // it is the on-screen adjacency that was asked for.
+    await pump(
+      tester,
+      harness(memberships: [membership(orgA, MembershipRole.member)]),
+    );
+
+    final bell = tester.getCenter(
+      find.byIcon(Icons.notifications_outlined).first,
+    );
+    final account = tester.getCenter(find.byType(AccountButton).first);
+
+    // Same row, bell immediately to the left of the photo.
+    expect(bell.dy, closeTo(account.dy, 4));
+    expect(bell.dx, lessThan(account.dx));
+    expect(account.dx - bell.dx, lessThan(80));
+  });
+
+  testWidgets('the bell counts what is waiting and opens it', (tester) async {
     await pump(
       tester,
       harness(
@@ -443,8 +697,16 @@ void main() {
       ),
     );
 
+    // The badge is the whole reason taking this off the home screen is safe.
+    expect(find.widgetWithText(Badge, '1'), findsOneWidget);
+
+    await openBell(tester);
+
     expect(tester.takeException(), isNull);
-    expect(find.text('Waiting on you'), findsOneWidget);
+    // Reworded: "Waiting on you" named a state without saying what to do
+    // about it, which is what users found confusing.
+    expect(find.text('Needs your action'), findsOneWidget);
+    expect(find.text('Waiting on you'), findsNothing);
     expect(find.text('Lakshmi N wants to score'), findsOneWidget);
     expect(find.text('Blue House v Red House'), findsWidgets);
     expect(find.textContaining('I am the umpire today'), findsOneWidget);
@@ -463,8 +725,77 @@ void main() {
       ),
     );
 
+    // Not merely absent from the dashboard — absent from the bell too, which
+    // must not count an obligation this person has no way to discharge.
+    expect(find.byType(Badge), findsNothing);
+
+    await openBell(tester);
+
     expect(find.text('Lakshmi N wants to score'), findsNothing);
-    expect(find.text('Waiting on you'), findsNothing);
+    // Combined empty state now that the screen also carries a club-activity
+    // feed (empty here, via the override above): "Nothing here yet" covers
+    // both, rather than the action-items-only wording that applied before
+    // there was a second thing on this screen to be empty.
+    expect(find.text('Nothing here yet'), findsOneWidget);
+  });
+
+  // Bug #4. A person in two clubs used to lose EVERY live match because one
+  // club's collection-group read was refused — the screen showed "Could not
+  // load live matches" and nothing else.
+  group('a club whose live matches cannot be read', () {
+    testWidgets('does not take the other clubs down with it', (tester) async {
+      await pump(
+        tester,
+        harness(
+          memberships: [
+            membership(orgA, MembershipRole.member),
+            membership(orgB, MembershipRole.eventManager),
+          ],
+          live: [liveMatch],
+          liveReadFailsFor: {orgB},
+        ),
+      );
+
+      // The match at the club that DID load is on screen.
+      expect(find.text('Blue House'), findsWidgets);
+      expect(find.text('Could not load live matches'), findsNothing);
+    });
+
+    testWidgets('is reported rather than silently dropped', (tester) async {
+      await pump(
+        tester,
+        harness(
+          memberships: [
+            membership(orgA, MembershipRole.member),
+            membership(orgB, MembershipRole.eventManager),
+          ],
+          live: [liveMatch],
+          liveReadFailsFor: {orgB},
+        ),
+      );
+
+      // Showing the matches that loaded is only half of it. Quietly dropping
+      // a club would tell a player nothing is on at the ground they are
+      // standing in, which is the failure the strict combiner existed to
+      // prevent — so the notice has to be there too.
+      expect(
+        find.text('One club’s matches could not be loaded'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('every club failing still reports an error', (tester) async {
+      await pump(
+        tester,
+        harness(
+          memberships: [membership(orgA, MembershipRole.member)],
+          liveReadFailsFor: {orgA},
+        ),
+      );
+
+      // Nothing loaded at all, so an empty state would be a lie.
+      expect(find.text('Could not load live matches'), findsOneWidget);
+    });
   });
 
   testWidgets('renders on a laptop window with the rail', (tester) async {

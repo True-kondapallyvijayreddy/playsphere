@@ -4,7 +4,7 @@ import 'package:image_picker/image_picker.dart';
 
 import '../../../core/models/enums.dart';
 import '../../../core/models/fixture.dart';
-import '../../../core/models/match_player.dart';
+import '../../../domain/memory_tagging.dart';
 import '../../../core/models/memory.dart';
 import '../../../core/providers.dart';
 import '../../../shared/app_scaffold.dart';
@@ -17,9 +17,16 @@ import 'memory_grid.dart';
 /// different people, and either may be the one with the good photo.
 ///
 /// Tagging is what connects a match photo to a career. An untagged upload is
-/// still a club memory but will never appear on anyone's profile, so the sheet
-/// pre-selects nobody and makes the consequence explicit rather than silently
-/// producing orphans.
+/// still a club memory but will never appear on anyone's profile.
+///
+/// The sheet therefore pre-selects EVERYONE who was at the match — both
+/// line-ups and the officials — rather than starting empty. Starting empty
+/// made the common case the laborious one: the photo is almost always of the
+/// people who were there, and an uploader on a ground was not going to tap
+/// twenty-two chips, so in practice memories were being saved with nobody
+/// tagged and never reached a single profile. Untagging the two people who
+/// happen not to be in frame is the rarer, cheaper action, so that is the one
+/// that costs taps.
 class MatchMemoriesSection extends ConsumerWidget {
   const MatchMemoriesSection({super.key, required this.fixture});
 
@@ -140,6 +147,7 @@ class MatchMemoriesSection extends ConsumerWidget {
             fixtureId: fixture.id,
             uploaderUid: myUid,
             orgIsPublic: org?.visibility == OrgVisibility.public,
+            tournamentId: fixture.tournamentId,
             bytes: composed.bytes,
             contentType: composed.contentType,
             kind: composed.kind,
@@ -164,10 +172,13 @@ class _MemoryDetails {
   final List<String> taggedUids;
 }
 
-/// Caption plus who is in the photo, drawn from the match line-ups.
+/// Caption plus who is in the photo, drawn from the match line-ups and the
+/// officials.
 ///
-/// Only players who actually played are offered. Tagging someone who was not in
-/// the match would put a stranger's face on their career profile.
+/// Everyone present is offered AND pre-selected. Only people with a real uid
+/// can be tagged — a guest recorded by name alone has no profile for the
+/// memory to land on — and nobody outside the match is offered at all, so a
+/// tag can never put a stranger's face on someone's career profile.
 class _MemoryDetailsDialog extends StatefulWidget {
   const _MemoryDetailsDialog({required this.fixture});
   final Fixture fixture;
@@ -178,7 +189,13 @@ class _MemoryDetailsDialog extends StatefulWidget {
 
 class _MemoryDetailsDialogState extends State<_MemoryDetailsDialog> {
   final _caption = TextEditingController();
-  final Set<String> _tagged = {};
+
+  late final List<TaggablePerson> _people =
+      MemoryTagging.participantsOf(widget.fixture);
+
+  /// Starts as everyone at the match — see [MemoryTagging.defaultTagsFor].
+  late final Set<String> _tagged =
+      MemoryTagging.defaultTagsFor(widget.fixture);
 
   @override
   void dispose() {
@@ -188,13 +205,7 @@ class _MemoryDetailsDialogState extends State<_MemoryDetailsDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final f = widget.fixture;
-    // Only line-up entries with a real uid can be tagged — a guest player
-    // recorded by name alone has no profile for the memory to land on.
-    final players = <MatchPlayer>[
-      ...f.lineupA.where((p) => p.uid != null),
-      ...f.lineupB.where((p) => p.uid != null),
-    ];
+    final players = _people;
 
     return AlertDialog(
       title: const Text('Add a memory'),
@@ -215,20 +226,41 @@ class _MemoryDetailsDialogState extends State<_MemoryDetailsDialog> {
               const SizedBox(height: 8),
               if (players.isEmpty)
                 Text(
-                  'No line-ups were recorded for this match, so nobody can be '
-                  'tagged. The photo will still be saved to the match.',
+                  'No line-ups or officials were recorded for this match, so '
+                  'nobody can be tagged. The photo will still be saved to the '
+                  'match.',
                   style: Theme.of(context).textTheme.bodySmall,
                 )
               else ...[
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    'Who is in it?',
-                    style: Theme.of(context).textTheme.labelLarge,
-                  ),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Who is in it?',
+                        style: Theme.of(context).textTheme.labelLarge,
+                      ),
+                    ),
+                    // An escape hatch for the photo of one player. Without it
+                    // the pre-selected default would be worse than the empty
+                    // one it replaced for that case.
+                    TextButton(
+                      onPressed: () => setState(() {
+                        if (_tagged.isEmpty) {
+                          _tagged.addAll(
+                            _people.take(MemoryTagging.maxTags).map((p) => p.uid),
+                          );
+                        } else {
+                          _tagged.clear();
+                        }
+                      }),
+                      child: Text(_tagged.isEmpty ? 'Select all' : 'Clear'),
+                    ),
+                  ],
                 ),
                 Text(
-                  'Tagged players get this on their profile for good.',
+                  'Everyone who was at this match is tagged, umpires '
+                  'included. They each get this on their profile for good — '
+                  'untap anyone who is not in the photo.',
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
                 const SizedBox(height: 8),
@@ -238,13 +270,13 @@ class _MemoryDetailsDialogState extends State<_MemoryDetailsDialog> {
                   children: [
                     for (final p in players)
                       FilterChip(
-                        label: Text(p.name),
+                        label: Text(p.label),
                         selected: _tagged.contains(p.uid),
                         onSelected: (on) => setState(() {
                           if (on) {
-                            _tagged.add(p.uid!);
+                            if (_tagged.length < MemoryTagging.maxTags) _tagged.add(p.uid);
                           } else {
-                            _tagged.remove(p.uid!);
+                            _tagged.remove(p.uid);
                           }
                         }),
                       ),

@@ -1,0 +1,207 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R 6 0 R 8 0 R 10 0 R] /Count 4 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 2364 >>
+stream
+BT
+/F1 8 Tf
+10 TL
+36 750 Td
+(PLAYSPHERE  ULTRA-COMPREHENSIVE MASTER ARCHITECTURE SPECIFICATION) '
+(=================================================================================) '
+(Platform: Grassroots Sports OS for India \(Telangana Focus\)) '
+(Repository: PlaySphere \(Flutter Mobile/Web + Firebase + Node.js Cloud Functions\)) '
+() '
+(1. EXECUTIVE ARCHITECTURE PILLARS) '
+(---------------------------------------------------------------------------------) '
+(1. OFFLINE-FIRST EVENT SOURCING \(MUST\):) '
+(   Scoring happens on grounds with zero cellular signal. All actions append to an) '
+(   immutable MatchEvent log. Local device is the source of truth; sync is background.) '
+() '
+(2. DYNAMIC RULECONFIG ABSTRACTION \(MUST\):) '
+(   No sport rules \(overs, set caps, point values, raid time\) are hardcoded.) '
+(   Every scoring engine reads dynamic RuleConfig overrides per competition.) '
+() '
+(3. SINGLE AUTHORIZED SCORER LOCK INVARIANT:) '
+(   To prevent write conflicts, each match has exactly one active scorer lock.) '
+() '
+(4. ZERO-TRUST SECURITY BOUNDARY \(firestore.rules\):) '
+(   Client handles UI; server firestore.rules enforces append-only logs, role-based) '
+(   authorization, and minor safety under the Indian DPDP Act.) '
+() '
+(5. SERVER-SIDE FINANCIAL & RATING LEDGERS \(Cloud Functions asia-south1\):) '
+(   Glicko-2 ratings and official tournament ranking points are computed strictly) '
+(   in Cloud Functions to eliminate client-side rank tampering.) '
+() '
+(2. SYSTEM ARCHITECTURE & LAYER BREAKDOWN) '
+(---------------------------------------------------------------------------------) '
+([PRESENTATION LAYER] Flutter 3.x / Material 3 / GoRouter v14.2.0) '
+( - Declarative URLs: /home, /org/:id, /event/:id/score/:id, /watch/:id) '
+( - Responsive Layouts: Touch targets >= 60pt on mobile, keyboard shortcuts on laptop) '
+( - Localization: AppLocalizations \(Telugu, Hindi, English resource files\)) '
+() '
+([STATE MANAGEMENT LAYER] Riverpod v2.5.1) '
+( - Providers: currentUserProvider, authStateProvider, fixtureProvider) '
+() '
+([DOMAIN & SPORT ENGINE LAYER] Pure Functional Dart Modules) '
+( - Sport Engines: Cricket, Badminton, Football, Volleyball, Kabaddi, Kho-Kho) '
+( - AI Team Balancer: Snake draft + rating differential minimizer) '
+( - UNDO Engine: Reconstructs state from append-only MatchEvent log reversals) '
+ET
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>
+endobj
+7 0 obj
+<< /Length 2336 >>
+stream
+BT
+/F1 8 Tf
+10 TL
+36 750 Td
+(3. COMPLETE SCREEN-BY-SCREEN COMPONENT INVENTORY) '
+(=================================================================================) '
+() '
+(1. HomeScreen \(/home\)  Member Launchpad) '
+(   - _HomeHeader: Welcome banner, profile avatar, search bar) '
+(   - _MyClubsSection: Carousel of joined clubs with role badges \(Owner, Admin, Scorer\)) '
+(   - _LiveMatchesBar: Active live matches across user's clubs with real-time score tickers) '
+(   - _QuickActionGrid: 1-tap shortcuts to Quick Match, Looking For Board, Officials) '
+() '
+(2. OrgHomeScreen \(/org/:orgId\)  Club Dashboard) '
+(   - _ClubHeader: Logo, banner, location tag \(Mandal/District\), total members count) '
+(   - _ClubFeed: Announcements list, poll widgets, recent memory media grid) '
+(   - _UpcomingEventsSection: Event cards with 1-tap RSVP buttons \(Going, Maybe, No\)) '
+(   - _InterClubChallengesCard: Incoming challenges with Accept/Decline actions) '
+() '
+(3. QuickMatchScreen \(/org/:orgId/quick-match\)  Casual Match Setup) '
+(   - DropdownButtonFormField: Sport selector \(Cricket, Badminton, Kabaddi, etc.\)) '
+(   - ChoiceChip Row: Side format selector \(Singles, Doubles, 6-a-side, 11-a-side\)) '
+(   - _RulesetCard: Expandable preset selector \(T20, 8-over Gully\) with editable rules) '
+(   - _SideCard: Side A & Side B roster list with 1-tap member toggles) '
+(   - _AutoBalanceButton: 1-tap AI Team Auto-Balance trigger using Glicko-2 ratings) '
+(   - OutlinedButton \('Add by code'\): Add players from other clubs via PSOS code) '
+(   - FilledButton \('Start match & score'\): Creates fixture and opens ScoringScreen) '
+() '
+(4. ScoringScreen \(/org/:orgId/event/:compId/score/:fixtureId\)  Scoring Pad) '
+(   - _Scoreboard: High-contrast scoreboard card \(teams, headline score, summary\)) '
+(   - _PendingBanner: Offline queue badge showing pending actions waiting to upload) '
+(   - FilledButton.tonalIcon \('Undo last'\): Always-visible 1-tap UNDO button) '
+(   - _ControlRow: Dynamic action buttons \([0],[1],[2],[4],[6],[Wd],[Nb],[Wicket]\)) '
+(   - MatchScorecard: Full box score tables \(BattingLine, BowlingLine, FallOfWicket\)) '
+(   - MatchMemoriesSection: In-match photo/video clip uploader and thumbnail grid) '
+(   - _AdminActions: Outcome overrides for walkover, retirement, disqualification) '
+ET
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 9 0 R >>
+endobj
+9 0 obj
+<< /Length 2082 >>
+stream
+BT
+/F1 8 Tf
+10 TL
+36 750 Td
+(4. PUBLIC VIEWS, PROFILES & GOVERNMENT DASHBOARD) '
+(=================================================================================) '
+() '
+(5. SpectatorScreen \(/org/:orgId/event/:compId/watch/:fixtureId\)  Public Live View) '
+(   - _LiveHeader: Real-time score ticker backed by Firestore snapshot listener) '
+(   - _WagonWheelWidget: Interactive graphic showing shot angles and distances) '
+(   - _BallByBallFeed: Chronological commentary timeline with event icons) '
+() '
+(6. CareerProfileScreen \(/player/:uid\)  Portable Lifelong Player Identity) '
+(   - _ProfileHeader: Photo, verification tier \(Self, Scorer Verified, Association\)) '
+(   - _CrossSportIndexCard: Overall 'Sports OS Index' score \(0100\)) '
+(   - _RatingHistoryChart: Line chart tracking Glicko-2 rating progression) '
+() '
+(7. AnalyticsScreen \(/org/:orgId/analytics\)  B2G Government Dashboard) '
+(   - _FilterHeader: Location picker \(State -> District -> Mandal -> Village\)) '
+(   - _KpiMetricGrid: Active participants, match count, venue utilization %, para ratio) '
+() '
+(5. DATABASE SCHEMAS & ENTITY RELATIONSHIP MODEL) '
+(---------------------------------------------------------------------------------) '
+(ENTITIES TABLE:) '
+(- users: uid \(PK\), phone, name, dateOfBirth, profileVisibility, verificationTier, district) '
+(- orgs: id \(PK\), name, type \(community|school|college|village\), location, inviteCode) '
+(- memberships: uid \(PK\), orgId \(FK\), role \(owner|admin|scorer|member\), status) '
+(- competitions: id \(PK\), orgId \(FK\), sportId, format, status, ruleConfig) '
+(- fixtures: id \(PK\), competitionId \(FK\), entrantAId, entrantBId, scorerUid, scoreState) '
+(- match_events: docId \(000001 PK\), fixtureId \(FK\), seq, type, payload, clientEventId) '
+(- tournaments: id \(PK\), orgId \(FK\), grade \(club|district|state|national\), status) '
+(- ranking_entries: id \(PK\), uid \(FK\), tournamentId \(FK\), points, round, awardedAt) '
+(- ratings: sportId \(PK\), uid \(FK\), rating \(r\), deviation \(RD\), volatility, settledFixtures) '
+ET
+endobj
+10 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 11 0 R >>
+endobj
+11 0 obj
+<< /Length 1980 >>
+stream
+BT
+/F1 8 Tf
+10 TL
+36 750 Td
+(6. END-TO-END EVENT FLOWS & 5G RECONCILIATION) '
+(=================================================================================) '
+() '
+(FLOW A: OFFLINE MATCH SCORING LIFECYCLE) '
+(1. Scorer Action: Tap action button \([4], [Wicket]\) on ScoringScreen.) '
+(2. Pure Validation: SportEngine.validate\(\) checks rules against RuleConfig.) '
+(3. Local Render \(<100ms\): State updates locally; event enqueued to SharedPreferences.) '
+(4. UI Badge: Shows 'X actions waiting to sync' banner.) '
+(5. 5G Reconnect: ScoringService.reconcileQueue\(\) flushes batch to Cloud Firestore.) '
+(6. Triggers Fire: Glicko-2 ratings update + Multicast FCM push sent to club members.) '
+() '
+(FLOW B: 5G RECONCILIATION & QUEUE SAFEGUARDS) '
+([Offline Ground Scoring]   > [Write UUIDv7 to Queue]   > [Instant Local Render]) '
+(                                                                ) '
+(                                                     \(5G Connection Hits\)) '
+(                                                                ) '
+(                                                                ¼) '
+([Firestore SDK Flush]   > [SyncBatchPlanner.plan\(\)]   > [Cap Batch at 500 Events]) '
+(                                                                ) '
+(                                                                ¼) '
+([Monotonic Seq & Lock Check]   > [Atomic Server Commit]   > [Clear Pending Badge]) '
+(                                                                ) '
+(                                                                ¼) '
+([Cloud Functions Trigger: Glicko-2 Ratings + Multicast FCM Push + Spectator Push]) '
+() '
+(7. CRITICAL PROTECTIONS ON RECONNECT:) '
+(- Idempotency: Every event docId is sequence padded string \(events/000042\). No duplicate balls.) '
+(- Causal Order: Events replayed strictly in seq order \(1 -> 2 -> 3\).) '
+(- 500-Event Cap: Multi-day offline tournaments flush in 500-event steady passes.) '
+ET
+endobj
+xref
+0 12
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000134 00000 n 
+0000000202 00000 n 
+0000000328 00000 n 
+0000002733 00000 n 
+0000002859 00000 n 
+0000005236 00000 n 
+0000005362 00000 n 
+0000007485 00000 n 
+0000007613 00000 n 
+trailer
+<< /Size 12 /Root 1 0 R >>
+startxref
+9635
+%%EOF

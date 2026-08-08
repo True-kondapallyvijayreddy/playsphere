@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import 'billing.dart';
 import 'enums.dart';
 import 'firestore_codec.dart';
 import 'geo.dart';
@@ -25,6 +26,8 @@ class AppUser {
     this.geo = GeoLocation.empty,
     this.orgIds = const [],
     this.playerCode,
+    this.plan = MemberPlan.free,
+    this.planState = PlanState.none,
     this.createdAt,
     this.updatedAt,
   });
@@ -80,8 +83,23 @@ class AppUser {
   /// and refuses to let them register for anything.
   final bool profileComplete;
 
+  /// Free or Premium. See [MemberPlan] — nothing needed to take part in sport
+  /// is ever behind this.
+  final MemberPlan plan;
+
+  /// When Premium was activated and when it lapses.
+  final PlanState planState;
+
   final DateTime? createdAt;
   final DateTime? updatedAt;
+
+  /// Whether this player's Premium entitlement is live at [asOf].
+  ///
+  /// Everything that reads an entitlement takes the instant rather than
+  /// calling `DateTime.now()` itself, so a screen cannot render half of
+  /// itself as Premium and half as free across a midnight expiry.
+  bool hasPremiumAt(DateTime asOf) =>
+      plan.rank >= MemberPlan.premium.rank && planState.isActiveAt(asOf);
 
   /// Evaluated against the current instant for safety decisions (visibility,
   /// guardian consent). Note this is intentionally different from
@@ -109,6 +127,13 @@ class AppUser {
       geo: GeoLocation.fromDocData(d, legacyDistrictKey: null),
       orgIds: Fs.strList(d['orgIds']),
       playerCode: Fs.strOrNull(d['playerCode']),
+      plan: MemberPlan.fromWire(Fs.str(d['plan'])),
+      planState: PlanState.fromDocData(
+        d,
+        activatedKey: 'planActivatedAt',
+        validUntilKey: 'planValidUntil',
+        lastPaymentKey: 'planPaymentId',
+      ),
       createdAt: Fs.dateOrNull(d['createdAt']),
       updatedAt: Fs.dateOrNull(d['updatedAt']),
     );
@@ -130,6 +155,7 @@ class AppUser {
         'geo': geo.toMap(),
         'orgIds': orgIds,
         'playerCode': playerCode,
+        'plan': plan.wire,
         'isMinor': isMinor,
         'createdAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
@@ -144,6 +170,11 @@ class AppUser {
   /// memberships stream. Writing it from an edit form would let a screen that
   /// never loaded the memberships blank it — and blanking it silently makes
   /// the profile unreadable to every club-mate.
+  ///
+  /// And omits `plan` for a third reason: a profile edit form must not be
+  /// able to grant its own author Premium. That field is written only by
+  /// `BillingRepository`, next to the ledger row that paid for it, with
+  /// `firestore.rules` enforcing the same split independently.
   Map<String, Object?> toUpdate() => {
         'uid': uid,
         'displayName': displayName,
@@ -185,6 +216,11 @@ class AppUser {
       // editable code would let two people trade identities, and every match
       // either had ever played would follow.
       playerCode: playerCode,
+      // Not copyWith parameters either, and for the same reason the update
+      // payload omits them: an entitlement is granted by a payment, never by
+      // a screen holding a modified copy of the profile.
+      plan: plan,
+      planState: planState,
       createdAt: createdAt,
       updatedAt: updatedAt,
     );

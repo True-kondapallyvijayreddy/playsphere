@@ -125,46 +125,20 @@ service cloud.firestore {
     }
 
     // -------------------------------------------------------------------
-    // Match settlement provenance.
+    // Match settlement provenance — REMOVED, deliberately.
     //
-    // Ratings and career statistics are written by the SCORER's device onto
-    // OTHER people's profiles the moment a match completes (see
-    // lib/data/rating_service.dart). Both rules used to require nothing but
-    // `isSignedIn()`, so any account in the world could write any value into
-    // any player's record — a stranger could hand themselves +500 rating or
-    // 999 matches played, and did, against the emulator.
+    // `settlementFixture`, `isMatchSettlementFor` and `settledByAssignedScorer`
+    // used to live here. They existed to narrow a CLIENT write to ratings and
+    // career statistics: the caller had to name the fixture being settled, be
+    // an assigned scorer of it, and be writing onto somebody who actually
+    // played in it.
     //
-    // With no Cloud Functions tier to move settlement server-side, the fix is
-    // to make the write name the match it is settling. `settledBy` carries
-    // the fixture's coordinates, and these helpers verify — server-side,
-    // against documents the caller does not control — that the caller is an
-    // assigned scorer of that fixture and that the profile being written to
-    // belongs to somebody who actually played in it.
-    //
-    // What this still does not prove is that the NUMBER is the right one; the
-    // range and single-game-delta guards below remain the only defence there,
-    // and closing that properly is still the Cloud Function described in the
-    // residual-risk note on the rules themselves.
+    // `onMatchSettled` derives both documents from the finished fixture itself
+    // now, and the two rules below are `write: if false`. Nothing calls these
+    // any more, so keeping them would be three unreachable helpers describing a
+    // security model this file no longer implements — which is worse than no
+    // comment, because the next person to read them would believe them.
     // -------------------------------------------------------------------
-    function settlementFixture(s) {
-      return get(/databases/$(database)/documents/orgs/$(s.orgId)/competitions/$(s.compId)/fixtures/$(s.fixtureId)).data;
-    }
-
-    function isMatchSettlementFor(targetUid) {
-      return 'settledBy' in request.resource.data
-        && request.resource.data.settledBy is map
-        && request.resource.data.settledBy.keys().hasOnly(['orgId', 'compId', 'fixtureId'])
-        && request.resource.data.settledBy.orgId is string
-        && request.resource.data.settledBy.compId is string
-        && request.resource.data.settledBy.fixtureId is string
-        && settledByAssignedScorer(request.resource.data.settledBy, targetUid);
-    }
-
-    function settledByAssignedScorer(s, targetUid) {
-      return uid() in settlementFixture(s).scorerUids
-        && 'playerUids' in settlementFixture(s)
-        && targetUid in settlementFixture(s).playerUids;
-    }
 
     function sharesActiveOrgWith(data) {
       return isSignedIn()
@@ -229,10 +203,19 @@ service cloud.firestore {
     // `playerUids` is included because it summarises BOTH squads and has to
     // be recomputed whenever either changes — the settlement rules read it to
     // decide whether a scorer may write ratings onto a given player.
+    // `squadCallA`/`squadCallB` belong here too, and their absence was the
+    // whole reason the flow's step 6 — "XYZ Club selects players OR opens
+    // registration" — only worked for the club that happened to be hosting.
+    // Every other branch on a fixture is anchored to authority in the HOSTING
+    // club, because that is whose tenant the document lives in; the visiting
+    // club's own admins had no write path to their own side's call at all, and
+    // `isSquadCounterMove` explicitly refuses a change to `open` or `capacity`
+    // because that branch exists for REGISTRANTS moving counters. So the one
+    // club the feature was built for could not use it.
     function squadFieldsFor(side) {
       return side == 'a'
-        ? ['lineupA', 'squadLockedA', 'playerUids']
-        : ['lineupB', 'squadLockedB', 'playerUids'];
+        ? ['lineupA', 'squadLockedA', 'squadCallA', 'playerUids']
+        : ['lineupB', 'squadLockedB', 'squadCallB', 'playerUids'];
     }
 
     // True when this write only touches [side]'s squad fields.
@@ -245,14 +228,28 @@ service cloud.firestore {
     // squad is not locked, or in the act of unlocking it. The lock is the
     // club's own statement that it has finished picking, so only the club
     // that set it can lift it; that is the whole point of it existing.
+    // `touchesOnlySquad` leads, and the order is load-bearing rather than
+    // stylistic. It is a pure comparison of the write's own keys — no document
+    // reads, a handful of expressions — while `canManageCompetitions` costs a
+    // membership lookup. Firestore budgets 1,000 expressions per request and
+    // this function is reached twice (once per side) at the end of a long OR
+    // chain, so testing the cheap, highly selective condition first is what
+    // keeps the whole fixture rule inside the ceiling. Asking about authority
+    // first, as this used to, spent a lookup on every write that was never a
+    // squad edit at all.
     function canSetOwnSquad(data, side) {
-      return isInterClub(data)
+      return touchesOnlySquad(side)
+        && isInterClub(data)
+        // A finished match's team sheet is part of its result. Locking the
+        // score while leaving each club free to rewrite who played it would
+        // let a side change, after the fact, whose name is against the
+        // hundred. See scoreFieldsUnchanged().
+        && resource.data.status != 'completed'
         && (side == 'a'
             ? (data.entrantAId in data.participantOrgIds
                && canManageCompetitions(data.entrantAId))
             : (data.entrantBId in data.participantOrgIds
                && canManageCompetitions(data.entrantBId)))
-        && touchesOnlySquad(side)
         && (
           // Not locked: free to edit.
           (side == 'a'
@@ -480,6 +477,24 @@ service cloud.firestore {
             && request.resource.data[field] == resource.data[field]);
     }
 
+    // Stricter than unchangedIfPresent: the field may not be CHANGED, and may
+    // not be ADDED either.
+    //
+    // The difference is the whole point and it is not a nuance.
+    // `unchangedIfPresent` treats a field the document does not have as free
+    // to write, which is right for a migration — an `mvp` may legitimately be
+    // filled in on a match completed before the field existed. It is exactly
+    // wrong for a freeze: a completed fixture with no `lineupA` is a match
+    // whose team sheet was never recorded, and letting somebody supply one
+    // afterwards is inventing who played rather than preserving it. That is
+    // the more attractive attack of the two, because it leaves no earlier
+    // value to contradict it.
+    function frozen(field) {
+      return (field in resource.data) == (field in request.resource.data)
+        && (!(field in resource.data)
+            || request.resource.data[field] == resource.data[field]);
+    }
+
     // Write-once, counted from the moment the field holds an actual VALUE.
     //
     // Distinct from unchangedIfPresent(), and the distinction is the whole
@@ -610,6 +625,21 @@ service cloud.firestore {
     // one, and touches nothing else on the competition. This is what lets a
     // non-organizer write to a document they otherwise may not edit at all,
     // without that becoming a way to rewrite the event.
+    // A write that moves a competition INTO `cancelled` must carry a non-empty
+    // reason in the same commit.
+    //
+    // Every other write passes straight through: this is not a check on
+    // cancelled events, it is a check on the act of cancelling. An event that
+    // is already cancelled can still be edited, and an event that is not being
+    // cancelled is not asked for a reason it does not have.
+    function cancellationExplained() {
+      return !(request.resource.data.status == 'cancelled'
+               && resource.data.status != 'cancelled')
+        || (request.resource.data.cancelReason is string
+            && request.resource.data.cancelReason.size() > 0
+            && request.resource.data.cancelReason.size() <= 500);
+    }
+
     function isRegistrationCounterBump() {
       return request.resource.data.diff(resource.data).affectedKeys()
                .hasOnly(['confirmedCount', 'waitlistCount'])
@@ -645,34 +675,125 @@ service cloud.firestore {
         && slotIsFree(resource.data);
     }
 
-    // Withdrawing gives a slot back. Allowed to decrement, never below zero,
-    // and still only these two fields.
+    // Withdrawing gives a slot back.
+    //
+    // Bounded to a drop of exactly one on exactly one counter, and that is the
+    // whole point. This used to permit ANY decrease — "not below zero, not
+    // upwards, only these two fields" — which any active member could reach
+    // through the member branch on `competitions` below. Writing
+    // `confirmedCount: 0` on a full event was a legal write: no registration
+    // changed, nobody withdrew, and the field silently reopened to whoever
+    // refreshed next. A counter that can be zeroed is not a capacity check.
+    //
+    // One withdrawal frees one place, so one counter moves by one. An
+    // organizer removing several people does it one registration at a time,
+    // through the branch above that requires `canManageCompetitions`.
     function isWithdrawalCounterDrop() {
       return request.resource.data.diff(resource.data).affectedKeys()
                .hasOnly(['confirmedCount', 'waitlistCount'])
         && request.resource.data.get('confirmedCount', 0) >= 0
         && request.resource.data.get('waitlistCount', 0) >= 0
-        && request.resource.data.get('confirmedCount', 0)
-             <= resource.data.get('confirmedCount', 0)
-        && request.resource.data.get('waitlistCount', 0)
-             <= resource.data.get('waitlistCount', 0);
+        && (
+          (request.resource.data.get('confirmedCount', 0)
+             == resource.data.get('confirmedCount', 0) - 1
+           && request.resource.data.get('waitlistCount', 0)
+             == resource.data.get('waitlistCount', 0))
+          ||
+          (request.resource.data.get('waitlistCount', 0)
+             == resource.data.get('waitlistCount', 0) - 1
+           && request.resource.data.get('confirmedCount', 0)
+             == resource.data.get('confirmedCount', 0))
+        );
     }
 
-    // The score-bearing fields of a fixture's live projection. Used to
-    // freeze a fixture's recorded result once the match is `completed`, and
-    // to compare against for the monotonic-sequence guard.
+    // -------------------------------------------------------------------
+    // Raising a protest.
+    //
+    // A protest is created as a document under the fixture, and the fixture
+    // itself has to be flagged `disputed` in the SAME batch — a bracket, a
+    // points table and a spectator card all read that flag from the one
+    // document they already hold, and a protest nothing downstream can see is
+    // not a protest.
+    //
+    // That second write had no rule that admitted it. Every fixture update
+    // branch is anchored either to `canManageCompetitions` or to being the
+    // assigned scorer of a match that has not finished, and a protest is by
+    // definition raised by neither, against a match that has. So the batch was
+    // rejected, the protest document died with it, and "Protest this result" —
+    // shown to every viewer — returned a permission error to exactly the
+    // player it exists for. Only organizers could protest, which is the one
+    // group that does not need to.
+    //
+    // Scoped hard, because this is an ordinary member writing to a document
+    // they otherwise cannot touch at all: the ONLY permitted transition is
+    // completed → disputed, nothing else on the fixture may move, and the
+    // protest document must be created in the same commit by the same person.
+    // `getAfter` is what ties the two together — without it this would be a
+    // way for any member to flag any finished match as disputed for the fun
+    // of it.
+    // -------------------------------------------------------------------
+    function isProtestFlag(orgId, compId, fixtureId) {
+      return request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['status', 'updatedAt', 'openDisputeId'])
+        && resource.data.status == 'completed'
+        && request.resource.data.status == 'disputed'
+        && request.resource.data.openDisputeId is string
+        && protestExistsFor(orgId, compId, fixtureId);
+    }
+
+    // The protest this flag is accounting for, as it will be after the batch
+    // commits — it must name a real dispute on THIS fixture, raised by the
+    // caller, in the same commit.
+    //
+    // `openDisputeId` on the fixture is what makes that checkable: rules cannot
+    // query, so the write has to say which document justifies it. getAfter
+    // rather than get, because the dispute is created in this same batch and
+    // does not exist committed yet.
+    function protestExistsFor(orgId, compId, fixtureId) {
+      return getAfter(
+          /databases/$(database)/documents/orgs/$(orgId)/competitions/$(compId)/fixtures/$(fixtureId)/disputes/$(request.resource.data.openDisputeId)
+        ).data.raisedByUid == uid();
+    }
+
+    // Everything that makes up a finished match's RESULT — the numbers and
+    // the names against them — frozen together once the fixture is
+    // `completed`.
+    //
+    // Both halves matter and they were not always both here. The score fields
+    // were frozen and the line-ups were not, so an organizer could leave the
+    // figures untouched and swap a name in `lineupA`, handing one player's
+    // hundred to somebody who was not at the ground. Immutable numbers with
+    // mutable attribution are not an immutable result.
+    //
+    // Kept as ONE function rather than two on purpose. Firestore budgets 1,000
+    // expressions per request and this fixture rule is already a long OR chain
+    // of `allow update` statements, each of which is evaluated when a write
+    // matches none of them; a second function call on that path costs its own
+    // frame for no gain, and the two halves are only ever asked about
+    // together.
+    //
+    // Two different "missing field" policies here, deliberately.
+    // `unchangedIfPresent` for `mvp` — a match completed before that field
+    // existed may legitimately have one filled in. `frozen` for the line-ups —
+    // a match that never recorded a team sheet must NOT gain one afterwards,
+    // because inventing who played is the attack with no earlier value to
+    // contradict it.
     function scoreFieldsUnchanged() {
       return unchanged('lastSeq')
         && unchanged('scoreState')
         && unchanged('summary')
         && unchanged('winnerEntrantId')
         && unchanged('isDraw')
-        // The award is part of the result, decided from the same event log at
-        // the same instant. An organizer who could rewrite it afterwards could
-        // hand the best-player of a finished match to whoever they liked.
-        // `unchangedIfPresent` rather than `unchanged` because every fixture
-        // completed before this field existed does not carry one.
-        && unchangedIfPresent('mvp');
+        // The award is decided from the same event log at the same instant. An
+        // organizer who could rewrite it afterwards could hand the best-player
+        // of a finished match to whoever they liked.
+        && unchangedIfPresent('mvp')
+        // Who played. `frozen` rather than `unchangedIfPresent`, because a
+        // completed match that never recorded a team sheet must not gain one
+        // now — see the note on [frozen].
+        && frozen('lineupA')
+        && frozen('lineupB')
+        && frozen('playerUids');
     }
 
     // -------------------------------------------------------------------
@@ -843,54 +964,15 @@ service cloud.firestore {
         // `playerCode: null`, which `in` counts as present, so the stricter
         // helper would freeze it at null and no code could ever be claimed.
         && settableOnce('playerCode')
+        // Premium. Same shape as the org rule: an ordinary profile edit must
+        // leave the entitlement alone (`AppUser.toUpdate` carries no plan
+        // fields), and a purchase must at least be bounded. See the COMMERCE
+        // block for the limits of what this can enforce today.
+        && (planFieldsUnchanged() || planGrantIsBounded())
         && orgMirrorBounded();
 
       allow delete: if false; // Soft-delete only, for audit integrity.
 
-      // -----------------------------------------------------------------
-      // Ratings & portable career statistics subcollections.
-      //
-      // RESIDUAL RISK — read this before touching either rule below.
-      // These are written directly by the client
-      // (lib/data/rating_service.dart) the instant a match completes; there
-      // is no server-side settlement step to trust instead, so this is the
-      // single most valuable data in the product sitting behind a
-      // client-authored write. That is a real, currently-accepted
-      // architectural gap, not an oversight. Full closure requires moving
-      // match settlement into a Cloud Function that reads the fixture and
-      // lineups with admin privilege and computes/writes ratings itself —
-      // at which point these two rules can become read-only to clients.
-      //
-      // Until then, what these rules DO enforce:
-      //   - the write must name the fixture it is settling (`settledBy`), and
-      //     the caller must be an ASSIGNED SCORER of that fixture while the
-      //     profile being written to must belong to somebody on its
-      //     `playerUids` — see isMatchSettlementFor() above. Before this, a
-      //     signed-in stranger who had never been near a match could
-      //     overwrite anyone's rating or matches played;
-      //   - every field is present, correctly typed, and within a sane
-      //     numeric range, so a write cannot corrupt the document shape or
-      //     plant an absurd value (rating 999999999, deviation -50, a
-      //     string where a number belongs);
-      //   - on ratings/, `gamesPlayed` may only advance by exactly one and
-      //     `rating` may only move by a bounded amount per write, so a
-      //     single write can look, at most, like the outcome of one real
-      //     game rather than an arbitrary overwrite;
-      //   - on career_stats/, the identity fields (`uid`, `sportId`) must
-      //     match the document's own path, and `lastPlayedAt` cannot be
-      //     future-dated;
-      //   - no extra fields can be smuggled into either document.
-      //
-      // What this CANNOT verify, and remains open until settlement moves
-      // server-side: that the caller actually played in a real match
-      // against this specific opponent, that `sportId` is the sport that
-      // was actually played, or that a bounded single-game delta
-      // corresponds to a real result rather than a small self-serving nudge
-      // repeated many times. `matchesPlayed` and `tally.*` on career_stats/
-      // are written via FieldValue.increment(), whose resolved value
-      // security rules cannot reliably see at evaluation time, so those two
-      // fields are deliberately NOT range-validated here.
-      // -----------------------------------------------------------------
       // -----------------------------------------------------------------
       // Devices, for push.
       //
@@ -902,6 +984,24 @@ service cloud.firestore {
       // -----------------------------------------------------------------
       match /devices/{token} {
         allow read, write: if isSignedIn() && uid() == userId;
+      }
+
+      // -----------------------------------------------------------------
+      // The durable half of a push — see `sendToUsers` in functions/index.js.
+      //
+      // Written only by Cloud Functions, which use the Admin SDK and never
+      // touch these rules at all: `create` is `false` here specifically so
+      // nobody can hand themselves a fake "you are approved" or a fabricated
+      // result by writing straight into their own inbox. The owner may read
+      // their own feed and flip `read`/`readAt` on a notification they have
+      // opened — nothing else, and nothing on anyone else's.
+      // -----------------------------------------------------------------
+      match /notifications/{notifId} {
+        allow read: if isSignedIn() && uid() == userId;
+        allow update: if isSignedIn() && uid() == userId
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['read', 'readAt']);
+        allow create, delete: if false;
       }
 
       // -----------------------------------------------------------------
@@ -1016,7 +1116,19 @@ service cloud.firestore {
     // Inter-club challenges (top-level cross-tenant)
     // -------------------------------------------------------------------
     match /challenges/{challengeId} {
-      allow read: if isSignedIn();
+      // Either club's members, and nobody else.
+      //
+      // `isSignedIn()` made every challenge on the platform listable by any
+      // account: who is playing whom, when, at whose ground, and which clubs
+      // are declining each other. None of that belongs to a stranger, and a
+      // challenge is a negotiation between exactly two clubs.
+      //
+      // Both branches are pure lookups against the caller's own membership, so
+      // the app's `where('fromOrgId', ==, x)` / `where('toOrgId', ==, x)`
+      // queries in `CommunityRepository.watchChallengesForOrg` still authorize
+      // — a club only ever queries for its own challenges.
+      allow read: if isMember(resource.data.fromOrgId)
+        || isMember(resource.data.toOrgId);
 
       // Only an admin of the CHALLENGING club may issue a challenge — it
       // commits that club to a fixture if accepted, which is a governance
@@ -1059,10 +1171,75 @@ service cloud.firestore {
     }
 
     // -------------------------------------------------------------------
+    // Cross-club tournament invitations (top-level cross-tenant)
+    // -------------------------------------------------------------------
+    match /tournamentInvites/{inviteId} {
+      // Both clubs, and nobody else — the same boundary a challenge draws,
+      // for the same reason. Who a district championship has invited, and
+      // which schools turned it down, is the two clubs' business. Both
+      // branches are lookups against the caller's own membership, so the
+      // app's `where('fromOrgId', ==, x)` and `where('toOrgId', ==, x)`
+      // queries in `TournamentRepository` still authorize as lists.
+      allow read: if isMember(resource.data.fromOrgId)
+        || isMember(resource.data.toOrgId);
+
+      // Only an organizer of the HOSTING club may invite. An invitation
+      // carries that club's name to another club's admins, and letting any
+      // member send one lets any member speak for the club.
+      //
+      // `tournamentId` is checked for existence rather than followed: the
+      // rules cannot cheaply verify it belongs to the host, but they do not
+      // need to — `fromOrgId` is pinned to a club the caller manages, and
+      // the pair (fromOrgId, tournamentId) is what the invited club opens.
+      // The worst a hostile organizer can do is invite somebody to their own
+      // club's tournament, which is the feature.
+      allow create: if isSignedIn()
+        && request.resource.data.fromOrgId is string
+        && request.resource.data.toOrgId is string
+        && request.resource.data.fromOrgId != request.resource.data.toOrgId
+        && request.resource.data.tournamentId is string
+        && request.resource.data.tournamentId.size() > 0
+        && canManageCompetitions(request.resource.data.fromOrgId)
+        && request.resource.data.status == 'pending'
+        && request.resource.data.invitedBy == uid()
+        && serverTimed('createdAt');
+
+      // Answering belongs to the invited club; withdrawing belongs to the
+      // host, and only while the offer is unanswered. The split is the same
+      // one challenges make and it matters for the same reason: without it a
+      // host could quietly "withdraw" an invitation a club had already
+      // accepted and planned a Saturday around, and the club would see an
+      // invitation it never refused simply vanish.
+      allow update: if isSignedIn()
+        && unchanged('fromOrgId')
+        && unchanged('toOrgId')
+        && unchanged('tournamentId')
+        && unchangedIfPresent('createdAt')
+        && unchangedIfPresent('invitedBy')
+        && (
+          request.resource.data.status == 'withdrawn'
+            ? (canManageCompetitions(resource.data.fromOrgId)
+               && resource.data.status == 'pending')
+            : (canManageCompetitions(resource.data.toOrgId)
+               && request.resource.data.status in ['accepted', 'declined'])
+        );
+
+      allow delete: if false;
+    }
+
+    // -------------------------------------------------------------------
     // Community Looking-For Board (top-level)
     // -------------------------------------------------------------------
     match /lookingForPosts/{postId} {
-      allow read: if true;
+      // Signed in, not world-readable.
+      //
+      // The board is where somebody writes "need a keeper for Sunday, call me
+      // on…" — the posts routinely carry a name, an area and a way to reach the
+      // author, which is the entire point of the feature and also the reason it
+      // should not be scrapeable by anyone with the URL. Requiring an account
+      // costs a genuine user one sign-in they have already done, and takes the
+      // board out of reach of an unauthenticated crawler.
+      allow read: if isSignedIn();
       allow create: if isSignedIn()
         && request.resource.data.authorUid == uid();
       // Only the EXISTING author may edit a post. The old condition also
@@ -1134,7 +1311,15 @@ service cloud.firestore {
         && request.resource.data.name.size() >= 3
         && request.resource.data.name.size() <= 120
         && request.resource.data.memberCount == 1
-        && request.resource.data.deletedAt == null;
+        && request.resource.data.deletedAt == null
+        // A club is created with its plan, in the same batch as the ledger
+        // row — see ClubPlanGrant. Either it carries no plan at all, or it
+        // carries a bounded one.
+        && (
+          !('plan' in request.resource.data)
+          || request.resource.data.plan == 'free'
+          || planGrantIsBounded()
+        );
 
       allow update: if canManageOrg(orgId)
         // Ownership transfer is a deliberate, separate flow that must also
@@ -1143,6 +1328,12 @@ service cloud.firestore {
         && unchanged('ownerUid')
         && unchanged('createdAt')
         && unchanged('createdBy')
+        // The plan may only change as a bounded grant, and only by an owner.
+        // An ordinary settings edit leaves it alone — `Organization.toUpdate`
+        // deliberately carries no plan fields, and this is the independent
+        // enforcement of that. See the COMMERCE block for what this can and
+        // cannot guarantee while the launch offer is on.
+        && (planFieldsUnchanged() || planGrantIsBounded())
         || (
           // Admins may edit descriptive fields but not governance fields.
           canManageMembers(orgId)
@@ -1151,9 +1342,89 @@ service cloud.firestore {
           && unchanged('orgType')
           && unchanged('createdAt')
           && unchanged('createdBy')
+          // An admin may not buy or extend a plan; that is the owner's call,
+          // because it is the owner's money.
+          && planFieldsUnchanged()
         );
 
       allow delete: if false; // Soft-delete by setting deletedAt.
+
+      // -----------------------------------------------------------------
+      // Motions to remove an owner.
+      //
+      // A club may have several owners, which is what stops one person
+      // holding a school's entire history hostage. The cost of that is
+      // needing a way to remove one, and the whole risk of THAT is a single
+      // owner ejecting the others and re-creating the monopoly from the
+      // other direction.
+      //
+      // So every rule below is about one property: a vote must be
+      // countable, and it must be countable by the server rather than
+      // asserted by a client.
+      //
+      //  - `votes` is a LIST OF UIDS, never a number. A count can be set to
+      //    anything; a list can only be grown by one entry, and that entry
+      //    has to be the caller's own uid.
+      //  - `status` is never client-writable to `passed`. Crossing the
+      //    threshold is the Cloud Function's decision, made from the list,
+      //    with admin credentials that bypass these rules. A client that
+      //    could write `passed` would not need the votes at all.
+      //  - The doc id is the target's uid, so nobody can open five motions
+      //    against one person and split the electorate.
+      // -----------------------------------------------------------------
+      match /ownerProposals/{targetUid} {
+
+        // Every active member reads them. Who is trying to remove whom from
+        // a club's leadership is not a secret from the club — and a motion
+        // the membership cannot see is exactly the kind that gets pushed
+        // through quietly.
+        allow read: if isActive(orgId);
+
+        allow create: if canManageOrg(orgId)
+          && targetUid != uid()
+          && request.resource.data.targetUid == targetUid
+          && request.resource.data.openedBy == uid()
+          && request.resource.data.status == 'open'
+          && request.resource.data.reason is string
+          && request.resource.data.reason.size() > 0
+          && request.resource.data.reason.size() <= 500
+          // Opening a motion IS voting for it, and the opener is the only
+          // vote it may be created with. A creation carrying three uids
+          // would be one owner casting other people's votes.
+          && request.resource.data.votes == [uid()]
+          && serverTimed('openedAt');
+
+        // Two writes an owner may make, and nothing else.
+        allow update: if canManageOrg(orgId)
+          && resource.data.status == 'open'
+          && (
+            // (a) Voting: append yourself, change nothing else. The target
+            //     may not vote on their own removal, which is the one
+            //     exclusion that stops a two-owner motion being cancelled
+            //     out by its subject.
+            (
+              request.resource.data.diff(resource.data).affectedKeys()
+                .hasOnly(['votes'])
+              && targetUid != uid()
+              && request.resource.data.votes.hasAll(resource.data.votes)
+              && request.resource.data.votes.hasOnly(
+                   resource.data.votes.concat([uid()]))
+            )
+            // (b) Withdrawing your own motion.
+            || (
+              request.resource.data.diff(resource.data).affectedKeys()
+                .hasOnly(['status', 'resolvedAt'])
+              && resource.data.openedBy == uid()
+              && request.resource.data.status == 'withdrawn'
+            )
+          );
+
+        // Kept as a record. A motion that failed, or that succeeded, is part
+        // of how a club was governed and deleting it would let the same
+        // motion be run repeatedly until it passed with nothing to show for
+        // the earlier attempts.
+        allow delete: if false;
+      }
 
       // -----------------------------------------------------------------
       // Memberships. Doc id IS the uid, which makes duplicate membership
@@ -1221,6 +1492,17 @@ service cloud.firestore {
             // Only the owner may create another owner. An admin promoting
             // themselves to owner is the classic privilege-escalation path.
             && (request.resource.data.role != 'owner' || canManageOrg(orgId))
+            // ...and only the owner may UNMAKE one. This guard used to look
+            // solely at the incoming role, which caught promotion and missed
+            // demotion entirely: an admin could write `role: 'member'` onto the
+            // owner's row and pass every clause, because the new role is not
+            // 'owner' and the row is not their own. The club was then left with
+            // nobody holding `canManageOrg` — and since `ownerUid` on the org
+            // document is immutable, no client could ever repair it.
+            //
+            // The delete rule below has always protected the owner's row. This
+            // is the same protection for the write that was actually reachable.
+            && (resource.data.role != 'owner' || canManageOrg(orgId))
             // Nobody may edit their own role — not even the owner, because
             // that is how an org accidentally ends up with zero owners.
             && memberUid != uid()
@@ -1361,6 +1643,30 @@ service cloud.firestore {
 
         allow delete: if canManageCompetitions(orgId)
           && resource.data.get('eventCount', 0) == 0;
+
+        // The season owner's officiating panel — who they have pre-assigned
+        // to this tournament, ICC-style, before a single fixture exists. Doc
+        // id is the official's uid, same as `members`, so nobody can be
+        // added to a season's panel twice.
+        //
+        // Organizer-only in both directions: unlike registering yourself for
+        // an event, nobody puts themselves on the umpiring panel — a season
+        // owner picks them, from the open `umpires` registry or by hand.
+        match /officials/{officialUid} {
+          allow read: if orgIsReadable(orgId);
+
+          allow create: if canManageCompetitions(orgId)
+            && request.resource.data.name is string
+            && request.resource.data.name.size() > 0
+            && request.resource.data.addedBy == uid()
+            && serverTimed('addedAt');
+
+          allow update: if canManageCompetitions(orgId)
+            && unchanged('addedBy')
+            && unchanged('addedAt');
+
+          allow delete: if canManageCompetitions(orgId);
+        }
       }
 
       // -----------------------------------------------------------------
@@ -1404,7 +1710,15 @@ service cloud.firestore {
         // registration counters, and only those. They are not an organizer
         // and may not touch anything else on the document — see
         // `isRegistrationCounterBump`.
-        allow update: if isActive(orgId)
+        //
+        // `openToNonMembers` widens this the same way it widens
+        // `registrations` create above: an event that invited outsiders in
+        // has to let their confirm/waitlist/withdraw counter move land too,
+        // not just their registration document, or a non-member's
+        // self-registration transaction fails on this half of the pair
+        // while the other half (the registration doc) succeeds.
+        allow update: if (isActive(orgId)
+                           || resource.data.get('openToNonMembers', false) == true)
           && (isRegistrationCounterBump()
               || isWithdrawalCounterDrop()
               || isWaitlistPromotionCounterMove())
@@ -1427,7 +1741,14 @@ service cloud.firestore {
           // A finished competition is a historical record. Reopening it
           // would silently rewrite standings and ratings that participants
           // have already been told are final.
-          && resource.data.status != 'completed';
+          && resource.data.status != 'completed'
+          // A cancellation must say why. Enforced here and not only in
+          // `CompetitionRepository.cancelCompetition` because the reason is
+          // what the push notification carries: a client writing
+          // `status: cancelled` straight to Firestore would otherwise wake
+          // every entrant's phone with a cancellation and no explanation,
+          // which is the exact experience the reason exists to prevent.
+          && cancellationExplained();
 
         allow delete: if canManageCompetitions(orgId)
           && resource.data.status == 'draft';
@@ -1436,6 +1757,100 @@ service cloud.firestore {
         // Registrations. Doc id is the entrant's uid for individual events,
         // giving us "one registration per person per competition" for free.
         // ---------------------------------------------------------------
+        // ---------------------------------------------------------------
+        // Group entries — several members entering as one team.
+        //
+        // Two approvals, and the rules exist to make the FIRST of them mean
+        // something. A leader names five people; those five each have to
+        // accept before an organizer ever sees the group. Accepting is a
+        // write by the accepting member about themselves, which is also how
+        // "a group may contain only club members" is enforced: rules cannot
+        // iterate `memberUids`, but they can require that every acceptance
+        // comes from an active member acting on their own uid. A non-member
+        // can be named and can never accept, so a COMPLETE group is a group
+        // of members by construction.
+        //
+        // The status may only reach `pending_approval` when every named uid
+        // has accepted — checked here rather than trusted from the client, so
+        // a leader cannot push their own group to an organizer with four of
+        // five people still undecided.
+        // ---------------------------------------------------------------
+        match /groupEntries/{groupId} {
+
+          allow read: if isActive(orgId);
+
+          allow create: if isActive(orgId)
+            && request.resource.data.leaderUid == uid()
+            && request.resource.data.status == 'forming'
+            && request.resource.data.name is string
+            && request.resource.data.name.size() > 0
+            && request.resource.data.name.size() <= 60
+            && request.resource.data.memberUids is list
+            && request.resource.data.memberUids.size() >= 2
+            // A cap, because `memberUids` is read back in full by every
+            // client showing the group and an unbounded list is an unbounded
+            // document.
+            && request.resource.data.memberUids.size() <= 30
+            && uid() in request.resource.data.memberUids
+            // Proposing is agreeing. The leader is the only vote a group may
+            // be created with — anything else is one member answering for
+            // others.
+            && request.resource.data.acceptedUids == [uid()]
+            && request.resource.data.declinedUids == []
+            && serverTimed('createdAt');
+
+          allow update: if
+            // (a) A named member answering for themselves.
+            (
+              isActive(orgId)
+              && resource.data.status == 'forming'
+              && uid() in resource.data.memberUids
+              && (
+                // Accepting. The status may move to `pending_approval` in the
+                // same write, but ONLY when this acceptance completes the set.
+                (
+                  request.resource.data.diff(resource.data).affectedKeys()
+                    .hasOnly(['acceptedUids', 'status'])
+                  && request.resource.data.acceptedUids.hasAll(
+                       resource.data.acceptedUids)
+                  && request.resource.data.acceptedUids.hasOnly(
+                       resource.data.acceptedUids.concat([uid()]))
+                  && (
+                    request.resource.data.status == 'forming'
+                    || (
+                      request.resource.data.status == 'pending_approval'
+                      && request.resource.data.acceptedUids.hasAll(
+                           resource.data.memberUids)
+                    )
+                  )
+                )
+                // Declining, which ends the group. A single no is enough —
+                // see `GroupEntry.declinedUids`.
+                || (
+                  request.resource.data.diff(resource.data).affectedKeys()
+                    .hasOnly(['declinedUids', 'status'])
+                  && request.resource.data.declinedUids.hasOnly(
+                       resource.data.declinedUids.concat([uid()]))
+                  && request.resource.data.status == 'withdrawn'
+                )
+              )
+            )
+            // (b) The organizer's decision, only once the members are done.
+            || (
+              canManageCompetitions(orgId)
+              && resource.data.status == 'pending_approval'
+              && request.resource.data.diff(resource.data).affectedKeys()
+                   .hasOnly(['status', 'decidedBy', 'decisionNote'])
+              && request.resource.data.status in ['approved', 'rejected']
+              && request.resource.data.decidedBy == uid()
+            );
+
+          // Kept. A rejected or withdrawn group is the record of an entry
+          // that was refused, and deleting it would let the same group be
+          // proposed repeatedly with nothing to show for the earlier tries.
+          allow delete: if false;
+        }
+
         match /registrations/{regId} {
 
           allow read: if orgIsReadable(orgId) || regId == uid();
@@ -1452,7 +1867,18 @@ service cloud.firestore {
           //
           // The competition must actually be open — one that closed while a
           // screen sat open cannot be back-filled.
-          allow create: if isActive(orgId)
+          //
+          // Membership is normally required — but an event the organizer
+          // explicitly marked `openToNonMembers` invited outsiders to enter
+          // when they flipped that switch, and this is where that invitation
+          // has to be honoured: a signed-in stranger, same as an active
+          // member, may create their own registration. `openToNonMembers`
+          // forces `participationModel == 'approval'` on the Dart side
+          // (`Competition`), so `selfRegistrationStatusValid` below already
+          // lands a non-member in `pending`, never `confirmed` — nobody
+          // outside the club can claim a slot without a human approving them.
+          allow create: if (isActive(orgId)
+                             || compDoc(orgId, compId).get('openToNonMembers', false) == true)
             && regId == uid()
             && request.resource.data.uid == uid()
             // Defaulted, not required: the currently deployed web build
@@ -1502,10 +1928,13 @@ service cloud.firestore {
               // otherwise there is a window where the event is a player
               // short and nobody has been told they are in. The player doing
               // the withdrawing is not an organizer, so this is the one case
-              // where an active member may write to someone else's
-              // registration, and it is fenced to exactly that shape: a
-              // waitlisted row, becoming confirmed, only while a slot is
-              // provably free, changing nothing else.
+              // where an active member (or, on an `openToNonMembers` event,
+              // an outside entrant — they can withdraw same as a member, and
+              // withdrawing has to be able to free their slot for the queue
+              // the same way) may write to someone else's registration, and
+              // it is fenced to exactly that shape: a waitlisted row,
+              // becoming confirmed, only while a slot is provably free,
+              // changing nothing else.
               //
               // KNOWN LIMIT: these rules cannot run a query, so they can
               // verify that a slot is free but not that this particular
@@ -1517,7 +1946,8 @@ service cloud.firestore {
               // fact rather than prevented. Closing it properly needs a
               // head-of-queue pointer on the competition (or a Function),
               // and is not worth the complexity at grassroots stakes.
-              isActive(orgId)
+              (isActive(orgId)
+               || compDoc(orgId, compId).get('openToNonMembers', false) == true)
               && resource.data.status == 'waitlisted'
               && request.resource.data.status == 'confirmed'
               && unchanged('uid')
@@ -1633,137 +2063,212 @@ service cloud.firestore {
             allow delete: if false;
           }
 
-          // Two distinct update paths with different authority:
+          // ---------------------------------------------------------
+          // Updating a fixture: SEVERAL `allow update` statements, not one
+          // long OR chain.
+          //
+          // Firestore budgets 1,000 expressions per request and evaluates
+          // these in order, stopping at the first that grants. Written as a
+          // single chain, an ordinary team-sheet write had to fall through
+          // every scoring, advancement and organizer branch first — each one
+          // re-evaluating a membership lookup — and the whole rule hit the
+          // ceiling and denied with an evaluation error rather than a verdict.
+          //
+          // So each statement now OPENS with a cheap, highly selective test on
+          // the write's own fields — no document reads — and only asks about
+          // authority once the shape has already matched. A write that is not
+          // a squad edit costs a handful of expressions to rule out of the
+          // squad statement, instead of a lookup.
+          //
+          // Ordered by how often each is actually taken: scoring first, since
+          // it happens on every ball.
+          // ---------------------------------------------------------
+
+          // (b) The assigned scorer advancing the live projection.
+          //     They cannot move the fixture to a different competition,
+          //     rewrite history backwards, or reopen a finished match.
+          //
+          //     Opens on the monotonic-sequence test because it is pure, and
+          //     because it is false for every write that is not a score.
           allow update: if
-            // (a) Organizers may reschedule, assign officials, or force a
-            //     status such as walkover/abandoned/disputed. They must NOT
-            //     be able to silently overwrite the live score projection
-            //     of any fixture — including a completed one — to whatever
-            //     they like, so this carries the same monotonic-sequence
-            //     guard the scorer branch (b) enforces, plus a hard freeze
-            //     on the score fields once the match is `completed`.
-            (
-              canManageCompetitions(orgId)
-              && unchanged('compId')
-              && unchanged('orgId')
-              && participantsUnchanged()
-              && request.resource.data.lastSeq >= resource.data.lastSeq
-              && (resource.data.status != 'completed' || scoreFieldsUnchanged())
-              // A squad the OTHER club has locked is not the host's to
-              // change, however broad their authority over the fixture
-              // otherwise is.
-              && lockedSquadsRespected()
-            )
-            // (b) The assigned scorer may only advance the live projection.
-            //     They cannot move the fixture to a different competition,
-            //     rewrite history backwards, or reopen a finished match.
-            || (
-              // A scorer of the hosting club, OR of the visiting club in a
-              // challenge match. Both branches still require the uid to be on
-              // the fixture's own `scorerUids`, so this widens who may be
-              // *assigned* to score an inter-club game — it never lets an
-              // unassigned member of either club touch a score.
-              (canScore(orgId)
+            request.resource.data.lastSeq > resource.data.lastSeq
+            && resource.data.status in ['scheduled', 'live']
+            && request.resource.data.status in ['live', 'completed']
+            && unchanged('compId')
+            && unchanged('orgId')
+            && unchanged('entrantAId')
+            && unchanged('entrantBId')
+            && unchanged('scorerUids')
+            && participantsUnchanged()
+            && uid() in resource.data.scorerUids
+            // A scorer of the hosting club, OR of the visiting club in a
+            // challenge match. Both still require the uid to be on the
+            // fixture's own `scorerUids` above, so this widens who may be
+            // *assigned* to score an inter-club game — it never lets an
+            // unassigned member of either club touch a score.
+            && (canScore(orgId)
                 || isParticipantScorer(resource.data)
-                || canScoreSingleMatch(orgId, compId))
-              && uid() in resource.data.scorerUids
-              && unchanged('compId')
-              && unchanged('orgId')
-              && participantsUnchanged()
-              && unchanged('entrantAId')
-              && unchanged('entrantBId')
-              && unchanged('scorerUids')
-              && resource.data.status in ['scheduled', 'live']
-              && request.resource.data.status in ['live', 'completed']
-              // Monotonic sequence: the projection may only ever move
-              // forward, so a stale client cannot overwrite a newer score.
-              && request.resource.data.lastSeq > resource.data.lastSeq
-            )
-            // (c) The assigned scorer recording who is playing and who won
-            //     the toss, before the first ball. Both are prerequisites for
-            //     scoring at all — the engines refuse a delivery that names
-            //     nobody — so the scorer must be able to set them without
-            //     needing an organizer present at the ground. Restricted to a
-            //     match that has not started: once a ball is bowled the
-            //     line-up is part of the record.
-            || (
-              (canScore(orgId) || canScoreSingleMatch(orgId, compId))
-              && uid() in resource.data.scorerUids
-              && unchanged('compId')
-              && unchanged('orgId')
-              && unchanged('entrantAId')
-              && unchanged('entrantBId')
-              && unchanged('scorerUids')
-              && resource.data.lastSeq == 0
-              && request.resource.data.lastSeq == 0
-              && request.resource.data.status == resource.data.status
-              // A squad a contesting club has declared final is not the
-              // scorer's to change either.
-              && lockedSquadsRespected()
-            )
-            // (d) A scorer advancing their winner into the next round of a
-            //     knockout. This has to be a distinct branch because path (b)
-            //     deliberately forbids touching entrant ids — a scorer must
-            //     never be able to swap who is playing the match they are
-            //     scoring. Here they are filling a placeholder in a DIFFERENT,
-            //     unstarted fixture, and only a side that is still empty:
-            //     an entrant already present can never be replaced.
-            || (
-              // Either club's event managers may name their own players before
-              // the first ball. NOTE: like the pre-existing host-side rule,
-              // this does not require the caller to be on `scorerUids` — the
-              // comment above says "assigned scorer" but the condition has
-              // never enforced it. Left as-is here so this change stays scoped
-              // to inter-club access; see the note in the handover.
-              (canScore(orgId) || isParticipantScorer(resource.data))
-              && unchanged('compId')
-              && unchanged('orgId')
-              && participantsUnchanged()
-              && unchanged('scorerUids')
-              && resource.data.status == 'scheduled'
-              && resource.data.lastSeq == 0
-              && request.resource.data.lastSeq == 0
-              && (resource.data.entrantAId == '' || unchanged('entrantAId'))
-              && (resource.data.entrantBId == '' || unchanged('entrantBId'))
-              // Squads are explicitly out of scope here. This branch exists to
-              // fill an empty entrant slot when a winner advances, and it is
-              // reachable by a scorer of EITHER contesting club — which made
-              // it, until now, a way for one club to write the other club's
-              // team sheet. Team selection belongs to branch (c) for a host
-              // scorer and branch (e) for a club's own side; neither of those
-              // lets a club name the opposition.
-              && !request.resource.data.diff(resource.data).affectedKeys()
-                   .hasAny([
-                     'lineupA', 'lineupB',
-                     'squadLockedA', 'squadLockedB',
-                   ])
-            )
-            // (f) A member of a contesting club registering for, or pulling
-            //     out of, THEIR OWN club's side — moving only that side's
-            //     counters. They have no authority in the hosting club whose
-            //     tenant this fixture lives in, and this is the only thing
-            //     that grants them.
-            || isSquadCounterMove('a')
-            || isSquadCounterMove('b')
-            // (e) A contesting club naming ITS OWN side, and locking it.
-            //
-            //     This is the step the flow calls "XYZ Club selects players /
-            //     opens registration", and without it the visiting club of a
-            //     challenge match had no write path to its own team sheet at
-            //     all — every other branch is anchored to authority in the
-            //     HOSTING club, because that is whose tenant the fixture
-            //     lives in.
-            //
-            //     Scoped hard: only that club's own squad fields (see
-            //     `squadFieldsFor`), so the club picking side A can never
-            //     touch side B's players, the score, the officials or the
-            //     schedule. And once a club locks its squad, only that club
-            //     can reopen it.
-            || canSetOwnSquad(resource.data, 'a')
+                || canScoreSingleMatch(orgId, compId));
+
+          // (c) The assigned scorer recording who is playing and who won the
+          //     toss, before the first ball. Both are prerequisites for
+          //     scoring at all — the engines refuse a delivery that names
+          //     nobody — so the scorer must be able to set them without an
+          //     organizer present at the ground. Restricted to a match that
+          //     has not started: once a ball is bowled the line-up is part of
+          //     the record.
+          allow update: if
+            resource.data.lastSeq == 0
+            && request.resource.data.lastSeq == 0
+            && request.resource.data.status == resource.data.status
+            && unchanged('compId')
+            && unchanged('orgId')
+            && unchanged('entrantAId')
+            && unchanged('entrantBId')
+            && unchanged('scorerUids')
+            // A squad a contesting club has declared final is not the
+            // scorer's to change either.
+            && lockedSquadsRespected()
+            && uid() in resource.data.scorerUids
+            && (canScore(orgId) || canScoreSingleMatch(orgId, compId));
+
+          // (f) A member of a contesting club registering for, or pulling out
+          //     of, THEIR OWN club's side — moving only that side's counters.
+          //     They have no authority in the hosting club whose tenant this
+          //     fixture lives in, and this is the only thing that grants them.
+          allow update: if isSquadCounterMove('a') || isSquadCounterMove('b');
+
+          // (e) A contesting club naming ITS OWN side, opening its own squad
+          //     call, and locking it.
+          //
+          //     This is the step the flow calls "XYZ Club selects players /
+          //     opens registration", and without it the visiting club of a
+          //     challenge match had no write path to its own team sheet at
+          //     all — every other statement is anchored to authority in the
+          //     HOSTING club, because that is whose tenant the fixture lives
+          //     in.
+          //
+          //     Scoped hard: only that club's own squad fields (see
+          //     `squadFieldsFor`), so the club picking side A can never touch
+          //     side B's players, the score, the officials or the schedule.
+          //     And once a club locks its squad, only that club can reopen it.
+          allow update: if canSetOwnSquad(resource.data, 'a')
             || canSetOwnSquad(resource.data, 'b');
+
+          // (g) A competitor protesting the result.
+          //
+          //     `isProtestFlag` opens on a pure `affectedKeys()` test, so a
+          //     write that is not a protest is ruled out before the
+          //     `getAfter()` it carries is ever reached — the only lookup of
+          //     its kind on this document.
+          allow update: if isProtestFlag(orgId, compId, fixtureId)
+            && (isActive(orgId) || isParticipantMember(resource.data));
+
+          // (d) A scorer advancing their winner into the next round of a
+          //     knockout. Distinct from (b) because that statement
+          //     deliberately forbids touching entrant ids — a scorer must
+          //     never be able to swap who is playing the match they are
+          //     scoring. Here they are filling a placeholder in a DIFFERENT,
+          //     unstarted fixture, and only a side that is still empty: an
+          //     entrant already present can never be replaced.
+          allow update: if
+            resource.data.status == 'scheduled'
+            && resource.data.lastSeq == 0
+            && request.resource.data.lastSeq == 0
+            && (resource.data.entrantAId == '' || unchanged('entrantAId'))
+            && (resource.data.entrantBId == '' || unchanged('entrantBId'))
+            // An ALLOWLIST, not a blocklist, and the difference is the whole
+            // safety of this statement.
+            //
+            // It used to name the four fields a club must not be able to write
+            // on the other club's behalf — the two line-ups and the two locks —
+            // which was correct only for as long as that list stayed complete.
+            // It did not: `squadCallA`/`squadCallB` became per-club fields, the
+            // blocklist did not learn about them, and because this statement is
+            // reachable by a scorer of EITHER contesting club it immediately
+            // became a way for one club to open, close or resize the other
+            // club's squad call. A blocklist on a document that gains fields is
+            // a hole with a delay on it.
+            //
+            // Advancing a winner writes an entrant id and the name beside it.
+            // That is all this statement has ever needed to do, so that is all
+            // it may now touch — and a field added to a fixture next year is
+            // excluded by default instead of by remembering.
+            && request.resource.data.diff(resource.data).affectedKeys()
+                 .hasOnly([
+                   'entrantAId', 'entrantBId',
+                   'entrantAName', 'entrantBName',
+                   'updatedAt',
+                 ])
+            && unchanged('compId')
+            && unchanged('orgId')
+            && unchanged('scorerUids')
+            && participantsUnchanged()
+            // Either club's event managers may name their own players before
+            // the first ball. NOTE: like the pre-existing host-side rule, this
+            // does not require the caller to be on `scorerUids` — the comment
+            // above says "assigned scorer" but the condition has never
+            // enforced it. Left as-is so this stays scoped to inter-club
+            // access; see the note in the handover.
+            && (canScore(orgId) || isParticipantScorer(resource.data));
+
+          // (a) Organizers may reschedule, assign officials, or force a status
+          //     such as walkover/abandoned/disputed. They must NOT be able to
+          //     silently overwrite the live score projection of any fixture —
+          //     including a completed one — to whatever they like, so this
+          //     carries the same monotonic-sequence guard the scorer statement
+          //     enforces, plus a hard freeze on the score fields once the
+          //     match is `completed`.
+          //
+          //     Last, because it is the broadest and the most expensive: it is
+          //     the only statement with no cheap shape test to bail out on, so
+          //     everything that can be settled without a membership lookup has
+          //     already been settled above.
+          allow update: if
+            request.resource.data.lastSeq >= resource.data.lastSeq
+            && unchanged('compId')
+            && unchanged('orgId')
+            && participantsUnchanged()
+            && (resource.data.status != 'completed'
+                || scoreFieldsUnchanged())
+            // A squad the OTHER club has locked is not the host's to change,
+            // however broad their authority over the fixture otherwise is.
+            && lockedSquadsRespected()
+            && canManageCompetitions(orgId);
 
           allow delete: if canManageCompetitions(orgId)
             && resource.data.lastSeq == 0;
+
+          // -------------------------------------------------------------
+          // Cheers — anyone watching, making a noise for one side.
+          //
+          // Doc id is the sender's uid, which is the whole integrity model:
+          // one person is one cheer no matter how many times they tap, so the
+          // tally counts PEOPLE. A counter anybody could increment would be a
+          // number with no meaning, and a number with no meaning on a
+          // fifteen-year-old's match page is worse than no number.
+          //
+          // Readable by anyone who can read the fixture, INCLUDING signed-out
+          // spectators following a public live link — they are the audience
+          // this feature exists for. Writing needs an account, because an
+          // anonymous cheer cannot be one-per-person.
+          // -------------------------------------------------------------
+          match /cheers/{cheerUid} {
+            allow read: if true;
+
+            allow write: if isSignedIn()
+              && cheerUid == uid()
+              && (
+                // Deleting is taking your own cheer back.
+                request.method == 'delete'
+                || (
+                  request.resource.data.keys().hasOnly(['cheer', 'side', 'at'])
+                  && request.resource.data.cheer is string
+                  && request.resource.data.side in ['a', 'b']
+                  && serverTimed('at')
+                )
+              );
+          }
 
           // -------------------------------------------------------------
           // Squad entries — members of a contesting club putting their hand
@@ -2137,6 +2642,26 @@ service cloud.firestore {
     // repeated access to the same document, so a query over one org's live
     // fixtures costs one org read, not one per fixture.
     // -------------------------------------------------------------------
+    // -------------------------------------------------------------------
+    // Collection-group query over competitions, powering the Global Events
+    // board — every tournament in the country that is open to entries,
+    // filterable by sport, place and category.
+    //
+    // Deliberately NARROWER than the per-org competition rule above. That one
+    // grants a club's members everything their club runs; this one is a
+    // stranger reading across every tenant on the platform, and the only
+    // thing a stranger is entitled to see is an event that has explicitly
+    // invited them.
+    //
+    // `openToNonMembers` is that invitation, and it is a field the query must
+    // constrain. Firestore authorizes a `list` against the QUERY's
+    // constraints, so a query that does not pin `openToNonMembers == true` is
+    // refused outright rather than silently returning a club's private draws.
+    // -------------------------------------------------------------------
+    match /{path=**}/competitions/{compId} {
+      allow read: if resource.data.openToNonMembers == true;
+    }
+
     match /{path=**}/fixtures/{fixtureId} {
       allow read: if (isSignedIn() && uid() in resource.data.scorerUids)
         || orgIsReadable(resource.data.orgId);
@@ -2231,6 +2756,338 @@ service cloud.firestore {
       allow read: if resource.data.audience == 'public'
         || isActive(resource.data.audience)
         || orgIsReadable(resource.data.orgId);
+    }
+
+    // ===================================================================
+    // COMMERCE
+    // ===================================================================
+    //
+    // ## The one thing to understand before changing anything below
+    //
+    // PlaySphere is launching its paid plans at ₹0 — `Pricing.introOfferActive`
+    // in lib/core/models/billing.dart. While that is true, the CLIENT writes
+    // its own entitlement, because there is no payment processor in the loop
+    // to write it from the server side.
+    //
+    // A client that writes its own entitlement can obviously lie. These rules
+    // therefore do not pretend to verify that a purchase happened; they bound
+    // what a lie can be worth:
+    //
+    //   - `payments` rows may only be created with `amountPaise == 0` and
+    //     `gateway == 'none'`. A client cannot forge a receipt that claims
+    //     money was collected, so the ledger stays trustworthy as a financial
+    //     record even though the entitlement does not.
+    //   - A plan may only be granted for at most ~1 year at a time, so nobody
+    //     writes themselves a decade.
+    //   - `isVerified` on a ground is never client-writable at all.
+    //
+    // The worst a hostile client can do today is grant itself a plan that is
+    // currently being given away to everyone who asks. That is an acceptable
+    // exposure for a launch offer and NOT an acceptable one afterwards.
+    //
+    // ⚠ BEFORE `introOfferActive` IS TURNED OFF: the entitlement write must
+    // move to a Cloud Function driven by the payment processor's webhook, and
+    // the `plan*` fields on /orgs and /users must become server-only here —
+    // i.e. `planFieldsUnchanged()` with no exception. The two changes ship
+    // together or the product is giving away paid plans.
+    // -------------------------------------------------------------------
+
+    // A plan grant a client is allowed to write to its own org/user document.
+    //
+    // Shape and bounds only — see the block comment above for what this
+    // deliberately cannot check.
+    function planGrantIsBounded() {
+      return request.resource.data.plan in ['free', 'club', 'premium']
+        && request.resource.data.planValidUntil is timestamp
+        // One year plus a day of slack for clock skew between the client that
+        // computed the date and the server evaluating it.
+        && request.resource.data.planValidUntil
+             < request.time + duration.value(367, 'd')
+        && request.resource.data.planPaymentId is string;
+    }
+
+    // True when a write touches none of the entitlement fields. Used to let
+    // an ordinary profile or club edit through without re-checking the plan.
+    function planFieldsUnchanged() {
+      return unchangedIfPresent('plan')
+        && unchangedIfPresent('planValidUntil')
+        && unchangedIfPresent('planActivatedAt')
+        && unchangedIfPresent('planPaymentId');
+    }
+
+    // -------------------------------------------------------------------
+    // The ledger. One row per charge — plan, Premium or ground booking.
+    //
+    // Readable only by the person who paid. A receipt names what somebody
+    // bought and when, which is nobody else's business, and the collection is
+    // never listable across payers.
+    //
+    // Immutable once written: a ledger that can be edited is not a ledger.
+    // Corrections are new rows (a refund), never overwrites.
+    // -------------------------------------------------------------------
+    match /payments/{paymentId} {
+      allow get: if isSignedIn() && resource.data.payerUid == uid();
+      allow list: if isSignedIn()
+        && request.query.limit <= 100
+        && resource.data.payerUid == uid();
+
+      allow create: if isSignedIn()
+        && request.resource.data.payerUid == uid()
+        && request.resource.data.kind in
+             ['org_plan', 'member_plan', 'ground_booking']
+        && request.resource.data.currency == 'INR'
+        && serverTimed('createdAt')
+        // The heart of it: no client may write a row claiming money changed
+        // hands. When a real gateway exists, its webhook writes these with
+        // the Admin SDK and bypasses this rule entirely.
+        && request.resource.data.amountPaise == 0
+        && request.resource.data.gateway == 'none'
+        && request.resource.data.listPricePaise is int
+        && request.resource.data.listPricePaise >= 0;
+
+      allow update, delete: if false;
+    }
+
+    // -------------------------------------------------------------------
+    // The shop catalog.
+    //
+    // Vendor listings, not user content: world-readable, and written only
+    // from the console or a server. A client-writable product list is a
+    // client-writable link, pointed wherever the writer likes, shown to
+    // everybody — which is a phishing page with PlaySphere's branding on it.
+    // -------------------------------------------------------------------
+    match /products/{productId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // -------------------------------------------------------------------
+    // Give — the equipment-donation network.
+    //
+    // Three collections share one principle: a donor's own device may only
+    // ever assert the FIRST fact in a pipeline — "I'm donating this" or
+    // "this club needs that" — never a downstream one. What stage a
+    // donation is at, and whether a need is verified, are staff-only facts,
+    // gated the same way `sportRules` already is below: a custom `admin`
+    // claim, checked with isGiveStaff(). See `GiveDonation` and `GiveNeed`
+    // for why that boundary is the entire point of the feature — a donor's
+    // client marking its own donation "safety checked" would make the
+    // phrase meaningless.
+    // -------------------------------------------------------------------
+    function isGiveStaff() {
+      return isSignedIn() && request.auth.token.admin == true;
+    }
+
+    // Drop-off points. Curated like `products` above, not self-listed like
+    // `grounds` below: a fake center would let a stranger collect other
+    // people's donated equipment at an address PlaySphere's own app vouches
+    // for, so only staff/console may write one.
+    match /giveCollectionCenters/{centerId} {
+      allow read: if true;
+      allow write: if isGiveStaff();
+    }
+
+    match /giveDonations/{donationId} {
+      // A donor sees their own trail (it carries a phone number); staff see
+      // everything to run the pipeline. No one else.
+      allow read: if isSignedIn()
+        && (resource.data.donorUid == uid() || isGiveStaff());
+
+      allow create: if isSignedIn()
+        && request.resource.data.donorUid == uid()
+        && request.resource.data.status == 'submitted'
+        && request.resource.data.history is list
+        && request.resource.data.history.size() == 1
+        && request.resource.data.history[0].status == 'submitted'
+        && request.resource.data.type in ['equipment', 'money']
+        && request.resource.data.items is list
+        && (request.resource.data.type == 'money'
+              ? request.resource.data.items.size() == 0
+              : request.resource.data.items.size() > 0)
+        // Money is a lead for the team to call back, never a real charge —
+        // PlaySphere's payment gateway is deferred product-wide, so no
+        // client may write a row claiming money changed hands (mirrors the
+        // `billing` collection's `amountPaise == 0` rule above).
+        && (request.resource.data.type == 'money'
+              ? request.resource.data.amountPaise is int
+                  && request.resource.data.amountPaise >= 0
+              : request.resource.data.amountPaise == 0)
+        && request.resource.data.city is string
+        && request.resource.data.city.size() > 0;
+
+      // Every stage after submission — collected, inspected, rejected,
+      // cleaned, repaired, safety-checked, graded, packed, assigned,
+      // distributed — is staff-only. See `DonationStatus`.
+      allow update: if isGiveStaff();
+      allow delete: if false;
+    }
+
+    match /giveNeeds/{needId} {
+      // World-readable, same trust shape as `grounds`: a need carries no
+      // more than a first name and a shortfall, and has to be findable by a
+      // donor who has not signed in yet. The verified-only board is a query
+      // filter in the app, not a rule — this only governs a direct read.
+      allow read: if true;
+
+      allow create: if isSignedIn()
+        && request.resource.data.createdByUid == uid()
+        && request.resource.data.verified == false
+        && request.resource.data.status == 'open'
+        && request.resource.data.fulfilled is list
+        && request.resource.data.fulfilled.size() == 0
+        && request.resource.data.items is list
+        && request.resource.data.items.size() > 0
+        && request.resource.data.beneficiaryType in ['player', 'team', 'club']
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0
+        // A player need is self-reported — nobody may nominate someone
+        // else's shortfall without them. A team/club need requires the
+        // same authority that manages that club's competitions, so a
+        // stranger cannot raise a fake ask in a village club's name.
+        && (request.resource.data.beneficiaryType == 'player'
+              ? request.resource.data.playerUid == uid()
+              : canManageCompetitions(request.resource.data.orgId));
+
+      // Verification, status, and matching donations against `fulfilled`
+      // are all staff-only — mirrors donations above.
+      allow update: if isGiveStaff();
+      allow delete: if false;
+    }
+
+    // The network's headline numbers — written only by the
+    // `onDonationStatusChanged` Cloud Function (admin SDK, bypasses rules).
+    // See `GiveImpactStats` for why this must not be client-computed.
+    match /give/impactStats {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // -------------------------------------------------------------------
+    // Grounds — the rentable-venue marketplace.
+    //
+    // Deliberately top-level and deliberately not under /orgs: a ground owner
+    // is not a member of any club, and "cricket grounds in Hyderabad" cannot
+    // be a query if the documents are scattered under every club in the
+    // country. See Refs.grounds.
+    // -------------------------------------------------------------------
+    match /grounds/{groundId} {
+      // Public. A ground has to be findable by a club that has not signed up
+      // yet — that is the entire point of listing it — and the document holds
+      // nothing private beyond a business's own contact details, which its
+      // owner entered in order to be contacted.
+      allow read: if true;
+
+      allow create: if isSignedIn()
+        && request.resource.data.ownerUid == uid()
+        && request.resource.data.name is string
+        && request.resource.data.name.size() >= 3
+        && request.resource.data.name.size() <= 120
+        && request.resource.data.city is string
+        && request.resource.data.city.size() > 0
+        && request.resource.data.hourlyRatePaise is int
+        && request.resource.data.hourlyRatePaise >= 0
+        && request.resource.data.openHour is int
+        && request.resource.data.closeHour is int
+        && request.resource.data.openHour >= 0
+        && request.resource.data.closeHour <= 24
+        && request.resource.data.openHour < request.resource.data.closeHour
+        // PlaySphere's judgement, never the owner's. A self-certifying badge
+        // is not a badge.
+        && request.resource.data.isVerified == false
+        && request.resource.data.bookingCount == 0
+        && serverTimed('createdAt');
+
+      allow update: if isSignedIn()
+        && resource.data.ownerUid == uid()
+        // A ground cannot be handed to someone else by editing a field; that
+        // would move an income stream and every booking attached to it.
+        && unchanged('ownerUid')
+        && unchanged('isVerified')
+        && unchanged('createdAt')
+        && request.resource.data.hourlyRatePaise >= 0
+        && request.resource.data.openHour < request.resource.data.closeHour
+        // `bookingCount` is maintained by the booking transaction, which
+        // increments it. An owner editing their listing must not be able to
+        // set it — a fabricated booking count is a fabricated reputation.
+        && (
+          unchanged('bookingCount')
+          || request.resource.data.bookingCount == resource.data.bookingCount + 1
+        );
+
+      // Never deleted. A ground that has taken bookings is part of their
+      // record; `isActive: false` is how a listing goes away.
+      allow delete: if false;
+
+      // -----------------------------------------------------------------
+      // Bookings against one ground.
+      //
+      // ## Why anyone signed in can read them
+      //
+      // Availability. Deciding whether 6pm on Sunday is free means reading
+      // what is already booked, and that read happens before the person has
+      // any relationship with the ground. The documents are deliberately
+      // thin on personal data for exactly this reason — a name and an hour.
+      //
+      // ## What the rules can and cannot guarantee
+      //
+      // They cannot prevent a double booking. Firestore rules evaluate one
+      // document at a time and cannot query siblings, so "does this overlap
+      // anything else?" is unaskable here. That check lives in the booking
+      // TRANSACTION (`GroundRepository.book`), which re-reads the day's
+      // bookings inside the transaction and is aborted by Firestore if any of
+      // them changed underneath it. These rules enforce the shape; the
+      // transaction enforces exclusivity.
+      // -----------------------------------------------------------------
+      match /bookings/{bookingId} {
+        allow read: if isSignedIn();
+
+        allow create: if isSignedIn()
+          && request.resource.data.bookedByUid == uid()
+          && request.resource.data.groundId == groundId
+          && request.resource.data.status == 'confirmed'
+          && request.resource.data.dayKey is string
+          && request.resource.data.startHour is int
+          && request.resource.data.endHour is int
+          && request.resource.data.startHour >= 0
+          && request.resource.data.endHour <= 24
+          && request.resource.data.startHour < request.resource.data.endHour
+          // A day is 24 hours; a "booking" longer than that is either a bug
+          // or an attempt to blockade a ground.
+          && request.resource.data.endHour - request.resource.data.startHour <= 12
+          // The price is the ground's, not the booker's. Charging yourself ₹0
+          // for a ₹2,000 pitch is the obvious attack on a marketplace.
+          && request.resource.data.amountPaise ==
+               get(/databases/$(database)/documents/grounds/$(groundId))
+                 .data.hourlyRatePaise
+               * (request.resource.data.endHour - request.resource.data.startHour)
+          && serverTimed('createdAt');
+
+        // Either side may release a slot: the club that booked it, or the
+        // owner whose ground it is. Nothing else about a booking may change —
+        // moving the hours of a confirmed booking is how you take somebody
+        // else's slot without the conflict check ever running.
+        allow update: if isSignedIn()
+          && (
+            resource.data.bookedByUid == uid()
+            || get(/databases/$(database)/documents/grounds/$(groundId))
+                 .data.ownerUid == uid()
+          )
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['status', 'cancelledAt', 'completedAt'])
+          && request.resource.data.status in ['cancelled', 'completed'];
+
+        allow delete: if false;
+      }
+    }
+
+    // Every booking a club or player holds, across grounds nobody in
+    // particular owns — the collectionGroup counterpart of the rule above.
+    //
+    // Scoped to the caller's own bookings. Without this, the query behind
+    // "my bookings" is refused; with it unscoped, it would read every booking
+    // on the platform.
+    match /{path=**}/bookings/{bookingId} {
+      allow read: if isSignedIn() && resource.data.bookedByUid == uid();
     }
 
     // -------------------------------------------------------------------

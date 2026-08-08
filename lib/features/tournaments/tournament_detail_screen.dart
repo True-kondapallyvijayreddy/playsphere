@@ -12,9 +12,12 @@ import '../../core/models/tournament.dart';
 import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
+import '../../domain/scoring/scoring_registry.dart';
 import '../../domain/tournament/tournament_overview.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/live_dot.dart';
 import 'tournaments_screen.dart' show TournamentEditor;
+import 'widgets/invite_clubs_sheet.dart';
 import 'widgets/leaderboard_cards.dart';
 import 'widgets/running_late_card.dart';
 
@@ -71,83 +74,117 @@ class TournamentDetailScreen extends ConsumerWidget {
                       canManage: canManage,
                     ),
                     const SizedBox(height: 16),
-                    if (overview.hasError)
-                      Card(
-                        child: ListTile(
-                          leading: const Icon(Icons.error_outline),
-                          title: const Text('Could not load the matches'),
-                          subtitle: Text(errorMessage(overview.error!)),
-                        ),
-                      )
-                    else ...[
-                      _Progress(
+                    // A failure here is one panel's worth of data, not the
+                    // tournament. The matches feed can be down — a missing
+                    // index, a dropped connection — while the events, the
+                    // dates and the invite actions above are all perfectly
+                    // readable, so the notice replaces only what it covers
+                    // and the rest of the screen carries on rendering from
+                    // whatever did load.
+                    AsyncErrorStrip(
+                      value: overview,
+                      what: 'the matches',
+                    ),
+                    _Progress(
+                      tournament: tournament,
+                      overview: overview.valueOrNull,
+                    ),
+                    const SizedBox(height: 16),
+                    if (canManage)
+                      _ScheduleCard(
+                        orgId: orgId,
                         tournament: tournament,
                         overview: overview.valueOrNull,
                       ),
-                      const SizedBox(height: 16),
-                      if (canManage)
-                        _ScheduleCard(
-                          orgId: orgId,
-                          tournament: tournament,
-                          overview: overview.valueOrNull,
+                    if (canManage)
+                      Card(
+                        margin: const EdgeInsets.only(bottom: 16),
+                        child: ListTile(
+                          leading: const Icon(Icons.sports_outlined),
+                          title: const Text('Officials'),
+                          subtitle: const Text(
+                            'Build the umpiring panel and assign it across '
+                            'the bracket, before match day',
+                          ),
+                          trailing: const Icon(Icons.chevron_right),
+                          onTap: () => context.push(
+                            Routes.tournamentOfficials(orgId, tournamentId),
+                          ),
                         ),
-                      if (canManage)
-                        RunningLateCard(
-                          fixtures: ref
-                                  .watch(tournamentFixturesProvider(
-                                      tournamentId))
-                                  .valueOrNull ??
-                              const [],
-                          onShift: ({by, newStart}) => ref
-                              .read(tournamentRepositoryProvider)
-                              .shiftSchedule(
-                                orgId: orgId,
-                                tournamentId: tournamentId,
-                                by: by,
-                                newStart: newStart,
-                              ),
-                        ),
-                      _OnCourtNow(
-                        orgId: orgId,
-                        overview: overview.valueOrNull,
                       ),
-                      _UpNext(orgId: orgId, overview: overview.valueOrNull),
-                      GroupsSummaryCard(
-                        leaderboard: ref
-                            .watch(tournamentLeaderboardProvider(key))
-                            .valueOrNull,
+                    if (canManage)
+                      RunningLateCard(
+                        fixtures: ref
+                                .watch(tournamentFixturesProvider(key))
+                                .valueOrNull ??
+                            const [],
+                        onShift: ({by, newStart}) => ref
+                            .read(tournamentRepositoryProvider)
+                            .shiftSchedule(
+                              orgId: orgId,
+                              tournamentId: tournamentId,
+                              by: by,
+                              newStart: newStart,
+                            ),
                       ),
-                      LeaderboardCard(
-                        leaderboard: ref
-                            .watch(tournamentLeaderboardProvider(key))
-                            .valueOrNull,
-                      ),
-                      _Events(
-                        orgId: orgId,
-                        tournamentId: tournamentId,
-                        canManage: canManage,
-                        overview: overview.valueOrNull,
-                      ),
-                      _Honours(overview: overview.valueOrNull),
-                      if ((overview.valueOrNull?.completedEvents ?? 0) > 0)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 12),
-                          child: Card(
-                            child: ListTile(
-                              leading:
-                                  const Icon(Icons.workspace_premium_outlined),
-                              title: const Text('Certificates'),
-                              subtitle: const Text(
-                                'For everyone who played — champion down to '
-                                'participation, from the results themselves',
-                              ),
-                              trailing: const Icon(Icons.chevron_right),
-                              onTap: () => context.push(
-                                Routes.certificates(orgId, tournamentId),
-                              ),
+                    _OnCourtNow(
+                      orgId: orgId,
+                      overview: overview.valueOrNull,
+                    ),
+                    _UpNext(orgId: orgId, overview: overview.valueOrNull),
+                    GroupsSummaryCard(
+                      leaderboard: ref
+                          .watch(tournamentLeaderboardProvider(key))
+                          .valueOrNull,
+                    ),
+                    LeaderboardCard(
+                      leaderboard: ref
+                          .watch(tournamentLeaderboardProvider(key))
+                          .valueOrNull,
+                    ),
+                    _Events(
+                      orgId: orgId,
+                      tournamentId: tournamentId,
+                      canManage: canManage,
+                      overview: overview.valueOrNull,
+                    ),
+                    _Honours(overview: overview.valueOrNull),
+                    if ((overview.valueOrNull?.completedEvents ?? 0) > 0) ...[
+                      Padding(
+                        padding: const EdgeInsets.only(top: 12),
+                        child: Card(
+                          child: ListTile(
+                            leading:
+                                const Icon(Icons.workspace_premium_outlined),
+                            title: const Text('Certificates'),
+                            subtitle: const Text(
+                              'For everyone who played — champion down to '
+                              'participation, from the results themselves',
+                            ),
+                            trailing: const Icon(Icons.chevron_right),
+                            onTap: () => context.push(
+                              Routes.certificates(orgId, tournamentId),
                             ),
                           ),
                         ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Card(
+                          child: ListTile(
+                            leading: const Icon(Icons.photo_library_outlined),
+                            title: const Text('Season memories'),
+                            subtitle: const Text(
+                              'Every photo and clip from every match of '
+                              'this season, in one book',
+                            ),
+                            trailing: const Icon(Icons.chevron_right),
+                            onTap: () => context.push(
+                              Routes.seasonMemories(orgId, tournamentId),
+                            ),
+                          ),
+                        ),
+                      ),
                     ],
                   ],
                 ),
@@ -200,6 +237,18 @@ class _Header extends ConsumerWidget {
                   tooltip: 'Share the public link',
                   onPressed: () => _sharePublicLink(context, orgId, t.id),
                 ),
+                if (canManage)
+                  IconButton(
+                    icon: const Icon(Icons.groups_outlined),
+                    tooltip: 'Invite other clubs',
+                    onPressed: () => showModalBottomSheet<void>(
+                      context: context,
+                      isScrollControlled: true,
+                      showDragHandle: true,
+                      builder: (_) =>
+                          InviteClubsSheet(tournament: t),
+                    ),
+                  ),
                 if (canManage)
                   IconButton(
                     icon: const Icon(Icons.edit_outlined),
@@ -509,7 +558,9 @@ class _OnCourtNow extends StatelessWidget {
             padding: const EdgeInsets.only(bottom: 8),
             child: Row(
               children: [
-                Icon(Icons.circle, size: 10, color: theme.colorScheme.error),
+                // Feature #16: blinking LiveDot instead of a static red circle
+                // to clearly indicate ongoing matches.
+                const LiveDot(size: 10),
                 const SizedBox(width: 8),
                 Text('On court now', style: theme.textTheme.titleMedium),
               ],
@@ -584,9 +635,34 @@ class _MatchRow extends StatelessWidget {
           ].join(' · '),
           style: theme.textTheme.bodySmall,
         ),
-        trailing: f.isLive
-            ? Icon(Icons.circle, size: 10, color: theme.colorScheme.error)
-            : null,
+        // Feature #16: show the live score summary alongside the blinking
+        // indicator, so users see current scores without clicking through.
+        trailing: f.isLiveAt(DateTime.now())
+            ? Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (f.summary.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: Text(
+                        f.summary,
+                        style: theme.textTheme.labelMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  const LiveDot(size: 10),
+                ],
+              )
+            : f.hasResult && f.summary.isNotEmpty
+                ? Text(
+                    f.summary,
+                    style: theme.textTheme.labelMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: theme.hintColor,
+                    ),
+                  )
+                : null,
       ),
     );
   }
@@ -608,7 +684,28 @@ class _Events extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final events = overview?.events ?? const <EventSummary>[];
+    // The summaries need the matches; the LIST of events does not. When the
+    // matches feed is unavailable the events are still worth showing — a
+    // season's five sports exist whether or not anything has been drawn yet,
+    // and "No events yet" under a season somebody just created with five of
+    // them reads as data loss. So this falls back to the draws themselves,
+    // with the played/live counts left at zero because they are genuinely
+    // unknown rather than genuinely nil.
+    final events = overview?.events ??
+        [
+          for (final c in ref
+                  .watch(tournamentEventsProvider(
+                      (orgId: orgId, tournamentId: tournamentId)))
+                  .valueOrNull ??
+              const <Competition>[])
+            EventSummary(
+              competition: c,
+              total: 0,
+              played: 0,
+              live: 0,
+              champion: null,
+            ),
+        ];
     final theme = Theme.of(context);
 
     return Padding(
@@ -666,12 +763,23 @@ class _Events extends ConsumerWidget {
       );
 }
 
-/// Picks which of the club's existing events belong to this tournament.
+/// Adds events to a tournament: either the club's existing unattached ones, or
+/// a sport created here and now.
 ///
 /// Only events not already attached elsewhere are offered — an event belongs
 /// to one tournament, because its matches are scheduled against one shared
 /// pool of courts and being in two timetables at once is not a state that
 /// means anything.
+///
+/// ## Why adding a sport outright belongs here
+///
+/// A season is created with its sports chosen up front, and a plan changes:
+/// the volleyball net turns up, the kho-kho ground is double-booked, another
+/// school asks whether there is a throwball event. Until now the only route
+/// was "create one from the club first" and then come back and attach it —
+/// two screens and a name to type for something the season form does in a
+/// checkbox. A club with no spare unattached events could not add a sport to
+/// its own season at all.
 class _AttachEventsSheet extends ConsumerStatefulWidget {
   const _AttachEventsSheet({
     required this.orgId,
@@ -688,6 +796,12 @@ class _AttachEventsSheet extends ConsumerStatefulWidget {
 
 class _AttachEventsSheetState extends ConsumerState<_AttachEventsSheet> {
   final _picked = <String>{};
+
+  /// Sports to create into this tournament, by catalog id, mapped to the
+  /// draw format chosen for each — the same per-sport choice
+  /// `CreateSeasonScreen` offers, so a sport added after the season already
+  /// exists is not silently stuck on Round Robin.
+  final _newSports = <String, CompetitionFormat>{};
   bool _busy = false;
 
   @override
@@ -718,9 +832,10 @@ class _AttachEventsSheetState extends ConsumerState<_AttachEventsSheet> {
             const SizedBox(height: 12),
             if (free.isEmpty)
               Padding(
-                padding: const EdgeInsets.symmetric(vertical: 16),
+                padding: const EdgeInsets.symmetric(vertical: 8),
                 child: Text(
-                  'No unattached events. Create one from the club first.',
+                  'This club has no unattached events. Add a sport below '
+                  'instead — it is created straight into this tournament.',
                   style: theme.textTheme.bodyMedium,
                 ),
               ),
@@ -741,6 +856,73 @@ class _AttachEventsSheetState extends ConsumerState<_AttachEventsSheet> {
                   }
                 }),
               ),
+
+            const SizedBox(height: 20),
+            Text('Or add a sport', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 2),
+            Text(
+              'Each becomes its own event under this tournament, sharing its '
+              'courts, its dates and its rest gap.',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final sport in SportCatalog.all)
+                  FilterChip(
+                    label: Text('${sport.icon}  ${sport.name}'),
+                    selected: _newSports.containsKey(sport.id),
+                    onSelected: (on) => setState(() {
+                      if (on) {
+                        _newSports[sport.id] = sport.competitionFormats.first;
+                      } else {
+                        _newSports.remove(sport.id);
+                      }
+                    }),
+                  ),
+              ],
+            ),
+            if (_newSports.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              for (final sportId in _newSports.keys)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '${SportCatalog.byId(sportId).icon}  '
+                          '${SportCatalog.byId(sportId).name} format',
+                          style: theme.textTheme.bodyMedium,
+                        ),
+                      ),
+                      SizedBox(
+                        width: 180,
+                        child: DropdownButtonFormField<CompetitionFormat>(
+                          value: _newSports[sportId],
+                          isDense: true,
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            border: OutlineInputBorder(),
+                          ),
+                          items: [
+                            for (final f
+                                in SportCatalog.byId(sportId).competitionFormats)
+                              DropdownMenuItem(value: f, child: Text(f.label)),
+                          ],
+                          onChanged: (f) {
+                            if (f != null) setState(() => _newSports[sportId] = f);
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+
             const SizedBox(height: 16),
             Row(
               children: [
@@ -751,8 +933,8 @@ class _AttachEventsSheetState extends ConsumerState<_AttachEventsSheet> {
                 ),
                 const SizedBox(width: 8),
                 FilledButton(
-                  onPressed: _picked.isEmpty || _busy ? null : _save,
-                  child: Text('Add ${_picked.length}'),
+                  onPressed: _total == 0 || _busy ? null : _save,
+                  child: Text(_total == 0 ? 'Add' : 'Add $_total'),
                 ),
               ],
             ),
@@ -761,6 +943,8 @@ class _AttachEventsSheetState extends ConsumerState<_AttachEventsSheet> {
       ),
     );
   }
+
+  int get _total => _picked.length + _newSports.length;
 
   Future<void> _save() async {
     setState(() => _busy = true);
@@ -773,6 +957,54 @@ class _AttachEventsSheetState extends ConsumerState<_AttachEventsSheet> {
           compId: compId,
         );
       }
+
+      if (_newSports.isNotEmpty) {
+        final tournament = ref
+            .read(tournamentProvider((
+              orgId: widget.orgId,
+              tournamentId: widget.tournamentId,
+            )))
+            .valueOrNull;
+        final competitions = ref.read(competitionRepositoryProvider);
+        final uid = ref.read(currentUidProvider);
+
+        for (final entry in _newSports.entries) {
+          final sport = SportCatalog.byId(entry.key);
+          await competitions.createCompetition(
+            Competition(
+              id: '',
+              orgId: widget.orgId,
+              tournamentId: widget.tournamentId,
+              // Named for the sport within the tournament, matching what the
+              // season form writes — a list of five events all called
+              // "Sports Week 2026" tells an organizer nothing.
+              name: '${tournament?.name ?? 'Tournament'} — ${sport.name}',
+              sportId: sport.id,
+              sportName: sport.name,
+              archetype: sport.archetype,
+              entrantType: sport.defaultEntrantType,
+              format: entry.value,
+              status: CompetitionStatus.draft,
+              category: CompetitionCategory.presets(
+                cutOff: tournament?.startDate,
+              ).first,
+              scoringPluginKey: sport.pluginKey,
+              startDate: tournament?.startDate,
+              waitlistEnabled: true,
+              createdBy: uid,
+            ),
+          );
+        }
+
+        // Created already attached, so the attach path's own increment never
+        // runs — see `noteEventsCreated` for why the count is load-bearing.
+        repo.noteEventsCreated(
+          orgId: widget.orgId,
+          tournamentId: widget.tournamentId,
+          count: _newSports.length,
+        );
+      }
+
       if (mounted) Navigator.of(context).pop();
     } catch (e) {
       if (mounted) showError(context, e);

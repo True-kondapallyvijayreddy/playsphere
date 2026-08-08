@@ -59,6 +59,70 @@ AsyncValue<List<T>> combineAsyncAll<T>(List<AsyncValue<List<T>>> values) {
   return AsyncValue.data([for (final v in values) ...v.requireValue]);
 }
 
+/// The result of a fan-out where one branch failing must not erase the rest.
+class PartialAsync<T> {
+  const PartialAsync({
+    required this.items,
+    required this.failures,
+    required this.isLoading,
+  });
+
+  final List<T> items;
+
+  /// One entry per club whose read was rejected. Empty on a clean fan-out.
+  final List<Object> failures;
+
+  final bool isLoading;
+
+  bool get hasFailures => failures.isNotEmpty;
+
+  /// Every branch failed, so there is genuinely nothing to show and the
+  /// screen should say so rather than render a convincing empty state.
+  bool get isTotalFailure => failures.isNotEmpty && items.isEmpty && !isLoading;
+}
+
+/// Flattens one [AsyncValue] per club, keeping whatever loaded.
+///
+/// ## Why this exists alongside [combineAsyncAll]
+///
+/// [combineAsyncAll] fails the whole combination if any single input failed,
+/// on the reasoning that silently dropping a club is worse than an honest
+/// error. That reasoning is right about silence and wrong about scale: the
+/// home dashboard fans out over EVERY club a person belongs to, so one
+/// unreadable club — a club deleted out from under a stale membership, a
+/// membership mirror that has drifted — took down the live-match section for
+/// all of their clubs at once. The screen showed "Could not load live
+/// matches" and no match anywhere was visible, which is the reported failure.
+///
+/// This keeps both halves of the promise instead of trading one for the
+/// other: show every match that did load, AND report that something did not.
+/// The caller is expected to surface [PartialAsync.failures] — dropping a
+/// club quietly is still not acceptable.
+PartialAsync<T> combineAsyncTolerant<T>(List<AsyncValue<List<T>>> values) {
+  final items = <T>[];
+  final failures = <Object>[];
+  var loading = false;
+
+  for (final v in values) {
+    if (v.hasError) {
+      failures.add(v.error!);
+      continue;
+    }
+    // `valueOrNull` rather than a loading check first: a Riverpod stream that
+    // has delivered once and is refreshing carries BOTH a value and the
+    // loading flag, and dropping that value would make the list flicker
+    // empty on every rebuild.
+    final value = v.valueOrNull;
+    if (value != null) {
+      items.addAll(value);
+    } else if (v.isLoading) {
+      loading = true;
+    }
+  }
+
+  return PartialAsync(items: items, failures: failures, isLoading: loading);
+}
+
 AsyncError<Object>? _firstError(List<AsyncValue<Object?>> values) {
   for (final v in values) {
     if (v.hasError) {

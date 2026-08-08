@@ -3,11 +3,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
+import '../../core/ads/promo.dart';
 import '../../core/layout/responsive.dart';
 import '../../core/models/competition.dart';
 import '../../core/models/enums.dart';
 import '../../core/models/fixture.dart';
-import '../../core/models/scoring_request.dart';
 import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
@@ -16,8 +16,24 @@ import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/confirm_exit.dart';
 import '../../shared/live_dot.dart';
+import '../../shared/promo_banner.dart';
+import '../../shared/section_header.dart';
 import '../scoring/widgets/live_score_card.dart';
+import 'event_feed.dart';
 import 'home_providers.dart';
+
+/// How many live matches the home dashboard shows before it hands off to
+/// [Routes.liveNow] with a "More" button. Three, not the whole list: this is
+/// the top of a dashboard with clubs, events and the rest of the product
+/// still to come, not the live screen itself.
+const _liveHomePreviewCap = 3;
+
+/// How many open-for-entry events the home dashboard shows before it hands
+/// off to [Routes.myEvents] with a "More" button. Five: enough that a member
+/// in one or two clubs sees everything without scrolling, but a person in a
+/// busy multi-club season does not get their clubs and live matches pushed
+/// off the first screen by a long list of entry windows.
+const _eventsHomePreviewCap = 5;
 
 /// The screen a member lands on after signing in.
 ///
@@ -31,24 +47,32 @@ class HomeScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final user = ref.watch(currentUserProvider).valueOrNull;
+    final theme = Theme.of(context);
     final uid = ref.watch(currentUidProvider);
     final memberships = ref.watch(myActiveMembershipsProvider);
     final clubs = memberships.valueOrNull ?? const [];
 
     final liveAsync = ref.watch(myLiveFixturesProvider);
     final live = liveAsync.valueOrNull ?? const <Fixture>[];
+    // Deliberately tolerant of its own failure: this is a bonus section, and
+    // an error here must never take the club's own live list down with it.
+    final clubmateLive =
+        ref.watch(clubmateLiveFixturesProvider).valueOrNull ??
+            const <Fixture>[];
+    final liveFailures = ref.watch(myLiveFixtureFailuresProvider);
     final eventsAsync = ref.watch(myUpcomingEventsProvider);
     final events = eventsAsync.valueOrNull ?? const <Competition>[];
-
-    final scoringAsync = ref.watch(myScoringAssignmentsProvider);
-    final scoring = scoringAsync.valueOrNull ?? const <Fixture>[];
-    final challengesAsync = ref.watch(myIncomingChallengesProvider);
-    final challenges = challengesAsync.valueOrNull ?? const [];
-    final approvalsAsync = ref.watch(myPendingApprovalsProvider);
-    final approvals = approvalsAsync.valueOrNull ?? const [];
-    final scoreAsksAsync = ref.watch(myScoringRequestsProvider);
-    final scoreAsks = scoreAsksAsync.valueOrNull ?? const <ScoringRequest>[];
+    // The home dashboard only ever shows what a member can act on today —
+    // open for entries — not everything scheduled or already running.
+    // displayStatus(), not the stored status field: an event whose deadline
+    // has quietly passed must stop counting as open the moment it does,
+    // same derivation _ClubCard's "open" pill already uses.
+    final openEvents = events
+        .where((c) => c.displayStatus() == CompetitionStatus.registrationOpen)
+        .toList();
+    // A season's sports fold into one card here — see [groupEventFeed] — so a
+    // five-sport sports week takes one slot in this preview instead of five.
+    final openFeed = groupEventFeed(openEvents);
 
     final career = uid == null ? null : ref.watch(careerProvider(uid));
     final lines = career?.valueOrNull ?? const [];
@@ -94,14 +118,166 @@ class HomeScreen extends ConsumerWidget {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       _Greeting(
-                        name: user?.displayName,
                         clubCount: activeClubs.length,
                         liveCount: live.length,
                       ),
                       const SizedBox(height: 16),
 
-                      _QuickActions(organizingOrgId: organizingOrgId),
-                      const SizedBox(height: 20),
+                      // --- PS-007: Live Matches Ticker at top (Cricbuzz style) ---
+                      //
+                      // Capped at 3: a member in half a dozen clubs during a
+                      // busy weekend could otherwise push everything else on
+                      // this dashboard — clubs, events, the rest of the
+                      // product — below several screens of scorecards. The
+                      // "More" button is not a consolation prize for what got
+                      // cut; every match still live is one tap away on
+                      // Routes.liveNow, in full, grouped the same way.
+                      SectionHeader(
+                        icon: Icons.sensors,
+                        title: 'Live now',
+                        subtitle: 'Every match your clubs are playing, ball by ball',
+                        trailing: live.isEmpty ? null : const LiveDot(),
+                      ),
+                      AsyncErrorStrip(value: liveAsync, what: 'live matches'),
+                      // A club whose read was refused no longer blanks the
+                      // whole section (Bug #4) — but it must not vanish
+                      // either, or a player is told nothing is on at a club
+                      // where a match is being played.
+                      if (liveFailures > 0)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: QuietCard(
+                            icon: Icons.cloud_off_outlined,
+                            title: liveFailures == 1
+                                ? 'One club’s matches could not be loaded'
+                                : '$liveFailures clubs’ matches could not be '
+                                    'loaded',
+                            message: 'Everything below is up to date. If this '
+                                'keeps happening, please report it.',
+                          ),
+                        ),
+                      if (live.isEmpty)
+                        const QuietCard(
+                          icon: Icons.sensors_off_outlined,
+                          title: 'No live matches right now',
+                          message: 'Matches scored by your clubs appear here live for everyone.',
+                        )
+                      else ...[
+                        for (final f in live.take(_liveHomePreviewCap))
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 10),
+                            child: _LiveFixture(fixture: f),
+                          ),
+                        if (live.length > _liveHomePreviewCap)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 4),
+                            child: OutlinedButton.icon(
+                              onPressed: () => context.push(Routes.liveNow),
+                              icon: const Icon(Icons.sensors, size: 18),
+                              label: Text(
+                                'More · ${live.length - _liveHomePreviewCap} '
+                                'more live',
+                              ),
+                            ),
+                          ),
+                      ],
+
+                      // Below the live scores, never above them.
+                      //
+                      // The first thing on this screen has to be the person's
+                      // own sport. An advert that pushes a match somebody is
+                      // playing right now further down the page is not worth
+                      // whatever it earns — and the "More live" button ending
+                      // up below the fold because of a banner is exactly the
+                      // kind of harm that never shows up in ad revenue.
+                      //
+                      // Renders nothing at all for Premium members.
+                      const PromoBanner(
+                        slot: PromoSlot.home,
+                        margin: EdgeInsets.only(top: 4, bottom: 8),
+                      ),
+
+                      // Clubmates playing somewhere else — a member turning
+                      // out for a district side or a college team. Scoped by
+                      // who is on the team sheet rather than by whose
+                      // competition it is, which is the only way these ever
+                      // reach the people who know them.
+                      if (clubmateLive.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        const SectionHeader(
+                          icon: Icons.groups_2_outlined,
+                          title: 'Your clubmates, elsewhere',
+                          subtitle: 'Playing for other clubs and teams '
+                              'right now',
+                          trailing: LiveDot(),
+                        ),
+                        for (final f in clubmateLive)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 10),
+                            child: _LiveFixture(fixture: f),
+                          ),
+                      ],
+                      const SizedBox(height: 16),
+
+                      // --- PS-006 & PS-009: Primary Hero Action CTA ("Play Match Now") ---
+                      //
+                      // No side icon: it was a fixed cricket bat-and-ball
+                      // glyph shown to every sport's players regardless of
+                      // what they actually play — wrong far more often than
+                      // right, and a decoration, not information. The text
+                      // and the button carry the card on their own.
+                      Card(
+                        elevation: 0,
+                        color: theme.colorScheme.primaryContainer,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(18, 16, 14, 16),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'Play Match Now',
+                                      style: theme.textTheme.titleMedium?.copyWith(
+                                        fontWeight: FontWeight.w800,
+                                        color: theme.colorScheme.onPrimaryContainer,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      'Score a casual match or tournament game in seconds',
+                                      style: theme.textTheme.bodySmall?.copyWith(
+                                        color: theme.colorScheme.onPrimaryContainer
+                                            .withValues(alpha: 0.8),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              FilledButton.icon(
+                                onPressed: () {
+                                  final pId = ref.read(primaryOrgIdProvider);
+                                  if (pId != null) {
+                                    context.push(Routes.quickMatch(pId));
+                                  } else if (activeClubs.isNotEmpty) {
+                                    context.push(Routes.quickMatch(activeClubs.first.orgId));
+                                  } else {
+                                    context.push(Routes.orgs);
+                                  }
+                                },
+                                icon: const Icon(Icons.play_arrow, size: 18),
+                                label: const Text('Start'),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
 
                       _StatTiles(
                         clubs: activeClubs.length,
@@ -113,110 +289,8 @@ class HomeScreen extends ConsumerWidget {
                       ),
                       const SizedBox(height: 24),
 
-                      // --- What is waiting on this person ---------------------
-                      AsyncErrorStrip(
-                        value: scoringAsync,
-                        what: 'the matches you are scoring',
-                      ),
-                      AsyncErrorStrip(
-                        value: challengesAsync,
-                        what: 'challenges from other clubs',
-                      ),
-                      AsyncErrorStrip(
-                        value: approvalsAsync,
-                        what: 'join requests',
-                      ),
-                      AsyncErrorStrip(
-                        value: scoreAsksAsync,
-                        what: 'requests to score a match',
-                      ),
-                      if (scoring.isNotEmpty ||
-                          challenges.isNotEmpty ||
-                          approvals.isNotEmpty ||
-                          scoreAsks.isNotEmpty) ...[
-                        const _SectionHeader(
-                          icon: Icons.pending_actions_outlined,
-                          title: 'Waiting on you',
-                          subtitle: 'Nothing here moves until somebody acts',
-                        ),
-                        for (final f in scoring)
-                          _ActionCard(
-                            icon: Icons.sports_cricket_outlined,
-                            tone: _Tone.primary,
-                            title: f.isLive
-                                ? 'You are scoring ${f.entrantAName} v '
-                                    '${f.entrantBName}'
-                                : 'You are down to score ${f.entrantAName} v '
-                                    '${f.entrantBName}',
-                            subtitle: [
-                              if (f.roundLabel != null) f.roundLabel!,
-                              if (f.venue != null) f.venue!,
-                              if (f.scheduledAt != null)
-                                _friendlyDate(f.scheduledAt!),
-                            ].join(' · '),
-                            actionLabel: f.isLive ? 'Resume' : 'Open',
-                            onTap: () => context
-                                .push(Routes.scoring(f.orgId, f.compId, f.id)),
-                          ),
-                        for (final c in challenges)
-                          _ActionCard(
-                            icon: Icons.sports_kabaddi_outlined,
-                            tone: _Tone.tertiary,
-                            title: 'A club has challenged you',
-                            subtitle: '${c.fromOrgName} · '
-                                '${SportCatalog.byId(c.sportId).name}',
-                            actionLabel: 'Answer',
-                            onTap: () =>
-                                context.push(Routes.challenges(c.toOrgId)),
-                          ),
-                        // Above join requests on purpose: a match may be about
-                        // to start, and an unanswered request to score it means
-                        // a match nobody records. A join request can wait a day.
-                        for (final r in scoreAsks)
-                          _ScoringRequestCard(request: r),
-                        if (approvals.isNotEmpty)
-                          _ActionCard(
-                            icon: Icons.person_add_alt,
-                            tone: _Tone.tertiary,
-                            title: '${approvals.length} '
-                                '${approvals.length == 1 ? 'person is' : 'people are'}'
-                                ' waiting to join',
-                            subtitle: 'They cannot play or be picked until you '
-                                'approve them',
-                            actionLabel: 'Review',
-                            onTap: () => context
-                                .push(Routes.members(approvals.first.orgId)),
-                          ),
-                        const SizedBox(height: 20),
-                      ],
-
-                      // --- Live now -------------------------------------------
-                      _SectionHeader(
-                        icon: Icons.sensors,
-                        title: 'Live now',
-                        subtitle: 'Every match your clubs are playing, ball by '
-                            'ball',
-                        trailing: live.isEmpty ? null : const LiveDot(),
-                      ),
-                      AsyncErrorStrip(value: liveAsync, what: 'live matches'),
-                      if (live.isEmpty)
-                        const _QuietCard(
-                          icon: Icons.sensors_off_outlined,
-                          title: 'Nothing is being played right now',
-                          message: 'The moment a scorer starts a match it '
-                              'appears here — and anyone you send the link to '
-                              'can follow it without installing anything.',
-                        )
-                      else
-                        for (final f in live)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 10),
-                            child: _LiveFixture(fixture: f),
-                          ),
-                      const SizedBox(height: 24),
-
                       // --- The clubs they belong to ---------------------------
-                      _SectionHeader(
+                      SectionHeader(
                         icon: Icons.groups_2_outlined,
                         title: 'My clubs',
                         subtitle: 'Your record follows you across every one of '
@@ -235,17 +309,16 @@ class HomeScreen extends ConsumerWidget {
                       const SizedBox(height: 24),
 
                       // --- What is coming up ----------------------------------
-                      const _SectionHeader(
+                      const SectionHeader(
                         icon: Icons.emoji_events_outlined,
                         title: 'Events & tournaments',
-                        subtitle:
-                            'Open for entries, scheduled, or being played',
+                        subtitle: 'Open for entries, right now',
                       ),
                       AsyncErrorStrip(value: eventsAsync, what: 'events'),
-                      if (events.isEmpty)
-                        _QuietCard(
+                      if (openEvents.isEmpty)
+                        QuietCard(
                           icon: Icons.calendar_month_outlined,
-                          title: 'No events on right now',
+                          title: 'Nothing open for entries right now',
                           message: organizingOrgId == null
                               ? 'When your club opens entries for something, it '
                                   'shows up here.'
@@ -261,13 +334,40 @@ class HomeScreen extends ConsumerWidget {
                                   label: const Text('Create an event'),
                                 ),
                         )
-                      else
-                        for (final c in events.take(8))
-                          _EventCard(competition: c),
+                      else ...[
+                        for (final item in openFeed.take(_eventsHomePreviewCap))
+                          switch (item) {
+                            EventFeedSingle(:final competition) =>
+                              EventCard(competition: competition),
+                            EventFeedSeason(
+                              :final orgId,
+                              :final tournamentId,
+                              :final competitions
+                            ) =>
+                              SeasonCard(
+                                orgId: orgId,
+                                tournamentId: tournamentId,
+                                competitions: competitions,
+                              ),
+                          },
+                        if (openFeed.length > _eventsHomePreviewCap)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: OutlinedButton.icon(
+                              onPressed: () => context.push(Routes.myEvents),
+                              icon: const Icon(Icons.emoji_events_outlined,
+                                  size: 18),
+                              label: Text(
+                                'More · ${openFeed.length - _eventsHomePreviewCap} '
+                                'more open',
+                              ),
+                            ),
+                          ),
+                      ],
                       const SizedBox(height: 24),
 
                       // --- Everything else the product does -------------------
-                      const _SectionHeader(
+                      const SectionHeader(
                         icon: Icons.explore_outlined,
                         title: 'Explore',
                         subtitle: 'The rest of PlaySphere — also in the menu, '
@@ -297,33 +397,29 @@ class HomeScreen extends ConsumerWidget {
 // Header
 // ---------------------------------------------------------------------------
 
+/// The date and a one-line status — deliberately not a "Good evening, Name"
+/// salutation. That used to be the single largest thing on the dashboard
+/// (a headline-sized line plus a name that can run long) for a fact the
+/// member already knows: who they are. The date and what is live now are
+/// the two things actually worth the space.
 class _Greeting extends StatelessWidget {
   const _Greeting({
-    required this.name,
     required this.clubCount,
     required this.liveCount,
   });
 
-  final String? name;
   final int clubCount;
   final int liveCount;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final hour = DateTime.now().hour;
-    final part = hour < 12
-        ? 'Good morning'
-        : hour < 17
-            ? 'Good afternoon'
-            : 'Good evening';
-    final first = (name ?? '').split(' ').first;
 
     return Container(
-      padding: const EdgeInsets.fromLTRB(20, 20, 20, 22),
+      padding: const EdgeInsets.fromLTRB(18, 14, 18, 14),
       decoration: BoxDecoration(
         gradient: AppTheme.brandGradient,
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(14),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -335,15 +431,7 @@ class _Greeting extends StatelessWidget {
               letterSpacing: 0.4,
             ),
           ),
-          const SizedBox(height: 6),
-          Text(
-            first.isEmpty ? part : '$part, $first',
-            style: theme.textTheme.headlineSmall?.copyWith(
-              color: Colors.white,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 4),
           Text(
             clubCount == 0
                 ? 'Join a club with an invite code and everything you play '
@@ -355,6 +443,7 @@ class _Greeting extends StatelessWidget {
                         'record are all below.',
             style: theme.textTheme.bodyMedium?.copyWith(
               color: Colors.white.withValues(alpha: 0.92),
+              fontWeight: FontWeight.w600,
             ),
           ),
         ],
@@ -363,65 +452,6 @@ class _Greeting extends StatelessWidget {
   }
 }
 
-class _QuickActions extends ConsumerWidget {
-  const _QuickActions({required this.organizingOrgId});
-
-  final String? organizingOrgId;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    // Any club will do, not only one this person can organize in: a quick
-    // match needs no authority beyond membership, which is the whole point of
-    // it. `organizingOrgId` still exists for the event actions above.
-    final anyOrgId = ref.watch(primaryOrgIdProvider);
-
-    return Wrap(
-      spacing: 10,
-      runSpacing: 10,
-      children: [
-        if (anyOrgId != null)
-          ActionChip(
-            avatar: const Icon(Icons.sports_score, size: 18),
-            label: const Text('Play a match now'),
-            onPressed: () => context.push(Routes.quickMatch(anyOrgId)),
-          ),
-        ActionChip(
-          avatar: const Icon(Icons.vpn_key_outlined, size: 18),
-          label: const Text('Join a club'),
-          onPressed: () => context.push(Routes.joinOrg),
-        ),
-        ActionChip(
-          avatar: const Icon(Icons.add_business_outlined, size: 18),
-          label: const Text('Create a club'),
-          onPressed: () => context.push(Routes.createOrg),
-        ),
-        ActionChip(
-          avatar: const Icon(Icons.campaign_outlined, size: 18),
-          label: const Text('Looking for players'),
-          onPressed: () => context.push(Routes.lookingFor),
-        ),
-        ActionChip(
-          avatar: const Icon(Icons.menu_book_outlined, size: 18),
-          label: const Text('Rules'),
-          onPressed: () => context.push(Routes.rules),
-        ),
-        ActionChip(
-          avatar: const Icon(Icons.badge_outlined, size: 18),
-          label: const Text('My profile'),
-          onPressed: () => context.push(Routes.myProfile),
-        ),
-      ],
-    );
-  }
-}
-
-/// The counters under the greeting.
-///
-/// Each one is a door, not an ornament: a number that says "3 live" and does
-/// nothing when pressed reads as a broken button, and every one of these has
-/// an obvious page behind it. The two that are org-scoped are inert only when
-/// the person has no club for them to point at, in which case the number is
-/// zero anyway.
 class _StatTiles extends StatelessWidget {
   const _StatTiles({
     required this.clubs,
@@ -461,7 +491,10 @@ class _StatTiles extends StatelessWidget {
           value: '$live',
           label: 'Live now',
           highlight: live > 0,
-          onTap: orgId == null ? null : () => context.push(Routes.live(orgId)),
+          // Global, not the primary club's own live page: this counter is a
+          // sum across every club, so it must open the same cross-club list
+          // it is counting rather than just one of them.
+          onTap: () => context.push(Routes.liveNow),
         ),
         _Tile(
           icon: Icons.emoji_events_outlined,
@@ -469,17 +502,20 @@ class _StatTiles extends StatelessWidget {
           label: 'Events',
           onTap: orgId == null ? null : () => context.push(Routes.org(orgId)),
         ),
+        // Two counters, two destinations. Both of these pushed `/me` — so a
+        // tile reading "31 Matches" and a tile reading "4 Sports" opened the
+        // same profile page and neither showed what it had just counted.
         _Tile(
           icon: Icons.sports_score,
           value: '$matches',
           label: 'Matches',
-          onTap: () => context.push(Routes.myProfile),
+          onTap: () => context.push(Routes.myMatches),
         ),
         _Tile(
           icon: Icons.sports_handball_outlined,
           value: '$sports',
           label: sports == 1 ? 'Sport' : 'Sports',
-          onTap: () => context.push(Routes.myProfile),
+          onTap: () => context.push(Routes.mySports),
         ),
       ],
     );
@@ -559,222 +595,6 @@ class _Tile extends StatelessWidget {
 // Sections
 // ---------------------------------------------------------------------------
 
-class _SectionHeader extends StatelessWidget {
-  const _SectionHeader({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    this.trailing,
-  });
-
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final Widget? trailing;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          Icon(icon, size: 20, color: theme.colorScheme.primary),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title, style: theme.textTheme.titleMedium),
-                Text(
-                  subtitle,
-                  style: theme.textTheme.bodySmall,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ),
-          ),
-          if (trailing != null) trailing!,
-        ],
-      ),
-    );
-  }
-}
-
-enum _Tone { primary, tertiary }
-
-class _ActionCard extends StatelessWidget {
-  const _ActionCard({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.actionLabel,
-    required this.onTap,
-    required this.tone,
-  });
-
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final String actionLabel;
-  final VoidCallback onTap;
-  final _Tone tone;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final (bg, fg) = switch (tone) {
-      _Tone.primary => (scheme.primaryContainer, scheme.onPrimaryContainer),
-      _Tone.tertiary => (scheme.tertiaryContainer, scheme.onTertiaryContainer),
-    };
-
-    return Card(
-      margin: const EdgeInsets.only(bottom: 10),
-      color: bg,
-      child: ListTile(
-        leading: Icon(icon, color: fg),
-        title: Text(
-          title,
-          style: TextStyle(color: fg, fontWeight: FontWeight.w600),
-        ),
-        subtitle: subtitle.isEmpty
-            ? null
-            : Text(subtitle, style: TextStyle(color: fg)),
-        trailing: TextButton(onPressed: onTap, child: Text(actionLabel)),
-        onTap: onTap,
-      ),
-    );
-  }
-}
-
-/// "Ravi wants to score Blue House v Red House" — approve or not, from here.
-///
-/// Deliberately decided in place rather than behind a tap through to the
-/// match. The admin is often not at the ground and the match may be starting;
-/// making them navigate two screens to say yes is how a request goes
-/// unanswered until after the game.
-class _ScoringRequestCard extends ConsumerStatefulWidget {
-  const _ScoringRequestCard({required this.request});
-
-  final ScoringRequest request;
-
-  @override
-  ConsumerState<_ScoringRequestCard> createState() =>
-      _ScoringRequestCardState();
-}
-
-class _ScoringRequestCardState extends ConsumerState<_ScoringRequestCard> {
-  bool _busy = false;
-
-  Future<void> _decide({required bool approve}) async {
-    final me = ref.read(currentUidProvider);
-    if (me == null || _busy) return;
-    setState(() => _busy = true);
-    try {
-      final repo = ref.read(competitionRepositoryProvider);
-      if (approve) {
-        await repo.approveScoringRequest(
-          request: widget.request,
-          decidedByUid: me,
-        );
-      } else {
-        await repo.declineScoringRequest(
-          request: widget.request,
-          decidedByUid: me,
-        );
-      }
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              approve
-                  ? '${widget.request.displayName} can now score this match.'
-                  : 'Request declined.',
-            ),
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) showError(context, e);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final r = widget.request;
-
-    return Card(
-      margin: const EdgeInsets.only(bottom: 10),
-      color: scheme.primaryContainer,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 12, 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.sports_outlined, color: scheme.onPrimaryContainer),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        '${r.displayName} wants to score',
-                        style: TextStyle(
-                          color: scheme.onPrimaryContainer,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      Text(
-                        r.matchLabel.isEmpty ? 'a match' : r.matchLabel,
-                        style: TextStyle(color: scheme.onPrimaryContainer),
-                      ),
-                      if (r.note != null && r.note!.isNotEmpty)
-                        Text(
-                          '“${r.note}”',
-                          style: TextStyle(
-                            color: scheme.onPrimaryContainer,
-                            fontStyle: FontStyle.italic,
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            // Wrap, not Row: "Let them score" is a long label next to a
-            // second button on a 420px screen, and it has to survive both a
-            // narrow phone and a reader who has turned their font size up.
-            // It stacks rather than overflowing.
-            Wrap(
-              alignment: WrapAlignment.end,
-              spacing: 8,
-              runSpacing: 4,
-              children: [
-                TextButton(
-                  onPressed: _busy ? null : () => _decide(approve: false),
-                  child: const Text('Not now'),
-                ),
-                FilledButton(
-                  onPressed: _busy ? null : () => _decide(approve: true),
-                  child: Text(_busy ? 'Working…' : 'Let them score'),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 /// A live match with the club it belongs to named above it.
 ///
 /// The club name is the part the shared org-scoped screens can leave out and
@@ -830,8 +650,10 @@ class _ClubCard extends ConsumerWidget {
 
     final running =
         comps.where((c) => c.status == CompetitionStatus.inProgress).length;
+    // Derived status, so an event whose deadline has passed stops being
+    // counted as open for entries the moment it passes (Bug #6).
     final open = comps
-        .where((c) => c.status == CompetitionStatus.registrationOpen)
+        .where((c) => c.displayStatus() == CompetitionStatus.registrationOpen)
         .length;
 
     final where = [
@@ -985,8 +807,12 @@ class _Pill extends StatelessWidget {
   }
 }
 
-class _EventCard extends ConsumerWidget {
-  const _EventCard({required this.competition});
+/// An event or tournament card: sport, category, entry count and status.
+///
+/// Public — [MyEventsScreen] reuses it verbatim for the full cross-club list
+/// the home screen's "More" button opens, so the two never drift apart.
+class EventCard extends ConsumerWidget {
+  const EventCard({super.key, required this.competition});
 
   final Competition competition;
 
@@ -1013,13 +839,13 @@ class _EventCard extends ConsumerWidget {
             c.sportName,
             c.category.label,
             '${c.entrantCount} entered',
-            if (c.startDate != null) _friendlyDate(c.startDate!),
+            if (c.startDate != null) friendlyDate(c.startDate!),
           ].join(' · '),
           maxLines: 2,
           overflow: TextOverflow.ellipsis,
         ),
         isThreeLine: true,
-        trailing: _StatusChip(status: c.status),
+        trailing: _StatusChip(status: c.displayStatus()),
         onTap: () => context.push(Routes.competition(c.orgId, c.id)),
       ),
     );
@@ -1068,7 +894,7 @@ class _NoClubsCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return _QuietCard(
+    return QuietCard(
       icon: Icons.groups_outlined,
       title: 'You are not in a club yet',
       message: 'Join your school, college, village or community with the '
@@ -1096,51 +922,6 @@ class _NoClubsCard extends StatelessWidget {
 }
 
 /// A "nothing here yet" card that still says what would put something here.
-class _QuietCard extends StatelessWidget {
-  const _QuietCard({
-    required this.icon,
-    required this.title,
-    required this.message,
-    this.action,
-  });
-
-  final IconData icon;
-  final String title;
-  final String message;
-  final Widget? action;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: Padding(
-        padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(icon, color: theme.hintColor),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(title, style: theme.textTheme.titleSmall),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Text(message, style: theme.textTheme.bodySmall),
-            if (action != null) ...[
-              const SizedBox(height: 14),
-              action!,
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 /// The modules that are not on the bar: what they are, and where they go.
 class _ExploreGrid extends StatelessWidget {
   const _ExploreGrid({
@@ -1186,12 +967,12 @@ class _ExploreGrid extends StatelessWidget {
           body: 'Register as an umpire or scorer, or find one',
           onTap: () => context.push(Routes.umpireRegistry),
         ),
-        _ExploreTile(
-          icon: Icons.menu_book_outlined,
-          title: 'Rules library',
-          body: 'ICC, FIFA, FIBA, BWF, PKL and more, searchable',
-          onTap: () => context.push(Routes.rules),
-        ),
+        // Rules library is deliberately NOT here (Bug #7). It is reference
+        // material somebody consults once a season, not something a home
+        // screen should spend a tile on. It lives in the module menu behind
+        // the three lines, which is where the entry already was — this tile
+        // was a duplicate of it competing for the most valuable space in the
+        // app.
         if (primaryOrgId != null)
           _ExploreTile(
             icon: Icons.sports_kabaddi_outlined,
@@ -1263,17 +1044,3 @@ class _ExploreTile extends StatelessWidget {
 
 /// "Today", "Tomorrow", or a date — a scorer reading a fixture list at a
 /// ground cares which of those it is far more than the calendar date.
-String _friendlyDate(DateTime when) {
-  final now = DateTime.now();
-  final day = DateTime(when.year, when.month, when.day);
-  final today = DateTime(now.year, now.month, now.day);
-  final delta = day.difference(today).inDays;
-
-  final time = DateFormat.jm().format(when);
-  return switch (delta) {
-    0 => 'Today, $time',
-    1 => 'Tomorrow, $time',
-    -1 => 'Yesterday, $time',
-    _ => DateFormat('d MMM').format(when),
-  };
-}

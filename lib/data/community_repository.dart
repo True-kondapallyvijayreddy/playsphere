@@ -10,6 +10,7 @@ import '../core/models/firestore_codec.dart';
 import '../core/models/fixture.dart';
 import '../core/models/looking_for_post.dart';
 import '../core/models/sub_group.dart';
+import '../core/models/tournament.dart';
 import '../domain/scoring/scoring_registry.dart';
 
 /// Central repository for Module A — Clubs & Communities core OS features.
@@ -162,13 +163,30 @@ class CommunityRepository {
   /// an inter-club friendly with no code that knows it is one.
   ///
   /// Returns the created competition so the caller can navigate straight to it.
+  /// Accepts a challenge, creating one competition and one fixture per leg.
+  ///
+  /// ## Why this returns the FIRST competition and not the only one
+  ///
+  /// A challenge used to be one sport, so accepting it produced one match and
+  /// the caller navigated to it. A multi-sport challenge produces several —
+  /// table tennis singles, badminton doubles, a cricket match — and they are
+  /// one afternoon between two clubs, not three unrelated events that happen
+  /// to share a date.
+  ///
+  /// So when there is more than one leg they are grouped under a tournament,
+  /// exactly as a season groups its sports, and `createdTournamentId` on the
+  /// challenge points at it. The first competition is still returned because
+  /// that is what a single-sport accept means and it keeps every existing
+  /// caller correct; multi-sport callers should navigate to the tournament.
+  ///
+  /// One batch for all of it. A partial accept — two of three matches created,
+  /// the challenge left `pending` — would leave both clubs looking at
+  /// different truths about what they had agreed to play.
   Future<Competition> acceptChallenge({
     required Challenge challenge,
     required DateTime selectedSlot,
     required String acceptedByUid,
   }) async {
-    final sport = SportCatalog.byId(challenge.sportId);
-
     // The club that accepted hosts; the club that issued the challenge is the
     // visitor. Side A is the challenger, which keeps "A v B" reading the same
     // way the challenge itself was worded.
@@ -176,66 +194,115 @@ class CommunityRepository {
     final guestOrgId = challenge.fromOrgId;
     final participants = [guestOrgId, hostOrgId];
 
-    final compRef = Refs.competitions(hostOrgId).doc();
-    final competition = Competition(
-      id: compRef.id,
-      orgId: hostOrgId,
-      name: '${challenge.fromOrgName} v ${challenge.toOrgName}',
-      sportId: challenge.sportId,
-      sportName: sport.name,
-      archetype: sport.archetype,
-      entrantType: sport.defaultEntrantType,
-      // A single agreed match is a one-round knockout. Reusing the existing
-      // format keeps the fixture on the same advancement and finalize paths as
-      // every other match rather than inventing a parallel one.
-      format: CompetitionFormat.knockout,
-      status: CompetitionStatus.scheduled,
-      category: const CompetitionCategory(label: 'Open'),
-      scoringPluginKey: sport.pluginKey,
-      venue: challenge.venue,
-      startDate: selectedSlot,
-      maxEntrants: 2,
-      entrantCount: 2,
-      fixtureCount: 1,
-      participantOrgIds: participants,
-      createdBy: acceptedByUid,
-    );
-
-    final fixRef = Refs.fixtures(hostOrgId, compRef.id).doc();
-    final fixture = Fixture(
-      id: fixRef.id,
-      orgId: hostOrgId,
-      compId: compRef.id,
-      entrantAId: guestOrgId,
-      entrantBId: hostOrgId,
-      entrantAName: challenge.fromOrgName,
-      entrantBName: challenge.toOrgName,
-      status: FixtureStatus.scheduled,
-      scheduledAt: selectedSlot,
-      venue: challenge.venue,
-      // The accepting admin can score immediately, so an agreed match is never
-      // blocked on a second assignment step. Either club can add more scorers
-      // afterwards from the match list.
-      scorerUids: [acceptedByUid],
-      participantOrgIds: participants,
-      scoringPluginKey: sport.pluginKey,
-      sportId: challenge.sportId,
-      scoringConfig: sport.config,
-    );
-
+    final legs = challenge.resolvedLegs((id) => SportCatalog.byId(id).name);
     final batch = _firestore.batch();
-    batch.set(compRef, competition.toCreate());
-    batch.set(fixRef, fixture.toCreate());
+
+    // Only a multi-leg challenge gets a container. A single match under a
+    // tournament of one is a layer of navigation for nothing.
+    String? tournamentId;
+    if (legs.length > 1) {
+      final tRef = Refs.tournaments(hostOrgId).doc();
+      tournamentId = tRef.id;
+      batch.set(tRef, {
+        'orgId': hostOrgId,
+        'name': '${challenge.fromOrgName} v ${challenge.toOrgName}',
+        'status': TournamentStatus.scheduled.wire,
+        'startDate': Fs.ts(selectedSlot),
+        'endDate': Fs.ts(selectedSlot),
+        'eventCount': legs.length,
+        'createdBy': acceptedByUid,
+        'participantOrgIds': participants,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    }
+
+    Competition? first;
+    String? firstFixtureId;
+
+    for (final leg in legs) {
+      final sport = SportCatalog.byId(leg.sportId);
+      // The arrangement the two clubs agreed — singles, doubles, 8-a-side —
+      // layered over the sport's preset. This is what makes a doubles leg
+      // actually scored as doubles rather than as singles with four names on
+      // the sheet.
+      final format = SideFormats.forSport(leg.sportId)
+          .where((f) => f.id == leg.sideFormatId)
+          .firstOrNull;
+      final config = format == null
+          ? sport.config
+          : {...sport.config, ...format.configOverrides};
+
+      final compRef = Refs.competitions(hostOrgId).doc();
+      final competition = Competition(
+        id: compRef.id,
+        orgId: hostOrgId,
+        // Named for the leg when there are several, so a list of three does
+        // not read as the same event three times.
+        name: legs.length == 1
+            ? '${challenge.fromOrgName} v ${challenge.toOrgName}'
+            : '${challenge.fromOrgName} v ${challenge.toOrgName} — ${leg.label}',
+        sportId: leg.sportId,
+        sportName: sport.name,
+        archetype: sport.archetype,
+        entrantType: sport.defaultEntrantType,
+        // A single agreed match is a one-round knockout. Reusing the existing
+        // format keeps the fixture on the same advancement and finalize paths
+        // as every other match rather than inventing a parallel one.
+        format: CompetitionFormat.knockout,
+        status: CompetitionStatus.scheduled,
+        category: const CompetitionCategory(label: 'Open'),
+        scoringPluginKey: sport.pluginKey,
+        venue: challenge.venue,
+        startDate: selectedSlot,
+        maxEntrants: 2,
+        entrantCount: 2,
+        fixtureCount: 1,
+        tournamentId: tournamentId,
+        scoringConfig: format?.configOverrides ?? const {},
+        participantOrgIds: participants,
+        createdBy: acceptedByUid,
+      );
+
+      final fixRef = Refs.fixtures(hostOrgId, compRef.id).doc();
+      final fixture = Fixture(
+        id: fixRef.id,
+        orgId: hostOrgId,
+        compId: compRef.id,
+        entrantAId: guestOrgId,
+        entrantBId: hostOrgId,
+        entrantAName: challenge.fromOrgName,
+        entrantBName: challenge.toOrgName,
+        status: FixtureStatus.scheduled,
+        scheduledAt: selectedSlot,
+        venue: challenge.venue,
+        // The accepting admin can score immediately, so an agreed match is
+        // never blocked on a second assignment step. Either club can add more
+        // scorers afterwards from the match list.
+        scorerUids: [acceptedByUid],
+        participantOrgIds: participants,
+        scoringPluginKey: sport.pluginKey,
+        sportId: leg.sportId,
+        scoringConfig: config,
+      );
+
+      batch.set(compRef, competition.toCreate());
+      batch.set(fixRef, fixture.toCreate());
+
+      first ??= competition;
+      firstFixtureId ??= fixRef.id;
+    }
+
     batch.update(Refs.challenge(challenge.id), {
       'status': 'accepted',
-      'createdFixtureId': fixRef.id,
-      'createdCompId': compRef.id,
+      'createdFixtureId': firstFixtureId,
+      'createdCompId': first!.id,
       'hostOrgId': hostOrgId,
+      'createdTournamentId': tournamentId,
       'agreedSlot': Fs.ts(selectedSlot),
     });
 
     await batch.commit();
-    return competition;
+    return first;
   }
 
   /// Declines a challenge. Recorded rather than deleted so a club cannot

@@ -95,6 +95,86 @@ function roundFor({
 }
 
 /**
+ * The finish a FINAL TABLE POSITION is worth.
+ *
+ * A league has no bracket depth to measure against, and measuring one anyway
+ * is how every entrant in a round robin came out a semi-finalist: everybody
+ * plays every round, so "the deepest round I reached" is the last round for
+ * all of them and `deepestRound - lastRound` is zero for the champion and the
+ * bottom of the table alike. A ten-player league paid 36 × grade to the player
+ * who lost every match.
+ *
+ * A table is ranked, so the honest translation is position → the round a
+ * knockout of the same field would have put you out in. First is the winner,
+ * second the runner-up, third and fourth are the semi-finalists, and so on by
+ * doubling. That keeps a league and a bracket of the same size worth the same,
+ * which is the property the whole scheme depends on.
+ */
+function roundForPosition(position) {
+  if (position <= 1) return 'winner';
+  if (position === 2) return 'runner_up';
+  if (position <= 4) return 'semi_final';
+  if (position <= 8) return 'quarter_final';
+  if (position <= 16) return 'last_16';
+  if (position <= 32) return 'last_32';
+  return 'participated';
+}
+
+/**
+ * Orders a table format's entrants.
+ *
+ * Deliberately simple — wins, then fewest losses, then name — and deliberately
+ * NOT the full `StandingsCalculator` chain the app shows on screen. This has to
+ * produce the same answer as `RankingPoints` in Dart, and the tiebreak chain
+ * needs per-sport configuration and decoded score states that this trigger does
+ * not have. Points are what a ranking list is for; separating two entrants who
+ * finished on identical records matters far less than both of them being
+ * ranked above the player who lost everything, which is what was actually
+ * broken. Change this and `ranking_points.dart` together.
+ */
+function tablePositions(decided, names) {
+  const wins = new Map();
+  const losses = new Map();
+  for (const id of names.keys()) {
+    wins.set(id, 0);
+    losses.set(id, 0);
+  }
+  for (const f of decided) {
+    const winner = f.winnerEntrantId;
+    if (!wins.has(winner)) continue;
+    wins.set(winner, wins.get(winner) + 1);
+    const loser = winner === f.entrantAId ? f.entrantBId : f.entrantAId;
+    if (losses.has(loser)) losses.set(loser, losses.get(loser) + 1);
+  }
+
+  const ordered = [...names.keys()].sort((a, b) => {
+    const byWins = wins.get(b) - wins.get(a);
+    if (byWins !== 0) return byWins;
+    const byLosses = losses.get(a) - losses.get(b);
+    if (byLosses !== 0) return byLosses;
+    return nameOf(names, a).localeCompare(nameOf(names, b));
+  });
+
+  const position = new Map();
+  ordered.forEach((id, index) => position.set(id, index + 1));
+  return position;
+}
+
+/**
+ * An entrant's display name, never undefined.
+ *
+ * A fixture written before a name was denormalized onto it — or one whose
+ * entrant slot was filled by advancement that only wrote the id — leaves this
+ * absent, and `undefined.localeCompare` threw inside the sort below. That
+ * aborted `onTournamentCompleted` part-way, after some ranking batches had
+ * already committed, leaving a tournament half-settled.
+ */
+function nameOf(names, id) {
+  const n = names.get(id);
+  return typeof n === 'string' && n.length > 0 ? n : id;
+}
+
+/**
  * Works out what everyone in one event earned.
  *
  * [fixtures] must be every fixture of the event; [format] and [grade] its
@@ -137,19 +217,27 @@ export function awardsFor({ format, grade, fixtures }) {
       : decider.entrantAId
     : null;
 
+  // A format settled by a table is scored by where you finished in it; one
+  // settled by a deciding match is scored by how far out you were beaten.
+  const positions = TABLE_FORMATS.has(format)
+    ? tablePositions(decided, names)
+    : null;
+
   const awards = [];
-  for (const [entrantId, displayName] of names) {
-    const round = roundFor({
-      entrantId,
-      champion,
-      finalist,
-      lastRound: lastRound.get(entrantId) ?? 0,
-      deepestRound,
-      wonAnything: everWon.has(entrantId),
-    });
+  for (const entrantId of names.keys()) {
+    const round = positions
+      ? roundForPosition(positions.get(entrantId) ?? names.size)
+      : roundFor({
+          entrantId,
+          champion,
+          finalist,
+          lastRound: lastRound.get(entrantId) ?? 0,
+          deepestRound,
+          wonAnything: everWon.has(entrantId),
+        });
     awards.push({
       entrantId,
-      displayName,
+      displayName: nameOf(names, entrantId),
       round,
       points: pointsFor(grade, round),
     });

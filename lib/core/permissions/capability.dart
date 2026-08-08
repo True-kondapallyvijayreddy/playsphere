@@ -94,9 +94,17 @@ class PermissionMatrix {
   /// stops an admin quietly promoting themselves to owner.
   static List<MembershipRole> assignableBy(MembershipRole actorRole) {
     if (actorRole == MembershipRole.owner) {
-      return MembershipRole.values
-          .where((r) => r != MembershipRole.owner)
-          .toList();
+      // Owners may appoint OTHER owners, and this is the line that makes that
+      // true. It used to exclude `owner` from the list, which meant the person
+      // who created a club held every governance power in it permanently and
+      // the only way out was to abandon the club and lose its history.
+      //
+      // Appointing is unilateral; removing is not. See `OwnerVote` — an owner
+      // can bring somebody in on their own authority, but getting one out
+      // takes two thirds of the others. That asymmetry is deliberate: sharing
+      // power should be easy and taking it back should be hard, which is the
+      // opposite of what a symmetric rule would give.
+      return MembershipRole.values.toList();
     }
     if (!can(actorRole, Capability.manageMembers)) return const [];
     return MembershipRole.values

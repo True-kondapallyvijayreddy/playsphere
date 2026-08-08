@@ -1134,6 +1134,178 @@ describe('inter-club challenges', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Cross-club tournament invitations.
+//
+// Same two-tenant shape as a challenge, and the properties that matter are the
+// same: only the HOST's organizers may invite in the host's name, only the
+// INVITED club may answer, and neither club may impersonate the other's half
+// of the exchange.
+// ---------------------------------------------------------------------------
+describe('cross-club tournament invitations', () => {
+  const HOST_ORG = 'org_invite_host';
+  const GUEST_ORG = 'org_invite_guest';
+
+  const inviteDoc = (overrides = {}) => ({
+    tournamentId: 'tour_1',
+    tournamentName: 'District Championship',
+    fromOrgId: HOST_ORG,
+    fromOrgName: 'Host Club',
+    toOrgId: GUEST_ORG,
+    toOrgName: 'Guest Club',
+    status: 'pending',
+    message: null,
+    startDate: null,
+    endDate: null,
+    invitedBy: OWNER,
+    createdAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', HOST_ORG), organization(OWNER, 'public'));
+      await setDoc(doc(db, 'orgs', GUEST_ORG), organization(ADMIN, 'public'));
+      await setDoc(
+        doc(db, 'orgs', HOST_ORG, 'members', OWNER),
+        membership(OWNER, HOST_ORG, 'owner'),
+      );
+      await setDoc(
+        doc(db, 'orgs', GUEST_ORG, 'members', ADMIN),
+        membership(ADMIN, GUEST_ORG, 'admin'),
+      );
+      await setDoc(
+        doc(db, 'orgs', HOST_ORG, 'members', OUTSIDER),
+        membership(OUTSIDER, HOST_ORG, 'member'),
+      );
+    });
+  });
+
+  it('lets an organizer of the host club invite another club', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      setDoc(doc(db, 'tournamentInvites', 'inv1'), inviteDoc()),
+    );
+  });
+
+  it('refuses a plain member of the host club inviting in its name', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'tournamentInvites', 'inv1'),
+        inviteDoc({ invitedBy: OUTSIDER }),
+      ),
+    );
+  });
+
+  it('refuses a stranger inviting on a club\'s behalf', async () => {
+    const db = testEnv.authenticatedContext(SCORER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'tournamentInvites', 'inv1'),
+        inviteDoc({ invitedBy: SCORER }),
+      ),
+    );
+  });
+
+  it('refuses an invitation that claims to be from somebody else', async () => {
+    // `invitedBy` must be the caller. Without it the audit trail on who
+    // committed the club to inviting eleven schools is whatever was typed.
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'tournamentInvites', 'inv1'),
+        inviteDoc({ invitedBy: ADMIN }),
+      ),
+    );
+  });
+
+  it('refuses a club inviting itself', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'tournamentInvites', 'inv1'),
+        inviteDoc({ toOrgId: HOST_ORG, toOrgName: 'Host Club' }),
+      ),
+    );
+  });
+
+  it('lets an organizer of the invited club accept', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'tournamentInvites', 'inv1'), inviteDoc());
+    });
+    const db = testEnv.authenticatedContext(ADMIN).firestore();
+    await assertSucceeds(
+      updateDoc(doc(db, 'tournamentInvites', 'inv1'), { status: 'accepted' }),
+    );
+  });
+
+  it('refuses the HOST answering on the invited club\'s behalf', async () => {
+    // The whole value of the feature is that the host can read back a real
+    // answer. A host that can write 'accepted' itself is reading its own echo.
+    await seed(async (db) => {
+      await setDoc(doc(db, 'tournamentInvites', 'inv1'), inviteDoc());
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'tournamentInvites', 'inv1'), { status: 'accepted' }),
+    );
+  });
+
+  it('lets the host withdraw an unanswered invitation', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'tournamentInvites', 'inv1'), inviteDoc());
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      updateDoc(doc(db, 'tournamentInvites', 'inv1'), { status: 'withdrawn' }),
+    );
+  });
+
+  it('refuses withdrawing an invitation the club already accepted', async () => {
+    // They have put the date in their calendar on the strength of it.
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'tournamentInvites', 'inv1'),
+        inviteDoc({ status: 'accepted' }),
+      );
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'tournamentInvites', 'inv1'), { status: 'withdrawn' }),
+    );
+  });
+
+  it('refuses re-pointing an invitation at a different tournament', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'tournamentInvites', 'inv1'), inviteDoc());
+    });
+    const db = testEnv.authenticatedContext(ADMIN).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'tournamentInvites', 'inv1'), {
+        status: 'accepted',
+        tournamentId: 'tour_2',
+      }),
+    );
+  });
+
+  it('refuses a stranger reading two clubs\' invitation', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'tournamentInvites', 'inv1'), inviteDoc());
+    });
+    const db = testEnv.authenticatedContext(SCORER).firestore();
+    await assertFails(getDoc(doc(db, 'tournamentInvites', 'inv1')));
+  });
+
+  it('lets the invited club read the invitation addressed to it', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'tournamentInvites', 'inv1'), inviteDoc());
+    });
+    const db = testEnv.authenticatedContext(ADMIN).firestore();
+    await assertSucceeds(getDoc(doc(db, 'tournamentInvites', 'inv1')));
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Scoring requests — "let me score this one", and who may grant it.
 //
 // The security property that matters: a request must never be able to grant
@@ -2069,6 +2241,65 @@ describe('memories collection-group query', () => {
       ),
     );
   });
+
+  // -------------------------------------------------------------------------
+  // The SEASON MEMORY BOOK reads the same collection group again, constrained
+  // by (orgId, tournamentId) rather than (orgId) alone or (taggedUids,
+  // audience). It needs no rule of its own: `tournamentId` is not referenced
+  // anywhere in the rule, so it costs nothing to filter on, and `orgId` being
+  // pinned is exactly what the existing club-gallery branch already checks.
+  // -------------------------------------------------------------------------
+  const seasonMemoryBook = (db, orgId, tournamentId) =>
+    getDocs(
+      query(
+        collectionGroup(db, 'memories'),
+        where('orgId', '==', orgId),
+        where('tournamentId', '==', tournamentId),
+        orderBy('createdAt', 'desc'),
+        limit(200),
+      ),
+    );
+
+  it('lets a member open their UNLISTED club\'s season memory book', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'orgs', PRIVATE_ORG, 'competitions', COMP, 'fixtures', 'fx_priv', 'memories', 'm2'),
+        memoryDoc(PRIVATE_ORG, 'fx_priv', PRIVATE_ORG, { tournamentId: 't1' }),
+      );
+    });
+    const db = testEnv.authenticatedContext(ADMIN).firestore();
+    const snap = await assertSucceeds(seasonMemoryBook(db, PRIVATE_ORG, 't1'));
+    assert.equal(snap.size, 1);
+  });
+
+  it('a season book only shows its own season, not a sibling one', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'orgs', PRIVATE_ORG, 'competitions', COMP, 'fixtures', 'fx_priv', 'memories', 'm2'),
+        memoryDoc(PRIVATE_ORG, 'fx_priv', PRIVATE_ORG, { tournamentId: 't1' }),
+      );
+    });
+    const db = testEnv.authenticatedContext(ADMIN).firestore();
+    const snap = await assertSucceeds(seasonMemoryBook(db, PRIVATE_ORG, 't_other'));
+    assert.equal(snap.size, 0);
+  });
+
+  it('refuses an outsider opening an UNLISTED club\'s season memory book', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(seasonMemoryBook(db, PRIVATE_ORG, 't1'));
+  });
+
+  it('lets anyone open a PUBLIC club\'s season memory book', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP, 'fixtures', 'fx_pub', 'memories', 'm1'),
+        memoryDoc(PUBLIC_ORG, 'fx_pub', 'public', { tournamentId: 't1' }),
+      );
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    const snap = await assertSucceeds(seasonMemoryBook(db, PUBLIC_ORG, 't1'));
+    assert.equal(snap.size, 1);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2696,6 +2927,102 @@ describe('participation: hybrid and approval', () => {
         registration(PLAYER, 'confirmed', { preselected: true }),
       ),
     );
+  });
+});
+
+// `OUTSIDER` (declared above, ~line 45) is never added as a member of
+// `PUBLIC_ORG` by `seedEvent` — exactly the person `openToNonMembers` is
+// meant to let in. These tests are the write-path half of that toggle: the
+// discovery board already let this person find the event, this is where
+// they try to actually take a place in it.
+describe('participation: openToNonMembers lets an outsider register', () => {
+  it('refuses a stranger when the toggle is off', async () => {
+    await seedEvent({
+      participationModel: 'approval',
+      openToNonMembers: false,
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(regRef(db, OUTSIDER), registration(OUTSIDER, 'pending')),
+    );
+  });
+
+  it('accepts a stranger as a pending application once the toggle is on', async () => {
+    // `openToNonMembers` forces `participationModel: 'approval'` on the Dart
+    // side (see `CreateSeasonScreen`) — a non-member's entry is always a
+    // request for a human to confirm, never a self-confirm.
+    await seedEvent({
+      participationModel: 'approval',
+      openToNonMembers: true,
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertSucceeds(
+      setDoc(regRef(db, OUTSIDER), registration(OUTSIDER, 'pending')),
+    );
+  });
+
+  it('still refuses a stranger self-confirming, toggle or not', async () => {
+    await seedEvent({
+      participationModel: 'approval',
+      openToNonMembers: true,
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(regRef(db, OUTSIDER), registration(OUTSIDER, 'confirmed')),
+    );
+  });
+
+  it('lets a stranger self-confirm into a genuinely open, non-member event, and moves the counter', async () => {
+    // Not every `openToNonMembers` event is approval-gated — a standalone
+    // competition (`CreateCompetitionScreen`) lets an organizer pick 'open'
+    // participation independently of the toggle. Both halves of the paired
+    // write — the registration doc AND the competition's confirmedCount —
+    // have to clear the rules for the same outsider in the same commit.
+    await seedEvent({
+      participationModel: 'open',
+      openToNonMembers: true,
+      confirmedCount: 0,
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+
+    const batch = writeBatch(db);
+    batch.set(regRef(db, OUTSIDER), registration(OUTSIDER, 'confirmed'));
+    batch.update(compRef(db), { confirmedCount: 1 });
+    await assertSucceeds(batch.commit());
+  });
+
+  it('refuses the same open+non-member self-confirmation once the toggle is off', async () => {
+    await seedEvent({
+      participationModel: 'open',
+      openToNonMembers: false,
+      confirmedCount: 0,
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+
+    const batch = writeBatch(db);
+    batch.set(regRef(db, OUTSIDER), registration(OUTSIDER, 'confirmed'));
+    batch.update(compRef(db), { confirmedCount: 1 });
+    await assertFails(batch.commit());
+  });
+
+  it('lets a stranger withdraw their own entry and frees the slot they held', async () => {
+    await seedEvent({
+      participationModel: 'open',
+      openToNonMembers: true,
+      confirmedCount: 1,
+    });
+    await seed(async (db) => {
+      await setDoc(
+        regRef(db, OUTSIDER),
+        registration(OUTSIDER, 'confirmed'),
+      );
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+
+    const batch = writeBatch(db);
+    batch.update(regRef(db, OUTSIDER), { status: 'withdrawn' });
+    batch.update(compRef(db), { confirmedCount: 0 });
+    await assertSucceeds(batch.commit());
   });
 });
 
@@ -3999,6 +4326,121 @@ describe('tournaments', () => {
   });
 });
 
+describe('tournaments: officiating panel', () => {
+  const UMPIRE = 'uid_umpire';
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER),
+        membership(OWNER, PUBLIC_ORG, 'owner'),
+      );
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', PLAYER),
+        membership(PLAYER, PUBLIC_ORG, 'member'),
+      );
+    });
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(
+        doc(ctx.firestore(), `orgs/${PUBLIC_ORG}/tournaments/t1`),
+        {
+          orgId: PUBLIC_ORG,
+          name: 'Hyderabad District Championship',
+          status: 'draft',
+          eventCount: 0,
+          createdBy: OWNER,
+          createdAt: serverTimestamp(),
+        },
+      );
+    });
+  });
+
+  const official = (overrides = {}) => ({
+    name: 'Ravi Kumar',
+    role: 'main_umpire',
+    sports: ['cricket'],
+    clubId: null,
+    scoringRightsGranted: true,
+    addedBy: OWNER,
+    addedAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  const officialRef = (db, uid = UMPIRE) =>
+    doc(db, 'orgs', PUBLIC_ORG, 'tournaments', 't1', 'officials', uid);
+
+  it('an organizer adds someone to the panel ahead of the tournament', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(setDoc(officialRef(db), official()));
+  });
+
+  it('refuses an ordinary member adding someone to the panel', async () => {
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(setDoc(officialRef(db), official()));
+  });
+
+  it('refuses an outsider entirely', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(setDoc(officialRef(db), official()));
+  });
+
+  it('refuses a write that credits someone else for adding them', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      setDoc(officialRef(db), official({ addedBy: PLAYER })),
+    );
+  });
+
+  it('lets the organizer revoke scoring rights without removing them from the panel', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(
+        doc(ctx.firestore(), `orgs/${PUBLIC_ORG}/tournaments/t1/officials/${UMPIRE}`),
+        official(),
+      );
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      updateDoc(officialRef(db), { scoringRightsGranted: false }),
+    );
+  });
+
+  it('refuses backdating who added an existing panel member', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(
+        doc(ctx.firestore(), `orgs/${PUBLIC_ORG}/tournaments/t1/officials/${UMPIRE}`),
+        official(),
+      );
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      updateDoc(officialRef(db), { addedBy: PLAYER }),
+    );
+  });
+
+  it('an organizer removes someone from the panel', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(
+        doc(ctx.firestore(), `orgs/${PUBLIC_ORG}/tournaments/t1/officials/${UMPIRE}`),
+        official(),
+      );
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(deleteDoc(officialRef(db)));
+  });
+
+  it('any org member can read the panel', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(
+        doc(ctx.firestore(), `orgs/${PUBLIC_ORG}/tournaments/t1/officials/${UMPIRE}`),
+        official(),
+      );
+    });
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertSucceeds(getDoc(officialRef(db)));
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Ranking points
 // ---------------------------------------------------------------------------
@@ -4192,5 +4634,654 @@ describe('disputes', () => {
     });
     const db = testEnv.authenticatedContext(OWNER).firestore();
     await assertFails(deleteDoc(doc(db, path, 'd8')));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Raising a protest: the fixture flag that goes with it
+// ---------------------------------------------------------------------------
+//
+// The protest DOCUMENT rules above were correct all along, and passing. What
+// nothing exercised was the write the app actually makes:
+// `CompetitionRepository.raiseDispute` commits the protest and the fixture's
+// `status: 'disputed'` flag in ONE batch, because a bracket, a points table
+// and a spectator card all read that flag from the document they already hold.
+//
+// No fixture-update branch admitted that second write for anyone but an
+// organizer, so the whole batch was rejected and the protest died with it —
+// "Protest this result", shown to every viewer, returned a permission error to
+// exactly the competitor it exists for. These tests are the batch.
+describe('raising a protest flags the fixture', () => {
+  const COMP = 'comp_protest';
+  const FIX = 'fix_protest';
+  const MEMBER = 'uid_protester';
+
+  const fixPath = (db) =>
+    doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP, 'fixtures', FIX);
+  const disputePath = (db, id) =>
+    doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP, 'fixtures', FIX,
+      'disputes', id);
+
+  const protest = (uid, overrides = {}) => ({
+    orgId: PUBLIC_ORG,
+    compId: COMP,
+    fixtureId: FIX,
+    raisedByUid: uid,
+    raisedByName: 'Aarav',
+    entrantId: uid,
+    reason: 'wrong_score',
+    detail: 'Third set was 21-19.',
+    status: 'open',
+    resolvedByUid: null,
+    resolutionNote: null,
+    raisedAt: serverTimestamp(),
+    resolvedAt: null,
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER),
+        membership(OWNER, PUBLIC_ORG, 'owner'),
+      );
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', MEMBER),
+        membership(MEMBER, PUBLIC_ORG, 'member'),
+      );
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP),
+        { orgId: PUBLIC_ORG, name: 'Club Championship', status: 'in_progress' },
+      );
+      await setDoc(
+        fixPath(db),
+        { ...fixture(PUBLIC_ORG, COMP, [SCORER], 'completed'), lastSeq: 12 },
+      );
+    });
+  });
+
+  it('an ordinary member may protest a finished result', async () => {
+    const db = testEnv.authenticatedContext(MEMBER).firestore();
+    const batch = writeBatch(db);
+    batch.set(disputePath(db, 'p1'), protest(MEMBER));
+    batch.update(fixPath(db), {
+      status: 'disputed',
+      openDisputeId: 'p1',
+      updatedAt: serverTimestamp(),
+    });
+    await assertSucceeds(batch.commit());
+  });
+
+  it('refuses the flag without a protest to justify it', async () => {
+    // Otherwise any member could mark any finished match disputed for sport.
+    const db = testEnv.authenticatedContext(MEMBER).firestore();
+    await assertFails(
+      updateDoc(fixPath(db), {
+        status: 'disputed',
+        openDisputeId: 'p_nonexistent',
+        updatedAt: serverTimestamp(),
+      }),
+    );
+  });
+
+  it('refuses a flag naming somebody else\'s protest', async () => {
+    const db = testEnv.authenticatedContext(MEMBER).firestore();
+    const batch = writeBatch(db);
+    batch.set(disputePath(db, 'p2'), protest(OWNER));
+    batch.update(fixPath(db), {
+      status: 'disputed',
+      openDisputeId: 'p2',
+      updatedAt: serverTimestamp(),
+    });
+    await assertFails(batch.commit());
+  });
+
+  it('refuses a protest that smuggles a score change with it', async () => {
+    // The branch is scoped to `status`/`updatedAt`/`openDisputeId`. Protesting
+    // must not be a way to rewrite the thing being protested.
+    const db = testEnv.authenticatedContext(MEMBER).firestore();
+    const batch = writeBatch(db);
+    batch.set(disputePath(db, 'p3'), protest(MEMBER));
+    batch.update(fixPath(db), {
+      status: 'disputed',
+      openDisputeId: 'p3',
+      winnerEntrantId: 'entrant_a',
+      updatedAt: serverTimestamp(),
+    });
+    await assertFails(batch.commit());
+  });
+
+  it('refuses a protest from somebody with no membership at all', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    const batch = writeBatch(db);
+    batch.set(disputePath(db, 'p4'), protest(OUTSIDER));
+    batch.update(fixPath(db), {
+      status: 'disputed',
+      openDisputeId: 'p4',
+      updatedAt: serverTimestamp(),
+    });
+    await assertFails(batch.commit());
+  });
+
+  // A completed match's RESULT is the score AND the names against it.
+  //
+  // The score fields were frozen long before the line-ups were, which left a
+  // gap worth naming: an organizer could leave every number untouched and swap
+  // a name in `lineupA`, handing one player's innings to somebody who was not
+  // at the ground. Immutable figures with mutable attribution are not an
+  // immutable result.
+  //
+  // The pair of tests below also pins something structural. The organizer
+  // branch is the LAST `allow update` on a long OR chain, and Firestore
+  // budgets 1,000 expressions per request — so a legitimate organizer write to
+  // a completed fixture has to be shown to still land, not merely assumed.
+  it('refuses an organizer rewriting who played a finished match', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      updateDoc(fixPath(db), {
+        lineupA: [{ id: 'ringer', name: 'Someone Else' }],
+        updatedAt: serverTimestamp(),
+      }),
+    );
+  });
+
+  it('still lets an organizer move a finished match\'s venue', async () => {
+    // The freeze is on the result, not on the document. An organizer
+    // correcting where a match was played is not rewriting who won it — and
+    // this is the positive case that proves the branch is still REACHABLE
+    // within the expression budget.
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      updateDoc(fixPath(db), {
+        venue: 'Corrected Ground',
+        updatedAt: serverTimestamp(),
+      }),
+    );
+  });
+
+  it('an organizer resolves it and clears the pointer', async () => {
+    await seed(async (db) => {
+      await setDoc(disputePath(db, 'p5'), protest(MEMBER));
+      await updateDoc(fixPath(db), {
+        status: 'disputed',
+        openDisputeId: 'p5',
+      });
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    const batch = writeBatch(db);
+    batch.update(disputePath(db, 'p5'), {
+      status: 'rejected',
+      resolvedByUid: OWNER,
+      resolutionNote: 'Scorecard matches the event log.',
+      resolvedAt: serverTimestamp(),
+    });
+    batch.update(fixPath(db), {
+      status: 'completed',
+      openDisputeId: null,
+      updatedAt: serverTimestamp(),
+    });
+    await assertSucceeds(batch.commit());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The owner's row
+// ---------------------------------------------------------------------------
+describe('an admin cannot unmake the owner', () => {
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER),
+        membership(OWNER, PUBLIC_ORG, 'owner'),
+      );
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', ADMIN),
+        membership(ADMIN, PUBLIC_ORG, 'admin'),
+      );
+    });
+  });
+
+  it('refuses an admin demoting the owner to member', async () => {
+    // The escalation guard only ever looked at the INCOMING role, so this —
+    // the write that actually mattered — passed every clause. It left the club
+    // with nobody holding `canManageOrg`, and since `ownerUid` on the org is
+    // immutable, no client could repair it.
+    const db = testEnv.authenticatedContext(ADMIN).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER), {
+        role: 'member',
+      }),
+    );
+  });
+
+  it('refuses an admin suspending the owner', async () => {
+    const db = testEnv.authenticatedContext(ADMIN).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER), {
+        status: 'suspended',
+        role: 'member',
+      }),
+    );
+  });
+
+  it('the owner may still hand the role to somebody else', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      updateDoc(doc(db, 'orgs', PUBLIC_ORG, 'members', ADMIN), {
+        role: 'owner',
+      }),
+    );
+  });
+
+  it('an admin may still manage an ordinary member', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', 'uid_plain'),
+        membership('uid_plain', PUBLIC_ORG, 'member'),
+      );
+    });
+    const db = testEnv.authenticatedContext(ADMIN).firestore();
+    await assertSucceeds(
+      updateDoc(doc(db, 'orgs', PUBLIC_ORG, 'members', 'uid_plain'), {
+        role: 'judge_scorer',
+      }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Registration counters cannot simply be zeroed
+// ---------------------------------------------------------------------------
+describe('withdrawal counter drop is bounded', () => {
+  const COMP = 'comp_counters';
+  const MEMBER = 'uid_counter_member';
+
+  const compRef = (db) =>
+    doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP);
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', MEMBER),
+        membership(MEMBER, PUBLIC_ORG, 'member'),
+      );
+      await setDoc(compRef(db), {
+        orgId: PUBLIC_ORG,
+        name: 'Sunday Cricket',
+        status: 'registration_open',
+        participationModel: 'open',
+        maxEntrants: 13,
+        waitlistEnabled: true,
+        confirmedCount: 13,
+        waitlistCount: 4,
+      });
+    });
+  });
+
+  it('refuses a member zeroing the confirmed count', async () => {
+    // This was legal: "any decrease, not below zero, only these two fields".
+    // No registration changed, nobody withdrew, and a full event silently
+    // reopened to whoever refreshed next. A counter that can be zeroed is not
+    // a capacity check.
+    const db = testEnv.authenticatedContext(MEMBER).firestore();
+    await assertFails(updateDoc(compRef(db), { confirmedCount: 0 }));
+  });
+
+  it('refuses a member dropping the count by more than one', async () => {
+    const db = testEnv.authenticatedContext(MEMBER).firestore();
+    await assertFails(updateDoc(compRef(db), { confirmedCount: 9 }));
+  });
+
+  it('refuses dropping both counters in one write', async () => {
+    // One withdrawal frees one place on one counter.
+    const db = testEnv.authenticatedContext(MEMBER).firestore();
+    await assertFails(
+      updateDoc(compRef(db), { confirmedCount: 12, waitlistCount: 3 }),
+    );
+  });
+
+  it('allows a single withdrawal off the confirmed field', async () => {
+    const db = testEnv.authenticatedContext(MEMBER).firestore();
+    await assertSucceeds(updateDoc(compRef(db), { confirmedCount: 12 }));
+  });
+
+  it('allows a single withdrawal off the waitlist', async () => {
+    const db = testEnv.authenticatedContext(MEMBER).firestore();
+    await assertSucceeds(updateDoc(compRef(db), { waitlistCount: 3 }));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A visiting club opening its own side
+// ---------------------------------------------------------------------------
+describe('a contesting club may open its own squad call', () => {
+  it('lets the guest club admin open registration for the guest side', async () => {
+    // `squadCallA` was missing from `squadFieldsFor`, so the only branch that
+    // could carry it was `isSquadCounterMove` — which explicitly refuses a
+    // change to `open` or `capacity`, because that branch is for REGISTRANTS.
+    // The club the feature exists for could not use it.
+    await seedSquadCall({ callA: squadCall({ open: false }) });
+    const db = testEnv.authenticatedContext(GUEST_ADMIN).firestore();
+    await assertSucceeds(
+      updateDoc(fixRef(db), {
+        squadCallA: squadCall({ open: true, capacity: 11 }),
+      }),
+    );
+  });
+
+  it('refuses the guest club opening the HOST club\'s side', async () => {
+    await seedSquadCall({ callB: squadCall({ open: false }) });
+    const db = testEnv.authenticatedContext(GUEST_ADMIN).firestore();
+    await assertFails(
+      updateDoc(fixRef(db), {
+        squadCallB: squadCall({ open: true, capacity: 11 }),
+      }),
+    );
+  });
+
+  it('refuses an ordinary guest member opening their club\'s side', async () => {
+    // Opening a call is an organizing act; joining one is not.
+    await seedSquadCall({ callA: squadCall({ open: false }) });
+    const db = testEnv.authenticatedContext(GUEST_MEMBER).firestore();
+    await assertFails(
+      updateDoc(fixRef(db), {
+        squadCallA: squadCall({ open: true, capacity: 11 }),
+      }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Give — the equipment-donation network.
+//
+// One shared shape across all three collections: a donor/org can only ever
+// assert the FIRST fact in a pipeline. Everything downstream is gated by the
+// same `admin` custom claim as `sportRules` above — nothing in the client
+// can mint that token, so these tests use the same
+// `authenticatedContext(uid, { admin: true })` escape hatch.
+// ---------------------------------------------------------------------------
+describe('give: collection centers are curated, not self-listed', () => {
+  const centerPath = ['giveCollectionCenters', 'center_hyd'];
+  const center = (overrides = {}) => ({
+    name: 'Hyderabad Collection Centre',
+    city: 'Hyderabad',
+    cityKey: 'hyderabad',
+    address: null,
+    contactPhone: null,
+    latitude: null,
+    longitude: null,
+    acceptedCategories: [],
+    isActive: true,
+    notes: null,
+    ...overrides,
+  });
+
+  it('is world-readable, with or without an account', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, ...centerPath), center());
+    });
+    const db = testEnv.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(db, ...centerPath)));
+  });
+
+  it('refuses a signed-in stranger planting a fake center', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(setDoc(doc(db, ...centerPath), center()));
+  });
+
+  it('refuses even a club owner — this is not any club\'s to list', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER),
+        membership(OWNER, PUBLIC_ORG, 'owner'),
+      );
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(setDoc(doc(db, ...centerPath), center()));
+  });
+
+  it('admits the admin claim', async () => {
+    const db = testEnv
+      .authenticatedContext('uid_operator', { admin: true })
+      .firestore();
+    await assertSucceeds(setDoc(doc(db, ...centerPath), center()));
+  });
+});
+
+describe('give: donations — a donor may only ever submit, never advance', () => {
+  const donation = (overrides = {}) => ({
+    donorUid: OWNER,
+    donorName: 'Test Donor',
+    donorPhone: null,
+    type: 'equipment',
+    items: [{ category: 'shoes', quantity: 2, note: null }],
+    city: 'Hyderabad',
+    cityKey: 'hyderabad',
+    collectionCenterId: null,
+    amountPaise: 0,
+    status: 'submitted',
+    // Firestore refuses serverTimestamp() inside an array element — see
+    // GiveStatusEvent.toMap() for why this is a client-clock Date instead.
+    history: [{ status: 'submitted', at: new Date() }],
+    assignedNeedId: null,
+    notes: null,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  it('lets a signed-in donor submit their own donation', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      setDoc(doc(db, 'giveDonations', 'don_1'), donation()),
+    );
+  });
+
+  it('refuses a donation submitted in someone else\'s name', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'giveDonations', 'don_1'),
+        donation({ donorUid: OUTSIDER }),
+      ),
+    );
+  });
+
+  it('refuses a donor pre-setting a later stage', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'giveDonations', 'don_1'),
+        donation({ status: 'distributed' }),
+      ),
+    );
+  });
+
+  it('refuses an equipment donation claiming a nonzero amount', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'giveDonations', 'don_1'),
+        donation({ amountPaise: 50000 }),
+      ),
+    );
+  });
+
+  it('lets the donor read their own donation, refuses a stranger', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'giveDonations', 'don_1'), donation());
+    });
+    const owner = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(getDoc(doc(owner, 'giveDonations', 'don_1')));
+
+    const stranger = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(getDoc(doc(stranger, 'giveDonations', 'don_1')));
+  });
+
+  it('refuses the donor advancing their own donation\'s stage', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'giveDonations', 'don_1'), donation());
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'giveDonations', 'don_1'), { status: 'collected' }),
+    );
+  });
+
+  it('lets staff (admin claim) advance a donation\'s stage', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'giveDonations', 'don_1'), donation());
+    });
+    const db = testEnv
+      .authenticatedContext('uid_operator', { admin: true })
+      .firestore();
+    await assertSucceeds(
+      updateDoc(doc(db, 'giveDonations', 'don_1'), { status: 'collected' }),
+    );
+  });
+});
+
+describe('give: needs — self-reported for a player, club-authority for a team/club', () => {
+  const need = (overrides = {}) => ({
+    beneficiaryType: 'club',
+    orgId: PUBLIC_ORG,
+    orgName: 'Test Organization',
+    playerUid: null,
+    playerName: null,
+    title: 'Cricket shoes for the village club',
+    description: null,
+    city: 'Nalgonda',
+    cityKey: 'nalgonda',
+    playersCount: 12,
+    items: [{ category: 'shoes', quantity: 12, note: null }],
+    fulfilled: [],
+    status: 'open',
+    verified: false,
+    createdByUid: OWNER,
+    createdAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER),
+        membership(OWNER, PUBLIC_ORG, 'owner'),
+      );
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OUTSIDER),
+        membership(OUTSIDER, PUBLIC_ORG, 'member'),
+      );
+    });
+  });
+
+  it('lets a club owner raise a need for their own club', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(setDoc(doc(db, 'giveNeeds', 'need_1'), need()));
+  });
+
+  it('refuses an ordinary member raising a need in the club\'s name', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'giveNeeds', 'need_1'),
+        need({ createdByUid: OUTSIDER }),
+      ),
+    );
+  });
+
+  it('refuses a stranger to the club raising a need in its name', async () => {
+    const db = testEnv.authenticatedContext('uid_stranger_to_club').firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'giveNeeds', 'need_1'),
+        need({ createdByUid: 'uid_stranger_to_club' }),
+      ),
+    );
+  });
+
+  it('lets a player self-report their own need', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertSucceeds(
+      setDoc(
+        doc(db, 'giveNeeds', 'need_2'),
+        need({
+          beneficiaryType: 'player',
+          orgId: null,
+          orgName: null,
+          playerUid: OUTSIDER,
+          playerName: 'Test Player',
+          createdByUid: OUTSIDER,
+        }),
+      ),
+    );
+  });
+
+  it('refuses nominating someone else\'s player need', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'giveNeeds', 'need_2'),
+        need({
+          beneficiaryType: 'player',
+          orgId: null,
+          orgName: null,
+          playerUid: OWNER,
+          playerName: 'Someone Else',
+          createdByUid: OUTSIDER,
+        }),
+      ),
+    );
+  });
+
+  it('is world-readable unverified, but only staff may verify it', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'giveNeeds', 'need_1'), need());
+    });
+    const anon = testEnv.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(anon, 'giveNeeds', 'need_1')));
+
+    const asOwner = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      updateDoc(doc(asOwner, 'giveNeeds', 'need_1'), { verified: true }),
+    );
+
+    const asStaff = testEnv
+      .authenticatedContext('uid_operator', { admin: true })
+      .firestore();
+    await assertSucceeds(
+      updateDoc(doc(asStaff, 'giveNeeds', 'need_1'), { verified: true }),
+    );
+  });
+});
+
+describe('give: impact stats — Cloud Function only, no client escape hatch', () => {
+  it('is world-readable', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'give', 'impactStats'), {
+        donationsCount: 5,
+        itemsCollected: 5,
+        itemsDistributed: 0,
+        needsFulfilled: 0,
+        citiesActive: 1,
+        updatedAt: serverTimestamp(),
+      });
+    });
+    const db = testEnv.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(db, 'give', 'impactStats')));
+  });
+
+  it('refuses every client write, even the admin claim — only the Admin SDK may write here', async () => {
+    const db = testEnv
+      .authenticatedContext('uid_operator', { admin: true })
+      .firestore();
+    await assertFails(
+      setDoc(doc(db, 'give', 'impactStats'), { donationsCount: 1 }),
+    );
   });
 });

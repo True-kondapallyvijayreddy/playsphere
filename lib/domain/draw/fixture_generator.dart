@@ -967,10 +967,14 @@ class FixtureGenerator {
 
     final seeded = _seedOrShuffle(entrants, shuffleSeed);
 
+    // Matches the suggestion `DrawSetupSheet` shows an organizer who never
+    // touches the group-count stepper — roughly ten entrants a group is a
+    // sensible pool size, and the two defaults disagreeing would mean the
+    // sheet promised a shape the generator did not actually produce.
     var groups = numGroups ??
         (groupSize != null
             ? (seeded.length / groupSize).ceil()
-            : max(1, (seeded.length / 4).ceil()));
+            : max(1, (seeded.length / 10).ceil()));
     // Every group needs at least 2 entrants to play a match, and at least
     // `qualifiersPerGroup` so the knockout phase has someone to seed.
     final maxGroups = max(1, seeded.length ~/ max(2, qualifiersPerGroup));

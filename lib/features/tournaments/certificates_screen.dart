@@ -55,7 +55,7 @@ class CertificatesScreen extends ConsumerWidget {
               ref.watch(tournamentEventsProvider(key)).valueOrNull ??
                   const <Competition>[];
           final fixtures =
-              ref.watch(tournamentFixturesProvider(tournamentId)).valueOrNull ??
+              ref.watch(tournamentFixturesProvider(key)).valueOrNull ??
                   const <Fixture>[];
           final org = ref.watch(organizationProvider(orgId)).valueOrNull;
 

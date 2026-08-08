@@ -84,9 +84,14 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
 
   /// The group count the generator will actually use, so the summary line
   /// below cannot promise something different from what gets drawn.
+  ///
+  /// Defaults toward roughly ten entrants a group rather than four — a
+  /// sensible pool size for a group stage — but this is only the number the
+  /// stepper starts on; the organizer can move it to anything the qualifier
+  /// floor below allows.
   int get _effectiveGroups {
     final n = widget.entrantCount;
-    final requested = _draw.numGroups ?? (n / 4).ceil();
+    final requested = _draw.numGroups ?? (n / 10).ceil();
     final maxGroups = (n ~/ (_draw.qualifiersPerGroup < 2
             ? 2
             : _draw.qualifiersPerGroup))

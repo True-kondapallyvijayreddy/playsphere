@@ -7,6 +7,7 @@ import '../../core/models/enums.dart';
 import '../../core/models/fixture.dart';
 import '../../core/models/organization.dart';
 import '../../core/models/scoring_request.dart';
+import '../../core/models/tournament_invite.dart';
 import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 
@@ -46,13 +47,85 @@ final primaryOrgIdProvider = Provider<String?>((ref) {
   return ids.isEmpty ? null : ids.first;
 });
 
-/// Everything being played right now, across every club this person is in.
-final myLiveFixturesProvider = Provider<AsyncValue<List<Fixture>>>((ref) {
+/// Everything being played right now, across every club this person is in,
+/// keeping whatever loaded when a club's read is refused.
+///
+/// Deliberately tolerant, unlike the other fan-outs on this screen. A person
+/// in four clubs used to lose the entire live section — every match at every
+/// club — because ONE club's collection-group read was rejected, most often a
+/// membership left pointing at a club that no longer exists. The screen said
+/// "Could not load live matches" and showed nothing, which is Bug #4.
+///
+/// The club that failed is not swallowed: it surfaces through
+/// [myLiveFixtureFailuresProvider], which the dashboard renders as a notice
+/// beside the matches that did load.
+final myLiveFixturesPartialProvider = Provider<PartialAsync<Fixture>>((ref) {
   final orgIds = ref.watch(myActiveOrgIdsProvider);
-  if (orgIds.isEmpty) return const AsyncValue.data([]);
-  return combineAsyncAll([
+  if (orgIds.isEmpty) {
+    return const PartialAsync(items: [], failures: [], isLoading: false);
+  }
+  return combineAsyncTolerant([
     for (final id in orgIds) ref.watch(liveFixturesProvider(id)),
   ]);
+});
+
+/// The live matches themselves, as the rest of the app already expected them.
+///
+/// Reports an error only when EVERY club failed — at that point there really
+/// is nothing to show and a spinner or an empty state would both be lies.
+final myLiveFixturesProvider = Provider<AsyncValue<List<Fixture>>>((ref) {
+  final partial = ref.watch(myLiveFixturesPartialProvider);
+  if (partial.isTotalFailure) {
+    return AsyncValue.error(partial.failures.first, StackTrace.empty);
+  }
+  if (partial.isLoading && partial.items.isEmpty) {
+    return const AsyncValue.loading();
+  }
+  return AsyncValue.data(partial.items);
+});
+
+/// How many of this person's clubs could not be read, for the notice that
+/// keeps a partial answer honest.
+final myLiveFixtureFailuresProvider = Provider<int>(
+  (ref) => ref.watch(myLiveFixturesPartialProvider).failures.length,
+);
+
+/// Matches your clubmates are playing right now — including at other clubs.
+///
+/// A member turning out for a district side or a friend's club used to
+/// disappear from their own club's view entirely, because every live list is
+/// scoped to one club's competitions. These are the same people, found by who
+/// is on the team sheet rather than by whose competition it is.
+///
+/// Capped at 30 watched clubmates by Firestore's `arrayContainsAny` limit —
+/// see `CompetitionRepository.watchClubmateLiveFixtures`. Matches already
+/// visible through [myLiveFixturesProvider] are removed here rather than
+/// shown twice.
+final clubmateLiveFixturesProvider =
+    StreamProvider<List<Fixture>>((ref) {
+  final members = <String>{};
+  for (final orgId in ref.watch(myActiveOrgIdsProvider)) {
+    for (final m in ref.watch(orgMembersProvider(orgId)).valueOrNull ??
+        const <Membership>[]) {
+      if (m.isActive) members.add(m.uid);
+    }
+  }
+  members.remove(ref.watch(currentUidProvider));
+  if (members.isEmpty) return Stream.value(const []);
+
+  final mine = {
+    for (final f in ref.watch(myLiveFixturesProvider).valueOrNull ??
+        const <Fixture>[])
+      f.id,
+  };
+
+  return ref
+      .watch(competitionRepositoryProvider)
+      .watchClubmateLiveFixtures(memberUids: members.toList())
+      .map((all) => [
+            for (final f in all)
+              if (!mine.contains(f.id)) f,
+          ]);
 });
 
 /// Every competition across every club, newest first.
@@ -63,7 +136,7 @@ final myClubEventsProvider = Provider<AsyncValue<List<Competition>>>((ref) {
     for (final id in orgIds) ref.watch(competitionsProvider(id)),
   ]).whenData((all) {
     final sorted = [...all]..sort(
-        (a, b) => _eventSortKey(b).compareTo(_eventSortKey(a)),
+        (a, b) => b.sortDate.compareTo(a.sortDate),
       );
     return sorted;
   });
@@ -101,6 +174,26 @@ final myIncomingChallengesProvider =
   if (orgIds.isEmpty) return const AsyncValue.data([]);
   return combineAsyncAll([
     for (final id in orgIds) ref.watch(incomingChallengesProvider(id)),
+  ]);
+});
+
+/// Tournaments other clubs have invited a club of this person's into.
+///
+/// Gated on the same capability as challenges, and for the same reason: an
+/// invitation is an offer only an organizer can answer, and a member shown
+/// "2 invitations waiting" is being handed an obligation they cannot act on.
+final myTournamentInvitesProvider =
+    Provider<AsyncValue<List<TournamentInvite>>>((ref) {
+  final orgIds = [
+    for (final id in ref.watch(myActiveOrgIdsProvider))
+      if (ref
+          .watch(myCapabilitiesProvider(id))
+          .contains(Capability.manageCompetitions))
+        id,
+  ];
+  if (orgIds.isEmpty) return const AsyncValue.data([]);
+  return combineAsyncAll([
+    for (final id in orgIds) ref.watch(incomingTournamentInvitesProvider(id)),
   ]);
 });
 
@@ -143,7 +236,34 @@ final myScoringRequestsProvider =
   ]);
 });
 
-/// Sorts events by the date that matters for each one, falling back to when it
-/// was created so a draft with no dates still lands somewhere sensible.
-DateTime _eventSortKey(Competition c) =>
-    c.startDate ?? c.registrationClosesAt ?? c.createdAt ?? DateTime(2000);
+/// How many things are waiting on this person, for the badge on the bell.
+///
+/// Counts the four action-item lists that Notifications shows rather than a
+/// stored unread count, so that part of the badge cannot drift out of step
+/// with the screen behind it: the number falls the moment the underlying
+/// obligation is discharged, whoever discharged it and on whichever device.
+///
+/// Join requests count as one no matter how many people are queued, matching
+/// the single "N people are waiting to join" card they collapse into.
+///
+/// Also folds in [unreadNotificationCountProvider] — a plain member with no
+/// scoring assignment, no challenge to answer and nothing to approve used to
+/// see a bell that never once lit up, no matter how much was happening at
+/// their club, because every one of the counts above is gated on an
+/// organizer capability they do not hold. The activity feed is not.
+final waitingOnYouCountProvider = Provider<int>((ref) {
+  final scoring = ref.watch(myScoringAssignmentsProvider).valueOrNull ?? const [];
+  final challenges = ref.watch(myIncomingChallengesProvider).valueOrNull ?? const [];
+  final approvals = ref.watch(myPendingApprovalsProvider).valueOrNull ?? const [];
+  final scoreAsks = ref.watch(myScoringRequestsProvider).valueOrNull ?? const [];
+  final invites = ref.watch(myTournamentInvitesProvider).valueOrNull ?? const [];
+  final unreadActivity = ref.watch(unreadNotificationCountProvider);
+
+  return scoring.length +
+      challenges.length +
+      scoreAsks.length +
+      invites.length +
+      (approvals.isEmpty ? 0 : 1) +
+      unreadActivity;
+});
+

@@ -39,6 +39,7 @@ void main() {
     DateTime? at,
     String a = 'A',
     String b = 'B',
+    DateTime? lastEventAt,
   }) =>
       Fixture(
         id: '$compId-$index',
@@ -54,6 +55,15 @@ void main() {
         scheduledAt: at,
         winnerEntrantId: winner,
         tournamentId: 't1',
+        // A live match has a scoreboard somebody is touching. Counting one
+        // as live now takes more than the status field — a fixture stays in
+        // `live` after a scorer abandons it, and those were being reported
+        // as on court days later (Bug #1 / #15, see live_status_test.dart).
+        lastSeq: status == FixtureStatus.live ? 8 : 0,
+        lastEventAt: status == FixtureStatus.live
+            ? (lastEventAt ??
+                DateTime.now().subtract(const Duration(minutes: 3)))
+            : null,
       );
 
   group('progress across every event', () {
@@ -193,13 +203,34 @@ void main() {
       final o = TournamentOverview.from(
         events: [event('e1', 'Singles')],
         fixtures: [
-          match('e1', 0, status: FixtureStatus.live),
+          // Heartbeat tied to this test's own clock, not the wall clock: the
+          // board is asked what is on court at `now`, so the scoreboard has
+          // to have moved shortly before `now` to qualify.
+          match('e1', 0,
+              status: FixtureStatus.live,
+              lastEventAt: now.subtract(const Duration(minutes: 4))),
           match('e1', 1, status: FixtureStatus.scheduled),
         ],
         now: now,
       );
       expect(o.onCourtNow.length, 1);
       expect(o.onCourtNow.single.matchIndex, 0);
+    });
+
+    test('a match abandoned mid-scoreboard is not on court', () {
+      // Bug #1: the order-of-play board was listing matches nobody had
+      // touched in days as though they were being played right now.
+      final o = TournamentOverview.from(
+        events: [event('e1', 'Singles')],
+        fixtures: [
+          match('e1', 0,
+              status: FixtureStatus.live,
+              lastEventAt: now.subtract(const Duration(days: 3))),
+        ],
+        now: now,
+      );
+      expect(o.onCourtNow, isEmpty);
+      expect(o.liveMatches, 0);
     });
 
     test('up next skips matches whose time has long passed', () {

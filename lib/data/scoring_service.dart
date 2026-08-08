@@ -8,13 +8,14 @@ import '../core/errors/app_exception.dart';
 import '../core/firebase/firestore_refs.dart';
 import '../core/models/enums.dart';
 import '../core/models/fixture.dart';
-import '../domain/rating/glicko2.dart';
 import '../core/sync/sync_batch_planner.dart';
 import '../core/sync/sync_queue_entry.dart';
 import '../core/sync/uuid_v7.dart';
+import '../domain/cheer.dart';
 import '../domain/scoring/match_award.dart';
 import '../domain/scoring/scoring_plugin.dart';
 import '../domain/scoring/scoring_registry.dart';
+import 'org_repository.dart' show guard, guardStream;
 import 'rating_service.dart';
 
 /// Writes match events and keeps the fixture's live projection in step.
@@ -41,14 +42,15 @@ import 'rating_service.dart';
 /// the same ball cannot both win — the loser is rejected and re-syncs. No
 /// locks, no transactions across collections, no server code required.
 class ScoringService {
-  ScoringService({
-    SharedPreferences? prefs,
-    RatingService? ratingService,
-  })  : _prefs = prefs,
-        _ratingService = ratingService ?? const RatingService();
+  /// Takes no [RatingService] any more, deliberately.
+  ///
+  /// It used to, and fired a projection on every completed match whose result
+  /// was discarded — see the note in [submit]. Ratings are settled by
+  /// `onMatchSettled`, so the scoring path has no rating dependency at all and
+  /// should not be able to acquire one by accident.
+  ScoringService({SharedPreferences? prefs}) : _prefs = prefs;
 
   SharedPreferences? _prefs;
-  final RatingService _ratingService;
 
   static const _queueKey = 'playsphere_pending_score_events_v1';
 
@@ -67,6 +69,26 @@ class ScoringService {
   /// the screen until the server answers.
   Stream<AppException> get writeFailures => _failures.stream;
 
+  final StreamController<void> _resyncs = StreamController<void>.broadcast();
+
+  /// Fires when a write lost a race and the score is being taken from the
+  /// authoritative log instead.
+  ///
+  /// ## Why this is not on [writeFailures]
+  ///
+  /// It used to be, and scorers saw "Someone else scored this first" as an
+  /// error snackbar on a routine, self-healing condition. It is neither a
+  /// fault nor something the scorer can act on: the fixture document is
+  /// server-authoritative, Firestore rolls the rejected local mutation back,
+  /// and the snapshot listener the pad is already rendering from delivers the
+  /// winning state a moment later. The board corrects itself whether or not
+  /// anybody is told.
+  ///
+  /// So the recovery is silent and the NOTIFICATION is separate and calm —
+  /// the scorer needs to know the number they are looking at just changed
+  /// under them, which is different from being told something went wrong.
+  Stream<void> get resyncs => _resyncs.stream;
+
   final StreamController<int> _pendingCountController =
       StreamController<int>.broadcast();
 
@@ -83,29 +105,75 @@ class ScoringService {
   /// listener is given the current count immediately, then live updates —
   /// it is a `Stream`, not a delta feed, so `StreamBuilder` needs no
   /// separate initial fetch.
-  Stream<int> get pendingCountStream async* {
-    yield await pendingCount();
-    yield* _pendingCountController.stream;
+  /// Subscribes FIRST, then reads.
+  ///
+  /// Written the other way round — await the count, then forward the
+  /// controller — there is a gap between the two during which this stream is
+  /// subscribed to nothing, and an enqueue landing inside it is dropped. The
+  /// badge then sits on a stale number until the next unrelated action nudges
+  /// it. Attaching to the controller before the await closes the gap; the
+  /// initial value is emitted ahead of anything buffered, so a listener still
+  /// sees a count on its first frame.
+  Stream<int> get pendingCountStream {
+    final out = StreamController<int>();
+    StreamSubscription<int>? sub;
+
+    out.onListen = () {
+      // Forward first, so nothing enqueued while the initial read is in flight
+      // is lost.
+      sub = _pendingCountController.stream.listen(
+        out.add,
+        onError: out.addError,
+        onDone: out.close,
+      );
+      // Then the current value, so a `StreamBuilder` has something on its very
+      // first frame without a separate fetch.
+      pendingCount().then((n) {
+        if (!out.isClosed) out.add(n);
+      });
+    };
+    out.onCancel = () async => sub?.cancel();
+
+    return out.stream;
   }
 
   Future<void> _notifyPendingCountChanged() async {
-    if (_pendingCountController.hasListener) {
-      _pendingCountController.add(await pendingCount());
-    }
+    // No `hasListener` guard. On a broadcast controller that is only true once
+    // somebody is already attached, so the very first update after a subscribe
+    // could be swallowed by the race the getter above exists to close. Adding
+    // to a broadcast controller with no listeners is a no-op, not an error.
+    if (_pendingCountController.isClosed) return;
+    _pendingCountController.add(await pendingCount());
   }
 
   void dispose() {
     _failures.close();
+    _resyncs.close();
     _pendingCountController.close();
+  }
+
+  /// Reports a rejected write on the right channel for what it is.
+  ///
+  /// A conflict is expected and self-healing, so it goes to [resyncs].
+  /// Everything else — a network failure, a rules rejection, a bad payload —
+  /// is something the scorer has to know about and goes to [writeFailures].
+  void _report(AppException error) {
+    if (error is ConflictException) {
+      if (!_resyncs.isClosed) _resyncs.add(null);
+      return;
+    }
+    if (!_failures.isClosed) _failures.add(error);
   }
 
   // --- Reads ------------------------------------------------------------
 
   /// The one listener a spectator needs.
   Stream<Fixture?> watchFixture(String orgId, String compId, String fixtureId) =>
-      Refs.fixture(orgId, compId, fixtureId).snapshots().map(
-            (doc) => doc.exists ? Fixture.fromDoc(doc) : null,
-          );
+      guardStream(
+        () => Refs.fixture(orgId, compId, fixtureId).snapshots().map(
+              (doc) => doc.exists ? Fixture.fromDoc(doc) : null,
+            ),
+      );
 
   /// Ball-by-ball commentary feed. Only opened on screens that actually show
   /// the timeline, never just to display a score.
@@ -115,11 +183,13 @@ class ScoringService {
     String fixtureId, {
     int limit = 60,
   }) {
-    return Refs.matchEvents(orgId, compId, fixtureId)
-        .orderBy('seq', descending: true)
-        .limit(limit)
-        .snapshots()
-        .map((snap) => snap.docs.map(MatchEvent.fromDoc).toList());
+    return guardStream(
+      () => Refs.matchEvents(orgId, compId, fixtureId)
+          .orderBy('seq', descending: true)
+          .limit(limit)
+          .snapshots()
+          .map((snap) => snap.docs.map(MatchEvent.fromDoc).toList()),
+    );
   }
 
   Future<List<MatchEvent>> fetchAllEvents(
@@ -132,6 +202,80 @@ class ScoringService {
         .get();
     return snap.docs.map(MatchEvent.fromDoc).toList();
   }
+
+  // --- Cheering ---------------------------------------------------------
+
+  /// Live cheer tally for a match, and what [myUid] has sent.
+  ///
+  /// One listener over a small collection rather than a counter on the fixture
+  /// document. The fixture is the hottest document in the product — every ball
+  /// rewrites it — and putting a cheer counter on it would mean every cheer
+  /// from every spectator contending with the scorer's writes for the same
+  /// document. A cheer must never be able to slow down or lose a delivery.
+  Stream<CheerTally> watchCheers({
+    required String orgId,
+    required String compId,
+    required String fixtureId,
+    String? myUid,
+  }) =>
+      guardStream(
+        () => Refs.cheers(orgId, compId, fixtureId).snapshots().map((snap) {
+          final forA = <Cheer, int>{};
+          final forB = <Cheer, int>{};
+          Cheer? mine;
+          String? mineSide;
+
+          for (final doc in snap.docs) {
+            final data = doc.data();
+            final cheer = Cheer.fromWire(data['cheer'] as String?);
+            if (cheer == null) continue;
+            final side = data['side'] == 'b' ? 'b' : 'a';
+            final bucket = side == 'a' ? forA : forB;
+            bucket[cheer] = (bucket[cheer] ?? 0) + 1;
+            if (doc.id == myUid) {
+              mine = cheer;
+              mineSide = side;
+            }
+          }
+          return CheerTally(
+            forA: forA,
+            forB: forB,
+            mine: mine,
+            mineSide: mineSide,
+          );
+        }),
+      );
+
+  /// Sends, changes or takes back a cheer.
+  ///
+  /// The document id is the sender's uid, so cheering twice replaces rather
+  /// than adds. Passing the same [cheer] and [side] again withdraws it, which
+  /// is what makes the button a toggle: somebody who cheered the wrong team by
+  /// accident should be able to undo it without an extra control.
+  ///
+  /// Deliberately not awaited by callers on the hot path, and deliberately
+  /// tolerant of failure — a cheer that does not send is not worth an error
+  /// message in front of somebody watching a match.
+  Future<void> sendCheer({
+    required String orgId,
+    required String compId,
+    required String fixtureId,
+    required String uid,
+    required Cheer? cheer,
+    required String side,
+  }) =>
+      guard(() async {
+        final ref = Refs.cheer(orgId, compId, fixtureId, uid);
+        if (cheer == null) {
+          await ref.delete();
+          return;
+        }
+        await ref.set({
+          'cheer': cheer.wire,
+          'side': side,
+          'at': FieldValue.serverTimestamp(),
+        });
+      });
 
   // --- Writing ----------------------------------------------------------
 
@@ -200,6 +344,10 @@ class ScoringService {
         'isDraw': updated.isDraw,
         if (fixture.lastSeq == 0) 'startedAt': FieldValue.serverTimestamp(),
         if (outcome.isComplete) 'completedAt': FieldValue.serverTimestamp(),
+        // The heartbeat that lets a reader tell a match in progress from one
+        // somebody walked away from. Written on EVERY action, undos included,
+        // because an undo is a scorer at the pad just as much as a run is.
+        'lastEventAt': FieldValue.serverTimestamp(),
         // The best performer is decided in the SAME batch as the result. Any
         // later and there is a window where the match is over but the award
         // is still being worked out — and, worse, it would need a network
@@ -225,20 +373,21 @@ class ScoringService {
     // since confirmed.
     await _enqueue(fixture, action, byUid, nextSeq, clientEventId);
 
-    if (outcome.isComplete) {
-      unawaited(
-        _ratingService
-            .processMatchRatings(
-              fixture: updated,
-              scoreState: updated.scoreState,
-            )
-            .catchError((Object error) {
-          debugPrint('[PlaySphere] rating projection error: $error');
-          return const <String, Rating>{};
-        }),
-      );
-    }
-
+    // NOT a rating write, and no longer a rating READ either.
+    //
+    // `RatingService.processMatchRatings` stopped persisting anything when
+    // settlement moved into `onMatchSettled`; what stayed behind was a call
+    // that performed one Firestore read PER PLAYER and then threw the answer
+    // away — the future was unawaited and its value never captured. On a
+    // completed cricket match that is twenty-two round trips, fired at the
+    // exact moment the scorer taps the last ball, on a ground chosen for its
+    // pitch rather than its signal.
+    //
+    // The projection is still worth showing — "this result moves you +18" —
+    // and the method is still there to compute it. It belongs on the screen
+    // that displays it, where its cost is visible and it can be awaited, not
+    // on the write path.
+    //
     // Deliberately NOT awaited.
     //
     // With offline persistence enabled — and it is, because matches are
@@ -252,11 +401,9 @@ class ScoringService {
     // shows the new score at once and the SDK flushes to the server on
     // reconnect. Failures arrive asynchronously on [writeFailures].
     unawaited(
-      batch.commit().then((_) => _dequeue(clientEventId)).catchError(
-        (Object error) {
-          _failures.add(_translateWriteFailure(error));
-        },
-      ),
+      batch.commit()
+          .then((_) => _dequeue(clientEventId))
+          .catchError((Object error) => _report(_translateWriteFailure(error))),
     );
 
     return updated;
@@ -306,6 +453,25 @@ class ScoringService {
   ///
   /// [dryRun] recomputes without writing, which is how a dispute is
   /// investigated before anyone changes the visible score.
+  ///
+  /// ## When it can actually write, and why it says so
+  ///
+  /// A rebuild recomputes the projection from a log it does not add to, so it
+  /// writes the SAME `lastSeq` back. `firestore.rules` refuses that on both
+  /// paths that could reach it: the scorer branch demands a strictly increasing
+  /// sequence (the guard that stops a stale device overwriting a newer score),
+  /// and the organizer branch freezes every score-bearing field once a fixture
+  /// is `completed`.
+  ///
+  /// Both rules are right and neither should be relaxed — an unconditional
+  /// "rewrite the score of a finished match" is the one write in the product
+  /// that could not be audited. What was wrong was issuing the write anyway
+  /// and letting it fail somewhere the caller could not see: the method
+  /// returned `written: true` on a request Firestore had already rejected.
+  ///
+  /// So it checks first and reports [RebuildReport.blockedReason] instead.
+  /// Correcting a finished match goes through the protest flow — raise it,
+  /// uphold it, which returns the fixture to `live` — and then this can write.
   Future<RebuildReport> rebuildMatch({
     required Fixture fixture,
     required ScoringContext context,
@@ -334,17 +500,47 @@ class ScoringService {
       );
     }
 
-    await Refs.fixture(fixture.orgId, fixture.compId, fixture.id).update({
-      'scoreState': rebuilt,
-      'summary': plugin.summary(rebuilt, context),
-      'status': outcome.isComplete
-          ? FixtureStatus.completed.wire
-          : FixtureStatus.live.wire,
-      'winnerEntrantId': outcome.isComplete
-          ? _entrantIdForSide(fixture, outcome.winnerSide)
-          : null,
-      'isDraw': outcome.isDraw,
-    });
+    if (fixture.status == FixtureStatus.completed) {
+      return RebuildReport(
+        state: rebuilt,
+        matchedStoredProjection: false,
+        eventCount: events.length,
+        written: false,
+        blockedReason:
+            'The stored score disagrees with this match’s event log, but a '
+            'finished result cannot be rewritten directly. Raise a protest and '
+            'uphold it — that reopens the match — then run this again.',
+      );
+    }
+
+    try {
+      await Refs.fixture(fixture.orgId, fixture.compId, fixture.id).update({
+        'scoreState': rebuilt,
+        'summary': plugin.summary(rebuilt, context),
+        'status': outcome.isComplete
+            ? FixtureStatus.completed.wire
+            : FixtureStatus.live.wire,
+        'winnerEntrantId': outcome.isComplete
+            ? _entrantIdForSide(fixture, outcome.winnerSide)
+            : null,
+        'isDraw': outcome.isDraw,
+      });
+    } on FirebaseException catch (e) {
+      // Awaited, unlike the scoring path: a rebuild is an investigation run by
+      // somebody sitting still looking at the answer, not a tap on a ground.
+      // Reporting "rebuilt" for a write the server refused is the failure this
+      // whole method exists to detect in the first place.
+      return RebuildReport(
+        state: rebuilt,
+        matchedStoredProjection: false,
+        eventCount: events.length,
+        written: false,
+        blockedReason: e.code == 'permission-denied'
+            ? 'You do not have permission to rewrite this match’s score. '
+                'Only an organizer of this club can.'
+            : (e.message ?? 'The rebuilt score could not be saved.'),
+      );
+    }
 
     return RebuildReport(
       state: rebuilt,
@@ -463,11 +659,9 @@ class ScoringService {
     await _enqueue(fixture, action, byUid, nextSeq, clientEventId);
 
     unawaited(
-      batch.commit().then((_) => _dequeue(clientEventId)).catchError(
-        (Object error) {
-          _failures.add(_translateWriteFailure(error));
-        },
-      ),
+      batch.commit()
+          .then((_) => _dequeue(clientEventId))
+          .catchError((Object error) => _report(_translateWriteFailure(error))),
     );
 
     return updated;
@@ -794,7 +988,7 @@ class ScoringService {
         // Writing anyway would fail the security rules' monotonic-sequence
         // check regardless, so this is treated the same as any other
         // rejection: back off and report it rather than spinning on it.
-        _failures.add(const ConflictException());
+        _report(const ConflictException());
         return stillUnconfirmed.map(_bumpForRetry).toList();
       }
 
@@ -831,6 +1025,10 @@ class ScoringService {
           if (fixture.lastSeq == 0) 'startedAt': FieldValue.serverTimestamp(),
           if (outcome.isComplete)
             'completedAt': FieldValue.serverTimestamp(),
+          // Same heartbeat as the online path. A match scored in a dead spot
+          // and flushed on reconnect is being played now, and must not be
+          // read as abandoned just because the server heard about it late.
+          'lastEventAt': FieldValue.serverTimestamp(),
           // Same award, same inputs, on the path a match takes when it was
           // scored offline and only reaches the server on reconnect. A match
           // must not get a different MVP for having been played out of signal.
@@ -849,25 +1047,13 @@ class ScoringService {
 
       await batch.commit();
 
-      if (outcome.isComplete) {
-        unawaited(
-          _ratingService
-              .processMatchRatings(
-                fixture: fixture.copyWith(scoreState: rebuilt, lastSeq: maxSeq),
-                scoreState: rebuilt,
-              )
-              .catchError((Object error) {
-            debugPrint(
-              '[PlaySphere] rating projection error (replay): $error',
-            );
-            return const <String, Rating>{};
-          }),
-        );
-      }
-
+      // No rating call here either — see the note at the [submit] call site.
+      // Settlement is `onMatchSettled`'s, and it fires off the same status
+      // transition this batch just wrote, so a match completed offline settles
+      // on reconnect exactly like one completed live.
       return const [];
     } catch (e) {
-      _failures.add(_translateWriteFailure(e));
+      _report(_translateWriteFailure(e));
       return group.map(_bumpForRetry).toList();
     }
   }
@@ -980,10 +1166,23 @@ class RebuildReport {
     required this.matchedStoredProjection,
     required this.eventCount,
     required this.written,
+    this.blockedReason,
   });
 
   final Map<String, dynamic> state;
   final bool matchedStoredProjection;
   final int eventCount;
   final bool written;
+
+  /// Why a needed correction was not written, in words a referee can act on.
+  ///
+  /// Null when nothing was blocked — which includes the ordinary happy case
+  /// where the projection already matched and there was nothing to write.
+  /// Non-null means the log and the stored score genuinely disagree AND the
+  /// disagreement is still on screen.
+  final String? blockedReason;
+
+  /// The projection disagrees with the log and could not be corrected. The one
+  /// state a referee must not be allowed to mistake for "verified".
+  bool get needsAttention => blockedReason != null;
 }

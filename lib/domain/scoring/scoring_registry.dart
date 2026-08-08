@@ -294,6 +294,135 @@ class TossOptions {
   }
 }
 
+/// One thing an organizer has to confirm before a scheduled match is pulled
+/// forward and played now.
+@immutable
+class PreMatchCheck {
+  const PreMatchCheck({
+    required this.id,
+    required this.label,
+    this.detail,
+  });
+
+  /// Stored as a key on the fixture's `startedEarly.checks` map, so the answer
+  /// survives as a record of what was agreed.
+  final String id;
+
+  final String label;
+
+  /// The sport-specific nuance behind the question, shown under it.
+  final String? detail;
+}
+
+/// What to ask before starting a match ahead of its scheduled time.
+///
+/// ## Why the questions are per sport
+///
+/// "Shall we play now?" is never the only question. A cricket match moved
+/// forward has to settle which ball is being used, because a leather-ball
+/// fixture played with a tennis ball is a different match and every bowling
+/// figure it produces means something else. A badminton tie moved indoors
+/// changes the shuttle. A football match brought forward by three hours is
+/// played in daylight on a different surface.
+///
+/// These are the questions a captain actually asks in the ten minutes before
+/// an unscheduled start, and the answers are recorded rather than merely
+/// confirmed — an organizer saying "we agreed the same eleven" three weeks
+/// later needs the app to be able to say whether they did.
+class PreMatchChecks {
+  const PreMatchChecks._();
+
+  /// Asked for every sport: the two things that are true of any match.
+  static const _universal = [
+    PreMatchCheck(
+      id: 'lineups_unchanged',
+      label: 'Same teams as scheduled',
+      detail: 'Tick only if neither side has changed its players.',
+    ),
+    PreMatchCheck(
+      id: 'scorer_ready',
+      label: 'A scorer is present and ready',
+      detail: 'Nobody is standing at the board is how a match goes unrecorded.',
+    ),
+  ];
+
+  static const _map = <String, List<PreMatchCheck>>{
+    'cricket': [
+      PreMatchCheck(
+        id: 'same_ball',
+        label: 'Same ball type as scheduled',
+        detail: 'Leather, tennis or rubber — it changes what the figures mean.',
+      ),
+      PreMatchCheck(
+        id: 'overs_unchanged',
+        label: 'Same number of overs',
+        detail: 'Shorten it in Rules first if the light will not last.',
+      ),
+      PreMatchCheck(
+        id: 'umpires_present',
+        label: 'Umpires in place',
+      ),
+    ],
+    'badminton': [
+      PreMatchCheck(
+        id: 'same_shuttle',
+        label: 'Same shuttle grade',
+        detail: 'Feather and nylon do not play the same length.',
+      ),
+      PreMatchCheck(id: 'court_ready', label: 'Court free and net set'),
+    ],
+    'table_tennis': [
+      PreMatchCheck(id: 'same_ball', label: 'Same ball type'),
+      PreMatchCheck(id: 'table_ready', label: 'Table and net set'),
+    ],
+    'tennis': [
+      PreMatchCheck(id: 'same_ball', label: 'Same ball type'),
+      PreMatchCheck(id: 'court_ready', label: 'Court free and net set'),
+    ],
+    'football': [
+      PreMatchCheck(id: 'referee_present', label: 'Referee present'),
+      PreMatchCheck(
+        id: 'surface_same',
+        label: 'Same pitch and surface',
+        detail: 'Turf and grass are different matches.',
+      ),
+    ],
+    'hockey': [
+      PreMatchCheck(id: 'umpires_present', label: 'Umpires in place'),
+      PreMatchCheck(id: 'surface_same', label: 'Same pitch and surface'),
+    ],
+    'volleyball': [
+      PreMatchCheck(id: 'net_height', label: 'Net at the agreed height'),
+      PreMatchCheck(id: 'court_ready', label: 'Court free'),
+    ],
+    'kabaddi': [
+      PreMatchCheck(id: 'mat_ready', label: 'Mat laid and lines marked'),
+      PreMatchCheck(id: 'referee_present', label: 'Referee and umpires present'),
+    ],
+    'kho_kho': [
+      PreMatchCheck(id: 'poles_set', label: 'Poles and lanes marked'),
+      PreMatchCheck(id: 'referee_present', label: 'Referee present'),
+    ],
+    'basketball': [
+      PreMatchCheck(id: 'referee_present', label: 'Referees present'),
+      PreMatchCheck(id: 'clock_ready', label: 'Clock and shot clock working'),
+    ],
+    'chess': [
+      PreMatchCheck(id: 'clock_ready', label: 'Clock set to the time control'),
+    ],
+    'carrom': [
+      PreMatchCheck(id: 'board_ready', label: 'Board powdered and coins set'),
+    ],
+  };
+
+  /// Everything to ask for [sportId] — its own questions first, then the two
+  /// that apply to every sport.
+  static List<PreMatchCheck> forSport(String sportId) => [
+        ...?_map[sportId],
+        ..._universal,
+      ];
+}
+
 /// One sport in the platform catalogue.
 ///
 /// A sport is data, not code. It names the plugin that scores it and the
@@ -349,6 +478,26 @@ class SportSpec {
   List<SideFormat> get sideFormats => SideFormats.forSport(id);
 
   SideFormat get defaultSideFormat => SideFormats.defaultFor(id);
+
+  /// Every draw format this sport can actually run, default first.
+  ///
+  /// One list, used by every screen that sets a sport up — standalone event
+  /// creation, season creation, and adding a sport to an existing season —
+  /// so they cannot drift apart. Before this existed each screen kept its
+  /// own copy, and two of the three silently dropped Groups+Knockout and
+  /// Double Elimination even though the draw generator has always supported
+  /// both; the season screens offered no choice at all and wrote Round
+  /// Robin regardless of what the organizer actually needed.
+  List<CompetitionFormat> get competitionFormats => isPerformance
+      ? const [CompetitionFormat.finalOnly, CompetitionFormat.heatsThenFinal]
+      : const [
+          CompetitionFormat.roundRobin,
+          CompetitionFormat.knockout,
+          CompetitionFormat.groupThenKnockout,
+          CompetitionFormat.doubleElimination,
+          CompetitionFormat.swiss,
+          CompetitionFormat.leagueTable,
+        ];
 }
 
 /// The curated sport catalogue.

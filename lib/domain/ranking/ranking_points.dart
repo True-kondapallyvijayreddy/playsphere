@@ -129,18 +129,25 @@ class RankingPoints {
     final champion = _championOf(event, decided);
     final finalist = _finalistOf(event, decided);
 
+    // A format settled by a TABLE is scored by where you finished in it; one
+    // settled by a deciding match is scored by how far out you were beaten.
+    final positions =
+        _isTableFormat(event.format) ? _tablePositions(decided, names) : null;
+
     final awards = <RankingAward>[];
     for (final entry in names.entries) {
       final reached = lastRound[entry.key] ?? 0;
-      final round = _roundFor(
-        entrantId: entry.key,
-        champion: champion,
-        finalist: finalist,
-        lastRound: reached,
-        deepestRound: deepestRound,
-        playedGroupOnly: reached == 0,
-        wonAnything: everWon.contains(entry.key),
-      );
+      final round = positions != null
+          ? _roundForPosition(positions[entry.key] ?? names.length)
+          : _roundFor(
+              entrantId: entry.key,
+              champion: champion,
+              finalist: finalist,
+              lastRound: reached,
+              deepestRound: deepestRound,
+              playedGroupOnly: reached == 0,
+              wonAnything: everWon.contains(entry.key),
+            );
       awards.add(RankingAward(
         entrantId: entry.key,
         displayName: entry.value,
@@ -189,6 +196,75 @@ class RankingPoints {
     };
   }
 
+  /// Formats whose title comes from a table rather than from a deciding match.
+  static bool _isTableFormat(CompetitionFormat format) =>
+      format == CompetitionFormat.roundRobin ||
+      format == CompetitionFormat.leagueTable ||
+      format == CompetitionFormat.swiss;
+
+  /// The finish a final TABLE POSITION is worth.
+  ///
+  /// A league has no bracket depth to measure against, and measuring one anyway
+  /// is how every entrant in a round robin came out a semi-finalist: everybody
+  /// plays every round, so "the deepest round I reached" is the last round for
+  /// all of them and `deepestRound - lastRound` is zero for the champion and
+  /// for the bottom of the table alike. A ten-player league paid the same 36 ×
+  /// grade to the winner and to the player who lost every match.
+  ///
+  /// A table is ranked, so the honest translation is position → the round a
+  /// knockout of the same field would have put you out in. First is the winner,
+  /// second the runner-up, third and fourth the semi-finalists, doubling from
+  /// there. A league and a bracket of the same size are then worth the same,
+  /// which is the property the whole scheme depends on.
+  static FinishingRound _roundForPosition(int position) {
+    if (position <= 1) return FinishingRound.winner;
+    if (position == 2) return FinishingRound.runnerUp;
+    if (position <= 4) return FinishingRound.semiFinal;
+    if (position <= 8) return FinishingRound.quarterFinal;
+    if (position <= 16) return FinishingRound.lastSixteen;
+    if (position <= 32) return FinishingRound.lastThirtyTwo;
+    return FinishingRound.participated;
+  }
+
+  /// Orders a table format's entrants.
+  ///
+  /// Deliberately simple — wins, then fewest losses, then name — and
+  /// deliberately NOT the full [StandingsCalculator] chain the app shows on
+  /// screen. This has to produce the same answer as `functions/ranking.js`,
+  /// which has neither the per-sport tiebreak configuration nor a decoded score
+  /// state to work from. Separating two entrants who finished on identical
+  /// records matters far less than both of them ranking above the player who
+  /// lost everything, which is what was actually broken. Change this and
+  /// `tablePositions` in ranking.js together.
+  static Map<String, int> _tablePositions(
+    List<Fixture> decided,
+    Map<String, String> names,
+  ) {
+    final wins = {for (final id in names.keys) id: 0};
+    final losses = {for (final id in names.keys) id: 0};
+
+    for (final f in decided) {
+      final winner = f.winnerEntrantId;
+      if (winner == null || !wins.containsKey(winner)) continue;
+      wins[winner] = wins[winner]! + 1;
+      final loser = winner == f.entrantAId ? f.entrantBId : f.entrantAId;
+      if (losses.containsKey(loser)) losses[loser] = losses[loser]! + 1;
+    }
+
+    final ordered = names.keys.toList()
+      ..sort((a, b) {
+        final byWins = wins[b]!.compareTo(wins[a]!);
+        if (byWins != 0) return byWins;
+        final byLosses = losses[a]!.compareTo(losses[b]!);
+        if (byLosses != 0) return byLosses;
+        return (names[a] ?? a).compareTo(names[b] ?? b);
+      });
+
+    return {
+      for (var i = 0; i < ordered.length; i++) ordered[i]: i + 1,
+    };
+  }
+
   static String? _championOf(Competition event, List<Fixture> decided) {
     final decider = _deciderOf(event, decided);
     return decider?.winnerEntrantId;
@@ -206,11 +282,7 @@ class RankingPoints {
   /// deciding match — its title comes from the table, and nobody is a
   /// "runner-up" of a round robin in the sense a ranking table means.
   static Fixture? _deciderOf(Competition event, List<Fixture> decided) {
-    if (event.format == CompetitionFormat.roundRobin ||
-        event.format == CompetitionFormat.leagueTable ||
-        event.format == CompetitionFormat.swiss) {
-      return null;
-    }
+    if (_isTableFormat(event.format)) return null;
     final bracketMatches = [
       for (final f in decided)
         if (f.bracket != Bracket.group) f,

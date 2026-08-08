@@ -1,11 +1,11 @@
 {
-    "name": "playsphere",
-    "short_name": "playsphere",
+    "name": "PlaySphere",
+    "short_name": "PlaySphere",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#0A0A0A",
+    "theme_color": "#63B22B",
+    "description": "Every sport. Every match. Every memory. Run your club, score any sport ball-by-ball, and keep a career record that follows you for life.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

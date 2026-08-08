@@ -338,10 +338,27 @@ class _ChallengeCardState extends ConsumerState<_ChallengeCard> {
             ),
             const SizedBox(height: 4),
             Text(
-              incoming
-                  ? '${sport.name} · they challenged you'
-                  : '${sport.name} · you challenged them',
+              incoming ? 'They challenged you' : 'You challenged them',
               style: theme.textTheme.bodySmall,
+            ),
+            const SizedBox(height: 6),
+            // Every contest, not just the first. A club being asked to play
+            // three sports has to be able to see all three before agreeing —
+            // accepting is one tap and creates all of them.
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                for (final leg
+                    in c.resolvedLegs((id) => SportCatalog.byId(id).name))
+                  Chip(
+                    avatar: Text(SportCatalog.byId(leg.sportId).icon),
+                    label: Text(
+                      leg.sideFormatName.isEmpty ? leg.sportName : leg.label,
+                    ),
+                    visualDensity: VisualDensity.compact,
+                  ),
+              ],
             ),
             if (c.venue != null && c.venue!.isNotEmpty) ...[
               const SizedBox(height: 2),
@@ -456,7 +473,48 @@ class _IssueChallengeDialogState
   final _search = TextEditingController();
   final _venue = TextEditingController();
   Organization? _opponent;
-  String _sportId = 'cricket';
+  /// The contests being proposed, in the order they were added.
+  ///
+  /// A list of legs rather than a set of sport ids, because "table tennis" is
+  /// not a challenge — "table tennis singles" is, and the same two clubs may
+  /// well want both singles and doubles on the same afternoon. The old set of
+  /// ids could not express either.
+  final List<ChallengeLeg> _legs = [
+    ChallengeLeg(
+      sportId: 'cricket',
+      sportName: SportCatalog.byId('cricket').name,
+      sideFormatId: _defaultFormatFor('cricket').id,
+      sideFormatName: _defaultFormatFor('cricket').name,
+    ),
+  ];
+
+  static SideFormat _defaultFormatFor(String sportId) {
+    final formats = SideFormats.forSport(sportId);
+    return formats.firstWhere(
+      (f) => f.isDefault,
+      orElse: () => formats.first,
+    );
+  }
+
+  void _toggleLeg(String sportId, SideFormat format) {
+    setState(() {
+      final at = _legs.indexWhere(
+        (l) => l.sportId == sportId && l.sideFormatId == format.id,
+      );
+      if (at >= 0) {
+        // Never empty: a challenge with no contests in it is not a challenge,
+        // and the send button would have nothing to build from.
+        if (_legs.length > 1) _legs.removeAt(at);
+        return;
+      }
+      _legs.add(ChallengeLeg(
+        sportId: sportId,
+        sportName: SportCatalog.byId(sportId).name,
+        sideFormatId: format.id,
+        sideFormatName: format.name,
+      ));
+    });
+  }
   final List<DateTime> _slots = [];
   bool _busy = false;
 
@@ -505,7 +563,11 @@ class _IssueChallengeDialogState
               toOrgId: opponent.id,
               fromOrgName: me.name,
               toOrgName: opponent.name,
-              sportId: _sportId,
+              // Still written, and still the first leg's sport: every
+              // challenge document created before legs existed carries only
+              // this, and the list rows read it as a fallback.
+              sportId: _legs.first.sportId,
+              legs: List.of(_legs),
               status: 'pending',
               proposedSlots: List.of(_slots),
               venue: _venue.text.trim().isEmpty ? null : _venue.text.trim(),
@@ -547,23 +609,62 @@ class _IssueChallengeDialogState
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              DropdownButtonFormField<String>(
-                value: _sportId,
-                decoration: const InputDecoration(
-                  labelText: 'Sport',
-                  border: OutlineInputBorder(),
-                ),
-                // Every sport the app can score, not the five that happened to
-                // be typed into this dialog before.
-                items: [
-                  for (final s in SportCatalog.all)
-                    DropdownMenuItem(
-                      value: s.id,
-                      child: Text('${s.icon}  ${s.name}'),
-                    ),
-                ],
-                onChanged: (v) => setState(() => _sportId = v ?? _sportId),
+              Text(
+                _legs.length == 1
+                    ? 'What are you playing?'
+                    : '${_legs.length} contests in this challenge',
+                style: Theme.of(context).textTheme.labelLarge,
               ),
+              const SizedBox(height: 2),
+              Text(
+                'Pick as many as you like — they are agreed together and '
+                'played as one fixture list.',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 8),
+              // One row per sport, one chip per arrangement. Doing it this way
+              // rather than sport-then-a-second-step is what lets a club put
+              // TT singles AND TT doubles on the same challenge, which is
+              // exactly what an inter-club afternoon looks like.
+              for (final s in SportCatalog.all)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SizedBox(
+                        width: 120,
+                        child: Padding(
+                          padding: const EdgeInsets.only(top: 10),
+                          child: Text(
+                            '${s.icon} ${s.name}',
+                            style: Theme.of(context).textTheme.bodySmall,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ),
+                      Expanded(
+                        child: Wrap(
+                          spacing: 6,
+                          runSpacing: 6,
+                          children: [
+                            for (final f in SideFormats.forSport(s.id))
+                              FilterChip(
+                                label: Text(f.name),
+                                visualDensity: VisualDensity.compact,
+                                selected: _legs.any(
+                                  (l) =>
+                                      l.sportId == s.id &&
+                                      l.sideFormatId == f.id,
+                                ),
+                                onSelected: (_) => _toggleLeg(s.id, f),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               const SizedBox(height: 12),
 
               if (_opponent != null)

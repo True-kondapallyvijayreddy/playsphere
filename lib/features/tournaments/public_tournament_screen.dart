@@ -188,7 +188,7 @@ class _PublicMatch extends StatelessWidget {
           ].join(' · '),
           style: theme.textTheme.bodySmall,
         ),
-        trailing: f.isLive
+        trailing: f.isLiveAt(DateTime.now())
             ? Icon(Icons.circle, size: 10, color: theme.colorScheme.error)
             : (f.summary.isNotEmpty
                 ? Text(f.summary, style: theme.textTheme.labelSmall)

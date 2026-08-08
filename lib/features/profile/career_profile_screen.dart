@@ -9,6 +9,7 @@ import '../../core/models/memory.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../data/career_repository.dart';
+import '../../domain/career/head_to_head.dart';
 import '../../domain/rating/glicko2.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
@@ -88,7 +89,15 @@ class CareerProfileScreen extends ConsumerWidget {
                     ),
                     const SizedBox(height: 10),
                     AsyncErrorStrip(value: career, what: 'your sports record'),
-                    _SportsList(career: career, isMe: isMe),
+                    _SportsList(career: career, isMe: isMe, uid: uid),
+
+                    const SizedBox(height: 28),
+                    // Built and tested since head-to-head shipped, and never
+                    // shown anywhere until now — a career total says how good
+                    // someone is; it has never been able to answer "how do I
+                    // do against them", which is the question a rivalry is
+                    // actually about.
+                    _HeadToHead(uid: uid),
 
                     const SizedBox(height: 28),
                     Text(
@@ -267,10 +276,15 @@ class _Stat extends StatelessWidget {
 }
 
 class _SportsList extends StatelessWidget {
-  const _SportsList({required this.career, required this.isMe});
+  const _SportsList({
+    required this.career,
+    required this.isMe,
+    required this.uid,
+  });
 
   final AsyncValue<List<CareerLine>> career;
   final bool isMe;
+  final String uid;
 
   @override
   Widget build(BuildContext context) {
@@ -298,15 +312,18 @@ class _SportsList extends StatelessWidget {
     }
 
     return Column(
-      children: [for (final line in lines) _SportCard(line: line)],
+      children: [
+        for (final line in lines) _SportCard(line: line, uid: uid),
+      ],
     );
   }
 }
 
 class _SportCard extends StatelessWidget {
-  const _SportCard({required this.line});
+  const _SportCard({required this.line, required this.uid});
 
   final CareerLine line;
+  final String uid;
 
   @override
   Widget build(BuildContext context) {
@@ -324,41 +341,49 @@ class _SportCard extends StatelessWidget {
 
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Text(sport.icon, style: const TextStyle(fontSize: 22)),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        qualifier == null
-                            ? sport.name
-                            : '${sport.name} · $qualifier',
-                        style: theme.textTheme.titleMedium,
-                      ),
-                      Text(
-                        '${line.matchesPlayed} '
-                        '${line.matchesPlayed == 1 ? 'match' : 'matches'}',
-                        style: theme.textTheme.bodySmall,
-                      ),
-                    ],
+      clipBehavior: Clip.antiAlias,
+      // Feature #14: a sport opens its own page — that sport's matches, their
+      // scorecards, the leaderboard and the full tally. All four already
+      // existed in the data; this card was where the journey stopped.
+      child: InkWell(
+        onTap: () => context.push(Routes.playerSport(uid, line.sportId)),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Text(sport.icon, style: const TextStyle(fontSize: 22)),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          qualifier == null
+                              ? sport.name
+                              : '${sport.name} · $qualifier',
+                          style: theme.textTheme.titleMedium,
+                        ),
+                        Text(
+                          '${line.matchesPlayed} '
+                          '${line.matchesPlayed == 1 ? 'match' : 'matches'}',
+                          style: theme.textTheme.bodySmall,
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                if (rating != null) _RatingBadge(rating: rating),
+                  if (rating != null) _RatingBadge(rating: rating),
+                  Icon(Icons.chevron_right, color: theme.hintColor),
+                ],
+              ),
+              if (line.stats != null && line.stats!.tally.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                _TallyStrip(tally: line.stats!.tally),
               ],
-            ),
-            if (line.stats != null && line.stats!.tally.isNotEmpty) ...[
-              const SizedBox(height: 12),
-              _TallyStrip(tally: line.stats!.tally),
             ],
-          ],
+          ),
         ),
       ),
     );
@@ -464,4 +489,67 @@ class _TallyStrip extends StatelessWidget {
     );
     return spaced[0].toUpperCase() + spaced.substring(1).toLowerCase();
   }
+}
+
+/// Every rival this player has faced, best-known record first.
+///
+/// [HeadToHead.forPlayer] is a pure function of the player's own fixtures —
+/// see its doc for why a career total cannot answer this — and this is the
+/// first screen to actually render what it produces.
+class _HeadToHead extends ConsumerWidget {
+  const _HeadToHead({required this.uid});
+
+  final String uid;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final recordsAsync = ref.watch(headToHeadProvider(uid));
+    final records = recordsAsync.valueOrNull ?? const <HeadToHeadRecord>[];
+    // Quietly absent rather than an empty-state card: a player with no
+    // opponents yet already gets that message from `_SportsList` above, and
+    // repeating it here would just be noise.
+    if (records.isEmpty) return const SizedBox.shrink();
+
+    final theme = Theme.of(context);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('Head to head', style: theme.textTheme.titleMedium),
+        const SizedBox(height: 4),
+        Text(
+          'Record against everyone this player has faced.',
+          style: theme.textTheme.bodySmall,
+        ),
+        const SizedBox(height: 10),
+        for (final r in records.take(10))
+          Card(
+            margin: const EdgeInsets.only(bottom: 6),
+            child: ListTile(
+              dense: true,
+              title: Text(r.opponentName),
+              subtitle: r.lastMet == null
+                  ? null
+                  : Text('Last met ${_stamp(r.lastMet!)}'),
+              trailing: Text(
+                '${r.line} (${r.played})',
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w700,
+                  color: r.isAhead
+                      ? theme.colorScheme.primary
+                      : r.isLevel
+                          ? theme.hintColor
+                          : theme.colorScheme.error,
+                ),
+              ),
+              onTap: () => context.push(Routes.profile(r.opponentUid)),
+            ),
+          ),
+      ],
+    );
+  }
+
+  static String _stamp(DateTime d) =>
+      '${d.day.toString().padLeft(2, '0')}/'
+      '${d.month.toString().padLeft(2, '0')}/${d.year}';
 }

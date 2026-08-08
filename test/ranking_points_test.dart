@@ -198,9 +198,23 @@ void main() {
   });
 
   group('formats that have no final', () {
-    test('a league crowns nobody a runner-up', () {
-      // Nobody is "runner-up" of a round robin in the sense a ranking table
-      // means, so the deciding-match logic must not invent one.
+    test('a league is scored by the table, not by bracket depth', () {
+      // This test used to assert the opposite — that a league crowns nobody,
+      // because "nobody is runner-up of a round robin in the sense a ranking
+      // table means". That premise is what produced the defect it was
+      // protecting.
+      //
+      // With no champion to name, `_roundFor` fell through to bracket depth:
+      // `deepestRound - lastRound`. In a round robin EVERYBODY plays every
+      // round, so that difference is zero for all of them, and every single
+      // entrant came out `semi_final`. A ten-player district league paid 3 × 36
+      // points to the player who won it and exactly the same to the player who
+      // lost every match — on a table that decides seeding, selection and
+      // funding.
+      //
+      // A league does have a champion. That is what a league is. So a table
+      // format is now scored by finishing POSITION, mapped onto the round a
+      // knockout of the same field would have put you out in.
       final awards = RankingPoints.award(
         tournament: tournament(TournamentGrade.district),
         event: event(format: CompetitionFormat.roundRobin),
@@ -210,8 +224,59 @@ void main() {
           match(2, 'B', 'C', winner: 'B', round: 2),
         ],
       );
-      expect(awards.any((a) => a.round == FinishingRound.winner), isFalse);
-      expect(awards.any((a) => a.round == FinishingRound.runnerUp), isFalse);
+
+      FinishingRound roundOf(String id) =>
+          awards.firstWhere((a) => a.entrantId == id).round;
+
+      // A won both, B won one, C won none.
+      expect(roundOf('A'), FinishingRound.winner);
+      expect(roundOf('B'), FinishingRound.runnerUp);
+      expect(roundOf('C'), FinishingRound.semiFinal);
+    });
+
+    test('a league winner is worth strictly more than the bottom of it', () {
+      // The regression in one line. Before the fix both sides of this
+      // comparison were 108 and the assertion could not have failed.
+      final awards = RankingPoints.award(
+        tournament: tournament(TournamentGrade.district),
+        event: event(format: CompetitionFormat.roundRobin),
+        fixtures: [
+          match(0, 'A', 'B', winner: 'A'),
+          match(1, 'A', 'C', winner: 'A'),
+          match(2, 'B', 'C', winner: 'B', round: 2),
+        ],
+      );
+
+      int pointsOf(String id) =>
+          awards.firstWhere((a) => a.entrantId == id).points;
+
+      expect(pointsOf('A'), greaterThan(pointsOf('B')));
+      expect(pointsOf('B'), greaterThan(pointsOf('C')));
+    });
+
+    test('a Swiss field is scored the same way', () {
+      // Swiss is the other format settled by a table rather than by a final,
+      // and it is the one §9 recommends for large chess and table-tennis
+      // fields — exactly where farming identical points would matter most.
+      final awards = RankingPoints.award(
+        tournament: tournament(TournamentGrade.state),
+        event: event(format: CompetitionFormat.swiss),
+        fixtures: [
+          match(0, 'A', 'B', winner: 'A'),
+          match(1, 'C', 'D', winner: 'C'),
+          match(2, 'A', 'C', winner: 'A', round: 2),
+          match(3, 'B', 'D', winner: 'B', round: 2),
+        ],
+      );
+
+      expect(
+        awards.firstWhere((a) => a.entrantId == 'A').round,
+        FinishingRound.winner,
+      );
+      expect(
+        awards.firstWhere((a) => a.entrantId == 'D').round,
+        FinishingRound.semiFinal,
+      );
     });
 
     test('a group-stage exit is scored as a group-stage exit', () {

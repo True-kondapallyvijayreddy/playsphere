@@ -75,6 +75,15 @@ class CricketPlugin extends ScoringPlugin {
   bool _freeHitEnabled(ScoringContext ctx) =>
       ctx.boolConfig('freeHitOnNoBall', true);
 
+  /// Whether the bowler must change at the end of every over.
+  ///
+  /// True everywhere the game is played to its own laws: no bowler may bowl
+  /// two overs in succession. It is configurable only because a handful of
+  /// short indoor and single-wicket formats drop the rule, not because a
+  /// scorer should be able to switch it off to save a tap.
+  bool _enforceBowlerChange(ScoringContext ctx) =>
+      ctx.boolConfig('bowlerMustChangeEachOver', true);
+
   int _boundaryFour(ScoringContext ctx) => ctx.intConfig('boundaryFour', 4);
   int _boundarySix(ScoringContext ctx) => ctx.intConfig('boundarySix', 6);
 
@@ -184,10 +193,39 @@ class CricketPlugin extends ScoringPlugin {
     ScoreAction action,
     ScoringContext ctx,
   ) {
-    if (state['complete'] == true && action.type != 'reopen') {
+    if (state['locked'] == true) {
+      return const ScoringResult.rejected(
+        'This match is locked by the organizer and cannot be modified.',
+      );
+    }
+
+    if (state['complete'] == true &&
+        action.type != 'reopen' &&
+        action.type != 'lock_match' &&
+        action.type != 'start_super_over') {
       return const ScoringResult.rejected(
         'This match is already finished. Reopen it to make a correction.',
       );
+    }
+
+    if (action.type == 'start_super_over') {
+      final innings = copyList(state['innings']);
+      // Add Super Over Innings 3 (Team A or B, 1-over max)
+      final sideA = innings.first['battingSide'] as String? ?? 'a';
+      final sideB = sideA == 'a' ? 'b' : 'a';
+      innings.add(_newInnings(sideB));
+      return ScoringResult.ok(mutate(state, (s) {
+        s['complete'] = false;
+        s['tie'] = false;
+        s['superOver'] = true;
+        s['innings'] = innings;
+        s['inningsIndex'] = 2;
+        s['target'] = null;
+      }));
+    }
+
+    if (action.type == 'lock_match') {
+      return ScoringResult.ok(mutate(state, (s) => s['locked'] = true));
     }
 
     if (action.type == 'reopen') {
@@ -278,11 +316,26 @@ class CricketPlugin extends ScoringPlugin {
         if (who == null) {
           return const ScoringResult.rejected('Choose the next bowler.');
         }
+        // No bowler may bowl two overs in succession. Caught here rather than
+        // left to the scorer, because the person tapping is watching the game
+        // and the app is the only thing counting.
+        if (_enforceBowlerChange(ctx) && who == cur['lastBowler']) {
+          return ScoringResult.rejected(
+            '${ctx.playerName(who, 'That bowler')} bowled the last over. '
+            'Somebody else has to bowl this one.',
+          );
+        }
         bowling[who] = bowling[who] ?? _newBowling();
         cur
           ..['bowler'] = who
-          ..['bowling'] = bowling
-          ..['overRuns'] = 0;
+          ..['bowling'] = bowling;
+        // `overRuns` is NOT reset here, and that is the fix rather than an
+        // omission. It counts what has been conceded in the over in progress,
+        // and it is reset where an over actually ends — below, at the ball
+        // boundary. Clearing it on every bowler change meant a bowler brought
+        // on mid-over (an injury, a scorer correcting the wrong name) started
+        // from zero, so two dot balls at the end of somebody else's expensive
+        // over were recorded as a maiden.
         innings[idx] = cur;
         return ScoringResult.ok(mutate(state, (s) => s['innings'] = innings));
 
@@ -393,8 +446,17 @@ class CricketPlugin extends ScoringPlugin {
         runsThisBall = r;
 
       case 'wicket':
-        final isRunOut = action.payload['runOut'] == true ||
-            action.payload['type'] == 'run_out';
+        final dismissalType = action.payload['type'] as String? ??
+            (action.payload['runOut'] == true ? 'run_out' : 'bowled');
+        final isRunOut = dismissalType == 'run_out';
+        // Which dismissals belong to the bowler's figures.
+        //
+        // A run-out never has, and §7.1 says so. A retirement does not either
+        // — nobody got the batter out — and while the type existed in
+        // `_dismissalText` from the beginning, the only check here was "is it
+        // a run-out", so a retirement quietly inflated the bowler's wickets
+        // and their bowling average with it.
+        final creditsBowler = !isRunOut && dismissalType != 'retired';
         if (freeHit && !isRunOut) {
           return const ScoringResult.rejected(
             'Free hit — the batter can only be run out on this delivery.',
@@ -464,9 +526,9 @@ class CricketPlugin extends ScoringPlugin {
         dismissed['out'] = true;
         dismissed['dismissal'] = _dismissalText(action, ctx);
         cur['wickets'] = i(cur['wickets']) + 1;
-        // A run-out is not the bowler's wicket, and a wicket off a wide can
-        // only ever be a run-out or a stumping.
-        if (!isRunOut) bowl['wickets'] = i(bowl['wickets']) + 1;
+        // A run-out is not the bowler's wicket, nor is a retirement, and a
+        // wicket off a wide can only ever be a run-out or a stumping.
+        if (creditsBowler) bowl['wickets'] = i(bowl['wickets']) + 1;
 
         if (!dismissedIsStriker) batting[dismissedId] = dismissed;
 
@@ -526,6 +588,17 @@ class CricketPlugin extends ScoringPlugin {
       final s1 = cur['striker'];
       cur['striker'] = cur['nonStriker'];
       cur['nonStriker'] = s1;
+
+      // Clearing the bowler is what actually enforces the change. The comment
+      // above said the bowler must change while the code let the same one keep
+      // going over after over, so a full innings could be recorded against one
+      // name — wrong figures for every bowler in the match, and an over count
+      // no scorecard could account for. A null bowler makes the next delivery
+      // impossible to score until somebody is named, and `controls` asks.
+      if (_enforceBowlerChange(ctx)) {
+        cur['lastBowler'] = bowler;
+        cur['bowler'] = null;
+      }
     }
 
     cur
@@ -666,13 +739,22 @@ class CricketPlugin extends ScoringPlugin {
     final runs = (cur['runs'] as num?)?.toInt() ?? 0;
     final wickets = (cur['wickets'] as num?)?.toInt() ?? 0;
     final legalBalls = (cur['legalBalls'] as num?)?.toInt() ?? 0;
-    final maxBalls = _overs(ctx) * _ballsPerOver(ctx);
+    final isSuperOver = state['superOver'] == true && idx >= 2;
+    // Super Over innings are 1 over; regular innings use the configured value.
+    final effectiveOvers = isSuperOver ? 1 : _overs(ctx);
+    final maxBalls = effectiveOvers * _ballsPerOver(ctx);
     final target = (state['target'] as num?)?.toInt();
-    final isSecondInnings = idx == 1;
+    // In a regular match the chasing innings is idx 1. In a Super Over the
+    // batting-first SO is idx 2 (even) and the chasing SO is idx 3 (odd).
+    // The pattern generalises: even indices bat first, odd indices chase.
+    final isChasingInnings = idx.isOdd;
 
     // A chase ends the moment the target is passed, mid-over.
-    final chaseWon = isSecondInnings && target != null && runs >= target;
+    final chaseWon = isChasingInnings && target != null && runs >= target;
 
+    // Super Over wickets: only 2 wickets per side (1 wicket in some formats),
+    // but we reuse _wicketsAllowed for the regular match. For Super Over,
+    // the innings ends on all-out (all available batters) or overs exhausted.
     final inningsOver = cur['closed'] == true ||
         wickets >= _wicketsAllowed(ctx) ||
         legalBalls >= maxBalls ||
@@ -686,13 +768,13 @@ class CricketPlugin extends ScoringPlugin {
     cur['closed'] = true;
     innings[idx] = cur;
 
-    if (!isSecondInnings) {
+    if (!isChasingInnings) {
       final battingFirst = cur['battingSide'] as String? ?? 'a';
       final chasingSide = battingFirst == 'a' ? 'b' : 'a';
       innings.add(_newInnings(chasingSide));
       return mutate(state, (s) {
         s['innings'] = innings;
-        s['inningsIndex'] = 1;
+        s['inningsIndex'] = idx + 1;
         s['target'] = runs + 1;
         s['freeHit'] = false;
       });
@@ -871,16 +953,20 @@ class CricketPlugin extends ScoringPlugin {
     }
 
     final cur = _current(state);
+    final idx = (state['inningsIndex'] as num?)?.toInt() ?? 0;
+    final isSuperOver = state['superOver'] == true && idx >= 2;
+    final effectiveOvers = isSuperOver ? 1 : _overs(ctx);
     final balls = (cur['legalBalls'] as num?)?.toInt() ?? 0;
-    final parts = <String>['${_oversText(balls, ctx)} / ${_overs(ctx)} ov'];
+    final parts = <String>['${_oversText(balls, ctx)} / $effectiveOvers ov'];
 
+    if (isSuperOver) parts.insert(0, 'SUPER OVER');
     if (cur['striker'] == null) parts.add('NEW BATTER');
     if (state['freeHit'] == true) parts.add('FREE HIT');
 
     final target = (state['target'] as num?)?.toInt();
-    if (target != null && (state['inningsIndex'] as num?)?.toInt() == 1) {
+    if (target != null && idx.isOdd) {
       final runs = (cur['runs'] as num?)?.toInt() ?? 0;
-      final ballsLeft = _overs(ctx) * _ballsPerOver(ctx) - balls;
+      final ballsLeft = effectiveOvers * _ballsPerOver(ctx) - balls;
       parts.add('need ${target - runs} off $ballsLeft');
     }
     return parts.join(' · ');
@@ -917,15 +1003,41 @@ class CricketPlugin extends ScoringPlugin {
     ScoringContext ctx,
   ) {
     if (state['complete'] == true) {
-      return const [
-        ScoreControlGroup(title: 'Match finished', controls: [
-          ScoreControl(
-            action: 'reopen',
-            label: 'Reopen to correct',
-            style: ControlStyle.subtle,
-            shortcut: 'r',
+      final isLocked = state['locked'] == true;
+      final isTie = state['tie'] == true;
+      if (isLocked) {
+        return const [
+          ScoreControlGroup(
+            title: 'Match finished & locked',
+            controls: [],
           ),
-        ]),
+        ];
+      }
+      return [
+        ScoreControlGroup(
+          title: isTie ? 'Match tied!' : 'Match finished',
+          controls: [
+            if (isTie)
+              const ScoreControl(
+                action: 'start_super_over',
+                label: 'Start Super Over ⚡',
+                style: ControlStyle.primary,
+                tooltip: 'Run a 1-over tiebreaker innings to decide the winner.',
+              ),
+            const ScoreControl(
+              action: 'reopen',
+              label: 'Reopen to correct',
+              style: ControlStyle.subtle,
+              shortcut: 'r',
+            ),
+            const ScoreControl(
+              action: 'lock_match',
+              label: 'Lock Match & Scores',
+              style: ControlStyle.danger,
+              tooltip: 'Permanently lock scores against further edits.',
+            ),
+          ],
+        ),
       ];
     }
 
@@ -950,6 +1062,54 @@ class CricketPlugin extends ScoringPlugin {
     // `apply` then rejects the moment they pick the same name twice.
     final resuming = cur['bowler'] != null && cur['nonStriker'] != null;
 
+    // The over just ended and nobody has been named to bowl the next one.
+    //
+    // Asked before the incoming batter below, because when a wicket falls off
+    // the last ball of an over both are outstanding at once and the bowler is
+    // the one the fielding captain settles first. Once a bowler is named this
+    // falls through to the batter prompt on the very next build.
+    //
+    // `nonStriker != null` is what separates this from the start of an
+    // innings, where nobody is named yet and the full opening dialog belongs.
+    if (cur['bowler'] == null && cur['nonStriker'] != null) {
+      final last = cur['lastBowler'] as String?;
+      return [
+        ScoreControlGroup(
+          title: 'End of over',
+          controls: [
+            ScoreControl(
+              action: 'new_bowler',
+              label: 'Choose the next bowler',
+              style: ControlStyle.primary,
+              side: battingSide,
+              tooltip: last == null
+                  ? null
+                  : '${ctx.playerName(last, 'The last bowler')} cannot bowl '
+                      'two overs in a row.',
+              prompts: const [
+                PlayerPrompt(
+                  key: 'playerId',
+                  label: 'Next bowler',
+                  from: PromptSource.opposingSide,
+                ),
+              ],
+            ),
+          ],
+        ),
+        const ScoreControlGroup(
+          title: 'Innings',
+          controls: [
+            ScoreControl(
+              action: 'end_innings',
+              label: 'End innings',
+              style: ControlStyle.danger,
+              shortcut: 'e',
+            ),
+          ],
+        ),
+      ];
+    }
+
     if (cur['striker'] == null && resuming) {
       return [
         ScoreControlGroup(
@@ -963,6 +1123,17 @@ class CricketPlugin extends ScoringPlugin {
               prompts: const [
                 PlayerPrompt(key: 'playerId', label: 'Incoming batter'),
               ],
+            ),
+          ],
+        ),
+        const ScoreControlGroup(
+          title: 'Innings',
+          controls: [
+            ScoreControl(
+              action: 'end_innings',
+              label: 'End innings',
+              style: ControlStyle.danger,
+              shortcut: 'e',
             ),
           ],
         ),
@@ -1011,49 +1182,276 @@ class CricketPlugin extends ScoringPlugin {
       const ScoreControlGroup(
         title: 'Extras',
         controls: [
+          // The full extras ladder. Wides run +0..+4 and no-balls +0..+6
+          // because those are the values that actually occur: a no-ball can be
+          // hit for six, and an overthrow off one makes five. The gaps that
+          // used to be here (no Wd+3, no NB+2/3/5) were not rare cases the
+          // scorer could round off — each one is a run that has to go
+          // somewhere, so a scorer meeting one had to record a different
+          // delivery and the bowler's figures were wrong from that ball on.
           ScoreControl(
             action: 'wide',
             label: 'Wide',
             shortcut: 'd',
-            tooltip: 'One penalty run. Not a legal delivery.',
+            tooltip: '1 penalty run.',
+          ),
+          ScoreControl(
+            action: 'wide',
+            label: 'Wd+1',
+            payload: {'runs': 1},
+            tooltip: '1 wide + 1 run taken.',
+          ),
+          ScoreControl(
+            action: 'wide',
+            label: 'Wd+2',
+            payload: {'runs': 2},
+            tooltip: '1 wide + 2 runs taken.',
+          ),
+          ScoreControl(
+            action: 'wide',
+            label: 'Wd+3',
+            payload: {'runs': 3},
+            tooltip: '1 wide + 3 runs taken.',
+          ),
+          ScoreControl(
+            action: 'wide',
+            label: 'Wd+4',
+            payload: {'runs': 4},
+            tooltip: '1 wide + 4 boundary runs.',
           ),
           ScoreControl(
             action: 'no_ball',
             label: 'No ball',
             shortcut: 'n',
-            tooltip: 'One penalty run, free hit next, not a legal delivery.',
+            tooltip: '1 penalty run + free hit next ball.',
+          ),
+          ScoreControl(
+            action: 'no_ball',
+            label: 'NB+1',
+            payload: {'runs': 1},
+            tooltip: '1 no ball + 1 run off bat.',
+          ),
+          ScoreControl(
+            action: 'no_ball',
+            label: 'NB+2',
+            payload: {'runs': 2},
+            tooltip: '1 no ball + 2 runs off bat.',
+          ),
+          ScoreControl(
+            action: 'no_ball',
+            label: 'NB+3',
+            payload: {'runs': 3},
+            tooltip: '1 no ball + 3 runs off bat.',
+          ),
+          ScoreControl(
+            action: 'no_ball',
+            label: 'NB+4',
+            payload: {'runs': 4},
+            tooltip: '1 no ball + 4 runs off bat.',
+          ),
+          ScoreControl(
+            action: 'no_ball',
+            label: 'NB+5',
+            payload: {'runs': 5},
+            tooltip: '1 no ball + 5 runs off bat (overthrow).',
+          ),
+          ScoreControl(
+            action: 'no_ball',
+            label: 'NB+6',
+            payload: {'runs': 6},
+            tooltip: '1 no ball + 6 runs off bat.',
           ),
           ScoreControl(
             action: 'bye',
-            label: 'Bye',
+            label: 'Bye 1',
             payload: {'runs': 1},
             style: ControlStyle.subtle,
             shortcut: 'b',
-            tooltip: 'Team runs only. Consumes a delivery.',
+          ),
+          ScoreControl(
+            action: 'bye',
+            label: 'Bye 2',
+            payload: {'runs': 2},
+            style: ControlStyle.subtle,
+          ),
+          ScoreControl(
+            action: 'bye',
+            label: 'Bye 3',
+            payload: {'runs': 3},
+            style: ControlStyle.subtle,
+          ),
+          ScoreControl(
+            action: 'bye',
+            label: 'Bye 4',
+            payload: {'runs': 4},
+            style: ControlStyle.subtle,
           ),
           ScoreControl(
             action: 'leg_bye',
-            label: 'Leg bye',
+            label: 'Leg bye 1',
             payload: {'runs': 1},
             style: ControlStyle.subtle,
             shortcut: 'g',
           ),
-        ],
-      ),
-      ScoreControlGroup(
-        title: 'Wicket',
-        controls: [
           ScoreControl(
-            action: 'wicket',
-            label: freeHit ? 'Run out only' : 'Wicket',
-            style: ControlStyle.danger,
-            payload: freeHit ? const {'type': 'run_out'} : const {},
-            shortcut: 'w',
-            tooltip: freeHit
-                ? 'Free hit — only a run out is allowed.'
-                : 'Bowled, caught, lbw, stumped or run out.',
+            action: 'leg_bye',
+            label: 'Leg bye 2',
+            payload: {'runs': 2},
+            style: ControlStyle.subtle,
+          ),
+          ScoreControl(
+            action: 'leg_bye',
+            label: 'Leg bye 3',
+            payload: {'runs': 3},
+            style: ControlStyle.subtle,
+          ),
+          ScoreControl(
+            action: 'leg_bye',
+            label: 'Leg bye 4',
+            payload: {'runs': 4},
+            style: ControlStyle.subtle,
           ),
         ],
+      ),
+      // Wickets, one control per dismissal type.
+      //
+      // A single "Wicket" button with an empty payload was not a shortcut, it
+      // was a data loss. `apply` defaults an unnamed dismissal to `bowled` and
+      // the striker, so every wicket in every match was recorded as bowled;
+      // `_dismissalText` fell back to the literal word and printed "b bowler"
+      // on every scorecard; `_fieldingCredits` never fired, so the catches,
+      // stumpings and run-outs §7.1 asks for were permanently zero; and
+      // because nothing ever set `type: run_out`, every run-out was credited
+      // to the bowler — the exact error §7.1 names.
+      //
+      // The engine could do all of it. The pad simply never asked. It asks
+      // now, declaratively, through the same `PlayerPrompt` mechanism every
+      // other sport uses — so this stays a plugin change and the screen still
+      // knows nothing about cricket.
+      ScoreControlGroup(
+        title: 'Wicket',
+        controls: freeHit
+            // On a free hit a run-out is the only dismissal available, so
+            // there is nothing to choose between.
+            ? [
+                ScoreControl(
+                  action: 'wicket',
+                  label: 'Run out',
+                  style: ControlStyle.danger,
+                  // The batting side, so "who was out" offers batters and the
+                  // fielder prompts offer the opposition.
+                  side: battingSide,
+                  payload: const {'type': 'run_out'},
+                  shortcut: 'w',
+                  tooltip: 'Free hit — only a run out is allowed.',
+                  prompts: const [
+                    PlayerPrompt(key: 'playerId', label: 'Who was out'),
+                    PlayerPrompt(
+                      key: 'fielder',
+                      label: 'Fielder',
+                      from: PromptSource.opposingSide,
+                      optional: true,
+                    ),
+                    PlayerPrompt(
+                      key: 'assist',
+                      label: 'Throw (assist)',
+                      from: PromptSource.opposingSide,
+                      optional: true,
+                    ),
+                  ],
+                ),
+              ]
+            : [
+                ScoreControl(
+                  action: 'wicket',
+                  label: 'Bowled',
+                  style: ControlStyle.danger,
+                  side: battingSide,
+                  payload: {'type': 'bowled', 'bowler': cur['bowler']},
+                  shortcut: 'w',
+                ),
+                ScoreControl(
+                  action: 'wicket',
+                  label: 'Caught',
+                  style: ControlStyle.danger,
+                  side: battingSide,
+                  payload: {'type': 'caught', 'bowler': cur['bowler']},
+                  shortcut: 'c',
+                  prompts: const [
+                    PlayerPrompt(
+                      key: 'fielder',
+                      label: 'Caught by',
+                      from: PromptSource.opposingSide,
+                    ),
+                  ],
+                ),
+                ScoreControl(
+                  action: 'wicket',
+                  label: 'LBW',
+                  style: ControlStyle.danger,
+                  side: battingSide,
+                  payload: {'type': 'lbw', 'bowler': cur['bowler']},
+                  shortcut: 'l',
+                ),
+                ScoreControl(
+                  action: 'wicket',
+                  label: 'Stumped',
+                  style: ControlStyle.danger,
+                  side: battingSide,
+                  payload: {'type': 'stumped', 'bowler': cur['bowler']},
+                  prompts: const [
+                    PlayerPrompt(
+                      key: 'keeper',
+                      label: 'Stumped by',
+                      from: PromptSource.opposingSide,
+                    ),
+                  ],
+                ),
+                ScoreControl(
+                  action: 'wicket',
+                  label: 'Run out',
+                  style: ControlStyle.danger,
+                  side: battingSide,
+                  payload: const {'type': 'run_out'},
+                  shortcut: 'o',
+                  // The only dismissal where WHICH batter went is a real
+                  // question: a non-striker run-out leaves the striker where
+                  // they are, and debiting the wrong one corrupts an average
+                  // and every fall-of-wicket line after it.
+                  prompts: const [
+                    PlayerPrompt(key: 'playerId', label: 'Who was out'),
+                    PlayerPrompt(
+                      key: 'fielder',
+                      label: 'Fielder',
+                      from: PromptSource.opposingSide,
+                      optional: true,
+                    ),
+                    PlayerPrompt(
+                      key: 'assist',
+                      label: 'Throw (assist)',
+                      from: PromptSource.opposingSide,
+                      optional: true,
+                    ),
+                  ],
+                ),
+                ScoreControl(
+                  action: 'wicket',
+                  label: 'Hit wicket',
+                  style: ControlStyle.danger,
+                  side: battingSide,
+                  payload: {'type': 'hit_wicket', 'bowler': cur['bowler']},
+                ),
+                ScoreControl(
+                  action: 'wicket',
+                  label: 'Retired',
+                  style: ControlStyle.subtle,
+                  side: battingSide,
+                  payload: const {'type': 'retired'},
+                  prompts: const [
+                    PlayerPrompt(key: 'playerId', label: 'Who retired'),
+                  ],
+                ),
+              ],
       ),
       ScoreControlGroup(
         title: 'Match',

@@ -82,6 +82,7 @@ class ModuleDrawer extends ConsumerWidget {
         ? 0
         : ref.watch(pendingMembersProvider(activeOrgId)).valueOrNull?.length ?? 0;
     final liveCount = ref.watch(myLiveFixturesProvider).valueOrNull?.length ?? 0;
+    final isPremium = ref.watch(isPremiumProvider);
 
     // Placeholder ids keep the declarations below readable; entries carrying
     // one are gated on [ModuleEntry.needsClub] and never navigated to.
@@ -140,6 +141,12 @@ class ModuleDrawer extends ConsumerWidget {
           label: 'Challenges',
           description: 'Play another club — propose, accept, schedule',
           path: Routes.challenges(id),
+          // Bug #12: only event managers see challenges in the module menu.
+          // Regular members reach the challenges screen through the bottom
+          // nav bar where the screen itself already gates actions behind
+          // canManage — but the drawer entry sitting alongside "Create an
+          // event" implied a capability the member does not hold.
+          requires: Capability.manageCompetitions,
           needsClub: true,
           badge: incoming == 0 ? null : incoming,
         ),
@@ -204,6 +211,15 @@ class ModuleDrawer extends ConsumerWidget {
           description: 'Register as an official, or find one for your match',
           path: Routes.umpireRegistry,
         ),
+        // Deliberately org-free. Discovering a tournament to enter is the one
+        // journey that must not start by picking which of your clubs you are
+        // asking on behalf of — you are looking outward, not inward.
+        const ModuleEntry(
+          icon: Icons.public,
+          label: 'Global events',
+          description: 'Tournaments open to entries across the country',
+          path: Routes.globalEvents,
+        ),
         const ModuleEntry(
           icon: Icons.menu_book_outlined,
           label: 'Rules library',
@@ -225,6 +241,40 @@ class ModuleDrawer extends ConsumerWidget {
           label: 'My career profile',
           description: 'Every match, rating and memory — yours for life',
           path: Routes.myProfile,
+        ),
+      ],
+      'Shop & more': [
+        const ModuleEntry(
+          icon: Icons.storefront_outlined,
+          label: 'Shop',
+          description: 'Rackets, balls, kit and shoes from Decathlon',
+          path: Routes.shop,
+        ),
+        const ModuleEntry(
+          icon: Icons.stadium_outlined,
+          label: 'Grounds near you',
+          description: 'Find and book a ground, court or turf by the hour',
+          path: Routes.grounds,
+        ),
+        const ModuleEntry(
+          icon: Icons.business_center_outlined,
+          label: 'List your ground',
+          description: 'Own a ground or a turf? Take bookings on PlaySphere',
+          path: Routes.myGrounds,
+        ),
+        // The one entry whose subtitle depends on what the person already
+        // holds. A member who is already paying should not be sold to every
+        // time they open the menu — for them this is the page where they see
+        // what they have and when it renews.
+        ModuleEntry(
+          icon: isPremium
+              ? Icons.workspace_premium
+              : Icons.workspace_premium_outlined,
+          label: isPremium ? 'Premium — active' : 'Get Premium',
+          description: isPremium
+              ? 'Your membership, renewal date and receipts'
+              : 'Full career history, analytics and no ads — ₹99 a year',
+          path: Routes.premium,
         ),
       ],
     };

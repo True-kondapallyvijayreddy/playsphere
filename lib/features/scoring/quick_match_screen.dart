@@ -266,9 +266,19 @@ class _QuickMatchScreenState extends ConsumerState<QuickMatchScreen> {
       ),
     );
     if (name == null || name.trim().isEmpty || !mounted) return;
+    final trimmedName = name.trim();
+    final isDuplicate = [..._a, ..._b].any(
+      (p) => p.name.trim().toLowerCase() == trimmedName.toLowerCase(),
+    );
+    if (isDuplicate) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Player "$trimmedName" is already in the roster.')),
+      );
+      return;
+    }
     _add(MatchPlayer(
       id: 'guest_${DateTime.now().microsecondsSinceEpoch}',
-      name: name.trim(),
+      name: trimmedName,
     ));
   }
 
@@ -448,6 +458,31 @@ class _QuickMatchScreenState extends ConsumerState<QuickMatchScreen> {
                   },
                 ),
                 const SizedBox(height: 16),
+
+                if (_sport.id == 'cricket') ...[
+                  DropdownButtonFormField<String>(
+                    value: _config['ballType'] as String? ?? 'Tennis',
+                    decoration: const InputDecoration(
+                      labelText: 'Ball type',
+                      helperText: 'Select the ball used for this match',
+                    ),
+                    items: const [
+                      DropdownMenuItem(value: 'Tennis', child: Text('🎾 Tennis Ball')),
+                      DropdownMenuItem(value: 'Leather', child: Text('🏏 Leather Ball')),
+                      DropdownMenuItem(value: 'Soft Tennis', child: Text('🥎 Soft Tennis Ball')),
+                      DropdownMenuItem(value: 'Heavy Tennis', child: Text('🎾 Heavy Tennis Ball')),
+                      DropdownMenuItem(value: 'Cork', child: Text('🔴 Cork Ball')),
+                      DropdownMenuItem(value: 'Tape Ball', child: Text('⚪ Tape Ball')),
+                    ],
+                    onChanged: (val) {
+                      if (val == null) return;
+                      setState(() {
+                        _config = {..._config, 'ballType': val};
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                ],
 
                 // --- How many a side ----------------------------------------
                 //

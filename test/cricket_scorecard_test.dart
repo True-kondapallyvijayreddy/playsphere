@@ -55,6 +55,22 @@ void main() {
 
   ScoreAction runs(int n) => ScoreAction(type: 'runs', payload: {'runs': n});
 
+  /// `n` deliveries of `perBall` runs, naming a bowler at each over boundary.
+  ///
+  /// A script that runs past an over without changing the bowler is not a
+  /// legal script: nobody may bowl two overs in succession, so the engine
+  /// stops at the over and waits to be told who is on next.
+  List<ScoreAction> over(int n, {int perBall = 1, String from = 'B'}) => [
+        for (var i = 0; i < n; i++) ...[
+          if (i > 0 && i % 6 == 0)
+            ScoreAction(
+              type: 'new_bowler',
+              payload: {'playerId': '$from${(i ~/ 6).isEven ? 1 : 2}'},
+            ),
+          runs(perBall),
+        ],
+      ];
+
   Map<String, dynamic> started() => play(cricket.initialState(ctx), [open()]);
 
   group('a delivery must name the people involved', () {
@@ -313,7 +329,7 @@ void main() {
   group('match settlement', () {
     test('the innings closes at the over limit and starts the chase', () {
       // 2 overs configured = 12 legal balls.
-      final s = play(started(), [for (var n = 0; n < 12; n++) runs(1)]);
+      final s = play(started(), over(12));
 
       expect(s['inningsIndex'], 1);
       expect(s['target'], 13); // 12 scored, need one more
@@ -322,7 +338,7 @@ void main() {
     });
 
     test('a chase ends the instant the target is passed', () {
-      var s = play(started(), [for (var n = 0; n < 12; n++) runs(1)]);
+      var s = play(started(), over(12));
       s = play(s, [
         const ScoreAction(
           type: 'open',
@@ -337,14 +353,14 @@ void main() {
     });
 
     test('levelling the target is a tie, not a win', () {
-      var s = play(started(), [for (var n = 0; n < 12; n++) runs(1)]);
+      var s = play(started(), over(12));
       // Target 13; chasing side makes exactly 12.
       s = play(s, [
         const ScoreAction(
           type: 'open',
           payload: {'striker': 'B1', 'nonStriker': 'B2', 'bowler': 'A1'},
         ),
-        for (var n = 0; n < 12; n++) runs(1),
+        ...over(12, from: 'A'),
       ]);
       expect(s['complete'], isTrue);
       expect(s['tie'], isTrue);

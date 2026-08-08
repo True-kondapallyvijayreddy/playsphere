@@ -60,6 +60,12 @@ dependencies:
 
   cupertino_icons: ^1.0.8
   share_plus: ^12.0.2
+
+  # Opening a vendor's product page from the shop. PlaySphere lists kit and
+  # hands the purchase to the retailer who actually holds the stock — see
+  # `data/shop_repository.dart` for why the checkout is deliberately theirs
+  # and not ours.
+  url_launcher: ^6.3.0
   firebase_crashlytics: ^4.3.10
   qr_flutter: ^4.1.0
 
@@ -68,7 +74,72 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: ^4.0.0
 
+  # Branding generators. Both are build-time only — they write the platform
+  # icon and splash resources into android/, ios/ and web/ and are never
+  # linked into the app, which is why they are dev dependencies.
+  flutter_launcher_icons: ^0.14.1
+  flutter_native_splash: ^2.4.1
+
 flutter:
   uses-material-design: true
   # Builds AppLocalizations from lib/l10n/*.arb per l10n.yaml.
   generate: true
+
+  # Only the one file the app actually draws. The rest of assets/branding/ —
+  # the 1024px icon, the adaptive foreground, the splash poster, the master
+  # logo — are SOURCES for the two generators below: they are baked into
+  # android/, ios/ and web/ at build time and would otherwise ride along in
+  # the bundle as ~3.5MB nobody ever loads, on the ₹8k phones §2.8 targets.
+  assets:
+    - assets/branding/mark.png
+
+# -----------------------------------------------------------------------------
+# App icon.
+#
+# The launcher icon is the MARK alone (assets/branding/icon.png), not the full
+# logo. At 48dp on a phone the "PLAYSPHERE" wordmark and its strapline are two
+# illegible grey bands; the mark reads at every size. The wordmark still
+# appears wherever there is room for it — the splash and the app bar.
+#
+# Android adaptive icons take a separate foreground because the launcher masks
+# it to whatever shape the device uses (circle, squircle, teardrop) and keeps
+# only the inner ~66%. `icon_foreground.png` is the mark inset on transparency
+# for exactly that crop; the black behind it is the brand's own background.
+# -----------------------------------------------------------------------------
+flutter_launcher_icons:
+  image_path: "assets/branding/icon.png"
+  android: "ic_launcher"
+  adaptive_icon_background: "#0A0A0A"
+  adaptive_icon_foreground: "assets/branding/icon_foreground.png"
+  ios: true
+  remove_alpha_ios: true
+  web:
+    generate: true
+    image_path: "assets/branding/icon.png"
+    background_color: "#0A0A0A"
+    theme_color: "#63B22B"
+
+# -----------------------------------------------------------------------------
+# Splash screen.
+#
+# `android_12` is a separate block and not a duplicate: from Android 12 the
+# system draws the splash itself from a single centred icon and a background
+# colour, and ignores a full-bleed image entirely. Given only the artwork, the
+# honest mapping is the full poster on 11 and below, and the mark on the brand
+# black on 12+, which is the most that platform will show.
+#
+# The background is the artwork's own near-black, so the moment before the
+# image paints is not a white flash on a dark screen.
+# -----------------------------------------------------------------------------
+flutter_native_splash:
+  color: "#0A0A0A"
+  image: "assets/branding/splash.png"
+  fullscreen: true
+  android: true
+  ios: true
+  web: false
+
+  android_12:
+    image: "assets/branding/icon_foreground.png"
+    color: "#0A0A0A"
+    icon_background_color: "#0A0A0A"

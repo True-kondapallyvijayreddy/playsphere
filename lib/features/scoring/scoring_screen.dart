@@ -54,6 +54,7 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
   bool _busy = false;
 
   StreamSubscription<AppException>? _failureSub;
+  StreamSubscription<void>? _resyncSub;
 
   @override
   void initState() {
@@ -71,12 +72,26 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
           SnackBar(content: Text(error.message)),
         );
       });
+      // A lost race is not a failure and no longer arrives as one. The pad
+      // re-renders from the fixture listener on its own; this only tells the
+      // scorer why the number in front of them just moved, briefly and
+      // without the error styling that made a routine condition look broken.
+      _resyncSub = service.resyncs.listen((_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Score updated from another device.'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      });
     });
   }
 
   @override
   void dispose() {
     _failureSub?.cancel();
+    _resyncSub?.cancel();
     _focusNode.dispose();
     super.dispose();
   }
@@ -104,7 +119,7 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
     /// line-ups are offered rather than guessing one.
     List<MatchPlayer> candidates(PlayerPrompt prompt) {
       final acting = control.side;
-      final pool =
+      var pool =
           acting == Side.neutral || prompt.from == PromptSource.eitherSide
               ? [...ctx.lineupFor(Side.a), ...ctx.lineupFor(Side.b)]
               : switch (prompt.from) {
@@ -113,10 +128,24 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
                   PromptSource.eitherSide => const <MatchPlayer>[],
                 };
 
+      // Bug #10: For batter selection prompts ('new_batter', 'striker', 'nonStriker'),
+      // filter out players who have already been dismissed (out == true) so out batters
+      // do not appear in the selection list.
+      if (fixture.scoringPluginKey == 'cricket' &&
+          (prompt.key == 'playerId' || prompt.key == 'striker' || prompt.key == 'nonStriker')) {
+        final state = fixture.scoreState;
+        final curInnings = (state['innings'] as List?)?.lastOrNull as Map?;
+        if (curInnings != null) {
+          final batting = (curInnings['batting'] as Map?) ?? const {};
+          pool = pool.where((p) {
+            final stats = batting[p.id] as Map?;
+            return stats?['out'] != true;
+          }).toList();
+        }
+      }
+
       // An explicit list narrows the side to the people the plugin says are
-      // eligible right now — who is on the field, who is on the bench. Order
-      // follows the plugin's, not the team sheet's, because for a substitution
-      // that order is who came on most recently.
+      // eligible right now.
       final only = prompt.only;
       if (only == null) return pool;
       final byId = {for (final p in pool) p.id: p};
@@ -169,6 +198,26 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
             if (p.multiple) p.key,
         },
         candidatesFor: (key) => candidates(byKey[key]!),
+        // Two prompts drawing on the SAME pool cannot name the same person.
+        //
+        // This is the general form of "striker and non-striker cannot be the
+        // same player": whatever the sport, if a control asks twice for
+        // somebody out of one side, it is asking about two different people —
+        // a footballer does not assist their own goal, a kho-kho attacker does
+        // not tag himself. Grouping by [PromptSource] gets that for every
+        // engine at once and leaves cross-side prompts alone, which is what
+        // keeps the bowler (drawn from the opposing side) selectable while the
+        // batters are being chosen.
+        //
+        // Optional prompts are excluded: "nobody" is a legitimate answer and
+        // must not be crowded out of a list by the required roles beside it.
+        exclusiveRoleGroups: [
+          for (final source in PromptSource.values)
+            {
+              for (final p in control.prompts)
+                if (p.from == source && !p.optional) p.key,
+            },
+        ].where((group) => group.length > 1).toList(),
         values: control.values,
       ),
     );

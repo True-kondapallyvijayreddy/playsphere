@@ -3,10 +3,13 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import '../core/errors/app_exception.dart';
 import '../core/firebase/firestore_refs.dart';
 import '../core/models/app_user.dart';
+import '../core/models/billing.dart';
 import '../core/models/enums.dart';
 import '../core/models/firestore_codec.dart';
 import '../core/models/player_code.dart';
 import '../core/models/organization.dart';
+import '../core/models/owner_proposal.dart';
+import '../domain/governance/owner_vote.dart';
 
 /// Translates raw Firestore failures into [AppException]s.
 ///
@@ -54,8 +57,10 @@ AppException asAppException(FirebaseException e) => switch (e.code) {
 class UserRepository {
   const UserRepository();
 
-  Stream<AppUser?> watch(String uid) => Refs.user(uid).snapshots().map(
-        (doc) => doc.exists ? AppUser.fromDoc(doc) : null,
+  Stream<AppUser?> watch(String uid) => guardStream(
+        () => Refs.user(uid).snapshots().map(
+              (doc) => doc.exists ? AppUser.fromDoc(doc) : null,
+            ),
       );
 
   Future<AppUser?> fetch(String uid) => guard(() async {
@@ -241,15 +246,34 @@ class OrgRepository {
   /// A batch matters here: if the org were written without the membership,
   /// the founder would be locked out of the thing they just created, with no
   /// way back in because only members can administer it.
+  /// Creates a club, its founding owner membership, its invite code and — if
+  /// one was bought — its plan and the ledger row that paid for it, in a
+  /// single batch.
+  ///
+  /// [planGrant] comes from `BillingRepository.purchasePlanForNewClub`, which
+  /// has already taken the money by the time this is called. Everything after
+  /// that point must land together: a club that exists without the plan its
+  /// founder just paid for is the one failure here that costs money and
+  /// cannot be repaired from the client.
   Future<String> createOrganization({
     required Organization org,
     required AppUser founder,
+    ClubPlanGrant? planGrant,
   }) =>
       guard(() async {
         final orgRef = Refs.orgs.doc();
         final batch = Refs.db.batch();
 
-        batch.set(orgRef, org.toCreate());
+        batch.set(orgRef, {
+          ...org.toCreate(),
+          if (planGrant != null) ...planGrant.orgFields(),
+        });
+        if (planGrant != null) {
+          batch.set(
+            Refs.payment(planGrant.paymentId),
+            planGrant.ledgerRow(orgRef.id),
+          );
+        }
         // The public code -> club lookup, written atomically with the club so
         // a code can never point at an organization that does not exist.
         batch.set(
@@ -396,6 +420,137 @@ class OrgRepository {
     required MembershipRole role,
   }) =>
       guard(() => Refs.member(orgId, uid).update({'role': role.wire}));
+
+  // --- Ownership --------------------------------------------------------
+
+  /// Everyone who currently holds `owner` in this club.
+  ///
+  /// The members subcollection is the source of truth for who owns a club, not
+  /// `Organization.ownerUids` — the role is what `firestore.rules` actually
+  /// checks, so anything reading a separate list would be answering a
+  /// different question from the one the database enforces.
+  Stream<List<Membership>> watchOwners(String orgId) => guardStream(
+        () => Refs.members(orgId)
+            .where('role', isEqualTo: MembershipRole.owner.wire)
+            .where('status', isEqualTo: MembershipStatus.active.wire)
+            .snapshots()
+            .map((s) => s.docs.map(Membership.fromDoc).toList()),
+      );
+
+  Stream<List<OwnerProposal>> watchOwnerProposals(String orgId) => guardStream(
+        () => Refs.ownerProposals(orgId)
+            .where('status', isEqualTo: OwnerProposalStatus.open.wire)
+            .snapshots()
+            .map((s) => s.docs.map(OwnerProposal.fromDoc).toList()),
+      );
+
+  /// Gives up your own ownership of a club, dropping to admin.
+  ///
+  /// Unilateral by design — see [OwnerVote.canResign]. The one refusal is the
+  /// last owner, because a club with no owner has nobody who can appoint one
+  /// and would be permanently stuck. They are told to appoint a co-owner
+  /// first, which is now something they can actually do.
+  ///
+  /// Drops to `admin` rather than `member`: somebody stepping back from
+  /// running a club is usually still helping run it, and demoting them all the
+  /// way out would cost them access to the events they are still organizing.
+  Future<void> resignOwnership({
+    required String orgId,
+    required String uid,
+  }) =>
+      guard(() async {
+        final owners = await Refs.members(orgId)
+            .where('role', isEqualTo: MembershipRole.owner.wire)
+            .where('status', isEqualTo: MembershipStatus.active.wire)
+            .get();
+
+        if (!OwnerVote.canResign(owners.docs.length)) {
+          throw const ValidationException(
+            'You are this club\'s only owner. Make someone else an owner '
+            'first — a club with no owner cannot appoint one.',
+          );
+        }
+
+        await Refs.member(orgId, uid).update({
+          'role': MembershipRole.admin.wire,
+        });
+      });
+
+  /// Opens a motion to remove another owner.
+  ///
+  /// Opening it counts as voting for it, which is why [byUid] goes straight
+  /// into `votes`. Anything else would make a two-owner club need a vote the
+  /// proposer then has to cast separately against their own motion.
+  Future<void> proposeOwnerRemoval({
+    required String orgId,
+    required String targetUid,
+    required String targetName,
+    required String reason,
+    required String byUid,
+  }) =>
+      guard(() async {
+        if (targetUid == byUid) {
+          throw const ValidationException(
+            'To give up your own ownership, use Step down.',
+          );
+        }
+        final text = reason.trim();
+        if (text.isEmpty) {
+          throw const ValidationException(
+            'Give a reason. The other owners are being asked to agree to '
+            'this and cannot do that from a name alone.',
+          );
+        }
+
+        final existing = await Refs.ownerProposal(orgId, targetUid).get();
+        if (existing.exists &&
+            OwnerProposal.fromDoc(existing).isOpen) {
+          throw const ValidationException(
+            'There is already an open motion about this owner.',
+          );
+        }
+
+        await Refs.ownerProposal(orgId, targetUid).set(
+          OwnerProposal(
+            targetUid: targetUid,
+            targetName: targetName,
+            openedBy: byUid,
+            reason: text,
+            status: OwnerProposalStatus.open,
+            votes: [byUid],
+          ).toCreate(),
+        );
+      });
+
+  /// Adds your vote to an open motion.
+  ///
+  /// `arrayUnion` rather than a read-modify-write: two owners voting in the
+  /// same second would otherwise each write a list built from what they read
+  /// before the other, and one vote would vanish. It is also the shape
+  /// `firestore.rules` can check — a union of exactly one element, that
+  /// element being the caller.
+  ///
+  /// Crossing the threshold is NOT decided here. The `onOwnerVote` Cloud
+  /// Function tallies and executes, because a client that could carry out the
+  /// removal could carry it out without the votes.
+  Future<void> voteToRemoveOwner({
+    required String orgId,
+    required String targetUid,
+    required String byUid,
+  }) =>
+      guard(() => Refs.ownerProposal(orgId, targetUid).update({
+            'votes': FieldValue.arrayUnion([byUid]),
+          }));
+
+  /// Withdraws a motion. Only the owner who opened it may.
+  Future<void> withdrawOwnerProposal({
+    required String orgId,
+    required String targetUid,
+  }) =>
+      guard(() => Refs.ownerProposal(orgId, targetUid).update({
+            'status': OwnerProposalStatus.withdrawn.wire,
+            'resolvedAt': FieldValue.serverTimestamp(),
+          }));
 
   Future<void> removeMember({
     required String orgId,

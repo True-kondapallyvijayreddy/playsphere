@@ -157,7 +157,11 @@ class AppScaffold extends ConsumerWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          const PlaySphereLogo(markSize: 24, fontSize: 16),
+          // Bug #13: tapping the logo navigates to the home page.
+          GestureDetector(
+            onTap: () => context.go(Routes.home),
+            child: const PlaySphereLogo(markSize: 24, fontSize: 16),
+          ),
           Text(
             [
               title,
@@ -173,7 +177,12 @@ class AppScaffold extends ConsumerWidget {
       ),
       actions: [
         ...?actions,
+        // Bell immediately beside the profile photo, on every screen. The
+        // module menu used to sit between them once a back arrow appeared,
+        // so the pair a user reaches for by muscle memory moved depending on
+        // how deep they had navigated.
         if (canPop) const _ModuleMenuButton(),
+        const _NotificationBell(),
         const AccountButton(),
         const SizedBox(width: 4),
       ],
@@ -263,6 +272,29 @@ class AppScaffold extends ConsumerWidget {
         ],
       ),
     );
+  }
+}
+
+/// The bell, with a count of what is waiting on this person.
+///
+/// This is where "Waiting on you" went when it came off the home screen. The
+/// badge is what makes that move safe: an obligation that is no longer on the
+/// first screen has to be visible from every screen, or it is an obligation
+/// nobody discharges.
+class _NotificationBell extends ConsumerWidget {
+  const _NotificationBell();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final count = ref.watch(waitingOnYouCountProvider);
+    final button = IconButton(
+      icon: const Icon(Icons.notifications_outlined),
+      tooltip: count == 0 ? 'Notifications' : '$count waiting on you',
+      onPressed: () => context.push(Routes.notifications),
+    );
+
+    if (count == 0) return button;
+    return Badge.count(count: count, child: button);
   }
 }
 
@@ -363,10 +395,10 @@ List<NavItem> _globalItems(WidgetRef ref) {
         badgeCount: live == 0 ? null : live,
       ),
     const NavItem(
-      icon: Icons.menu_book_outlined,
-      selectedIcon: Icons.menu_book,
-      label: 'Rules',
-      path: Routes.rules,
+      icon: Icons.menu_outlined,
+      selectedIcon: Icons.menu,
+      label: 'More',
+      path: Routes.more,
     ),
   ];
 }

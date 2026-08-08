@@ -9,9 +9,13 @@ import '../core/models/competition.dart';
 import '../core/models/draw_slot.dart';
 import '../core/models/enums.dart';
 import '../core/models/fixture.dart';
+import '../core/models/match_official.dart';
 import '../core/models/ranking_entry.dart';
 import '../core/models/tournament.dart';
+import '../core/models/tournament_invite.dart';
+import '../core/models/tournament_official.dart';
 import '../core/models/venue.dart';
+import '../domain/draw/officials_roster.dart';
 import '../domain/draw/schedule_shift.dart';
 import '../domain/draw/tournament_scheduler.dart';
 import 'org_repository.dart' show guard;
@@ -103,12 +107,11 @@ class TournamentRepository {
 
   /// Every match in a tournament, across all its events, as one stream.
   ///
-  /// A collection-group query rather than one listener per event: a district
-  /// championship has fifteen draws, and fifteen listeners to render one
-  /// "what is on court now" board is the difference between a free tier and a
-  /// bill. This is what `Fixture.tournamentId` exists for.
-  Stream<List<Fixture>> watchFixtures(String tournamentId) {
+  /// A collection-group query constrained by orgId and tournamentId so
+  /// Firestore security rules can evaluate organization read access.
+  Stream<List<Fixture>> watchFixtures(String orgId, String tournamentId) {
     return Refs.allFixturesQuery
+        .where('orgId', isEqualTo: orgId)
         .where('tournamentId', isEqualTo: tournamentId)
         .snapshots()
         .map((snap) => snap.docs.map(Fixture.fromDoc).toList()
@@ -158,6 +161,304 @@ class TournamentRepository {
           'updatedAt': FieldValue.serverTimestamp(),
         });
         await batch.commit();
+      });
+
+  /// Records that [count] draws were created directly INTO a tournament.
+  ///
+  /// [addEvent] handles the attach-an-existing-event path and keeps the count
+  /// in step itself. The season form takes the other path — it creates each
+  /// sport already carrying `tournamentId`, so nothing ever ran the increment
+  /// and a five-sport season sat at `eventCount: 0`.
+  ///
+  /// That was not merely a wrong chip on a card. `firestore.rules` permits
+  /// deleting a tournament only when `eventCount == 0`, which is the guard
+  /// that stops somebody removing a season out from under the draws hanging
+  /// off it. A season that under-reports its own events is a season that can
+  /// be deleted while it still has five.
+  /// Fire-and-forget, like the creates it follows. Awaiting a write here means
+  /// awaiting the SERVER's acknowledgement, and a season created on a ground
+  /// with no signal would hang on this line rather than finishing offline and
+  /// syncing later — the one thing §2.1 says must never happen. The increment
+  /// is queued in the same ordered mutation queue as the create, so it lands
+  /// after it whenever the connection returns; a genuine rejection surfaces
+  /// through [writeFailures] rather than blocking the organizer.
+  void noteEventsCreated({
+    required String orgId,
+    required String tournamentId,
+    required int count,
+  }) {
+    unawaited(
+      Refs.tournament(orgId, tournamentId).update({
+        'eventCount': FieldValue.increment(count),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }).catchError((Object e) => _writeFailures.add(_translate(e))),
+    );
+  }
+
+  // --- Cross-club invitations -------------------------------------------
+
+  /// Invites a set of clubs into one tournament, in one batch.
+  ///
+  /// Batched deliberately. An organizer picks eleven clubs in one sitting and
+  /// taps send once; eleven sequential writes on a rural connection means the
+  /// fourth can fail while the first three have gone, leaving the host's list
+  /// half true with nothing to tell them which half. One commit either invites
+  /// everybody or nobody, and the retry is the same tap they already made.
+  ///
+  /// Clubs already invited are skipped rather than rejected — the caller's
+  /// picker excludes them, and re-sending would either duplicate the row or
+  /// overwrite an answer somebody has already given.
+  Future<void> inviteClubs({
+    required Tournament tournament,
+    required String hostOrgName,
+    required List<({String orgId, String name})> clubs,
+    required String invitedByUid,
+    String? message,
+  }) =>
+      guard(() async {
+        final targets = [
+          for (final c in clubs)
+            if (c.orgId != tournament.orgId) c,
+        ];
+        if (targets.isEmpty) {
+          throw const ValidationException('Pick at least one club to invite.');
+        }
+
+        final trimmed = message?.trim();
+        final batch = Refs.db.batch();
+        for (final club in targets) {
+          batch.set(
+            Refs.tournamentInvites.doc(),
+            TournamentInvite(
+              id: '',
+              tournamentId: tournament.id,
+              tournamentName: tournament.name,
+              fromOrgId: tournament.orgId,
+              fromOrgName: hostOrgName,
+              toOrgId: club.orgId,
+              toOrgName: club.name,
+              status: 'pending',
+              message: (trimmed == null || trimmed.isEmpty) ? null : trimmed,
+              startDate: tournament.startDate,
+              endDate: tournament.endDate,
+              invitedBy: invitedByUid,
+            ).toCreate(),
+          );
+        }
+        await batch.commit();
+      });
+
+  /// Every club invited to one tournament, in the order they were asked.
+  Stream<List<TournamentInvite>> watchInvitesForTournament({
+    required String orgId,
+    required String tournamentId,
+  }) {
+    return Refs.tournamentInvites
+        .where('fromOrgId', isEqualTo: orgId)
+        .where('tournamentId', isEqualTo: tournamentId)
+        .snapshots()
+        .map((snap) => snap.docs.map(TournamentInvite.fromDoc).toList()
+          ..sort((a, b) => a.toOrgName.compareTo(b.toOrgName)));
+  }
+
+  /// Tournaments other clubs have invited [orgId] into and are still waiting
+  /// on an answer for.
+  Stream<List<TournamentInvite>> watchIncomingInvites(String orgId) {
+    return Refs.tournamentInvites
+        .where('toOrgId', isEqualTo: orgId)
+        .where('status', isEqualTo: 'pending')
+        .snapshots()
+        .map((snap) => snap.docs.map(TournamentInvite.fromDoc).toList()
+          ..sort((a, b) => (a.startDate ?? DateTime(9999))
+              .compareTo(b.startDate ?? DateTime(9999))));
+  }
+
+  /// Records the invited club's answer, or the host taking the offer back.
+  ///
+  /// Accepting does NOT enter anybody into anything. The tournament's own
+  /// entry rules decide who plays — a club that says yes here is saying it
+  /// intends to come, and its players still register through the events. This
+  /// is the reply to a question, not a registration, and conflating the two
+  /// would let one admin's tap commit a club to a draw nobody has picked a
+  /// squad for.
+  Future<void> respondToInvite({
+    required String inviteId,
+    required String status,
+  }) =>
+      guard(() => Refs.tournamentInvite(inviteId).update({
+            'status': status,
+            'respondedAt': FieldValue.serverTimestamp(),
+          }));
+
+  // --- Officials (the season's own panel, pre-assigned ICC-style) -------
+
+  Stream<List<TournamentOfficial>> watchOfficials(
+    String orgId,
+    String tournamentId,
+  ) =>
+      Refs.tournamentOfficials(orgId, tournamentId).snapshots().map(
+            (snap) => snap.docs.map(TournamentOfficial.fromDoc).toList()
+              ..sort((a, b) => a.name.compareTo(b.name)),
+          );
+
+  /// Adds someone to this tournament's officiating panel — either picked from
+  /// the global `umpires` registry, or entered by hand for the common
+  /// grassroots case: the club treasurer's uncle is umpiring, and he has
+  /// never opened the app.
+  Future<void> addOfficialToRoster({
+    required String orgId,
+    required String tournamentId,
+    required TournamentOfficial official,
+    required String addedByUid,
+  }) =>
+      guard(() => Refs.tournamentOfficial(orgId, tournamentId, official.uid)
+          .set(official.toCreate(addedBy: addedByUid)));
+
+  Future<void> removeOfficialFromRoster({
+    required String orgId,
+    required String tournamentId,
+    required String uid,
+  }) =>
+      guard(
+        () => Refs.tournamentOfficial(orgId, tournamentId, uid).delete(),
+      );
+
+  /// Runs [OfficialsAssigner] across every scheduled, not-yet-officiated
+  /// fixture in the tournament, using the roster built by
+  /// [addOfficialToRoster], and persists whatever it could place.
+  ///
+  /// Two things are deliberately skipped rather than overridden:
+  ///
+  /// - A fixture with no `scheduledAt` yet — a venue still marked TBD has no
+  ///   time window to check clashes against, and is left for a second run
+  ///   once the schedule (or that one match, via the move sheet) is set.
+  /// - A fixture that already carries an official — a manual assignment is a
+  ///   decision this run must not quietly replace, the same rule the venue
+  ///   scheduler follows for a hand-fixed court.
+  ///
+  /// Returns the [OfficialsRoster] the algorithm produced, `unstaffed`
+  /// included, so the caller can show the season owner exactly which matches
+  /// still need a name before match day rather than finding out at the gate.
+  Future<OfficialsRoster> assignOfficialsAcrossTournament({
+    required String orgId,
+    required String tournamentId,
+  }) =>
+      guard(() async {
+        final tDoc = await Refs.tournament(orgId, tournamentId).get();
+        if (!tDoc.exists) {
+          throw const NotFoundException('That tournament no longer exists.');
+        }
+        final tournament = Tournament.fromDoc(tDoc);
+
+        final rosterSnap =
+            await Refs.tournamentOfficials(orgId, tournamentId).get();
+        final roster =
+            rosterSnap.docs.map(TournamentOfficial.fromDoc).toList();
+        if (roster.isEmpty) {
+          throw const ValidationException(
+            'Add officials to this tournament before assigning them to '
+            'matches.',
+          );
+        }
+
+        final fixSnap = await Refs.allFixturesQuery
+            .where('orgId', isEqualTo: orgId)
+            .where('tournamentId', isEqualTo: tournamentId)
+            .get();
+        final fixtures = fixSnap.docs.map(Fixture.fromDoc).toList();
+
+        // Entrant -> club, one lookup per event — the same shape as the
+        // uid-by-entrant map `generateSchedule` builds above, for clubs
+        // instead of players.
+        final clubByEntrant = <String, String?>{};
+        for (final compId in {for (final f in fixtures) f.compId}) {
+          final entrantSnap = await Refs.entrants(orgId, compId).get();
+          for (final doc in entrantSnap.docs) {
+            clubByEntrant[doc.id] = Entrant.fromDoc(doc).clubId;
+          }
+        }
+
+        final slots = <OfficiatingSlot>[];
+        final byFixtureId = <String, Fixture>{};
+        for (final f in fixtures) {
+          final at = f.scheduledAt;
+          if (at == null) continue;
+          if (f.officials.isNotEmpty) continue;
+          if (f.status != FixtureStatus.scheduled) continue;
+
+          final clubs = <String>{
+            if (clubByEntrant[f.entrantAId] != null)
+              clubByEntrant[f.entrantAId]!,
+            if (clubByEntrant[f.entrantBId] != null)
+              clubByEntrant[f.entrantBId]!,
+          };
+
+          slots.add(OfficiatingSlot(
+            fixtureId: f.id,
+            window: ScheduleWindow(
+              start: at,
+              end: at.add(Duration(minutes: tournament.slotMinutes)),
+            ),
+            courtKey: f.courtId ?? f.venue ?? f.id,
+            contestingClubIds: clubs,
+            label: '${f.entrantAName} vs ${f.entrantBName}',
+          ));
+          byFixtureId[f.id] = f;
+        }
+
+        if (slots.isEmpty) {
+          throw const ValidationException(
+            'No scheduled, unofficiated matches to assign — generate the '
+            'schedule first, or every match already has an official.',
+          );
+        }
+
+        final available = [
+          for (final o in roster)
+            AvailableOfficial(
+              uid: o.uid,
+              name: o.name,
+              clubId: o.clubId,
+              role: o.role,
+            ),
+        ];
+
+        final result = const OfficialsAssigner().assign(
+          slots: slots,
+          officials: available,
+        );
+
+        final rosterByUid = {for (final o in roster) o.uid: o};
+        final batch = ChunkedBatch(Refs.db);
+        for (final a in result.assignments) {
+          final fixture = byFixtureId[a.fixtureId]!;
+          final entry = rosterByUid[a.official.uid]!;
+          final scorers = List<String>.from(fixture.scorerUids);
+          if (entry.scoringRightsGranted && !scorers.contains(entry.uid)) {
+            scorers.add(entry.uid);
+          }
+          batch.update(
+            Refs.fixture(orgId, fixture.compId, fixture.id),
+            {
+              'officials': MatchOfficial.listTo([
+                MatchOfficial(
+                  uid: entry.uid,
+                  name: entry.name,
+                  role: entry.role,
+                  grantedScoringAccess: entry.scoringRightsGranted,
+                ),
+              ]),
+              'scorerUids': scorers,
+              'updatedAt': FieldValue.serverTimestamp(),
+            },
+          );
+        }
+
+        unawaited(batch.commitAll().catchError((Object e) {
+          _writeFailures.add(_translate(e));
+        }));
+
+        return result;
       });
 
   // --- Ranking ----------------------------------------------------------

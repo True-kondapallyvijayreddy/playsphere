@@ -16,7 +16,32 @@ enum NotificationType {
   matchStart('match_start', isCritical: true),
   result('result', isCritical: true),
   membershipApproved('membership_approved', isCritical: false),
-  challengeReceived('challenge_received', isCritical: false);
+  challengeReceived('challenge_received', isCritical: false),
+
+  /// An event somebody entered has been called off.
+  ///
+  /// Critical, and the clearest case for it in the enum: everything else here
+  /// tells you about something that WILL happen, and missing it costs you a
+  /// reminder. Missing this one costs a wasted Saturday and a journey to a
+  /// ground where nothing is happening.
+  eventCancelled('event_cancelled', isCritical: true),
+
+  /// A club has announced a tournament or a season, and every member of that
+  /// club is being invited to it at once.
+  ///
+  /// Critical. This is the invitation itself, not a nudge about one somebody
+  /// already has: a member who never sees it never knows the thing is being
+  /// run, and by the time they open the app the entries may well be closed.
+  /// A tournament announced by push and missed is the exact failure the
+  /// WhatsApp fallback exists for.
+  tournamentAnnounced('tournament_announced', isCritical: true),
+
+  /// Another club has invited this one into their tournament.
+  ///
+  /// Not critical, for the same reason [challengeReceived] is not: it is an
+  /// offer addressed to a club's organizers, it sits in their list until
+  /// somebody answers it, and nothing is lost by finding it a day later.
+  tournamentInvite('tournament_invite', isCritical: false);
 
   const NotificationType(this.wire, {required this.isCritical});
 
@@ -92,6 +117,7 @@ class AppNotification {
     this.targetUserId,
     this.clubTopicId,
     this.competitionTopicId,
+    this.read = false,
   });
 
   final String id;
@@ -100,6 +126,11 @@ class AppNotification {
   final String body;
   final DateTime createdAt;
   final DeepLink? deepLink;
+
+  /// Only meaningful for a notification read back from
+  /// [Refs.notifications] — a message still in flight from FCM has no read
+  /// state yet. Defaults to false so an unread badge never undercounts.
+  final bool read;
 
   /// Any extra key/value payload beyond the fields above (e.g. a match id
   /// for a "match start" notification), carried through unchanged.
@@ -149,6 +180,24 @@ class AppNotification {
       targetUserId: data['targetUserId'] as String?,
       clubTopicId: data['clubTopicId'] as String?,
       competitionTopicId: data['competitionTopicId'] as String?,
+    );
+  }
+
+  /// Only [read] ever needs changing on a notification already read back
+  /// from Firestore, so that is all this takes.
+  AppNotification copyWith({bool? read}) {
+    return AppNotification(
+      id: id,
+      type: type,
+      title: title,
+      body: body,
+      createdAt: createdAt,
+      deepLink: deepLink,
+      data: data,
+      targetUserId: targetUserId,
+      clubTopicId: clubTopicId,
+      competitionTopicId: competitionTopicId,
+      read: read ?? this.read,
     );
   }
 }

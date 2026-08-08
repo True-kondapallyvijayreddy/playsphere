@@ -266,6 +266,23 @@ void main() {
     Map<String, dynamic> innings(Map<String, dynamic> state, [int index = 0]) =>
         (state['innings'] as List)[index] as Map<String, dynamic>;
 
+    /// `n` single runs, with a bowler named at every over boundary.
+    ///
+    /// No bowler may bowl two overs in a row, so a script that scores past an
+    /// over without changing the bowler is not a script the engine will accept
+    /// — the same way the real game would not. The names alternate because
+    /// that is the minimum a legal script needs.
+    List<ScoreAction> singles(int n, {int ballsPerOver = 6}) => [
+          for (var i = 0; i < n; i++) ...[
+            if (i > 0 && i % ballsPerOver == 0)
+              ScoreAction(
+                type: 'new_bowler',
+                payload: {'playerId': (i ~/ ballsPerOver).isEven ? 'B1' : 'B2'},
+              ),
+            const ScoreAction(type: 'runs', payload: {'runs': 1}),
+          ],
+        ];
+
     test('a wide adds a run but does NOT consume a delivery', () {
       final state = run(plugin, t20, [
         openA,
@@ -321,14 +338,55 @@ void main() {
 
     test('the innings closes after the configured number of overs', () {
       // 2 overs = 12 legal deliveries.
-      final state = run(plugin, t20, [
-        openA,
-        for (var i = 0; i < 12; i++)
-          const ScoreAction(type: 'runs', payload: {'runs': 1}),
-      ]);
+      final state = run(plugin, t20, [openA, ...singles(12)]);
       expect(innings(state)['closed'], isTrue);
       expect(state['inningsIndex'], 1, reason: 'the chase should have started');
       expect(state['target'], 13, reason: '12 runs scored, target is 13');
+    });
+
+    test('the same bowler cannot bowl two overs in a row', () {
+      // Six legal balls and the over is done. The engine must not let a
+      // seventh be scored against a bowler who has not been replaced — that
+      // is how a whole innings ends up recorded against one name.
+      final afterOver = run(plugin, t20, [
+        openA,
+        for (var i = 0; i < 6; i++)
+          const ScoreAction(type: 'runs', payload: {'runs': 1}),
+      ]);
+
+      final seventhBall = plugin.apply(
+        afterOver,
+        const ScoreAction(type: 'runs', payload: {'runs': 1}),
+        t20,
+      );
+      expect(seventhBall.isAccepted, isFalse);
+
+      final sameBowlerAgain = plugin.apply(
+        afterOver,
+        const ScoreAction(type: 'new_bowler', payload: {'playerId': 'B1'}),
+        t20,
+      );
+      expect(sameBowlerAgain.isAccepted, isFalse);
+      expect(sameBowlerAgain.rejection, contains('bowled the last over'));
+
+      final someoneElse = plugin.apply(
+        afterOver,
+        const ScoreAction(type: 'new_bowler', payload: {'playerId': 'B2'}),
+        t20,
+      );
+      expect(someoneElse.isAccepted, isTrue);
+    });
+
+    test('strike rotates at the end of an over', () {
+      // A2 took strike as non-striker and is on strike after six singles:
+      // five odd-run swaps plus the end-of-over rotation.
+      final afterOver = run(plugin, t20, [
+        openA,
+        for (var i = 0; i < 6; i++)
+          const ScoreAction(type: 'runs', payload: {'runs': 1}),
+      ]);
+      expect(innings(afterOver)['striker'], 'A2');
+      expect(innings(afterOver)['nonStriker'], 'A1');
     });
 
     test('a chase ends the moment the target is passed', () {

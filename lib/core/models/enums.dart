@@ -488,3 +488,122 @@ enum CategoryDimension {
         orElse: () => CategoryDimension.openCategory,
       );
 }
+
+// ---------------------------------------------------------------------------
+// Give — the equipment-donation network (donations, collection centers,
+// verified club/player needs). See `lib/data/give_repository.dart`.
+// ---------------------------------------------------------------------------
+
+/// What a donor is contributing. Money is a distinct type from equipment
+/// rather than an equipment category with a price, because the two funnels
+/// go different places from the moment they're submitted: equipment needs a
+/// collection center and a physical pipeline, money needs a payment gateway
+/// (deferred product-wide — see `GiveDonation.amountPaise`) and funds
+/// procurement instead.
+enum GiveDonationType {
+  equipment('equipment', 'Equipment'),
+  money('money', 'Money');
+
+  const GiveDonationType(this.wire, this.label);
+  final String wire;
+  final String label;
+
+  static GiveDonationType fromWire(String? w) => GiveDonationType.values
+      .firstWhere((e) => e.wire == w, orElse: () => GiveDonationType.equipment);
+}
+
+/// The vocabulary of donatable items, shared by a donation's contents and a
+/// need's shortfall — the same enum on both sides is what lets a shoe
+/// donation match a shoe need without a translation layer. Free text would
+/// let "cricket shoes" and "Cricket Shoes" fail to match each other.
+enum EquipmentCategory {
+  cricketBat('cricket_bat', 'Cricket bat', '🏏'),
+  cricketPad('cricket_pad', 'Cricket pads', '🏏'),
+  helmet('helmet', 'Helmet', '⛑️'),
+  shoes('shoes', 'Shoes', '👟'),
+  jersey('jersey', 'Jersey', '👕'),
+  footballBoots('football_boots', 'Football boots', '🥾'),
+  football('football', 'Football', '⚽'),
+  tennisRacket('tennis_racket', 'Tennis racket', '🎾'),
+  badmintonRacket('badminton_racket', 'Badminton racket', '🏸'),
+  sportsBag('sports_bag', 'Sports bag', '🎒'),
+  trainingKit('training_kit', 'Training kit', '🏋️'),
+  goalkeeperKit('goalkeeper_kit', 'Goalkeeper kit', '🧤'),
+  protectiveGear('protective_gear', 'Protective equipment', '🛡️'),
+  other('other', 'Other usable equipment', '🎽');
+
+  const EquipmentCategory(this.wire, this.label, this.emoji);
+  final String wire;
+  final String label;
+  final String emoji;
+
+  static EquipmentCategory fromWire(String? w) => EquipmentCategory.values
+      .firstWhere((e) => e.wire == w, orElse: () => EquipmentCategory.other);
+}
+
+/// The refurbishment pipeline a physical donation moves through, strictly
+/// ordered. Stages after [submitted] are set by collection-center staff
+/// (console / a future staff app), never by the donor's client — see
+/// `firestore.rules` on `giveDonations`. [rejected] is a terminal branch off
+/// [inspected], not a step in the happy path: unsafe items (a cracked
+/// helmet, boots with a structural failure) are rejected rather than
+/// refurbished, deliberately, because "cleaned up" is not the same claim as
+/// "safe".
+enum DonationStatus {
+  submitted('submitted', 'Submitted', 0),
+  collected('collected', 'Collected', 1),
+  inspected('inspected', 'Inspected', 2),
+  rejected('rejected', 'Rejected — unsafe to reuse', 3),
+  cleaned('cleaned', 'Cleaned', 3),
+  repaired('repaired', 'Repaired', 4),
+  safetyChecked('safety_checked', 'Safety checked', 5),
+  graded('graded', 'Graded', 6),
+  packed('packed', 'Packed', 7),
+  assigned('assigned', 'Assigned to a need', 8),
+  distributed('distributed', 'Delivered', 9);
+
+  const DonationStatus(this.wire, this.label, this.step);
+  final String wire;
+  final String label;
+
+  /// Position for a progress tracker. [rejected] shares a step with
+  /// [cleaned] deliberately — it branches off the same point in the pipeline
+  /// rather than sitting further along it.
+  final int step;
+
+  bool get isTerminalRejection => this == DonationStatus.rejected;
+
+  static DonationStatus fromWire(String? w) => DonationStatus.values
+      .firstWhere((e) => e.wire == w, orElse: () => DonationStatus.submitted);
+}
+
+/// Who a verified need was raised for. Drives which fields a need shows —
+/// [player] shows one name and one kit list, [team]/[club] show a roster
+/// count and an aggregated shortfall.
+enum GiveBeneficiaryType {
+  player('player', 'Player'),
+  team('team', 'Team'),
+  club('club', 'Club / village');
+
+  const GiveBeneficiaryType(this.wire, this.label);
+  final String wire;
+  final String label;
+
+  static GiveBeneficiaryType fromWire(String? w) => GiveBeneficiaryType.values
+      .firstWhere((e) => e.wire == w, orElse: () => GiveBeneficiaryType.club);
+}
+
+/// Whether a need is still worth showing a donor.
+enum GiveNeedStatus {
+  open('open', 'Open'),
+  partiallyFulfilled('partially_fulfilled', 'Partially fulfilled'),
+  fulfilled('fulfilled', 'Fulfilled'),
+  closed('closed', 'Closed');
+
+  const GiveNeedStatus(this.wire, this.label);
+  final String wire;
+  final String label;
+
+  static GiveNeedStatus fromWire(String? w) => GiveNeedStatus.values
+      .firstWhere((e) => e.wire == w, orElse: () => GiveNeedStatus.open);
+}

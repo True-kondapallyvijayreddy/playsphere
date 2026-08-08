@@ -21,28 +21,70 @@ import '../../../domain/scoring/scoring_registry.dart';
 /// no view model: a [BoxScore] already knows its columns, how to format each
 /// one and which of them are derived, so the table renders whatever a plugin
 /// declares without knowing anything about the sport.
-class MatchScorecard extends StatelessWidget {
+class MatchScorecard extends StatefulWidget {
   const MatchScorecard({super.key, required this.fixture});
 
   final Fixture fixture;
 
+  /// Below this, two cards side by side are two unreadable columns rather than
+  /// a comparison. A phone gets the switcher; a tablet, a desktop and the
+  /// public live page get both at once.
+  static const double sideBySideMinWidth = 720;
+
+  @override
+  State<MatchScorecard> createState() => _MatchScorecardState();
+}
+
+/// One side's card, with the label the switcher shows for it.
+class _CardSection {
+  const _CardSection({
+    required this.label,
+    required this.child,
+    required this.isActive,
+  });
+
+  final String label;
+  final Widget child;
+
+  /// Whether this is the side currently batting/serving. Drives which tab the
+  /// switcher opens on during a live match.
+  final bool isActive;
+}
+
+class _MatchScorecardState extends State<MatchScorecard> {
+  /// Which card the narrow layout is showing, once the viewer has chosen.
+  ///
+  /// Null means "follow the match" — the batting side, recomputed every build.
+  /// A tap pins it, because a spectator who has deliberately opened the other
+  /// team's card should not have it yanked away at the innings break.
+  int? _pinned;
+
   @override
   Widget build(BuildContext context) {
+    final fixture = widget.fixture;
     final plugin = ScoringRegistry.resolve(fixture.scoringPluginKey);
     final ctx = fixture.scoringContext();
     final theme = Theme.of(context);
 
-    final sections = <Widget>[];
+    final sections = <_CardSection>[];
 
     // Cricket first: its card is structurally unlike every other sport's —
     // two disciplines, a batting order, an innings — and flattening it into a
     // generic table would lose the thing a cricketer opens a scorecard for.
     if (plugin is CricketPlugin) {
-      for (final card in plugin.allCards(fixture.scoreState, ctx)) {
+      final cards = plugin.allCards(fixture.scoreState, ctx);
+      for (var i = 0; i < cards.length; i++) {
+        final card = cards[i];
         sections.add(
-          InningsCardView(
-            card: card,
-            teamName: ctx.nameFor(card.battingSide),
+          _CardSection(
+            label: ctx.nameFor(card.battingSide),
+            // The LAST innings is the one being played. Cricket's sides are
+            // innings rather than teams, so "who is batting" is positional.
+            isActive: i == cards.length - 1,
+            child: InningsCardView(
+              card: card,
+              teamName: ctx.nameFor(card.battingSide),
+            ),
           ),
         );
       }
@@ -50,7 +92,16 @@ class MatchScorecard extends StatelessWidget {
       for (final side in const [Side.a, Side.b]) {
         final box = plugin.boxScore(fixture.scoreState, ctx, side);
         if (box == null || box.appeared.isEmpty) continue;
-        sections.add(BoxScoreTable(boxScore: box));
+        sections.add(
+          _CardSection(
+            label: box.teamName,
+            // Every other sport's two cards are both live for the whole match
+            // — there is no "batting side" in badminton — so neither is
+            // singled out and the switcher opens on the first.
+            isActive: false,
+            child: BoxScoreTable(boxScore: box),
+          ),
+        );
       }
     }
 
@@ -58,13 +109,71 @@ class MatchScorecard extends StatelessWidget {
     // "Scorecard" heading over an empty card reads as a fault.
     if (sections.isEmpty) return const SizedBox.shrink();
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Text('Scorecard', style: theme.textTheme.titleMedium),
-        const SizedBox(height: 8),
-        for (final s in sections) ...[s, const SizedBox(height: 12)],
-      ],
+    final header = Text('Scorecard', style: theme.textTheme.titleMedium);
+
+    // One card needs neither a switcher nor a second column — a first innings
+    // in progress, or a sport that only produced one box score.
+    if (sections.length == 1) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [header, const SizedBox(height: 8), sections.first.child],
+      );
+    }
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth >= MatchScorecard.sideBySideMinWidth) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              header,
+              const SizedBox(height: 8),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (var i = 0; i < sections.length; i++) ...[
+                    if (i > 0) const SizedBox(width: 12),
+                    Expanded(child: sections[i].child),
+                  ],
+                ],
+              ),
+            ],
+          );
+        }
+
+        // Narrow: one at a time, opening on whoever is batting.
+        final activeIndex = sections.indexWhere((s) => s.isActive);
+        final shown = _pinned ?? (activeIndex >= 0 ? activeIndex : 0);
+        final index = shown.clamp(0, sections.length - 1);
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            header,
+            const SizedBox(height: 8),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: SegmentedButton<int>(
+                segments: [
+                  for (var i = 0; i < sections.length; i++)
+                    ButtonSegment(
+                      value: i,
+                      label: Text(sections[i].label),
+                      icon: sections[i].isActive
+                          ? const Icon(Icons.sports_cricket, size: 14)
+                          : null,
+                    ),
+                ],
+                selected: {index},
+                showSelectedIcon: false,
+                onSelectionChanged: (s) => setState(() => _pinned = s.first),
+              ),
+            ),
+            const SizedBox(height: 8),
+            sections[index].child,
+          ],
+        );
+      },
     );
   }
 }

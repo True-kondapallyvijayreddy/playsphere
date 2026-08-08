@@ -99,6 +99,10 @@ class _LineupEditorState extends ConsumerState<LineupEditor> {
       if (existing >= 0) {
         list.removeAt(existing);
       } else {
+        // Bug #7: A player cannot play for both sides. If present in the
+        // opposite team list, remove them first.
+        final otherList = _tab == 0 ? _b : _a;
+        otherList.removeWhere((p) => p.id == uid);
         list.add(MatchPlayer(id: uid, name: name, uid: uid));
       }
     });
@@ -385,9 +389,30 @@ class _TossDialogState extends ConsumerState<TossDialog> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            f.sport == 'chess' ? 'Who drew White?' : 'Who won it?',
-            style: Theme.of(context).textTheme.bodyMedium,
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                f.sport == 'chess' ? 'Who drew White?' : 'Who won it?',
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+              OutlinedButton.icon(
+                onPressed: () {
+                  final randomWinner = (DateTime.now().millisecondsSinceEpoch % 2 == 0)
+                      ? f.entrantAId
+                      : f.entrantBId;
+                  final winnerName = randomWinner == f.entrantAId
+                      ? f.entrantAName
+                      : f.entrantBName;
+                  setState(() => _winnerId = randomWinner);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('🪙 Coin toss result: $winnerName won the toss!')),
+                  );
+                },
+                icon: const Icon(Icons.casino_outlined, size: 16),
+                label: const Text('Flip Coin 🪙'),
+              ),
+            ],
           ),
           RadioListTile<String>(
             value: f.entrantAId,
@@ -406,11 +431,6 @@ class _TossDialogState extends ConsumerState<TossDialog> {
           const Divider(),
           const Text('And chose to'),
           const SizedBox(height: 8),
-          // Declared by the sport, not by this screen. A badminton umpire
-          // asks serve or receive and a kabaddi one asks raid or court; the
-          // dialog offered Bat and Field to all thirteen sports, so the
-          // record of every non-cricket match said something that had not
-          // happened. See TossOptions.
           Wrap(
             spacing: 8,
             children: [
@@ -441,9 +461,7 @@ class _TossDialogState extends ConsumerState<TossDialog> {
                   setState(() => _busy = true);
                   try {
                     await ref.read(competitionRepositoryProvider).recordToss(
-                          orgId: f.orgId,
-                          compId: f.compId,
-                          fixtureId: f.id,
+                          fixture: f,
                           wonByEntrantId: _winnerId!,
                           decision: _decision,
                           startingSide: _startingSide(f),
@@ -511,6 +529,7 @@ class PlayerPicker extends StatefulWidget {
     required this.candidatesFor,
     this.optionalRoles = const {},
     this.multiRoles = const {},
+    this.exclusiveRoleGroups = const [],
     this.values = const [],
   });
 
@@ -543,6 +562,23 @@ class PlayerPicker extends StatefulWidget {
   /// would hand a super-tackle to one player and falsify the rest.
   final Set<String> multiRoles;
 
+  /// Groups of roles that must each name a DIFFERENT person.
+  ///
+  /// The cricket case is the one that got reported: a scorer could pick the
+  /// same player as striker and non-striker, and only found out after tapping
+  /// through the whole dialog, when the engine rejected the delivery. The
+  /// answer to "who is at the other end" can never be "the person already on
+  /// strike", so offering them was never right — the fix is to stop offering,
+  /// not to explain the refusal better.
+  ///
+  /// The caller derives these from the prompts drawing on the same pool, so
+  /// this generalises past cricket without knowing any sport: a footballer
+  /// cannot assist their own goal, and a kho-kho attacker cannot tag himself.
+  /// A prompt drawn from the OPPOSING side is in a different group and stays
+  /// unfiltered — the bowler is on the other team and has nothing to do with
+  /// who is batting.
+  final List<Set<String>> exclusiveRoleGroups;
+
   @override
   State<PlayerPicker> createState() => _PlayerPickerState();
 }
@@ -554,6 +590,52 @@ class _PlayerPickerState extends State<PlayerPicker> {
   bool _filled(String key) => widget.multiRoles.contains(key)
       ? (_chosenMany[key]?.isNotEmpty ?? false)
       : (_chosen[key]?.isNotEmpty ?? false);
+
+  /// The candidates for [key], minus anyone already named in a role that must
+  /// be a different person.
+  ///
+  /// Recomputed on every build rather than cached, because it depends on what
+  /// the scorer has picked so far: choosing a striker has to remove that
+  /// player from the non-striker list on the same frame.
+  List<MatchPlayer> _available(String key) {
+    final taken = <String>{};
+    for (final group in widget.exclusiveRoleGroups) {
+      if (!group.contains(key)) continue;
+      for (final other in group) {
+        if (other == key) continue;
+        final one = _chosen[other];
+        if (one != null && one.isNotEmpty) taken.add(one);
+        final many = _chosenMany[other];
+        if (many != null) taken.addAll(many);
+      }
+    }
+    final pool = widget.candidatesFor(key);
+    if (taken.isEmpty) return pool;
+    return [
+      for (final p in pool)
+        if (!taken.contains(p.id)) p,
+    ];
+  }
+
+  /// Drops a selection that a LATER pick has just made illegal.
+  ///
+  /// Without this, picking A as striker and then A as non-striker is blocked,
+  /// but picking A as non-striker first and then A as striker would leave A
+  /// sitting in both — the second dropdown's filter only runs against what was
+  /// chosen before it. Clearing the clash keeps the dialog in a state the
+  /// engine would accept, whatever order the scorer answers in.
+  void _clearClashes(String justSet) {
+    final id = _chosen[justSet];
+    if (id == null || id.isEmpty) return;
+    for (final group in widget.exclusiveRoleGroups) {
+      if (!group.contains(justSet)) continue;
+      for (final other in group) {
+        if (other == justSet) continue;
+        if (_chosen[other] == id) _chosen.remove(other);
+        _chosenMany[other]?.remove(id);
+      }
+    }
+  }
 
   /// Raw text per value field, kept as typed rather than as a parsed number.
   ///
@@ -589,7 +671,7 @@ class _PlayerPickerState extends State<PlayerPicker> {
     super.initState();
     for (final key in widget.roles.keys) {
       if (widget.multiRoles.contains(key)) continue;
-      final only = widget.candidatesFor(key);
+      final only = _available(key);
       if (only.length == 1) _chosen[key] = only.first.id;
     }
   }
@@ -619,7 +701,7 @@ class _PlayerPickerState extends State<PlayerPicker> {
                         spacing: 6,
                         runSpacing: 6,
                         children: [
-                          for (final p in widget.candidatesFor(entry.key))
+                          for (final p in _available(entry.key))
                             FilterChip(
                               label: Text(p.name),
                               selected:
@@ -661,11 +743,13 @@ class _PlayerPickerState extends State<PlayerPicker> {
                           value: '',
                           child: Text('Nobody'),
                         ),
-                      for (final p in widget.candidatesFor(entry.key))
+                      for (final p in _available(entry.key))
                         DropdownMenuItem(value: p.id, child: Text(p.name)),
                     ],
-                    onChanged: (v) =>
-                        setState(() => _chosen[entry.key] = v ?? ''),
+                    onChanged: (v) => setState(() {
+                      _chosen[entry.key] = v ?? '';
+                      _clearClashes(entry.key);
+                    }),
                   ),
                 ),
             for (final v in widget.values)

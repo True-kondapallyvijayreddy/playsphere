@@ -71,6 +71,20 @@ stands.
 | i18n (Telugu/Hindi/English) | **0%** | All strings hardcoded English. |
 | Payments (Razorpay) | **0%** | Not started. |
 
+### Commerce layer (added 2026-08-08) — see `docs/COMMERCE.md`
+
+| Area | Status | Notes |
+|---|---|---|
+| Plans & entitlements | 🟡 | Club ₹999/yr and Premium ₹99/yr modelled end to end, both at ₹0 under a launch offer. `plan`/`planValidUntil` on `orgs` and `users`; `payments/` ledger written even at ₹0. **Entitlement is still written by the client** — this must move server-side before the offer ends. |
+| Payment gateway | 🟡 | `PaymentGateway` seam with `FreeCheckout` only. Razorpay is one implementation plus one provider swap. `FreeCheckout` throws on any non-zero amount, so skipping that step fails loudly. |
+| Club creation checkout | ✅ | Two-step form; plan, ledger row, club, membership and invite code all land in one batch. |
+| Premium | ✅ | `/premium`, in the module drawer. Receipts list. Early renewal extends rather than truncates. |
+| Advertising | 🟡 | House catalog, no SDK. 5s countdown then close, session-scoped dismissal, hidden for Premium, no third-party ads to minors. No advertiser console, no impression tracking. |
+| Shop | ✅ | Decathlon link-out catalog, sport-filtered from the viewer's career. No cart by design. |
+| Grounds — owner side | ✅ | Top-level `grounds/`, registration/edit, rate, hours, facilities, booking calendar. No verification flow. |
+| Grounds — booking | ✅ | Transactional double-booking check, availability grid, wired into event creation as an optional step. Settle-at-venue; no online payment yet. |
+| Geo search | ❌ | Grounds match on `cityKey`. Lat/long stored, nothing queries them. No map, no distance sort. |
+
 ---
 
 ## 2. Feature audit

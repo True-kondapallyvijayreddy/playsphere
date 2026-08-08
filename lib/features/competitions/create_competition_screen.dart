@@ -4,12 +4,15 @@ import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/layout/responsive.dart';
+import '../../core/models/billing.dart';
 import '../../core/models/competition.dart';
 import '../../core/models/enums.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
+import '../../data/ground_repository.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../grounds/ground_booking_flow.dart';
 
 /// Event creation.
 ///
@@ -47,6 +50,16 @@ class _CreateCompetitionScreenState
   bool _waitlist = true;
   bool _openToNonMembers = false;
   bool _busy = false;
+
+  /// Whether the organizer wants PlaySphere to find them a ground.
+  ///
+  /// Off by default, deliberately — see the section comment in [build].
+  bool _wantsGroundBooking = false;
+
+  /// The slot actually held, once one has been. Null right up until the
+  /// booking transaction has committed, so this being non-null is proof the
+  /// ground is genuinely reserved rather than merely chosen.
+  BookedGround? _booked;
 
   @override
   void dispose() {
@@ -87,21 +100,49 @@ class _CreateCompetitionScreenState
     return wanted;
   }
 
-  List<CompetitionFormat> get _formatsForSport {
-    if (_sport.isPerformance) {
-      return [CompetitionFormat.finalOnly, CompetitionFormat.heatsThenFinal];
-    }
-    return [
-      CompetitionFormat.roundRobin,
-      CompetitionFormat.knockout,
-      CompetitionFormat.leagueTable,
-      CompetitionFormat.swiss,
-      // One match, recorded as an event — a name, a venue, a date — but with
-      // no field to assemble. For a club that wants "Sunday internal, 3rd
-      // August" in its history rather than an unnamed fixture. Quick match is
-      // the same thing without the paperwork; both land on the same format.
-      CompetitionFormat.singleMatch,
-    ];
+  // Deliberately no `singleMatch` in `SportSpec.competitionFormats` — a
+  // one-off match is its own event type now, chosen a screen earlier
+  // (Feature #8), which is a better place to ask: the whole lower half of
+  // THIS form — participation model, capacity, waitlist — exists to
+  // assemble a field, and a single match has both sides named on the spot.
+  // Offering it as a "format" meant filling in a page of registration
+  // settings that were then discarded.
+  List<CompetitionFormat> get _formatsForSport => _sport.competitionFormats;
+
+  /// Opens the search-and-book sheet, seeded with what the form already
+  /// knows.
+  ///
+  /// The sport, the club's city and the event's start date are all sitting
+  /// right here, and asking for them a second time inside the sheet is how a
+  /// booking flow gets abandoned halfway.
+  Future<void> _openGroundSearch() async {
+    final org = ref.read(organizationProvider(widget.orgId)).valueOrNull;
+
+    final result = await showGroundBookingSheet(
+      context,
+      sportId: _sport.id,
+      initialCity: org?.city,
+      initialDate: _startDate,
+      orgId: widget.orgId,
+    );
+    if (result == null || !mounted) return;
+
+    setState(() {
+      _booked = result;
+      _venue.text = result.venueLabel;
+      // The booked day is the day the event is on. Leaving the two able to
+      // differ would let an organizer hold Sunday and tell everyone Saturday.
+      _startDate = result.booking.startsAt;
+      _startTime = TimeOfDay(hour: result.booking.startHour, minute: 0);
+    });
+  }
+
+  /// Drops the booking from the form. Deliberately does not cancel the slot:
+  /// the hour is genuinely held and releasing it is a decision with a
+  /// consequence, made on the Grounds screen where the confirmation lives.
+  void _clearBooking() {
+    _booked = null;
+    _venue.clear();
   }
 
   Future<void> _create() async {
@@ -109,12 +150,13 @@ class _CreateCompetitionScreenState
     final uid = ref.read(currentUidProvider);
     if (uid == null) return;
 
-    // A single match has no field to assemble, so there is nothing this form
-    // can finish. Creating the competition here would leave an empty shell —
-    // an event with no fixture, which shows up in the club's list and cannot
-    // be played. It hands over to the quick-match screen instead, carrying
-    // what has already been typed, and that screen writes the competition and
-    // its one fixture together.
+    // Unreachable by the dropdown since single match became its own event
+    // type (Feature #8) — kept as a guard rather than deleted, because the
+    // failure it prevents is silent and permanent: creating the competition
+    // here would leave an event with no fixture, which appears in the club's
+    // list and can never be played. If a single-sport format list ever grows
+    // `singleMatch` back, this still hands over to the quick-match screen,
+    // which writes the competition and its one fixture together.
     if (_format.isSingleMatch) {
       context.push(
         Routes.quickMatch(
@@ -347,12 +389,71 @@ class _CreateCompetitionScreenState
                   ),
                   const SizedBox(height: 20),
 
+                  // ---- Where it is played ----------------------------
+                  //
+                  // Asked as a question with two equally valid answers, not
+                  // as a booking funnel with a way out. Most clubs in India
+                  // play on a ground they already have — a school field, a
+                  // panchayat maidan, the street outside — and a form that
+                  // treats "we have somewhere" as the awkward path is a form
+                  // written for the cities. So the default stays off, and
+                  // typing a place is a complete answer.
+                  const _SectionHeading(
+                    'Where are you playing?',
+                    subtitle: 'Book a ground through PlaySphere, or just say '
+                        'where',
+                  ),
+                  const SizedBox(height: 8),
+                  SwitchListTile(
+                    value: _wantsGroundBooking,
+                    onChanged: (v) => setState(() {
+                      _wantsGroundBooking = v;
+                      if (!v) _clearBooking();
+                    }),
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Book a ground'),
+                    subtitle: const Text(
+                      'Search grounds near you and hold an hour. Leave this '
+                      'off if you already have somewhere to play.',
+                    ),
+                  ),
+
+                  if (_wantsGroundBooking) ...[
+                    const SizedBox(height: 8),
+                    if (_booked == null)
+                      OutlinedButton.icon(
+                        onPressed: _openGroundSearch,
+                        style: OutlinedButton.styleFrom(
+                          minimumSize: const Size.fromHeight(48),
+                        ),
+                        icon: const Icon(Icons.search),
+                        label: const Text('Find an available ground'),
+                      )
+                    else
+                      _BookedGroundCard(
+                        booked: _booked!,
+                        onChange: _openGroundSearch,
+                        onRemove: () => setState(_clearBooking),
+                      ),
+                    const SizedBox(height: 16),
+                  ],
+
                   TextFormField(
                     controller: _venue,
-                    decoration: const InputDecoration(
-                      labelText: 'Venue / ground (optional)',
+                    // A booked ground fills this in and locks it. The venue
+                    // line and the booking must not be able to disagree —
+                    // a team sheet naming one ground while the slot is held
+                    // at another is worse than either alone.
+                    readOnly: _booked != null,
+                    decoration: InputDecoration(
+                      labelText: _booked == null
+                          ? 'Venue / ground (optional)'
+                          : 'Venue (from your booking)',
                       hintText: 'e.g. Main court',
-                      border: OutlineInputBorder(),
+                      border: const OutlineInputBorder(),
+                      suffixIcon: _booked == null
+                          ? null
+                          : const Icon(Icons.lock_outline, size: 18),
                     ),
                   ),
                   const SizedBox(height: 28),
@@ -554,6 +655,98 @@ class _CreateCompetitionScreenState
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// The slot that has been held, shown in the event form.
+///
+/// States the ground, the day, the hours and the price back in full. A
+/// booking is a commitment of somebody's money and somebody else's evening,
+/// and the confirmation that it happened should not be a tick.
+class _BookedGroundCard extends StatelessWidget {
+  const _BookedGroundCard({
+    required this.booked,
+    required this.onChange,
+    required this.onRemove,
+  });
+
+  final BookedGround booked;
+  final VoidCallback onChange;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final b = booked.booking;
+
+    return Card(
+      color: theme.colorScheme.primaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.event_available, color: theme.colorScheme.primary),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Ground booked',
+                    style: theme.textTheme.labelSmall
+                        ?.copyWith(letterSpacing: 0.6),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    booked.ground.name,
+                    style: theme.textTheme.titleSmall
+                        ?.copyWith(fontWeight: FontWeight.w700),
+                  ),
+                  Text(
+                    '${DateFormat('EEE d MMM').format(b.startsAt)} · '
+                    '${groundHourLabel(b.startHour)}–'
+                    '${groundHourLabel(b.endHour)}',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  Text(
+                    b.amountPaise == 0
+                        ? 'Free'
+                        : '${Pricing.formatPaise(b.amountPaise)} for '
+                            '${b.hours} hour${b.hours == 1 ? '' : 's'}',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      TextButton(
+                        onPressed: onChange,
+                        style: TextButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          minimumSize: Size.zero,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        child: const Text('Book a different slot'),
+                      ),
+                      const SizedBox(width: 8),
+                      TextButton(
+                        onPressed: onRemove,
+                        style: TextButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          minimumSize: Size.zero,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        child: const Text('Remove from event'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

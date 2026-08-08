@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" width="1200" height="800" style="background:#0f172a; font-family:'Segoe UI', Roboto, sans-serif;">
+  <defs>
+    <linearGradient id="gradCard" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e3a8a"/>
+      <stop offset="100%" stop-color="#1e1b4b"/>
+    </linearGradient>
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000" flood-opacity="0.4"/>
+    </filter>
+  </defs>
+
+  <!-- Title -->
+  <text x="600" y="45" font-size="26" font-weight="bold" fill="#f8fafc" text-anchor="middle">PLAYSPHERE — SYSTEM ARCHITECTURE SPECIFICATION</text>
+  <text x="600" y="75" font-size="14" fill="#94a3b8" text-anchor="middle">Grassroots Sports OS for India (Telangana Focus) — Modular Layer Architecture</text>
+
+  <!-- Layer 1: Flutter Client Application -->
+  <rect x="40" y="110" width="1120" height="180" rx="12" fill="url(#gradCard)" stroke="#3b82f6" stroke-width="2" filter="url(#shadow)"/>
+  <text x="60" y="140" font-size="18" font-weight="bold" fill="#60a5fa">1. FLUTTER CLIENT APPLICATION (Android / iOS / Web)</text>
+  
+  <rect x="60" y="160" width="240" height="100" rx="8" fill="#1e293b" stroke="#475569"/>
+  <text x="180" y="195" font-size="14" font-weight="bold" fill="#38bdf8" text-anchor="middle">Presentation Layer</text>
+  <text x="180" y="220" font-size="12" fill="#cbd5e1" text-anchor="middle">GoRouter v14.2.0 | Material 3</text>
+  <text x="180" y="240" font-size="11" fill="#94a3b8" text-anchor="middle">Telugu, Hindi, English i18n</text>
+
+  <rect x="330" y="160" width="240" height="100" rx="8" fill="#1e293b" stroke="#475569"/>
+  <text x="450" y="195" font-size="14" font-weight="bold" fill="#38bdf8" text-anchor="middle">State Management</text>
+  <text x="450" y="220" font-size="12" fill="#cbd5e1" text-anchor="middle">Riverpod v2.5.1</text>
+  <text x="450" y="240" font-size="11" fill="#94a3b8" text-anchor="middle">Reactive Providers &amp; Streams</text>
+
+  <rect x="600" y="160" width="240" height="100" rx="8" fill="#1e293b" stroke="#475569"/>
+  <text x="720" y="195" font-size="14" font-weight="bold" fill="#38bdf8" text-anchor="middle">Pure Sport Engines</text>
+  <text x="720" y="220" font-size="12" fill="#cbd5e1" text-anchor="middle">Cricket, Badminton, Kabaddi</text>
+  <text x="720" y="240" font-size="11" fill="#94a3b8" text-anchor="middle">RuleConfig Abstraction</text>
+
+  <rect x="870" y="160" width="260" height="100" rx="8" fill="#1e293b" stroke="#475569"/>
+  <text x="1000" y="195" font-size="14" font-weight="bold" fill="#38bdf8" text-anchor="middle">Offline Queue Engine</text>
+  <text x="1000" y="220" font-size="12" fill="#cbd5e1" text-anchor="middle">SharedPreferences Queue</text>
+  <text x="1000" y="240" font-size="11" fill="#94a3b8" text-anchor="middle">SyncBatchPlanner (UUIDv7)</text>
+
+  <!-- Flow Arrows Down -->
+  <line x1="600" y1="290" x2="600" y2="340" stroke="#38bdf8" stroke-width="3" stroke-dasharray="6,6"/>
+  <polygon points="600,345 593,330 607,330" fill="#38bdf8"/>
+
+  <!-- Layer 2: Security & Firebase Layer -->
+  <rect x="40" y="350" width="1120" height="180" rx="12" fill="url(#gradCard)" stroke="#16a34a" stroke-width="2" filter="url(#shadow)"/>
+  <text x="60" y="380" font-size="18" font-weight="bold" fill="#4ade80">2. FIREBASE INFRASTRUCTURE &amp; SECURITY BOUNDARY (asia-south1 Mumbai)</text>
+
+  <rect x="60" y="400" width="340" height="100" rx="8" fill="#1e293b" stroke="#475569"/>
+  <text x="230" y="435" font-size="14" font-weight="bold" fill="#4ade80" text-anchor="middle">Cloud Firestore (NoSQL)</text>
+  <text x="230" y="460" font-size="12" fill="#cbd5e1" text-anchor="middle">Append-Only MatchEvents</text>
+  <text x="230" y="480" font-size="11" fill="#94a3b8" text-anchor="middle">Native Offline Cache Persistence</text>
+
+  <rect x="430" y="400" width="340" height="100" rx="8" fill="#1e293b" stroke="#475569"/>
+  <text x="600" y="435" font-size="14" font-weight="bold" fill="#4ade80" text-anchor="middle">firestore.rules (2,244 lines)</text>
+  <text x="600" y="460" font-size="12" fill="#cbd5e1" text-anchor="middle">Role Checks &amp; Monotonic Seq Lock</text>
+  <text x="600" y="480" font-size="11" fill="#94a3b8" text-anchor="middle">DPDP Act Minor Safety (DOB Gating)</text>
+
+  <rect x="800" y="400" width="330" height="100" rx="8" fill="#1e293b" stroke="#475569"/>
+  <text x="965" y="435" font-size="14" font-weight="bold" fill="#4ade80" text-anchor="middle">Cloud Storage (storage.rules)</text>
+  <text x="965" y="460" font-size="12" fill="#cbd5e1" text-anchor="middle">Photos (8MB) &amp; Videos (50MB)</text>
+  <text x="965" y="480" font-size="11" fill="#94a3b8" text-anchor="middle">Match Memories &amp; Club Docs</text>
+
+  <!-- Flow Arrows Down -->
+  <line x1="600" y1="530" x2="600" y2="580" stroke="#4ade80" stroke-width="3" stroke-dasharray="6,6"/>
+  <polygon points="600,585 593,570 607,570" fill="#4ade80"/>
+
+  <!-- Layer 3: Cloud Functions Server Engines -->
+  <rect x="40" y="590" width="1120" height="170" rx="12" fill="url(#gradCard)" stroke="#ea580c" stroke-width="2" filter="url(#shadow)"/>
+  <text x="60" y="620" font-size="18" font-weight="bold" fill="#fb923c">3. NODE.JS CLOUD FUNCTIONS SERVER TRIGGERS (index.js)</text>
+
+  <rect x="60" y="640" width="250" height="100" rx="8" fill="#1e293b" stroke="#475569"/>
+  <text x="185" y="675" font-size="13" font-weight="bold" fill="#fb923c" text-anchor="middle">onMatchSettled</text>
+  <text x="185" y="700" font-size="11" fill="#cbd5e1" text-anchor="middle">Computes Glicko-2 Ratings</text>
+  <text x="185" y="718" font-size="10" fill="#94a3b8" text-anchor="middle">Increments Career Stats</text>
+
+  <rect x="340" y="640" width="250" height="100" rx="8" fill="#1e293b" stroke="#475569"/>
+  <text x="465" y="675" font-size="13" font-weight="bold" fill="#fb923c" text-anchor="middle">onTournamentCompleted</text>
+  <text x="465" y="700" font-size="11" fill="#cbd5e1" text-anchor="middle">Computes Ranking Ledger</text>
+  <text x="465" y="718" font-size="10" fill="#94a3b8" text-anchor="middle">Writes /rankingEntries</text>
+
+  <rect x="620" y="640" width="250" height="100" rx="8" fill="#1e293b" stroke="#475569"/>
+  <text x="745" y="675" font-size="13" font-weight="bold" fill="#fb923c" text-anchor="middle">onFixtureStatusChanged</text>
+  <text x="745" y="700" font-size="11" fill="#cbd5e1" text-anchor="middle">Triggers Push Notifications</text>
+  <text x="745" y="718" font-size="10" fill="#94a3b8" text-anchor="middle">Live &amp; Result Alerts</text>
+
+  <rect x="900" y="640" width="230" height="100" rx="8" fill="#1e293b" stroke="#475569"/>
+  <text x="1015" y="675" font-size="13" font-weight="bold" fill="#fb923c" text-anchor="middle">sendToUsers()</text>
+  <text x="1015" y="700" font-size="11" fill="#cbd5e1" text-anchor="middle">Multicast FCM Push</text>
+  <text x="1015" y="718" font-size="10" fill="#94a3b8" text-anchor="middle">Dead Token Auto-Pruning</text>
+</svg>

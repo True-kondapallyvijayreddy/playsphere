@@ -45,8 +45,12 @@ class _RunningLateCardState extends ConsumerState<RunningLateCard> {
     // Nothing left to move — the day is done, or nothing has been scheduled.
     if (next == null) return const SizedBox.shrink();
 
+    // Bug #1 / #15: use activity-aware isLiveAt rather than the raw status
+    // field, so a match abandoned by its scorer days ago counts as pending
+    // (and therefore movable) rather than in-progress.
+    final now = DateTime.now();
     final pending = widget.fixtures
-        .where((f) => f.scheduledAt != null && !f.status.isResulted && !f.isLive)
+        .where((f) => f.scheduledAt != null && !f.status.isResulted && !f.isLiveAt(now))
         .length;
 
     return Padding(

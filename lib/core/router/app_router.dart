@@ -8,6 +8,8 @@ import 'package:go_router/go_router.dart';
 import '../../features/venues/venues_screen.dart';
 import '../../features/rankings/rankings_screen.dart';
 import '../../features/tournaments/certificates_screen.dart';
+import '../../features/tournaments/officials_screen.dart';
+import '../../features/tournaments/season_memory_book_screen.dart';
 import '../../features/tournaments/public_tournament_screen.dart';
 import '../../features/tournaments/tournaments_screen.dart';
 import '../../features/tournaments/tournament_detail_screen.dart';
@@ -15,10 +17,26 @@ import '../../features/analytics/analytics_screen.dart';
 import '../../features/auth/profile_setup_screen.dart';
 import '../../features/auth/sign_in_screen.dart';
 import '../../features/community/looking_for_board_screen.dart';
+import '../../features/competitions/global_events_screen.dart';
 import '../../features/competitions/challenges_screen.dart';
 import '../../features/competitions/competition_detail_screen.dart';
+import '../../features/competitions/choose_event_type_screen.dart';
 import '../../features/competitions/create_competition_screen.dart';
+import '../../features/competitions/create_season_screen.dart';
+import '../../features/competitions/entrant_detail_screen.dart';
+import '../../features/competitions/my_events_screen.dart';
+import '../../features/give/give_collection_centers_screen.dart';
+import '../../features/give/give_donate_screen.dart';
+import '../../features/give/give_home_screen.dart';
+import '../../features/give/give_impact_screen.dart';
+import '../../features/give/give_my_donations_screen.dart';
+import '../../features/give/give_needs_screen.dart';
+import '../../features/give/give_raise_need_screen.dart';
+import '../../features/grounds/grounds_screen.dart';
+import '../../features/grounds/my_grounds_screen.dart';
 import '../../features/home/home_screen.dart';
+import '../../features/more/more_menu_screen.dart';
+import '../../features/notifications/notifications_screen.dart';
 import '../../features/orgs/club_files_screen.dart';
 import '../../features/orgs/club_gallery_screen.dart';
 import '../../features/orgs/create_org_screen.dart';
@@ -27,9 +45,15 @@ import '../../features/orgs/members_screen.dart';
 import '../../features/orgs/org_home_screen.dart';
 import '../../features/orgs/org_picker_screen.dart';
 import '../../features/orgs/umpire_registry_screen.dart';
+import '../../features/premium/premium_screen.dart';
+import '../../features/shop/shop_screen.dart';
 import '../../features/profile/career_profile_screen.dart';
+import '../../features/profile/my_matches_screen.dart';
+import '../../features/profile/my_sports_screen.dart';
+import '../../features/profile/player_sport_screen.dart';
 import '../../features/rules/sport_rules_screen.dart';
 import '../../features/scoring/live_matches_screen.dart';
+import '../../features/scoring/live_now_screen.dart';
 import '../../features/scoring/quick_match_screen.dart';
 import '../../features/scoring/scoring_screen.dart';
 import '../../features/scoring/spectator_screen.dart';
@@ -48,6 +72,27 @@ class Routes {
 
   static const orgs = '/orgs';
   static const rules = '/rules';
+  static const more = '/more';
+
+  /// Every open event on the platform. Deliberately org-free: discovering a
+  /// tournament is the one journey that must not start inside a club.
+  static const globalEvents = '/events';
+  static const notifications = '/notifications';
+
+  /// Every live match across every club this person belongs to, in one place.
+  ///
+  /// Deliberately org-free, unlike [live]: a member in four clubs has four
+  /// separate per-club live pages and no single one of them was ever "what is
+  /// live for me right now" — this is what the home screen's "More" button
+  /// opens once there are more matches live than fit in the preview.
+  static const liveNow = '/live';
+
+  /// Every event and tournament across every club this person belongs to.
+  ///
+  /// Deliberately org-free, same reasoning as [liveNow]: this is what the
+  /// home screen's "More" button opens once there are more open-for-entry
+  /// events than fit in its five-item preview.
+  static const myEvents = '/events/mine';
   static const createOrg = '/orgs/new';
   static const joinOrg = '/orgs/join';
 
@@ -77,8 +122,60 @@ class Routes {
   static String certificates(String orgId, String tournamentId) =>
       '/org/$orgId/tournaments/$tournamentId/certificates';
 
+  static String tournamentOfficials(String orgId, String tournamentId) =>
+      '/org/$orgId/tournaments/$tournamentId/officials';
+
+  static String seasonMemories(String orgId, String tournamentId) =>
+      '/org/$orgId/tournaments/$tournamentId/memories';
+
   static const myProfile = '/me';
   static String profile(String uid) => '/player/$uid';
+
+  /// What a player can buy for themselves. Deliberately org-free — Premium is
+  /// bought by a person and travels with them between clubs, exactly like the
+  /// career record it deepens.
+  static const premium = '/premium';
+
+  /// Sports kit, from a vendor. Org-free for the same reason as [premium]:
+  /// a player buying a racket is buying it as themselves.
+  static const shop = '/shop';
+
+  /// The Give network hub — "Give a Kit. Build a Player." Org-free, same
+  /// reasoning as [shop]: a donor gives as themselves, and a club's own
+  /// needs are managed from its own dashboard, not from here.
+  static const give = '/give';
+  static const giveDonate = '/give/donate';
+  static const giveMyDonations = '/give/mine';
+  static const giveCollectionCenters = '/give/centers';
+  static const giveNeeds = '/give/needs';
+  static const giveRaiseNeed = '/give/needs/raise';
+  static const giveImpact = '/give/impact';
+
+  /// Grounds available to hire, searchable by city, sport and time.
+  ///
+  /// Deliberately org-free and deliberately not under `/org/:id/venues`. A
+  /// venue is a club's own hall; a ground is a business somebody else owns
+  /// and rents to anybody — see `Refs.grounds`.
+  static const grounds = '/grounds';
+
+  /// The other side of the same marketplace: what a ground owner manages.
+  static const myGrounds = '/grounds/mine';
+
+  static String ground(String groundId) => '/grounds/$groundId';
+
+  /// Every match this player has appeared in. A destination of its own, not
+  /// an anchor on the profile: "Matches" and "Sports" both used to push
+  /// `/me`, so the two counters on the home screen led to the same page and
+  /// neither answered the question its label asked.
+  static const myMatches = '/me/matches';
+
+  /// The sports this player has a record in, each opening its own page.
+  static const mySports = '/me/sports';
+
+  /// One sport within a player's career — their matches in it, the
+  /// scorecards, and where they sit in the ranking.
+  static String playerSport(String uid, String sportId) =>
+      '/player/$uid/sport/${Uri.encodeComponent(sportId)}';
 
   static String org(String orgId) => '/org/$orgId';
   static String members(String orgId) => '/org/$orgId/members';
@@ -87,7 +184,18 @@ class Routes {
   static String challenges(String orgId) => '/org/$orgId/challenges';
   static String gallery(String orgId) => '/org/$orgId/gallery';
   static String files(String orgId) => '/org/$orgId/files';
+  /// Step one of creating anything: the event-type chooser (Feature #8).
+  /// Everything that used to link straight to the single-sport form now
+  /// lands here first.
   static String createCompetition(String orgId) => '/org/$orgId/new-event';
+
+  /// The single-sport competition form, reached by choosing Tournament.
+  static String createTournamentEvent(String orgId) =>
+      '/org/$orgId/new-event/tournament';
+
+  /// The multi-sport season form: which sports, how many entries each, and
+  /// whether outside clubs may enter.
+  static String createSeason(String orgId) => '/org/$orgId/new-event/season';
 
   /// Two people or two scratch sides playing right now, with none of the
   /// event machinery in between.
@@ -116,6 +224,8 @@ class Routes {
       '/org/$orgId/event/$compId/score/$fixtureId';
   static String watch(String orgId, String compId, String fixtureId) =>
       '/org/$orgId/event/$compId/watch/$fixtureId';
+  static String entrant(String orgId, String compId, String entrantId) =>
+      '/org/$orgId/event/$compId/entrant/$entrantId';
 
   /// Where the public web build is served from.
   ///
@@ -218,6 +328,26 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         path: Routes.rules,
         builder: (_, __) => const SportRulesScreen(),
       ),
+      GoRoute(
+        path: Routes.globalEvents,
+        builder: (_, __) => const GlobalEventsScreen(),
+      ),
+      GoRoute(
+        path: Routes.more,
+        builder: (_, __) => const MoreMenuScreen(),
+      ),
+      GoRoute(
+        path: Routes.notifications,
+        builder: (_, __) => const NotificationsScreen(),
+      ),
+      GoRoute(
+        path: Routes.liveNow,
+        builder: (_, __) => const LiveNowScreen(),
+      ),
+      GoRoute(
+        path: Routes.myEvents,
+        builder: (_, __) => const MyEventsScreen(),
+      ),
       // Both of these screens take the signed-in user as a constructor
       // argument rather than reading it themselves, so the route resolves it.
       // They existed and worked for months with nothing routed to them, which
@@ -262,9 +392,91 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         builder: (_, __) => const _MyProfileScreen(),
       ),
       GoRoute(
+        path: Routes.premium,
+        builder: (_, __) => const PremiumScreen(),
+      ),
+      // The two halves of the ground marketplace. Neither is under `/org/`:
+      // a ground owner has no club, and a player looking for a pitch is
+      // looking outward — see Routes.grounds.
+      //
+      // `/grounds/mine` is declared before the `:groundId` route so the
+      // literal wins; go_router matches in declaration order, and `mine`
+      // would otherwise be read as a ground id.
+      GoRoute(
+        path: Routes.myGrounds,
+        builder: (_, __) => const MyGroundsScreen(),
+      ),
+      GoRoute(
+        path: Routes.grounds,
+        builder: (_, __) => const GroundsScreen(),
+      ),
+      GoRoute(
+        path: Routes.shop,
+        // `?sport=` arrives from a promo banner, and only preselects the
+        // filter — the chips are still there and "All sports" is one tap away.
+        builder: (_, state) =>
+            ShopScreen(initialSportId: state.uri.queryParameters['sport']),
+      ),
+      // The Give network. `giveDonate` and `giveRaiseNeed` are declared
+      // before `give` so their more specific paths are unaffected by
+      // declaration order — go_router matches by full path, not prefix, but
+      // keeping the hub first in reading order matches how the other module
+      // groups (grounds, shop) are laid out above.
+      GoRoute(
+        path: Routes.give,
+        builder: (_, __) => const GiveHomeScreen(),
+      ),
+      GoRoute(
+        path: Routes.giveDonate,
+        builder: (_, __) => const GiveDonateScreen(),
+      ),
+      GoRoute(
+        path: Routes.giveMyDonations,
+        builder: (_, __) => const GiveMyDonationsScreen(),
+      ),
+      GoRoute(
+        path: Routes.giveCollectionCenters,
+        builder: (_, __) => const GiveCollectionCentersScreen(),
+      ),
+      GoRoute(
+        path: Routes.giveNeeds,
+        builder: (_, __) => const GiveNeedsScreen(),
+      ),
+      GoRoute(
+        path: Routes.giveRaiseNeed,
+        builder: (_, __) => const GiveRaiseNeedScreen(),
+      ),
+      GoRoute(
+        path: Routes.giveImpact,
+        builder: (_, __) => const GiveImpactScreen(),
+      ),
+      // "Matches" and "Sports" are destinations in their own right, not
+      // anchors on the profile. Both home-screen tiles used to push `/me`,
+      // so two differently-labelled counters landed on the same page.
+      GoRoute(
+        path: Routes.myMatches,
+        builder: (_, __) => const _MyScopedScreen(_MyScope.matches),
+      ),
+      GoRoute(
+        path: Routes.mySports,
+        builder: (_, __) => const _MyScopedScreen(_MyScope.sports),
+      ),
+      GoRoute(
         path: '/player/:uid',
         builder: (_, state) =>
             CareerProfileScreen(uid: state.pathParameters['uid']!),
+        routes: [
+          GoRoute(
+            path: 'sport/:sportId',
+            builder: (_, state) => PlayerSportScreen(
+              uid: state.pathParameters['uid']!,
+              // Chess ids carry a `:` qualifier (`chess:blitz`), which is
+              // percent-encoded into the path and has to come back out.
+              sportId:
+                  Uri.decodeComponent(state.pathParameters['sportId']!),
+            ),
+          ),
+        ],
       ),
       GoRoute(
         path: '/org/:orgId',
@@ -327,6 +539,20 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                       tournamentId: state.pathParameters['tournamentId']!,
                     ),
                   ),
+                  GoRoute(
+                    path: 'officials',
+                    builder: (_, state) => OfficialsScreen(
+                      orgId: state.pathParameters['orgId']!,
+                      tournamentId: state.pathParameters['tournamentId']!,
+                    ),
+                  ),
+                  GoRoute(
+                    path: 'memories',
+                    builder: (_, state) => SeasonMemoryBookScreen(
+                      orgId: state.pathParameters['orgId']!,
+                      tournamentId: state.pathParameters['tournamentId']!,
+                    ),
+                  ),
                 ],
               ),
             ],
@@ -341,10 +567,27 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             builder: (_, state) =>
                 ClubFilesScreen(orgId: state.pathParameters['orgId']!),
           ),
+          // Creating anything starts with the type chooser (Feature #8); the
+          // single-sport form is now one of four destinations behind it
+          // rather than the only thing "New event" could mean.
           GoRoute(
             path: 'new-event',
             builder: (_, state) =>
-                CreateCompetitionScreen(orgId: state.pathParameters['orgId']!),
+                ChooseEventTypeScreen(orgId: state.pathParameters['orgId']!),
+            routes: [
+              GoRoute(
+                path: 'tournament',
+                builder: (_, state) => CreateCompetitionScreen(
+                  orgId: state.pathParameters['orgId']!,
+                ),
+              ),
+              GoRoute(
+                path: 'season',
+                builder: (_, state) => CreateSeasonScreen(
+                  orgId: state.pathParameters['orgId']!,
+                ),
+              ),
+            ],
           ),
           GoRoute(
             path: 'quick-match',
@@ -376,6 +619,14 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                   orgId: state.pathParameters['orgId']!,
                   compId: state.pathParameters['compId']!,
                   fixtureId: state.pathParameters['fixtureId']!,
+                ),
+              ),
+              GoRoute(
+                path: 'entrant/:entrantId',
+                builder: (_, state) => EntrantDetailScreen(
+                  orgId: state.pathParameters['orgId']!,
+                  compId: state.pathParameters['compId']!,
+                  entrantId: state.pathParameters['entrantId']!,
                 ),
               ),
             ],
@@ -420,6 +671,29 @@ class _MyProfileScreen extends ConsumerWidget {
     final uid = ref.watch(currentUidProvider);
     if (uid == null) return const SignInScreen();
     return CareerProfileScreen(uid: uid);
+  }
+}
+
+/// Which of the signed-in player's own pages a `/me/...` route resolves to.
+enum _MyScope { matches, sports }
+
+/// Resolves `/me/matches` and `/me/sports` to the signed-in player.
+///
+/// Same shape and same reasoning as [_MyProfileScreen]: `/me/...` links are
+/// built without reaching for the session, and the uid is looked up here.
+class _MyScopedScreen extends ConsumerWidget {
+  const _MyScopedScreen(this.scope);
+
+  final _MyScope scope;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final uid = ref.watch(currentUidProvider);
+    if (uid == null) return const SignInScreen();
+    return switch (scope) {
+      _MyScope.matches => MyMatchesScreen(uid: uid),
+      _MyScope.sports => MySportsScreen(uid: uid),
+    };
   }
 }
 

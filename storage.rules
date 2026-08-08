@@ -21,6 +21,27 @@ rules_version = '2';
 // Minor safety (CLAUDE.md §2.7, §12.8) is enforced where the *reference* lives,
 // in firestore.rules. A photo of a junior match is not made discoverable by
 // this file; only by a memory document that the Firestore rules gate.
+//
+// ## Accepted risk: upload volume
+//
+// Stated here because it was true and unstated, which is the worse of the two.
+// Any signed-in account may write under its OWN uid segment beneath any
+// `orgId`/`fixtureId` it can name, without belonging to that club — because
+// this file cannot ask Firestore whether it does. The per-object ceilings below
+// are therefore the only limit, and there is no limit on the NUMBER of objects.
+// A determined account can push storage and egress onto the project's billing.
+//
+// What contains it today: an object nobody linked is an object nobody can find
+// (the accompanying `memories` document is the only route to the path, and
+// creating one requires an active membership — see firestore.rules), and the
+// content-type and size checks stop the bucket becoming general-purpose file
+// hosting. What that does NOT contain is the bill.
+//
+// Closing it properly needs something this file cannot express: Firebase App
+// Check to reject uploads from anything but a genuine app instance, plus a
+// per-user quota enforced by a server-signed upload URL. Both are
+// infrastructure, not rules. Until then, watch the bucket's growth rather than
+// assuming these ceilings are a budget.
 service firebase.storage {
   match /b/{bucket}/o {
 

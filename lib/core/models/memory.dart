@@ -41,6 +41,7 @@ class Memory {
     required this.url,
     required this.kind,
     required this.audience,
+    this.tournamentId,
     this.caption,
     this.taggedUids = const [],
     this.width,
@@ -54,6 +55,16 @@ class Memory {
   final String compId;
   final String fixtureId;
   final String uploaderUid;
+
+  /// The season this match belonged to, if any — copied from
+  /// `Fixture.tournamentId` at upload time so every memory from every match
+  /// of a season can be queried together into one book, the same way
+  /// `orgId` lets a whole club's memories be queried as a gallery. Null for
+  /// a memory on a standalone competition that isn't part of a tournament,
+  /// and for every memory uploaded before this field existed — the season
+  /// book simply does not include those, which is acceptable because a
+  /// season's book is assembled going forward, not backfilled.
+  final String? tournamentId;
 
   /// The Storage object path. Kept alongside [url] because a download URL
   /// cannot be turned back into a path, and deleting the object needs the path.
@@ -120,6 +131,7 @@ class Memory {
       url: Fs.str(d['url']),
       kind: MemoryKind.fromWire(Fs.strOrNull(d['kind'])),
       audience: Fs.str(d['audience']),
+      tournamentId: Fs.strOrNull(d['tournamentId']),
       caption: Fs.strOrNull(d['caption']),
       taggedUids: Fs.strList(d['taggedUids']),
       width: d['width'] == null ? null : Fs.integer(d['width']),
@@ -138,6 +150,7 @@ class Memory {
         'url': url,
         'kind': kind.wire,
         'audience': audience,
+        'tournamentId': tournamentId,
         'caption': caption,
         'taggedUids': taggedUids,
         'width': width,

@@ -2,6 +2,7 @@ import 'dart:math';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import 'billing.dart';
 import 'enums.dart';
 import 'firestore_codec.dart';
 import 'geo.dart';
@@ -19,6 +20,7 @@ class Organization {
     required this.orgType,
     required this.visibility,
     required this.ownerUid,
+    this.ownerUids = const [],
     required this.inviteCode,
     this.parentOrgId,
     this.description,
@@ -28,6 +30,8 @@ class Organization {
     this.logoUrl,
     this.memberCount = 0,
     this.requiresApprovalToJoin = true,
+    this.plan = OrgPlan.free,
+    this.planState = PlanState.none,
     this.createdBy,
     this.createdAt,
     this.deletedAt,
@@ -38,9 +42,14 @@ class Organization {
   final OrgType orgType;
   final OrgVisibility visibility;
 
-  /// Exactly one owner uid lives here. Security rules read it to decide who
-  /// may transfer ownership or change org-level governance settings.
+  /// Exactly one primary owner uid lives here.
   final String ownerUid;
+
+  /// Feature #3: Multi-owner list for organizations.
+  final List<String> ownerUids;
+
+  /// Returns whether [uid] is a primary or co-owner of this club.
+  bool isOwner(String uid) => uid == ownerUid || ownerUids.contains(uid);
 
   /// Short human-shareable code. A coach reads it out in a WhatsApp group and
   /// players join without needing to be found by search.
@@ -70,12 +79,28 @@ class Organization {
   /// does not, and forcing approval there just means nobody ever gets let in.
   final bool requiresApprovalToJoin;
 
+  /// What this club has bought. Defaults to [OrgPlan.free], which is also
+  /// what every club created before plans existed reads back as.
+  final OrgPlan plan;
+
+  /// When that plan was activated and when it lapses. See [PlanState] for why
+  /// this lives on the org document rather than in a collection of its own.
+  final PlanState planState;
+
   final String? createdBy;
   final DateTime? createdAt;
   final DateTime? deletedAt;
 
   bool get isDeleted => deletedAt != null;
   bool get isPublic => visibility == OrgVisibility.public;
+
+  /// Whether the club's paid entitlement is live at [asOf].
+  ///
+  /// A lapsed plan is deliberately not a lockout — see [OrgPlan.free]. This
+  /// answers "should we show the renewal prompt and the paid-only extras",
+  /// never "may this club keep running its matches".
+  bool hasPaidPlanAt(DateTime asOf) =>
+      plan.rank >= OrgPlan.club.rank && planState.isActiveAt(asOf);
 
   factory Organization.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
     final d = doc.data() ?? const {};
@@ -85,6 +110,7 @@ class Organization {
       orgType: OrgType.fromWire(Fs.str(d['orgType'])),
       visibility: OrgVisibility.fromWire(Fs.str(d['visibility'])),
       ownerUid: Fs.str(d['ownerUid']),
+      ownerUids: Fs.strList(d['ownerUids']),
       inviteCode: Fs.str(d['inviteCode']),
       parentOrgId: Fs.strOrNull(d['parentOrgId']),
       description: Fs.strOrNull(d['description']),
@@ -98,6 +124,13 @@ class Organization {
       logoUrl: Fs.strOrNull(d['logoUrl']),
       memberCount: Fs.integer(d['memberCount']),
       requiresApprovalToJoin: Fs.boolean(d['requiresApprovalToJoin'], true),
+      plan: OrgPlan.fromWire(Fs.str(d['plan'])),
+      planState: PlanState.fromDocData(
+        d,
+        activatedKey: 'planActivatedAt',
+        validUntilKey: 'planValidUntil',
+        lastPaymentKey: 'planPaymentId',
+      ),
       createdBy: Fs.strOrNull(d['createdBy']),
       createdAt: Fs.dateOrNull(d['createdAt']),
       deletedAt: Fs.dateOrNull(d['deletedAt']),
@@ -119,11 +152,22 @@ class Organization {
         'logoUrl': logoUrl,
         'memberCount': 1,
         'requiresApprovalToJoin': requiresApprovalToJoin,
+        'plan': plan.wire,
+        'planActivatedAt': Fs.ts(planState.activatedAt),
+        'planValidUntil': Fs.ts(planState.validUntil),
+        'planPaymentId': planState.lastPaymentId,
         'createdBy': ownerUid,
         'createdAt': FieldValue.serverTimestamp(),
         'deletedAt': null,
       };
 
+  /// Deliberately carries no plan fields.
+  ///
+  /// This is what the club-settings form writes, and a club editing its own
+  /// name must not be able to hand itself a paid plan in the same call. The
+  /// entitlement is only ever written by `BillingRepository`, alongside the
+  /// ledger row that justifies it, and `firestore.rules` enforces the same
+  /// separation independently.
   Map<String, Object?> toUpdate() => Fs.prune({
         'name': name,
         'nameLower': name.toLowerCase(),
@@ -172,6 +216,8 @@ class Organization {
       memberCount: memberCount,
       requiresApprovalToJoin:
           requiresApprovalToJoin ?? this.requiresApprovalToJoin,
+      plan: plan,
+      planState: planState,
       createdBy: createdBy,
       createdAt: createdAt,
       deletedAt: deletedAt,

@@ -8,6 +8,7 @@ import 'package:flutter_web_plugins/url_strategy.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'core/l10n/locale_controller.dart';
+import 'core/providers.dart';
 import 'core/router/app_router.dart';
 import 'core/theme/app_theme.dart';
 import 'firebase_options.dart';
@@ -132,11 +133,31 @@ Future<void> main() async {
   );
 }
 
-class PlaySphereApp extends ConsumerWidget {
+class PlaySphereApp extends ConsumerStatefulWidget {
   const PlaySphereApp({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<PlaySphereApp> createState() => _PlaySphereAppState();
+}
+
+class _PlaySphereAppState extends ConsumerState<PlaySphereApp> {
+  @override
+  void initState() {
+    super.initState();
+    // Starts the offline scoring queue moving (Bug #9). Mounted here rather
+    // than on the scoring pad because a scorer who has finished a match never
+    // opens that pad again, and until this call existed that was the only
+    // thing that ever replayed the queue — matches sat unsynced for days on a
+    // phone with full signal.
+    //
+    // Post-frame so the first paint is never behind a network round trip.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) ref.read(syncDriverProvider).start();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return MaterialApp.router(
       title: 'PlaySphere',
       debugShowCheckedModeBanner: false,

@@ -208,6 +208,10 @@ class Competition {
     this.matchPointsModel = const MatchPointsModel(),
     this.drawConfig = const DrawConfig(),
     this.scheduleConfig = const ScheduleConfig(),
+    this.scoringConfig = const {},
+    this.cancelReason,
+    this.cancelledAt,
+    this.cancelledBy,
     this.participantOrgIds,
     this.createdBy,
     this.createdAt,
@@ -326,15 +330,60 @@ class Competition {
   /// turn a set of fixtures into a timetable instead of a single start time.
   final ScheduleConfig scheduleConfig;
 
+  /// This event's overrides on top of its sport's rule preset — the organizer
+  /// answer to "we play 8 overs, not 20".
+  ///
+  /// Empty for every event that just takes the sport's defaults, which is most
+  /// of them. When set, [effectiveScoringConfig] layers it over
+  /// `SportSpec.config` and that is what gets frozen onto each new fixture.
+  ///
+  /// Stored here rather than reached for at scoring time on purpose. §12.2
+  /// says every sport parameter travels through config, and §3 says a fixture
+  /// freezes the rules it was played under: an organizer shortening the format
+  /// mid-event must change the matches still to come and must NOT retroactively
+  /// rewrite the ones already played. Keeping the override on the competition
+  /// and copying it at fixture-creation time is what gives both of those at
+  /// once.
+  final Map<String, dynamic> scoringConfig;
+
+  /// The rules a new fixture of this competition should be created with.
+  ///
+  /// [sportConfig] is the sport's own resolved preset — `SportSpec.config`.
+  /// Anything the organizer overrode wins over it; everything else falls
+  /// through untouched, so an override of `oversPerInnings` does not silently
+  /// drop the wide/no-ball values sitting beside it.
+  Map<String, dynamic> effectiveScoringConfig(
+    Map<String, dynamic> sportConfig,
+  ) =>
+      scoringConfig.isEmpty
+          ? sportConfig
+          : {...sportConfig, ...scoringConfig};
+
+  /// Returns this competition with the organizer's rule edits applied.
+  ///
+  /// The other half of [withDrawSetup], and separate from it because the two
+  /// answer different questions: that one shapes the bracket, this one changes
+  /// how a match inside it is played. Both are narrow for the same reason —
+  /// see [withDrawSetup].
+  Competition withRules({
+    Map<String, dynamic>? scoringConfig,
+    ScheduleConfig? scheduleConfig,
+  }) =>
+      withDrawSetup(
+        scheduleConfig: scheduleConfig,
+        scoringConfig: scoringConfig,
+      );
+
   /// Returns this competition with the organizer's draw setup applied.
   ///
-  /// Deliberately narrow rather than a general `copyWith`: these two are the
-  /// only fields a screen changes between reading a competition and handing it
+  /// Deliberately narrow rather than a general `copyWith`: these are the only
+  /// fields a screen changes between reading a competition and handing it
   /// straight back to `generateDraw`, and a full copy-with over thirty-odd
   /// fields is thirty-odd chances to drop one silently.
   Competition withDrawSetup({
     DrawConfig? drawConfig,
     ScheduleConfig? scheduleConfig,
+    Map<String, dynamic>? scoringConfig,
   }) =>
       Competition(
         id: id,
@@ -375,10 +424,38 @@ class Competition {
         matchPointsModel: matchPointsModel,
         drawConfig: drawConfig ?? this.drawConfig,
         scheduleConfig: scheduleConfig ?? this.scheduleConfig,
+        scoringConfig: scoringConfig ?? this.scoringConfig,
+        cancelReason: cancelReason,
+        cancelledAt: cancelledAt,
+        cancelledBy: cancelledBy,
         participantOrgIds: participantOrgIds,
         createdBy: createdBy,
         createdAt: createdAt,
       );
+
+  /// Why this event was called off, in the organizer's own words.
+  ///
+  /// ## Why a reason is mandatory rather than encouraged
+  ///
+  /// An event that vanishes is indistinguishable from a bug. Somebody who
+  /// booked a Saturday, arranged a lift and told their family they were
+  /// playing opens the app to find nothing there, and the only available
+  /// conclusion is that the app lost it. A cancelled event with "Ground
+  /// waterlogged — rescheduling for the 14th" against it is a different
+  /// experience entirely, and it is the same one line of text.
+  ///
+  /// It is also what makes the notification worth sending: "Sunday Cricket was
+  /// cancelled" prompts a WhatsApp message to the organizer asking why, which
+  /// is the work the notification was supposed to save.
+  ///
+  /// Null for every event that has not been cancelled.
+  /// `CompetitionRepository.cancelCompetition` refuses to write one without it.
+  final String? cancelReason;
+
+  final DateTime? cancelledAt;
+  final String? cancelledBy;
+
+  bool get isCancelled => status == CompetitionStatus.cancelled;
 
   /// The organizations taking part, when this competition spans more than the
   /// one that owns it — a school-vs-school or village-vs-village challenge.
@@ -400,6 +477,17 @@ class Competition {
 
   final String? createdBy;
   final DateTime? createdAt;
+
+  /// The date this event should be ordered by: when it happens, not when
+  /// somebody typed it in.
+  ///
+  /// Sorting a club's events by [createdAt] puts a tournament entered late for
+  /// last month above one starting tomorrow, which is how a list of events
+  /// stops being a list anybody can read down. The fallbacks matter as much as
+  /// the first choice: a draft with no dates yet still has to land somewhere
+  /// stable rather than jumping around as other events are added.
+  DateTime get sortDate =>
+      startDate ?? registrationClosesAt ?? createdAt ?? DateTime(2000);
 
   /// True when this competition exists because a challenge was accepted, and
   /// therefore answers to two clubs rather than one.
@@ -446,6 +534,41 @@ class Competition {
   bool get openSlotsFull {
     final left = slotsRemaining;
     return left != null && left == 0;
+  }
+
+  /// Whether the registration deadline has passed at [now].
+  ///
+  /// False when no deadline was set — an event with no cut-off closes when
+  /// the organizer says so, not on its own.
+  bool registrationDeadlinePassed([DateTime? now]) {
+    final closes = registrationClosesAt;
+    if (closes == null) return false;
+    return (now ?? DateTime.now()).isAfter(closes);
+  }
+
+  /// The status to SHOW, as distinct from the one stored in Firestore.
+  ///
+  /// A competition's `status` field only changes when somebody writes it, and
+  /// nothing writes it when a registration deadline passes — there is no
+  /// server tier running a scheduled job over every event. So an event whose
+  /// entries closed on Friday still advertised "Registration Open" the
+  /// following week, and players kept tapping a Register button that
+  /// [registrationIsOpen] had already, correctly, disabled. The label and the
+  /// button disagreed, which reads as a broken app rather than a closed event.
+  ///
+  /// Deriving it on read fixes that for every event at once, including the
+  /// ones already sitting in the database, and needs no migration and no
+  /// scheduled function.
+  ///
+  /// Only ever moves `registrationOpen` → `registrationClosed`. A deadline
+  /// says nothing about an event that is already running, finished or
+  /// cancelled, and inferring anything further would overwrite a real
+  /// decision an organizer made.
+  CompetitionStatus displayStatus([DateTime? now]) {
+    if (status != CompetitionStatus.registrationOpen) return status;
+    return registrationDeadlinePassed(now)
+        ? CompetitionStatus.registrationClosed
+        : status;
   }
 
   bool get registrationIsOpen {
@@ -529,6 +652,10 @@ class Competition {
             ? Map<String, dynamic>.from(d['scheduleConfig'] as Map)
             : null,
       ),
+      scoringConfig: Fs.map(d['scoringConfig']),
+      cancelReason: Fs.strOrNull(d['cancelReason']),
+      cancelledAt: Fs.dateOrNull(d['cancelledAt']),
+      cancelledBy: Fs.strOrNull(d['cancelledBy']),
       participantOrgIds: d['participantOrgIds'] is List
           ? Fs.strList(d['participantOrgIds'])
           : null,
@@ -595,6 +722,7 @@ class Competition {
         'matchPointsModel': matchPointsModel.toMap(),
         'drawConfig': drawConfig.toMap(),
         'scheduleConfig': scheduleConfig.toMap(),
+        'scoringConfig': scoringConfig,
         'participantOrgIds': participantOrgIds,
         'createdBy': createdBy,
         'createdAt': FieldValue.serverTimestamp(),
@@ -626,6 +754,12 @@ class Competition {
         'tiebreakChain': tiebreakChain,
         'drawConfig': drawConfig.toMap(),
         'scheduleConfig': scheduleConfig.toMap(),
+        // Editable after creation, unlike `participationModel` above. Changing
+        // the format of matches still to be played is a normal organizer
+        // decision — rain shortens a day and a 20-over event becomes a 12-over
+        // one. Fixtures already created keep the config frozen onto them, so
+        // this never rewrites a match that has been played.
+        'scoringConfig': scoringConfig,
         'updatedAt': FieldValue.serverTimestamp(),
       });
 }

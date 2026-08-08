@@ -98,6 +98,32 @@ class MemoryRepository {
         .map((s) => s.docs.map(Memory.fromDoc).toList());
   }
 
+  /// Every memory from every match of one season, in one place — the book a
+  /// season owner or a player opens once the tournament is done, next to the
+  /// champions board and the certificates.
+  ///
+  /// Pinning `orgId` alongside `tournamentId` is not just belt-and-braces
+  /// scoping — it is what lets this reuse the club-gallery branch of the
+  /// `memories` collection-group rule for free. That branch already
+  /// authorizes any query that equality-filters on `orgId`; `tournamentId` is
+  /// then just an extra filter Firestore applies on top; it needs no rule of
+  /// its own. See the long comment on the `memories` collection-group match
+  /// block in `firestore.rules` for why an unpinned field would otherwise be
+  /// an evaluation error.
+  Stream<List<Memory>> watchTournamentMemories({
+    required String orgId,
+    required String tournamentId,
+    int limit = 200,
+  }) {
+    return Refs.allMemoriesQuery
+        .where('orgId', isEqualTo: orgId)
+        .where('tournamentId', isEqualTo: tournamentId)
+        .orderBy('createdAt', descending: true)
+        .limit(limit)
+        .snapshots()
+        .map((s) => s.docs.map(Memory.fromDoc).toList());
+  }
+
   /// Uploads one memory and returns the stored record.
   ///
   /// [bytes] must already be downscaled by the caller — see
@@ -117,6 +143,7 @@ class MemoryRepository {
     /// re-derive it from the club document and reject a mismatch, so an
     /// uploader cannot mark an unlisted club's photos as public.
     required bool orgIsPublic,
+    String? tournamentId,
     String? caption,
     List<String> taggedUids = const [],
     int? width,
@@ -162,6 +189,7 @@ class MemoryRepository {
         url: url,
         kind: kind,
         audience: Memory.audienceFor(orgId: orgId, orgIsPublic: orgIsPublic),
+        tournamentId: tournamentId,
         caption: caption,
         taggedUids: taggedUids,
         width: width,

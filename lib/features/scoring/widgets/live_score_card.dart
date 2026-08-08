@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../../core/models/enums.dart';
 import '../../../core/models/fixture.dart';
+import '../../../core/router/app_router.dart';
 import '../../../domain/scoring/scoring_registry.dart';
 
 /// Compact live scoreboard.
@@ -32,6 +34,15 @@ class LiveScoreCard extends StatelessWidget {
     final status = plugin.statusLine(fixture.scoreState, ctx);
     final winnerId = fixture.winnerEntrantId;
 
+    // Not `fixture.isLive`. A fixture stays in the `live` status from its
+    // first ball until the plugin declares a result, so every match a scorer
+    // abandoned still claims to be live — days later, in one reported case.
+    // The badge only means something if it tracks the scoreboard, not the
+    // status field.
+    final now = DateTime.now();
+    final isLive = fixture.isLiveAt(now);
+    final isStale = fixture.isStaleLiveAt(now);
+
     return Card(
       clipBehavior: Clip.antiAlias,
       child: InkWell(
@@ -43,7 +54,7 @@ class LiveScoreCard extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  if (fixture.isLive) ...[
+                  if (isLive) ...[
                     Container(
                       padding: const EdgeInsets.symmetric(
                         horizontal: 7,
@@ -57,6 +68,30 @@ class LiveScoreCard extends StatelessWidget {
                         'LIVE',
                         style: TextStyle(
                           color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.6,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                  ] else if (isStale) ...[
+                    // Deliberately grey and deliberately not "LIVE". The
+                    // scoreboard is real and worth showing; the claim that it
+                    // is happening right now is not.
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 7,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        'PAUSED',
+                        style: TextStyle(
+                          color: theme.hintColor,
                           fontSize: 10,
                           fontWeight: FontWeight.w800,
                           letterSpacing: 0.6,
@@ -93,6 +128,20 @@ class LiveScoreCard extends StatelessWidget {
                       name: fixture.displayNameA(),
                       isWinner: winnerId == fixture.entrantAId,
                       align: TextAlign.start,
+                      // Every id here already lives on the fixture, so this
+                      // needs nothing from whoever built this card — every
+                      // list that already shows a `LiveScoreCard` gets a
+                      // tappable name for free. A quick-match/challenge side
+                      // has no real `Entrant` behind it; `EntrantDetailScreen`
+                      // shows a plain "no profile" state for those rather
+                      // than this card needing to know the difference.
+                      onTap: () => context.push(
+                        Routes.entrant(
+                          fixture.orgId,
+                          fixture.compId,
+                          fixture.entrantAId,
+                        ),
+                      ),
                     ),
                   ),
                   Padding(
@@ -110,6 +159,13 @@ class LiveScoreCard extends StatelessWidget {
                       name: fixture.displayNameB(),
                       isWinner: winnerId == fixture.entrantBId,
                       align: TextAlign.end,
+                      onTap: () => context.push(
+                        Routes.entrant(
+                          fixture.orgId,
+                          fixture.compId,
+                          fixture.entrantBId,
+                        ),
+                      ),
                     ),
                   ),
                 ],
@@ -120,11 +176,11 @@ class LiveScoreCard extends StatelessWidget {
                   child: Text(
                     status,
                     style: theme.textTheme.bodySmall?.copyWith(
-                      color: fixture.isLive
+                      color: isLive
                           ? theme.colorScheme.primary
                           : theme.hintColor,
                       fontWeight:
-                          fixture.isLive ? FontWeight.w600 : FontWeight.normal,
+                          isLive ? FontWeight.w600 : FontWeight.normal,
                     ),
                   ),
                 ),
@@ -192,15 +248,17 @@ class _Side extends StatelessWidget {
     required this.name,
     required this.isWinner,
     required this.align,
+    this.onTap,
   });
 
   final String name;
   final bool isWinner;
   final TextAlign align;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Text(
+    final text = Text(
       name,
       textAlign: align,
       maxLines: 2,
@@ -208,6 +266,18 @@ class _Side extends StatelessWidget {
       style: Theme.of(context).textTheme.titleSmall?.copyWith(
             fontWeight: isWinner ? FontWeight.w800 : FontWeight.w500,
           ),
+    );
+    if (onTap == null) return text;
+    // A small InkWell nested inside the card's own — the whole card still
+    // opens the match everywhere except the two words naming who is
+    // playing, which is a more specific, more useful thing to tap.
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(4),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: text,
+      ),
     );
   }
 }
