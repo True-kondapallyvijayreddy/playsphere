@@ -19,6 +19,7 @@ import '../data/shop_repository.dart';
 import '../data/scout_repository.dart';
 import '../data/sponsor_repository.dart';
 import '../data/club_commerce_repository.dart';
+import '../data/ad_repository.dart';
 import '../data/scoring_service.dart';
 import '../data/umpire_repository.dart';
 import '../domain/career/head_to_head.dart';
@@ -55,6 +56,7 @@ import 'models/give_impact_stats.dart';
 import 'models/give_need.dart';
 import 'models/sponsorship.dart';
 import 'models/club_product.dart';
+import 'models/ad_campaign.dart';
 import '../domain/scout/talent_profile.dart';
 import 'models/club_file.dart';
 import 'models/squad_entry.dart';
@@ -319,6 +321,36 @@ final myClubOrdersProvider = StreamProvider<List<ClubOrder>>((ref) {
 final clubOrdersProvider =
     StreamProvider.family<List<ClubOrder>, String>((ref, orgId) {
   return ref.watch(clubCommerceRepositoryProvider).watchOrgOrders(orgId);
+});
+
+final adRepositoryProvider = Provider((ref) => const AdRepository());
+
+/// This advertiser's own submissions, any status.
+final myAdCampaignsProvider = StreamProvider<List<AdCampaign>>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(const []);
+  return ref.watch(adRepositoryProvider).watchMyCampaigns(uid);
+});
+
+/// Approved campaigns eligible for one slot — the raw feed
+/// `promoForSlotProvider` picks from.
+final approvedCampaignsForSlotProvider =
+    StreamProvider.family<List<AdCampaign>, PromoSlot>((ref, slot) {
+  return ref.watch(adRepositoryProvider).watchApprovedForSlot(slot);
+});
+
+/// The one promo `PromoBanner` actually renders for [slot]: a live,
+/// approved advertiser campaign when one is targeting this slot, otherwise
+/// `PromoCatalog`'s house catalog — see `PromoCatalog.forSlotWithCampaigns`.
+final promoForSlotProvider = Provider.family<Promo?, PromoSlot>((ref, slot) {
+  final campaigns =
+      ref.watch(approvedCampaignsForSlotProvider(slot)).valueOrNull ?? const [];
+  return PromoCatalog.forSlotWithCampaigns(
+    slot,
+    liveCampaigns: [for (final c in campaigns) c.toPromo()],
+    playerSportIds: ref.watch(myPromoSportIdsProvider),
+    seed: PromoCatalog.dailySeed(DateTime.now()),
+  );
 });
 
 final scoutRepositoryProvider = Provider((ref) => const ScoutRepository());

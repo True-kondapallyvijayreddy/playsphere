@@ -737,3 +737,27 @@ enum ClubOrderStatus {
   static ClubOrderStatus fromWire(String? w) => ClubOrderStatus.values
       .firstWhere((e) => e.wire == w, orElse: () => ClubOrderStatus.placed);
 }
+
+// -----------------------------------------------------------------------------
+// Advertising — the self-serve console `lib/core/ads/promo.dart`'s own file
+// doc says fills the same `Promo` shape once it exists. See
+// `lib/core/models/ad_campaign.dart`.
+// -----------------------------------------------------------------------------
+
+/// Where one campaign stands. Deliberately mirrors `GiveNeed.verified`'s
+/// posture rather than reusing any status enum above: a client may create a
+/// campaign, but only staff (the same `admin` claim `isGiveStaff()` checks)
+/// may move it out of [pending] — see `firestore.rules` on `adCampaigns`.
+enum AdCampaignStatus {
+  pending('pending', 'Awaiting review'),
+  approved('approved', 'Live'),
+  rejected('rejected', 'Not approved'),
+  paused('paused', 'Paused');
+
+  const AdCampaignStatus(this.wire, this.label);
+  final String wire;
+  final String label;
+
+  static AdCampaignStatus fromWire(String? w) => AdCampaignStatus.values
+      .firstWhere((e) => e.wire == w, orElse: () => AdCampaignStatus.pending);
+}

@@ -78,10 +78,20 @@ class Promo {
 /// sense above a list of upcoming events ("book a ground") is noise on the
 /// shop screen, and vice versa.
 enum PromoSlot {
-  home,
-  events,
-  shop,
-  grounds,
+  home('home'),
+  events('events'),
+  shop('shop'),
+  grounds('grounds');
+
+  const PromoSlot(this.wire);
+
+  /// Persisted on an advertiser's `AdCampaign` (`lib/core/models/ad_campaign.dart`)
+  /// — never `Enum.name`, for the usual reason: a renamed Dart constant must
+  /// not silently orphan a campaign a real advertiser paid to target.
+  final String wire;
+
+  static PromoSlot fromWire(String? w) =>
+      PromoSlot.values.firstWhere((e) => e.wire == w, orElse: () => PromoSlot.home);
 }
 
 /// The catalog, and the rule for choosing from it.
@@ -202,6 +212,39 @@ class PromoCatalog {
   /// session and different between days.
   static int dailySeed(DateTime now) =>
       now.year * 1000 + now.difference(DateTime(now.year)).inDays;
+
+  /// [forSlot], but tried against [liveCampaigns] first — real, approved
+  /// advertiser campaigns for this exact slot (see
+  /// `lib/core/models/ad_campaign.dart` and `AdRepository.watchApprovedForSlot`)
+  /// — before ever falling back to the house catalog.
+  ///
+  /// [liveCampaigns] is assumed pre-filtered to campaigns that are already
+  /// approved, currently in flight and targeting this slot — this method does
+  /// not re-check any of that, the same division of labour `ShopRepository`
+  /// draws between "the bundled catalog is the floor" and whatever the
+  /// server actually holds. When [liveCampaigns] is empty (overwhelmingly the
+  /// common case until this product has real advertisers), behaviour is
+  /// pixel-for-pixel identical to plain [forSlot] — no existing test of that
+  /// method needed to change for this to exist.
+  ///
+  /// A live campaign always wins over a house ad when both are available: a
+  /// house promotion is filler for an empty slot, not a competitor to
+  /// somebody who paid for the space.
+  static Promo? forSlotWithCampaigns(
+    PromoSlot slot, {
+    required List<Promo> liveCampaigns,
+    List<String> playerSportIds = const [],
+    int seed = 0,
+  }) {
+    if (liveCampaigns.isEmpty) {
+      return forSlot(slot, playerSportIds: playerSportIds, seed: seed);
+    }
+    final matching = liveCampaigns
+        .where((p) => p.sportIds.isNotEmpty && p.sportIds.any(playerSportIds.contains))
+        .toList(growable: false);
+    final chosen = matching.isNotEmpty ? matching : liveCampaigns;
+    return chosen[seed.abs() % chosen.length];
+  }
 }
 
 /// Sports this player has actually played, for targeting.

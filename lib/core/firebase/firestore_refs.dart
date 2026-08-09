@@ -602,4 +602,16 @@ class Refs {
 
   static DocumentReference<Map<String, dynamic>> clubOrder(String orderId) =>
       clubOrders.doc(orderId);
+
+  // --- Advertising -----------------------------------------------------
+
+  /// Every advertiser's campaign, at `adCampaigns/{campaignId}`. See
+  /// `AdCampaign` and `lib/core/ads/promo.dart`.
+  static CollectionReference<Map<String, dynamic>> get adCampaigns =>
+      db.collection('adCampaigns');
+
+  static DocumentReference<Map<String, dynamic>> adCampaign(
+    String campaignId,
+  ) =>
+      adCampaigns.doc(campaignId);
 }

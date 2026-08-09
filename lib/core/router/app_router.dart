@@ -45,6 +45,7 @@ import '../../features/sponsor/sponsor_my_pledges_screen.dart';
 import '../../features/sponsor/sponsor_listing_detail_screen.dart';
 import '../../features/sponsor/sponsor_incoming_offers_screen.dart';
 import '../../features/scout/scout_search_screen.dart';
+import '../../features/ads/ad_console_screen.dart';
 import '../../features/shop/club_store_screen.dart';
 import '../../features/shop/club_store_manage_screen.dart';
 import '../../features/shop/club_store_orders_screen.dart';
@@ -184,6 +185,10 @@ class Routes {
   /// who may open a search, because the real gate (a minor's consent) is
   /// enforced per-profile by `firestore.rules`, not by who is allowed to ask.
   static const scoutSearch = '/scout/search';
+
+  /// The advertiser self-serve console. Org-free — an advertiser is a
+  /// business acting for itself, not a club.
+  static const adConsole = '/ads';
 
   /// Grounds available to hire, searchable by city, sport and time.
   ///
@@ -526,6 +531,10 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.scoutSearch,
         builder: (_, __) => const ScoutSearchScreen(),
+      ),
+      GoRoute(
+        path: Routes.adConsole,
+        builder: (_, __) => const AdConsoleScreen(),
       ),
       // "Matches" and "Sports" are destinations in their own right, not
       // anchors on the profile. Both home-screen tiles used to push `/me`,

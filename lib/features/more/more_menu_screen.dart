@@ -123,6 +123,12 @@ class MoreMenuScreen extends ConsumerWidget {
             onTap: () => context.push(Routes.myClubOrders),
           ),
           _MenuItemTile(
+            icon: Icons.campaign_outlined,
+            title: 'Advertise on PlaySphere',
+            subtitle: 'Reach players by sport, club and ground',
+            onTap: () => context.push(Routes.adConsole),
+          ),
+          _MenuItemTile(
             icon: Icons.person_search_outlined,
             title: 'Looking For Board',
             subtitle: 'Find players, teams, or match partners',

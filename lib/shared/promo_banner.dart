@@ -50,6 +50,11 @@ class _PromoBannerState extends ConsumerState<PromoBanner> {
   Timer? _timer;
   int _secondsLeft = _countdownSeconds;
 
+  /// The id `PromoBanner` has already logged an impression for, this
+  /// widget's lifetime — a rebuild (e.g. the countdown ticking) must not
+  /// count the same viewing twice.
+  String? _impressionLoggedFor;
+
   @override
   void initState() {
     super.initState();
@@ -62,6 +67,12 @@ class _PromoBannerState extends ConsumerState<PromoBanner> {
     });
   }
 
+  /// `Promo.id` for a live advertiser campaign is always `campaign-$id` —
+  /// see `AdCampaign.toPromo`. A house ad has no campaign to bill an
+  /// impression against.
+  String? _campaignIdOf(Promo promo) =>
+      promo.id.startsWith('campaign-') ? promo.id.substring('campaign-'.length) : null;
+
   @override
   void dispose() {
     // A periodic timer outlives the widget unless it is cancelled, and this
@@ -73,6 +84,10 @@ class _PromoBannerState extends ConsumerState<PromoBanner> {
   bool get _closable => _secondsLeft <= 0;
 
   void _open(Promo promo) {
+    final campaignId = _campaignIdOf(promo);
+    if (campaignId != null) {
+      unawaited(ref.read(adRepositoryProvider).recordClick(campaignId));
+    }
     final target = promo.destination;
     if (target == null) return;
     // Only in-app routes are navigated. An external URL in a promo is opened
@@ -93,11 +108,7 @@ class _PromoBannerState extends ConsumerState<PromoBanner> {
     // timer, no layout shift where a banner used to be.
     if (isPremium) return const SizedBox.shrink();
 
-    final promo = PromoCatalog.forSlot(
-      widget.slot,
-      playerSportIds: ref.watch(myPromoSportIdsProvider),
-      seed: PromoCatalog.dailySeed(DateTime.now()),
-    );
+    final promo = ref.watch(promoForSlotProvider(widget.slot));
     if (promo == null) return const SizedBox.shrink();
     if (dismissed.contains(promo.id)) return const SizedBox.shrink();
     if (!mayShowPromo(
@@ -106,6 +117,19 @@ class _PromoBannerState extends ConsumerState<PromoBanner> {
       isMinor: me?.isMinor ?? false,
     )) {
       return const SizedBox.shrink();
+    }
+
+    final campaignId = _campaignIdOf(promo);
+    if (campaignId != null && _impressionLoggedFor != promo.id) {
+      _impressionLoggedFor = promo.id;
+      // Deferred past this frame: a provider ping belongs after the banner
+      // has actually been laid out and shown, not as a side effect of
+      // computing what to show.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          unawaited(ref.read(adRepositoryProvider).recordImpression(campaignId));
+        }
+      });
     }
 
     return Padding(

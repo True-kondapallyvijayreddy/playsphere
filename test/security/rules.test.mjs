@@ -5904,3 +5904,118 @@ describe('club commerce: products are owner-only to price, orders are launch-off
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Advertising — the self-serve console.
+// ---------------------------------------------------------------------------
+describe('ad campaigns: self-serve submission, staff-only review', () => {
+  const ADVERTISER = 'uid_advertiser';
+  const STAFF = 'uid_ad_staff';
+
+  const campaign = (overrides = {}) => ({
+    advertiserUid: ADVERTISER,
+    advertiserName: 'Local Sports Store',
+    headline: 'New season, new boots',
+    body: 'Boots and balls for every side.',
+    emoji: '⚽',
+    ctaLabel: 'Shop now',
+    sportIds: ['football'],
+    destination: '/shop?sport=football',
+    slots: ['home'],
+    status: 'pending',
+    budgetPaise: 500000,
+    impressions: 0,
+    clicks: 0,
+    createdAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  it('lets a signed-in advertiser submit a pending campaign', async () => {
+    const db = testEnv.authenticatedContext(ADVERTISER).firestore();
+    await assertSucceeds(setDoc(doc(db, 'adCampaigns', 'camp_1'), campaign()));
+  });
+
+  it('refuses a campaign submitted in somebody else\'s name', async () => {
+    const db = testEnv.authenticatedContext(ADVERTISER).firestore();
+    await assertFails(
+      setDoc(doc(db, 'adCampaigns', 'camp_1'), campaign({ advertiserUid: OUTSIDER })),
+    );
+  });
+
+  it('refuses a campaign pre-approving itself, or pre-setting counters', async () => {
+    const db = testEnv.authenticatedContext(ADVERTISER).firestore();
+    await assertFails(
+      setDoc(doc(db, 'adCampaigns', 'camp_1'), campaign({ status: 'approved' })),
+    );
+    await assertFails(
+      setDoc(doc(db, 'adCampaigns', 'camp_2'), campaign({ impressions: 1 })),
+    );
+  });
+
+  it('refuses an external destination', async () => {
+    const db = testEnv.authenticatedContext(ADVERTISER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'adCampaigns', 'camp_1'),
+        campaign({ destination: 'https://example.com' }),
+      ),
+    );
+  });
+
+  it('is readable by its own advertiser and by staff while pending, but not by a stranger', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'adCampaigns', 'camp_1'), campaign());
+    });
+    const asAdvertiser = testEnv.authenticatedContext(ADVERTISER).firestore();
+    await assertSucceeds(getDoc(doc(asAdvertiser, 'adCampaigns', 'camp_1')));
+
+    const asStaff = testEnv.authenticatedContext(STAFF, { admin: true }).firestore();
+    await assertSucceeds(getDoc(doc(asStaff, 'adCampaigns', 'camp_1')));
+
+    const asStranger = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(getDoc(doc(asStranger, 'adCampaigns', 'camp_1')));
+  });
+
+  it('becomes world-readable once approved', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'adCampaigns', 'camp_1'), campaign({ status: 'approved' }));
+    });
+    const anon = testEnv.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(anon, 'adCampaigns', 'camp_1')));
+  });
+
+  it('refuses the advertiser approving their own campaign, lets staff do it', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'adCampaigns', 'camp_1'), campaign());
+    });
+    const asAdvertiser = testEnv.authenticatedContext(ADVERTISER).firestore();
+    await assertFails(
+      updateDoc(doc(asAdvertiser, 'adCampaigns', 'camp_1'), { status: 'approved' }),
+    );
+
+    const asStaff = testEnv.authenticatedContext(STAFF, { admin: true }).firestore();
+    await assertSucceeds(
+      updateDoc(doc(asStaff, 'adCampaigns', 'camp_1'), { status: 'approved' }),
+    );
+  });
+
+  it('lets any signed-in viewer bump impressions or clicks by exactly one, nothing else', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'adCampaigns', 'camp_1'), campaign({ status: 'approved' }));
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertSucceeds(
+      updateDoc(doc(db, 'adCampaigns', 'camp_1'), { impressions: 1 }),
+    );
+    await assertSucceeds(
+      updateDoc(doc(db, 'adCampaigns', 'camp_1'), { clicks: 1 }),
+    );
+    // Not by two at once, and not alongside another field.
+    await assertFails(
+      updateDoc(doc(db, 'adCampaigns', 'camp_1'), { impressions: 3 }),
+    );
+    await assertFails(
+      updateDoc(doc(db, 'adCampaigns', 'camp_1'), { impressions: 2, headline: 'Hijacked' }),
+    );
+  });
+});

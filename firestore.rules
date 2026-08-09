@@ -2954,6 +2954,74 @@ service cloud.firestore {
     }
 
     // -------------------------------------------------------------------
+    // Advertising — the self-serve console `lib/core/ads/promo.dart`'s file
+    // doc anticipates: "When there is a real advertiser console, it fills
+    // the same Promo shape". Same trust shape as `giveNeeds`: an advertiser's
+    // own device may only ever assert the campaign itself, never its own
+    // review outcome — `status` moves only under `isGiveStaff()`, the same
+    // `admin` claim Give's verification already uses, and reused here rather
+    // than a second claim invented for the same "PlaySphere staff reviewed
+    // this" fact.
+    //
+    // Read access is narrower than a Give need's, though: an unapproved
+    // campaign's copy and quoted budget are the advertiser's own business
+    // until PlaySphere has actually put it in front of anyone, so only a
+    // live (`approved`) campaign is world-readable; a pending/rejected one is
+    // visible only to the advertiser who submitted it (or staff). Both
+    // branches are independently provable from the query that would use them
+    // — `watchApprovedForSlot` constrains `status`, `watchMyCampaigns`
+    // constrains `advertiserUid` — so this needs no `/{path=**}` wildcard;
+    // `adCampaigns` is already a top-level collection.
+    // -------------------------------------------------------------------
+    match /adCampaigns/{campaignId} {
+      allow get: if resource.data.status == 'approved'
+        || (isSignedIn() && resource.data.advertiserUid == uid())
+        || isGiveStaff();
+      allow list: if resource.data.status == 'approved'
+        || (isSignedIn() && resource.data.advertiserUid == uid())
+        || isGiveStaff();
+
+      allow create: if isSignedIn()
+        && request.resource.data.advertiserUid == uid()
+        && request.resource.data.status == 'pending'
+        && request.resource.data.impressions == 0
+        && request.resource.data.clicks == 0
+        && request.resource.data.headline is string
+        && request.resource.data.headline.size() > 0
+        && request.resource.data.budgetPaise is int
+        && request.resource.data.budgetPaise >= 0
+        && request.resource.data.slots is list
+        && request.resource.data.slots.size() > 0
+        // In-app routes only — see `PromoBanner._open`'s comment on why a
+        // banner never navigates a raw external URL itself.
+        && (
+          !('destination' in request.resource.data)
+          || request.resource.data.destination == null
+          || request.resource.data.destination.matches('^/.*')
+        );
+
+      // Staff move status; anyone signed in may ping exactly one impression
+      // or click counter by exactly one, and nothing else in the same write
+      // — see `AdRepository.recordImpression`/`recordClick`.
+      allow update: if isGiveStaff()
+        || (
+          isSignedIn()
+          && (
+            (
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['impressions'])
+              && request.resource.data.impressions == resource.data.impressions + 1
+            )
+            || (
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['clicks'])
+              && request.resource.data.clicks == resource.data.clicks + 1
+            )
+          )
+        );
+
+      allow delete: if false;
+    }
+
+    // -------------------------------------------------------------------
     // Give — the equipment-donation network.
     //
     // Three collections share one principle: a donor's own device may only

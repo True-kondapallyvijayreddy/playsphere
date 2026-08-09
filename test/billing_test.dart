@@ -1,6 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:playsphere/core/ads/promo.dart';
+import 'package:playsphere/core/models/ad_campaign.dart';
 import 'package:playsphere/core/models/billing.dart';
+import 'package:playsphere/core/models/enums.dart';
 
 /// The rules that decide what somebody has paid for and what they get.
 ///
@@ -254,6 +256,128 @@ void main() {
       final c = PromoCatalog.dailySeed(DateTime(2026, 8, 9, 9));
       expect(a, b);
       expect(a, isNot(c));
+    });
+  });
+
+  group('promo slot selection with live advertiser campaigns', () {
+    const campaignPromo = Promo(
+      id: 'campaign-abc123',
+      advertiser: 'Local Sports Store',
+      headline: 'New season, new boots',
+      body: 'b',
+      emoji: '⚽',
+      ctaLabel: 'Shop now',
+    );
+
+    test('falls back to the house catalog when no campaign is live', () {
+      // Pixel-for-pixel identical to plain forSlot — the overwhelmingly
+      // common case until this product has real advertisers.
+      final withCampaigns = PromoCatalog.forSlotWithCampaigns(
+        PromoSlot.home,
+        liveCampaigns: const [],
+        seed: 3,
+      );
+      final plain = PromoCatalog.forSlot(PromoSlot.home, seed: 3);
+      expect(withCampaigns?.id, plain?.id);
+    });
+
+    test('a live campaign wins over the house catalog when both exist', () {
+      final chosen = PromoCatalog.forSlotWithCampaigns(
+        PromoSlot.home,
+        liveCampaigns: const [campaignPromo],
+        seed: 3,
+      );
+      expect(chosen?.id, 'campaign-abc123');
+    });
+
+    test("a live campaign matching the player's sport is preferred over one that doesn't", () {
+      const cricketAd = Promo(
+        id: 'campaign-cricket',
+        advertiser: 'A',
+        headline: 'h',
+        body: 'b',
+        emoji: '🏏',
+        ctaLabel: 'go',
+        sportIds: ['cricket'],
+      );
+      const genericAd = Promo(
+        id: 'campaign-generic',
+        advertiser: 'B',
+        headline: 'h',
+        body: 'b',
+        emoji: '📣',
+        ctaLabel: 'go',
+      );
+      final chosen = PromoCatalog.forSlotWithCampaigns(
+        PromoSlot.home,
+        liveCampaigns: const [genericAd, cricketAd],
+        playerSportIds: const ['cricket'],
+      );
+      expect(chosen?.id, 'campaign-cricket');
+    });
+  });
+
+  group('PromoSlot wire round-trip', () {
+    test('every slot survives fromWire(wire)', () {
+      for (final slot in PromoSlot.values) {
+        expect(PromoSlot.fromWire(slot.wire), slot);
+      }
+    });
+
+    test('an unrecognised wire value falls back to home, not a crash', () {
+      expect(PromoSlot.fromWire('nonsense'), PromoSlot.home);
+      expect(PromoSlot.fromWire(null), PromoSlot.home);
+    });
+  });
+
+  group('AdCampaign.toPromo fills the exact Promo shape', () {
+    const campaign = AdCampaign(
+      id: 'c1',
+      advertiserUid: 'uid_1',
+      advertiserName: 'Local Sports Store',
+      headline: 'New season, new boots',
+      body: 'Boots and balls for every side.',
+      emoji: '⚽',
+      ctaLabel: 'Shop now',
+      sportIds: ['football'],
+      destination: '/shop?sport=football',
+      status: AdCampaignStatus.approved,
+    );
+
+    test('id is namespaced so PromoBanner can tell a campaign from a house ad', () {
+      expect(campaign.toPromo().id, 'campaign-c1');
+    });
+
+    test('advertiser name carries through, so it is never mistaken for a house ad', () {
+      final promo = campaign.toPromo();
+      expect(promo.isHouseAd, isFalse);
+      expect(promo.disclosure, 'Ad · Local Sports Store');
+    });
+
+    test('every displayed field round-trips unchanged', () {
+      final promo = campaign.toPromo();
+      expect(promo.headline, campaign.headline);
+      expect(promo.body, campaign.body);
+      expect(promo.emoji, campaign.emoji);
+      expect(promo.ctaLabel, campaign.ctaLabel);
+      expect(promo.sportIds, campaign.sportIds);
+      expect(promo.destination, campaign.destination);
+    });
+
+    test('isLive is true only once approved', () {
+      expect(campaign.isLive, isTrue);
+      expect(
+        AdCampaign(
+          id: 'c2',
+          advertiserUid: 'uid_1',
+          advertiserName: 'A',
+          headline: 'h',
+          body: 'b',
+          emoji: '📣',
+          ctaLabel: 'go',
+        ).isLive,
+        isFalse,
+      );
     });
   });
 
