@@ -79,14 +79,13 @@ different places today — this design puts both behind one entry point.
   otherwise mirrors `users/{uid}/career_stats/{sportId}` so the UI can reuse
   the same tally-rendering code (chip list, key humanizing, formatting).
 
-- **Player career stats gain `won`/`lost`/`drawn`** — `onMatchSettled`
+- **Player `won`/`lost`/`drawn` — noted, not built here.** `onMatchSettled`
   already writes these fields today (as `wins`/`losses`/`draws`), but
-  `CareerStats.fromMap` (Dart) never decodes them, so no screen has ever
-  shown a player's record. A player's own win/loss is unambiguous (they were
-  either on the winning side or they weren't, regardless of who else was on
-  the field), unlike a club's. Decoding these is folded into Task 1 below
-  alongside the tally fix, since it's the same document and the same gap:
-  data already being written, never read.
+  `CareerStats.fromMap` (Dart) never decodes them, so no player-profile
+  screen has ever shown a win/loss record. Unlike a club's, a player's own
+  win/loss is unambiguous. It's a real, easy gap — but nothing in this
+  plan's scope (club stats, leaderboards) depends on it, so per YAGNI it
+  stays a documented follow-up rather than a task here.
 
 ### Club Won/Lost is out of scope (for now)
 
