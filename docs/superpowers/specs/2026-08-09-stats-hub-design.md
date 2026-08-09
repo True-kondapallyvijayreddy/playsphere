@@ -51,8 +51,8 @@ different places today — this design puts both behind one entry point.
      sports the player has played).
   3. Tap a sport → **Club Sport Stats screen** (new; mirrors the layout of
      `player_sport_screen.dart`):
-     - Headline: Played / Won / Lost / Drawn / Points for that club in that
-       sport.
+     - Headline: matches played for that club in that sport. **Not**
+       Won/Lost/Drawn — see "Club Won/Lost is out of scope" below.
      - Full lifetime stat tally for the club (same chip-list rendering
        pattern used for player tallies today — key humanizing, sorted by
        magnitude).
@@ -68,14 +68,38 @@ different places today — this design puts both behind one entry point.
 ## Data model
 
 - **Club career stats** — new collection
-  `orgs/{orgId}/career_stats/{sportId}`, deliberately shaped like the
-  existing `users/{uid}/career_stats/{sportId}`:
+  `orgs/{orgId}/career_stats/{sportId}`:
   ```
-  { matchesPlayed, won, lost, drawn, tally: Map<String, num>, lastUpdated }
+  { matchesPlayed, tally: Map<String, num>, lastUpdated }
   ```
-  Matching the existing shape lets the UI reuse the same tally-rendering
-  code (chip list, key humanizing, formatting) that player stats already
-  use.
+  No `won`/`lost`/`drawn` at club level — see "Club Won/Lost is out of
+  scope" below. `matchesPlayed` and `tally` (aggregated from every player
+  who represented the club in that sport) are unambiguous regardless of who
+  the opponent was, so both are safe to track from day one. The shape
+  otherwise mirrors `users/{uid}/career_stats/{sportId}` so the UI can reuse
+  the same tally-rendering code (chip list, key humanizing, formatting).
+
+- **Player career stats gain `won`/`lost`/`drawn`** — `onMatchSettled`
+  already writes these fields today (as `wins`/`losses`/`draws`), but
+  `CareerStats.fromMap` (Dart) never decodes them, so no screen has ever
+  shown a player's record. A player's own win/loss is unambiguous (they were
+  either on the winning side or they weren't, regardless of who else was on
+  the field), unlike a club's. Decoding these is folded into Task 1 below
+  alongside the tally fix, since it's the same document and the same gap:
+  data already being written, never read.
+
+### Club Won/Lost is out of scope (for now)
+
+A fixture lives under exactly one club's `orgId`, but that does not mean the
+match was that club against an outside opponent — plenty of matches are two
+of a club's own teams playing each other (school house matches are the
+common case). "The club won" is meaningless when both sides are the same
+club. A genuine club-vs-club result only exists for the separate Challenge
+feature (which stores both clubs' ids directly) and for open tournaments an
+outside club's team entered — both need real work to detect correctly, and
+are deliberately left for a later pass rather than folded into this plan and
+either done wrong or ballooning its scope. Club stats therefore report
+**Played** and the **stat tally**, not a win/loss record.
 
 - **Headline stats per sport** — each scoring plugin (cricket, kabaddi,
   badminton, etc. — these already declare `PlayerPrompt`/`ValuePrompt`/etc
@@ -104,9 +128,21 @@ different places today — this design puts both behind one entry point.
 
 - **Club stats**: extend the existing match-finalize function (the one that
   already writes `users/{uid}/ratings` and `users/{uid}/career_stats`) to
-  also resolve each side's club and increment
-  `orgs/{orgId}/career_stats/{sportId}` (tally + W/L/D). Additive to a
-  trigger that already runs on every finalize — no new trigger.
+  also increment `orgs/{orgId}/career_stats/{sportId}` — once per finished
+  fixture, `matchesPlayed` by 1 and `tally` by the sum of every player's
+  (both sides') per-match tally. `orgId` is the fixture's own field, no
+  per-side club resolution needed now that club W/L is out of scope.
+  Additive to a trigger that already runs on every finalize — no new
+  trigger.
+- **Player tally + W/L/D**: the same trigger currently writes
+  `matchesPlayed`/`wins`/`draws`/`losses` to `users/{uid}/career_stats` but
+  never the per-player `tally` map — despite a pure Dart aggregator
+  (`CareerAggregator` in `lib/domain/career/career_stats.dart`) existing
+  to compute exactly that shape, unused. This plan ports that computation
+  into the JS trigger (mirroring the existing Dart↔JS duplication pattern
+  used for `contribution.js`/`match_award.dart` and `ranking.js`), since
+  every downstream stat — player tally chips, club tally, both
+  leaderboards — depends on it.
 - **Global leaderboard refresh**: a new, separate scheduled function (e.g.
   hourly) that reads `career_stats` across users for each sport's headline
   stat(s) and rewrites the top-50 in `leaderboards/{sportId}/{statKey}`.
@@ -118,9 +154,10 @@ different places today — this design puts both behind one entry point.
 
 ## Edge cases
 
-- **Draws/ties**: sports like football or chess can end level, so both club
-  and player records need a `drawn` count alongside `won`/`lost` — not a
-  strict binary.
+- **Draws/ties**: sports like football or chess can end level, so a
+  player's record needs a `drawn` count alongside `won`/`lost` — not a
+  strict binary. (Not applicable to club stats, which carry no W/L/D — see
+  above.)
 - **Every match already has a club**: fixtures are always created under a
   club's `orgId` (even "quick match" goes through `/org/{orgId}/...`), so
   there is no finished match with no club to attribute stats to.
