@@ -44,6 +44,7 @@ import '../../features/sponsor/sponsor_my_listings_screen.dart';
 import '../../features/sponsor/sponsor_my_pledges_screen.dart';
 import '../../features/sponsor/sponsor_listing_detail_screen.dart';
 import '../../features/sponsor/sponsor_incoming_offers_screen.dart';
+import '../../features/scout/scout_search_screen.dart';
 import '../../features/orgs/club_files_screen.dart';
 import '../../features/orgs/club_gallery_screen.dart';
 import '../../features/orgs/create_org_screen.dart';
@@ -170,6 +171,11 @@ class Routes {
   static String sponsorListing(String listingId) => '/sponsor/listings/$listingId';
   static String sponsorOffers(String listingId) =>
       '/sponsor/listings/$listingId/offers';
+
+  /// Talent discovery — §6 Module C. Org-free and role-free: nothing gates
+  /// who may open a search, because the real gate (a minor's consent) is
+  /// enforced per-profile by `firestore.rules`, not by who is allowed to ask.
+  static const scoutSearch = '/scout/search';
 
   /// Grounds available to hire, searchable by city, sport and time.
   ///
@@ -504,6 +510,10 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         builder: (_, state) => SponsorListingDetailScreen(
           listingId: state.pathParameters['listingId']!,
         ),
+      ),
+      GoRoute(
+        path: Routes.scoutSearch,
+        builder: (_, __) => const ScoutSearchScreen(),
       ),
       // "Matches" and "Sports" are destinations in their own right, not
       // anchors on the profile. Both home-screen tiles used to push `/me`,

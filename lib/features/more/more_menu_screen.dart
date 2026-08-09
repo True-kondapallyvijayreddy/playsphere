@@ -105,6 +105,12 @@ class MoreMenuScreen extends ConsumerWidget {
             onTap: () => context.push(Routes.sponsor),
           ),
           _MenuItemTile(
+            icon: Icons.travel_explore_outlined,
+            title: 'Talent Discovery',
+            subtitle: 'Search players by sport, age, district and form',
+            onTap: () => context.push(Routes.scoutSearch),
+          ),
+          _MenuItemTile(
             icon: Icons.person_search_outlined,
             title: 'Looking For Board',
             subtitle: 'Find players, teams, or match partners',

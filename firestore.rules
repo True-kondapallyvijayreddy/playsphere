@@ -2623,6 +2623,27 @@ service cloud.firestore {
     }
 
     // -------------------------------------------------------------------
+    // Collection-group query over career_stats, powering
+    // `ScoutRepository.searchCandidates` — "who has played cricket
+    // recently", across every account, not just the players in one club.
+    //
+    // Same gotcha as fixtures/memories below: the nested rule under
+    // /users/{userId} does not extend to a collectionGroup('career_stats')
+    // query. Unconditional on `isSignedIn()` alone, deliberately — a
+    // career_stats document carries no more than the nested rule already
+    // exposes to any signed-in reader (matches/wins/losses/sportId, no
+    // birth date, no contact details), so there is no field this needs to
+    // constrain the QUERY against, and therefore no risk of the
+    // list-time evaluation-error trap `openToNonMembers` below exists to
+    // warn about. The actual privacy boundary for who a search result
+    // names is the read of `/users/{userId}` that follows, per-candidate,
+    // in `ScoutRepository` — see that class's doc.
+    // -------------------------------------------------------------------
+    match /{path=**}/career_stats/{sportId} {
+      allow read: if isSignedIn();
+    }
+
+    // -------------------------------------------------------------------
     // Collection-group query over fixtures, powering "what is live right
     // now in this org" and "what am I scoring today".
     //

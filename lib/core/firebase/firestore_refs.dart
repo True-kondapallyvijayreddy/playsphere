@@ -96,6 +96,25 @@ class Refs {
   ) =>
       userCareerStats(uid).doc(sportId);
 
+  /// Every player's career stats, across every account — the only way to ask
+  /// "who has played cricket recently" without reading every `users/{uid}`
+  /// document in the app. Requires the composite index on (`sportId`,
+  /// `lastPlayedAt`) — see `firestore.indexes.json`. Feeds
+  /// `ScoutRepository.searchCandidates`.
+  static Query<Map<String, dynamic>> get careerStatsGroup =>
+      db.collectionGroup('career_stats');
+
+  /// One guardian's consent grant for one scout to see one minor, at
+  /// `users/{minorUid}/guardianConsents/{granteeUid}`. See `firestore.rules`
+  /// on `/users/{userId}` for how this is what actually makes a minor's
+  /// profile readable at all — this repository never bypasses that, it only
+  /// reads the same record back for its own audit trail.
+  static DocumentReference<Map<String, dynamic>> guardianConsent(
+    String minorUid,
+    String granteeUid,
+  ) =>
+      user(minorUid).collection('guardianConsents').doc(granteeUid);
+
   static CollectionReference<Map<String, dynamic>> get orgs =>
       db.collection('orgs');
 

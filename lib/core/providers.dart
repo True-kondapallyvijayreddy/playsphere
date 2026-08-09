@@ -16,6 +16,7 @@ import '../data/ground_repository.dart';
 import '../data/org_repository.dart';
 import '../data/give_repository.dart';
 import '../data/shop_repository.dart';
+import '../data/scout_repository.dart';
 import '../data/sponsor_repository.dart';
 import '../data/scoring_service.dart';
 import '../data/umpire_repository.dart';
@@ -52,6 +53,7 @@ import 'models/give_donation.dart';
 import 'models/give_impact_stats.dart';
 import 'models/give_need.dart';
 import 'models/sponsorship.dart';
+import '../domain/scout/talent_profile.dart';
 import 'models/club_file.dart';
 import 'models/squad_entry.dart';
 import 'notifications/notification_model.dart';
@@ -287,6 +289,47 @@ final myPledgesProvider = StreamProvider<List<SponsorPledge>>((ref) {
 final pledgesForListingProvider =
     StreamProvider.family<List<SponsorPledge>, String>((ref, listingId) {
   return ref.watch(sponsorRepositoryProvider).watchPledgesForListing(listingId);
+});
+
+final scoutRepositoryProvider = Provider((ref) => const ScoutRepository());
+
+/// One search's parameters, bundled so the search screen watches a single
+/// provider rather than five independent ones. `sportId` is null before the
+/// scout has picked a sport at all — see `scoutSearchResultsProvider`.
+class ScoutSearchQuery {
+  const ScoutSearchQuery({
+    this.sportId,
+    this.filters = TalentSearchFilters.none,
+  });
+
+  final String? sportId;
+  final TalentSearchFilters filters;
+
+  ScoutSearchQuery copyWith({
+    String? Function()? sportId,
+    TalentSearchFilters? filters,
+  }) =>
+      ScoutSearchQuery(
+        sportId: sportId != null ? sportId() : this.sportId,
+        filters: filters ?? this.filters,
+      );
+}
+
+final scoutSearchQueryProvider = StateProvider((ref) => const ScoutSearchQuery());
+
+/// A one-shot fetch, not a live listener — `ScoutRepository.searchCandidates`
+/// makes a tolerant per-document read across an unbounded set of players, and
+/// nothing about that shape lends itself to a Firestore snapshot listener.
+/// The screen re-triggers this itself (pull-to-refresh / a "Search" button)
+/// rather than staying subscribed.
+final scoutSearchResultsProvider =
+    FutureProvider.autoDispose<List<ScoutSearchResult>>((ref) {
+  final query = ref.watch(scoutSearchQueryProvider);
+  if (query.sportId == null) return Future.value(const []);
+  return ref.watch(scoutRepositoryProvider).searchCandidates(
+        sportId: query.sportId!,
+        filters: query.filters,
+      );
 });
 
 final communityRepositoryProvider =

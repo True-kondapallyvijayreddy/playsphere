@@ -2087,6 +2087,53 @@ describe('career stats clubsPlayedFor', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Collection-group query over career_stats — talent discovery's entry point.
+//
+// Exactly the class of bug this file's header warns about: the nested rule
+// under /users/{userId} looked sufficient and was not. Without the
+// /{path=**}/career_stats block, ScoutRepository.searchCandidates would be
+// permission-denied for every sport, on every account, silently.
+// ---------------------------------------------------------------------------
+describe('career_stats collection-group query (talent discovery)', () => {
+  it('lets a signed-in user query across every account\'s career_stats', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', OWNER, 'career_stats', 'cricket'), {
+        uid: OWNER,
+        sportId: 'cricket',
+        matchesPlayed: 5,
+        lastPlayedAt: new Date(),
+      });
+      await setDoc(doc(db, 'users', OUTSIDER, 'career_stats', 'cricket'), {
+        uid: OUTSIDER,
+        sportId: 'cricket',
+        matchesPlayed: 3,
+        lastPlayedAt: new Date(),
+      });
+    });
+    const db = testEnv.authenticatedContext('uid_scout_reader').firestore();
+    const snap = await getDocs(
+      query(collectionGroup(db, 'career_stats'), where('sportId', '==', 'cricket')),
+    );
+    assert.equal(snap.size, 2);
+  });
+
+  it('refuses an unauthenticated reader', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', OWNER, 'career_stats', 'cricket'), {
+        uid: OWNER,
+        sportId: 'cricket',
+        matchesPlayed: 5,
+        lastPlayedAt: new Date(),
+      });
+    });
+    const db = testEnv.unauthenticatedContext().firestore();
+    await assertFails(
+      getDocs(query(collectionGroup(db, 'career_stats'), where('sportId', '==', 'cricket'))),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Collection-group query over memories — the photo grid on a career profile.
 //
 // A rule at the nested memories path does NOT apply to a
