@@ -95,6 +95,7 @@ class _PremiumScreenState extends ConsumerState<PremiumScreen> {
                   listPricePaise: Pricing.premiumYearlyPaise,
                   period: 'per year',
                   highlighted: !isPremium,
+                  globalMonthlyUsdCents: Pricing.memberMonthlyUsdCents,
                   features: const [
                     'Your full career history, every match, for life',
                     'Advanced performance analytics and form trends',

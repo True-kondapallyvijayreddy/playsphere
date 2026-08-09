@@ -147,6 +147,46 @@ class Pricing {
   static int productPricePaise(int listPricePaise) =>
       introOfferActive ? 0 : listPricePaise;
 
+  // -------------------------------------------------------------------
+  // Global pricing.
+  //
+  // India bills yearly, in rupees, through whatever gateway ends up wired
+  // into `PaymentGateway` — see `BillingRepository`. A market outside India
+  // is a different shape of purchase, not just a different number: the
+  // vision this implements prices it monthly, in US cents, which is its own
+  // billing period (`GlobalPricing.periodDays`), not a currency conversion
+  // of the Indian one.
+  //
+  // What THIS class provides is the pricing itself — real figures, real
+  // formatting, fully tested. What it deliberately does not provide is a
+  // second checkout: charging in USD needs a processor that can do that
+  // (Razorpay's core product is India-only), and picking one is a business
+  // decision, not something to bolt on silently while wiring a display
+  // figure. Until that exists, `orgMonthlyUsdCents`/`memberMonthlyUsdCents`
+  // are shown as information ("this is what it costs outside India") on the
+  // same screens that sell the Indian plan, never charged.
+  // -------------------------------------------------------------------
+
+  /// $9.00/month, in cents — see the block comment above.
+  static const orgMonthlyUsdCents = 900;
+
+  /// $0.99/month, in cents.
+  static const memberMonthlyUsdCents = 99;
+
+  /// A monthly cadence, unlike India's yearly [termDays] — see the block
+  /// comment above for why this is a deliberate product difference, not a
+  /// currency conversion of the same term.
+  static const globalTermDays = 30;
+
+  /// "$9.00", "$0.99" — cents formatted the way a US price tag reads, kept
+  /// separate from [formatPaise] because the two currencies round
+  /// differently (paise never shows a decimal for a whole-rupee price; a
+  /// dollar price always shows both cents places, `$9.00` not `$9`).
+  static String formatUsdCents(int cents) {
+    if (cents == 0) return 'Free';
+    return '\$${(cents / 100).toStringAsFixed(2)}';
+  }
+
   /// "₹999", "₹8.50", "Free" — for display only, never for arithmetic.
   ///
   /// Whole rupees lose the decimal because every price in this product is a

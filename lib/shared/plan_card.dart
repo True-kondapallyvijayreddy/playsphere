@@ -133,6 +133,7 @@ class PlanCard extends StatelessWidget {
     required this.features,
     this.footnote,
     this.highlighted = true,
+    this.globalMonthlyUsdCents,
   });
 
   final String title;
@@ -143,6 +144,12 @@ class PlanCard extends StatelessWidget {
   final List<String> features;
   final String? footnote;
   final bool highlighted;
+
+  /// This same plan's global list price — see `Pricing`'s "Global pricing"
+  /// block comment for why it is shown here as information rather than a
+  /// second checkout. Null hides the line entirely, which is what every
+  /// caller before this field existed gets automatically.
+  final int? globalMonthlyUsdCents;
 
   @override
   Widget build(BuildContext context) {
@@ -199,6 +206,19 @@ class PlanCard extends StatelessWidget {
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: theme.colorScheme.onSurfaceVariant,
                 ),
+              ),
+            ],
+            if (globalMonthlyUsdCents != null) ...[
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Icon(Icons.public, size: 14, color: theme.hintColor),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Outside India: ${Pricing.formatUsdCents(globalMonthlyUsdCents!)}/month',
+                    style: theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
+                  ),
+                ],
               ),
             ],
           ],

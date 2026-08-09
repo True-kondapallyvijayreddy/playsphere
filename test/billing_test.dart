@@ -145,6 +145,27 @@ void main() {
     });
   });
 
+  group('global pricing', () {
+    test('matches the vision\'s quoted global figures exactly', () {
+      expect(Pricing.orgMonthlyUsdCents, 900); // $9.00/month
+      expect(Pricing.memberMonthlyUsdCents, 99); // $0.99/month
+    });
+
+    test('the global term is monthly, not a conversion of the yearly one', () {
+      expect(Pricing.globalTermDays, 30);
+      expect(Pricing.globalTermDays, isNot(Pricing.termDays));
+    });
+
+    test('cents format with two decimal places, unlike whole-rupee paise', () {
+      expect(Pricing.formatUsdCents(900), r'$9.00');
+      expect(Pricing.formatUsdCents(99), r'$0.99');
+    });
+
+    test('zero cents reads as Free, same as zero paise', () {
+      expect(Pricing.formatUsdCents(0), 'Free');
+    });
+  });
+
   group('wire values', () {
     test('an unknown plan string degrades to free, never to paid', () {
       // A document written by a newer client must not accidentally grant a
@@ -367,7 +388,7 @@ void main() {
     test('isLive is true only once approved', () {
       expect(campaign.isLive, isTrue);
       expect(
-        AdCampaign(
+        const AdCampaign(
           id: 'c2',
           advertiserUid: 'uid_1',
           advertiserName: 'A',

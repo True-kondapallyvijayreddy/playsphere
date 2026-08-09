@@ -268,6 +268,7 @@ class _CreateOrgScreenState extends ConsumerState<CreateOrgScreen> {
           payablePaise: 0,
           listPricePaise: Pricing.clubYearlyPaise,
           period: 'per year',
+          globalMonthlyUsdCents: Pricing.orgMonthlyUsdCents,
           features: [
             'Unlimited members — no per-player charge, ever',
             'Unlimited events, tournaments and seasons',
