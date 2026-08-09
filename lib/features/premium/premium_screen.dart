@@ -256,6 +256,7 @@ class _Receipts extends ConsumerWidget {
                 PlanPaymentKind.orgPlan => Icons.shield_outlined,
                 PlanPaymentKind.memberPlan => Icons.workspace_premium_outlined,
                 PlanPaymentKind.groundBooking => Icons.stadium_outlined,
+                PlanPaymentKind.clubStore => Icons.storefront_outlined,
               },
               size: 20,
             ),
@@ -263,6 +264,7 @@ class _Receipts extends ConsumerWidget {
               PlanPaymentKind.orgPlan => 'Club plan',
               PlanPaymentKind.memberPlan => 'Premium membership',
               PlanPaymentKind.groundBooking => 'Ground booking',
+              PlanPaymentKind.clubStore => 'Club store order',
             }),
             subtitle: Text(
               p.createdAt == null

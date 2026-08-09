@@ -2855,7 +2855,7 @@ service cloud.firestore {
       allow create: if isSignedIn()
         && request.resource.data.payerUid == uid()
         && request.resource.data.kind in
-             ['org_plan', 'member_plan', 'ground_booking']
+             ['org_plan', 'member_plan', 'ground_booking', 'club_store']
         && request.resource.data.currency == 'INR'
         && serverTimed('createdAt')
         // The heart of it: no client may write a row claiming money changed
@@ -2880,6 +2880,77 @@ service cloud.firestore {
     match /products/{productId} {
       allow read: if true;
       allow write: if false;
+    }
+
+    // -------------------------------------------------------------------
+    // Club Commerce — every club's own store.
+    //
+    // The opposite trust shape from the vendor catalog above on purpose: a
+    // `clubProducts` document IS user content, owned by the club that lists
+    // it, exactly like `grounds` below is owned by the ground's owner. Only
+    // the club's owner may create or edit an item (a tighter gate than
+    // `canManageCompetitions` elsewhere — this one sets a price, and prices
+    // are the one thing on this document that will move real money the
+    // moment `Pricing.introOfferActive` flips off). An inactive product
+    // stays world-readable rather than owner-only, deliberately: a past
+    // order's `productName` must still resolve for whoever placed it, and a
+    // client-side visibility filter (the storefront query only asks for
+    // `isActive == true`) is what actually hides a paused item from new
+    // buyers.
+    // -------------------------------------------------------------------
+    match /clubProducts/{productId} {
+      allow read: if true;
+
+      allow create: if isSignedIn()
+        && request.resource.data.createdByUid == uid()
+        && canManageOrg(request.resource.data.orgId)
+        && request.resource.data.isActive == true
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.listPricePaise is int
+        && request.resource.data.listPricePaise >= 0;
+
+      allow update: if isSignedIn()
+        && canManageOrg(resource.data.orgId)
+        && unchanged('orgId')
+        && unchanged('orgName')
+        && unchanged('createdByUid')
+        && request.resource.data.listPricePaise is int
+        && request.resource.data.listPricePaise >= 0;
+
+      allow delete: if false;
+    }
+
+    match /clubOrders/{orderId} {
+      // A buyer reads their own order; a club's owner reads what has been
+      // ordered from it. Nobody else — an order carries a buyer's name and
+      // is nobody else's business, same posture as `giveDonations`.
+      allow read: if isSignedIn() && (
+        resource.data.buyerUid == uid() || canManageOrg(resource.data.orgId)
+      );
+
+      allow create: if isSignedIn()
+        && request.resource.data.buyerUid == uid()
+        && request.resource.data.status == 'placed'
+        && request.resource.data.quantity is int
+        && request.resource.data.quantity > 0
+        && request.resource.data.unitListPricePaise is int
+        && request.resource.data.unitListPricePaise >= 0
+        // Same launch-offer bound as `payments` above: while the gateway is
+        // `FreeCheckout`, nobody may claim a nonzero amount was collected.
+        && request.resource.data.amountPaidPaise == 0;
+
+      // Only the club may move an order along — confirm, fulfil, cancel.
+      // A buyer cannot mark their own order fulfilled any more than a
+      // Give donor can mark their own donation delivered.
+      allow update: if isSignedIn()
+        && canManageOrg(resource.data.orgId)
+        && unchanged('orgId')
+        && unchanged('buyerUid')
+        && unchanged('amountPaidPaise')
+        && request.resource.data.status in ['confirmed', 'fulfilled', 'cancelled'];
+
+      allow delete: if false;
     }
 
     // -------------------------------------------------------------------

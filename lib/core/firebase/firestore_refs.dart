@@ -577,4 +577,29 @@ class Refs {
     String pledgeId,
   ) =>
       sponsorPledges.doc(pledgeId);
+
+  // --- Club Commerce -------------------------------------------------------
+
+  /// Every club's storefront items, at `clubProducts/{productId}`. Top-level
+  /// like [grounds] and [giveNeeds] — denormalized `orgId`/`orgName` on each
+  /// document is what makes "this club's storefront" a plain equality query
+  /// rather than a nested-collection read that a future "discover club merch
+  /// near me" screen could never span.
+  static CollectionReference<Map<String, dynamic>> get clubProducts =>
+      db.collection('clubProducts');
+
+  static DocumentReference<Map<String, dynamic>> clubProduct(
+    String productId,
+  ) =>
+      clubProducts.doc(productId);
+
+  /// Every order, at `clubOrders/{orderId}`. Top-level for the same reason
+  /// `giveDonations` is: "everything I've ordered" and "everything waiting on
+  /// my club to fulfil" are both single-field queries a person can run
+  /// without reading every club's order book.
+  static CollectionReference<Map<String, dynamic>> get clubOrders =>
+      db.collection('clubOrders');
+
+  static DocumentReference<Map<String, dynamic>> clubOrder(String orderId) =>
+      clubOrders.doc(orderId);
 }

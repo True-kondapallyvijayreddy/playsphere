@@ -18,6 +18,7 @@ import '../data/give_repository.dart';
 import '../data/shop_repository.dart';
 import '../data/scout_repository.dart';
 import '../data/sponsor_repository.dart';
+import '../data/club_commerce_repository.dart';
 import '../data/scoring_service.dart';
 import '../data/umpire_repository.dart';
 import '../domain/career/head_to_head.dart';
@@ -53,6 +54,7 @@ import 'models/give_donation.dart';
 import 'models/give_impact_stats.dart';
 import 'models/give_need.dart';
 import 'models/sponsorship.dart';
+import 'models/club_product.dart';
 import '../domain/scout/talent_profile.dart';
 import 'models/club_file.dart';
 import 'models/squad_entry.dart';
@@ -289,6 +291,34 @@ final myPledgesProvider = StreamProvider<List<SponsorPledge>>((ref) {
 final pledgesForListingProvider =
     StreamProvider.family<List<SponsorPledge>, String>((ref, listingId) {
   return ref.watch(sponsorRepositoryProvider).watchPledgesForListing(listingId);
+});
+
+final clubCommerceRepositoryProvider =
+    Provider((ref) => const ClubCommerceRepository());
+
+/// One club's public storefront.
+final clubActiveProductsProvider =
+    StreamProvider.family<List<ClubProduct>, String>((ref, orgId) {
+  return ref.watch(clubCommerceRepositoryProvider).watchActiveProducts(orgId);
+});
+
+/// One club's full catalog, active or paused — its own management view.
+final clubCatalogProvider =
+    StreamProvider.family<List<ClubProduct>, String>((ref, orgId) {
+  return ref.watch(clubCommerceRepositoryProvider).watchOrgCatalog(orgId);
+});
+
+/// Every order this person has placed, across every club.
+final myClubOrdersProvider = StreamProvider<List<ClubOrder>>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(const []);
+  return ref.watch(clubCommerceRepositoryProvider).watchMyOrders(uid);
+});
+
+/// Orders waiting on one club to fulfil.
+final clubOrdersProvider =
+    StreamProvider.family<List<ClubOrder>, String>((ref, orgId) {
+  return ref.watch(clubCommerceRepositoryProvider).watchOrgOrders(orgId);
 });
 
 final scoutRepositoryProvider = Provider((ref) => const ScoutRepository());

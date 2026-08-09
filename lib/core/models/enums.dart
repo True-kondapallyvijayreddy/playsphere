@@ -683,3 +683,57 @@ enum SponsorPledgeStatus {
   static SponsorPledgeStatus fromWire(String? w) => SponsorPledgeStatus.values
       .firstWhere((e) => e.wire == w, orElse: () => SponsorPledgeStatus.pending);
 }
+
+// -----------------------------------------------------------------------------
+// Club Commerce — every club's own store, distinct from `ShopRepository`'s
+// curated Decathlon link-out catalog. See `lib/core/models/club_product.dart`
+// for why a club's own jersey needs a real cart and a curated vendor
+// affiliate catalog deliberately does not.
+// -----------------------------------------------------------------------------
+
+/// The vocabulary of what a club sells under its own name. Deliberately a
+/// small, apparel-shaped set rather than reusing `EquipmentCategory` — that
+/// enum is Give/Sponsor's donatable-item vocabulary (bats, pads, rackets);
+/// a club store sells branded merchandise, not equipment, and the two lists
+/// would drift apart the moment either one grows (a "cricket bat" is never
+/// club-branded merchandise; a "training kit" can be both, which is why it
+/// appears on both enums rather than forcing one to import the other).
+enum ClubProductCategory {
+  jersey('jersey', 'Jersey', '👕'),
+  tshirt('tshirt', 'T-shirt', '👕'),
+  cap('cap', 'Cap', '🧢'),
+  trainingKit('training_kit', 'Training kit', '🏋️'),
+  accessory('accessory', 'Accessory', '🎒'),
+  other('other', 'Other merchandise', '🛍️');
+
+  const ClubProductCategory(this.wire, this.label, this.emoji);
+  final String wire;
+  final String label;
+  final String emoji;
+
+  static ClubProductCategory fromWire(String? w) => ClubProductCategory.values
+      .firstWhere((e) => e.wire == w, orElse: () => ClubProductCategory.other);
+}
+
+/// Where one order stands. A club fulfils its own orders by hand — see
+/// `ClubOrder`'s class doc — so this pipeline is deliberately shorter than
+/// `DonationStatus`: there is no collection center or refurbishment step,
+/// just "the club knows about it", "the club is preparing it" and "the
+/// buyer has it", plus the one terminal exit.
+enum ClubOrderStatus {
+  placed('placed', 'Placed', 0),
+  confirmed('confirmed', 'Preparing', 1),
+  fulfilled('fulfilled', 'Delivered', 2),
+  cancelled('cancelled', 'Cancelled', 2);
+
+  const ClubOrderStatus(this.wire, this.label, this.step);
+  final String wire;
+  final String label;
+  final int step;
+
+  bool get isTerminal =>
+      this == ClubOrderStatus.fulfilled || this == ClubOrderStatus.cancelled;
+
+  static ClubOrderStatus fromWire(String? w) => ClubOrderStatus.values
+      .firstWhere((e) => e.wire == w, orElse: () => ClubOrderStatus.placed);
+}

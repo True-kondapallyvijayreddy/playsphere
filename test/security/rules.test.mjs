@@ -5747,3 +5747,160 @@ describe('sponsorship pledges: two parties, two moves', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Club Commerce — every club's own store.
+// ---------------------------------------------------------------------------
+describe('club commerce: products are owner-only to price, orders are launch-offer bounded', () => {
+  const product = (overrides = {}) => ({
+    orgId: PUBLIC_ORG,
+    orgName: 'Test Organization',
+    name: 'Home Jersey',
+    description: '',
+    category: 'jersey',
+    listPricePaise: 89900,
+    imageUrl: null,
+    sizes: ['S', 'M', 'L'],
+    isActive: true,
+    createdByUid: OWNER,
+    createdAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER),
+        membership(OWNER, PUBLIC_ORG, 'owner'),
+      );
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OUTSIDER),
+        membership(OUTSIDER, PUBLIC_ORG, 'event_manager'),
+      );
+    });
+  });
+
+  it('lets the club owner list a product', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(setDoc(doc(db, 'clubProducts', 'prod_1'), product()));
+  });
+
+  it('refuses an event_manager (not owner) listing a product', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'clubProducts', 'prod_1'),
+        product({ createdByUid: OUTSIDER }),
+      ),
+    );
+  });
+
+  it('is world-readable, even signed out', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'clubProducts', 'prod_1'), product());
+    });
+    const anon = testEnv.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(anon, 'clubProducts', 'prod_1')));
+  });
+
+  it('lets the owner reprice, refuses a non-owner editing at all', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'clubProducts', 'prod_1'), product());
+    });
+    const asOwner = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      updateDoc(doc(asOwner, 'clubProducts', 'prod_1'), { listPricePaise: 99900 }),
+    );
+    const asOutsider = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      updateDoc(doc(asOutsider, 'clubProducts', 'prod_1'), { isActive: false }),
+    );
+  });
+
+  const order = (overrides = {}) => ({
+    orgId: PUBLIC_ORG,
+    orgName: 'Test Organization',
+    productId: 'prod_1',
+    productName: 'Home Jersey',
+    size: 'M',
+    quantity: 1,
+    buyerUid: OUTSIDER,
+    buyerName: 'Test Buyer',
+    unitListPricePaise: 89900,
+    amountPaidPaise: 0,
+    status: 'placed',
+    createdAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  it('lets a signed-in buyer place a launch-offer (₹0) order', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertSucceeds(setDoc(doc(db, 'clubOrders', 'order_1'), order()));
+  });
+
+  it('refuses an order claiming a nonzero amount was collected', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'clubOrders', 'order_1'),
+        order({ amountPaidPaise: 89900 }),
+      ),
+    );
+  });
+
+  it('refuses an order placed in somebody else\'s name', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(doc(db, 'clubOrders', 'order_1'), order({ buyerUid: OWNER })),
+    );
+  });
+
+  it('lets the buyer and the club owner read the order, refuses a stranger', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'clubOrders', 'order_1'), order());
+    });
+    const asBuyer = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertSucceeds(getDoc(doc(asBuyer, 'clubOrders', 'order_1')));
+
+    const asOwner = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(getDoc(doc(asOwner, 'clubOrders', 'order_1')));
+
+    const asStranger = testEnv.authenticatedContext('uid_commerce_stranger').firestore();
+    await assertFails(getDoc(doc(asStranger, 'clubOrders', 'order_1')));
+  });
+
+  it('lets the club owner advance an order, refuses the buyer fulfilling their own', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'clubOrders', 'order_1'), order());
+    });
+    const asBuyer = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      updateDoc(doc(asBuyer, 'clubOrders', 'order_1'), { status: 'fulfilled' }),
+    );
+
+    const asOwner = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      updateDoc(doc(asOwner, 'clubOrders', 'order_1'), { status: 'confirmed' }),
+    );
+  });
+
+  it('lets the shared payments ledger accept a club_store row at ₹0', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertSucceeds(
+      setDoc(doc(db, 'payments', 'pay_club_1'), {
+        payerUid: OUTSIDER,
+        kind: 'club_store',
+        subjectId: 'order_1',
+        plan: 'prod_1',
+        amountPaise: 0,
+        listPricePaise: 89900,
+        validUntil: null,
+        gateway: 'none',
+        gatewayRef: null,
+        currency: 'INR',
+        createdAt: serverTimestamp(),
+      }),
+    );
+  });
+});

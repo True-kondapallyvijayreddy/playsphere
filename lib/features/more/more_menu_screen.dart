@@ -82,6 +82,12 @@ class MoreMenuScreen extends ConsumerWidget {
               subtitle: 'View roster and squad roles',
               onTap: () => context.push(Routes.members(primaryOrgId)),
             ),
+            _MenuItemTile(
+              icon: Icons.storefront_outlined,
+              title: 'Club Store',
+              subtitle: 'Official jerseys and merchandise',
+              onTap: () => context.push('/org/$primaryOrgId/store'),
+            ),
           ],
           _MenuItemTile(
             icon: Icons.groups_outlined,
@@ -109,6 +115,12 @@ class MoreMenuScreen extends ConsumerWidget {
             title: 'Talent Discovery',
             subtitle: 'Search players by sport, age, district and form',
             onTap: () => context.push(Routes.scoutSearch),
+          ),
+          _MenuItemTile(
+            icon: Icons.shopping_bag_outlined,
+            title: 'My Orders',
+            subtitle: 'Everything you\'ve bought from a club store',
+            onTap: () => context.push(Routes.myClubOrders),
           ),
           _MenuItemTile(
             icon: Icons.person_search_outlined,

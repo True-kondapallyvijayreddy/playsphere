@@ -139,6 +139,14 @@ class Pricing {
         MemberPlan.premium => premiumYearlyPaise,
       };
 
+  /// What a buyer is actually charged today for a club-store product whose
+  /// club set [listPricePaise]. Same `introOfferActive` flag as the plans
+  /// above — commerce launches free for the same reason they did: every
+  /// order, receipt and ledger row is written exactly as it will be once
+  /// money changes hands, so turning this off is the only change needed.
+  static int productPricePaise(int listPricePaise) =>
+      introOfferActive ? 0 : listPricePaise;
+
   /// "₹999", "₹8.50", "Free" — for display only, never for arithmetic.
   ///
   /// Whole rupees lose the decimal because every price in this product is a
@@ -381,7 +389,13 @@ class ClubPlanGrant {
 enum PlanPaymentKind {
   orgPlan('org_plan'),
   memberPlan('member_plan'),
-  groundBooking('ground_booking');
+  groundBooking('ground_booking'),
+
+  /// A club-store purchase — see `ClubCommerceRepository.placeOrder`.
+  /// `subjectId` is the order id and `planWire` the product id, the closest
+  /// fit `PlanPayment`'s entitlement-shaped fields have for a one-off good
+  /// rather than a renewable plan; there is no `validUntil` for a jersey.
+  clubStore('club_store');
 
   const PlanPaymentKind(this.wire);
   final String wire;

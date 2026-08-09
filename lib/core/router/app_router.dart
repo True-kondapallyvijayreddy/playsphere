@@ -45,6 +45,10 @@ import '../../features/sponsor/sponsor_my_pledges_screen.dart';
 import '../../features/sponsor/sponsor_listing_detail_screen.dart';
 import '../../features/sponsor/sponsor_incoming_offers_screen.dart';
 import '../../features/scout/scout_search_screen.dart';
+import '../../features/shop/club_store_screen.dart';
+import '../../features/shop/club_store_manage_screen.dart';
+import '../../features/shop/club_store_orders_screen.dart';
+import '../../features/shop/my_club_orders_screen.dart';
 import '../../features/orgs/club_files_screen.dart';
 import '../../features/orgs/club_gallery_screen.dart';
 import '../../features/orgs/create_org_screen.dart';
@@ -147,6 +151,10 @@ class Routes {
   /// Sports kit, from a vendor. Org-free for the same reason as [premium]:
   /// a player buying a racket is buying it as themselves.
   static const shop = '/shop';
+
+  /// A buyer's own club-store orders, across every club — org-free like
+  /// [shop], since an order belongs to the person who placed it.
+  static const myClubOrders = '/me/club-orders';
 
   /// The Give network hub — "Give a Kit. Build a Player." Org-free, same
   /// reasoning as [shop]: a donor gives as themselves, and a club's own
@@ -443,6 +451,10 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         builder: (_, state) =>
             ShopScreen(initialSportId: state.uri.queryParameters['sport']),
       ),
+      GoRoute(
+        path: Routes.myClubOrders,
+        builder: (_, __) => const MyClubOrdersScreen(),
+      ),
       // The Give network. `giveDonate` and `giveRaiseNeed` are declared
       // before `give` so their more specific paths are unaffected by
       // declaration order — go_router matches by full path, not prefix, but
@@ -577,6 +589,23 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             path: 'rankings',
             builder: (_, state) =>
                 RankingsScreen(orgId: state.pathParameters['orgId']!),
+          ),
+          // Club Commerce. `store/manage` and `store/orders` are declared
+          // before `store` for the same reason `giveDonate` precedes `give`.
+          GoRoute(
+            path: 'store/manage',
+            builder: (_, state) =>
+                ClubStoreManageScreen(orgId: state.pathParameters['orgId']!),
+          ),
+          GoRoute(
+            path: 'store/orders',
+            builder: (_, state) =>
+                ClubStoreOrdersScreen(orgId: state.pathParameters['orgId']!),
+          ),
+          GoRoute(
+            path: 'store',
+            builder: (_, state) =>
+                ClubStoreScreen(orgId: state.pathParameters['orgId']!),
           ),
           GoRoute(
             path: 'live-tournament/:tournamentId',
