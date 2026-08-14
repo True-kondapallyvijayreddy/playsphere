@@ -31,6 +31,9 @@ class CarromPlugin extends ScoringPlugin {
   @override
   String get displayName => 'Carrom';
 
+  @override
+  List<String> get headlineStats => const [_boardsWon];
+
   static const _boardsWon = 'boardsWon';
   static const _pointsScored = 'pointsScored';
   static const _coinsPocketed = 'coinsPocketed';

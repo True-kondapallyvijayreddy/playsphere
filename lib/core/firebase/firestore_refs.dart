@@ -614,6 +614,17 @@ class Refs {
   static DocumentReference<Map<String, dynamic>> sportStat(String sportId) =>
       sportStats.doc(sportId);
 
+  /// Per-sport, per-stat leaderboards written hourly by
+  /// `functions/leaderboard.js`. The document id is `{sportId}:{statKey}` —
+  /// see `LeaderboardKey.docId`. Publicly readable, same reasoning as
+  /// [sportStats]: eligibility (public visibility, not a minor) was decided
+  /// server-side before the document was ever written.
+  static CollectionReference<Map<String, dynamic>> get leaderboards =>
+      db.collection('leaderboards');
+
+  static DocumentReference<Map<String, dynamic>> leaderboard(String boardId) =>
+      leaderboards.doc(boardId);
+
   static CollectionReference<Map<String, dynamic>> get products =>
       db.collection('products');
 

@@ -37,6 +37,9 @@ class FootballPlugin extends ScoringPlugin
   @override
   String get displayName => 'Football';
 
+  @override
+  List<String> get headlineStats => const [_goals];
+
   // Stat keys, shared with the box score definition below.
   static const _goals = 'goals';
   static const _assists = 'assists';

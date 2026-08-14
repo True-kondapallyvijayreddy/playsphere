@@ -43,6 +43,9 @@ class KabaddiPlugin extends ScoringPlugin
   @override
   String get displayName => 'Kabaddi';
 
+  @override
+  List<String> get headlineStats => const [_raidPoints, _tacklePoints];
+
   static const _raidPoints = 'raidPoints';
   static const _tacklePoints = 'tacklePoints';
   static const _bonusPoints = 'bonusPoints';

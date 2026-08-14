@@ -65,6 +65,8 @@ import '../../features/orgs/club_gallery_screen.dart';
 import '../../features/orgs/create_org_screen.dart';
 import '../../features/orgs/join_org_screen.dart';
 import '../../features/orgs/club_settings_screen.dart';
+import '../../features/orgs/club_sport_stats_screen.dart';
+import '../../features/orgs/club_stats_screen.dart';
 import '../../features/orgs/members_screen.dart';
 import '../../features/orgs/org_home_screen.dart';
 import '../../features/orgs/org_picker_screen.dart';
@@ -72,8 +74,10 @@ import '../../features/orgs/umpire_registry_screen.dart';
 import '../../features/premium/premium_screen.dart';
 import '../../features/shop/shop_screen.dart';
 import '../../features/profile/career_profile_screen.dart';
+import '../../features/profile/leaderboard_screen.dart';
 import '../../features/profile/my_matches_screen.dart';
 import '../../features/profile/my_sports_screen.dart';
+import '../../features/profile/player_clubs_screen.dart';
 import '../../features/profile/player_sport_screen.dart';
 import '../../features/profile/player_stats_screen.dart';
 import '../../features/rules/sport_rules_screen.dart';
@@ -261,17 +265,53 @@ class Routes {
   static String team(String teamId) => '/teams/$teamId';
 
   /// One player's record in one sport, sliced by where the matches came from
-  /// — `docs/Heart_of_the_playsphere.md` §18.
-  static String playerStats(String uid, String sportId) =>
-      '/player/$uid/stats/${Uri.encodeComponent(sportId)}';
+  /// — `docs/Heart_of_the_playsphere.md` §18. [highlight], when given, is a
+  /// tally key (e.g. `runs`) to land on already picked out — the profile's
+  /// per-sport counter tiles link here per-stat rather than just per-sport.
+  static String playerStats(String uid, String sportId, {String? highlight}) {
+    final path = '/player/$uid/stats/${Uri.encodeComponent(sportId)}';
+    return highlight == null
+        ? path
+        : '$path?highlight=${Uri.encodeComponent(highlight)}';
+  }
 
   /// One sport within a player's career — their matches in it, the
   /// scorecards, and where they sit in the ranking.
   static String playerSport(String uid, String sportId) =>
       '/player/$uid/sport/${Uri.encodeComponent(sportId)}';
 
+  /// Every match a player (not just the signed-in one) has appeared in —
+  /// the profile's "Matches" counter needed a real destination, and
+  /// [MyMatchesScreen] already takes any uid, so this just reaches it with
+  /// one in the URL instead of always resolving to the current user.
+  static String playerMatches(String uid) => '/player/$uid/matches';
+
+  /// Every club a player has represented, resolved from
+  /// `CareerStats.clubsPlayedFor` — the profile's "Clubs" counter's
+  /// destination.
+  static String playerClubs(String uid) => '/player/$uid/clubs';
+
+  /// The app-wide "who leads in this stat" board for one sport and one of
+  /// its `ScoringPlugin.headlineStats` keys — see `LeaderboardScreen`.
+  /// [highlightUid], when given, is picked out on the board if it appears.
+  static String leaderboard(String sportId, String statKey, {String? highlightUid}) {
+    final path =
+        '/leaderboard/${Uri.encodeComponent(sportId)}/${Uri.encodeComponent(statKey)}';
+    return highlightUid == null
+        ? path
+        : '$path?highlightUid=${Uri.encodeComponent(highlightUid)}';
+  }
+
   static String org(String orgId) => '/org/$orgId';
   static String members(String orgId) => '/org/$orgId/members';
+
+  /// A club's record, one row per sport it has played — see
+  /// `ClubStatsScreen`.
+  static String clubStats(String orgId) => '/org/$orgId/stats';
+
+  /// One sport within a club's record — see `ClubSportStatsScreen`.
+  static String clubSportStats(String orgId, String sportId) =>
+      '/org/$orgId/stats/${Uri.encodeComponent(sportId)}';
   static String createTeam(String orgId) => '/org/$orgId/teams/new';
   static String clubSettings(String orgId) => '/org/$orgId/settings';
   static String analytics(String orgId) => '/org/$orgId/analytics';
@@ -656,6 +696,14 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         builder: (_, __) => const SportsDirectoryScreen(),
       ),
       GoRoute(
+        path: '/leaderboard/:sportId/:statKey',
+        builder: (_, state) => LeaderboardScreen(
+          sportId: Uri.decodeComponent(state.pathParameters['sportId']!),
+          statKey: Uri.decodeComponent(state.pathParameters['statKey']!),
+          highlightUid: state.uri.queryParameters['highlightUid'],
+        ),
+      ),
+      GoRoute(
         path: Routes.adConsole,
         builder: (_, __) => const AdConsoleScreen(),
       ),
@@ -706,7 +754,20 @@ final appRouterProvider = Provider<GoRouter>((ref) {
               // chess ids carry a `:` qualifier.
               sportId:
                   Uri.decodeComponent(state.pathParameters['sportId']!),
+              highlight: state.uri.queryParameters['highlight'],
             ),
+          ),
+          GoRoute(
+            path: 'matches',
+            // MyMatchesScreen already reads any uid it's given — it just
+            // never had a URL that carried one other than the current user.
+            builder: (_, state) =>
+                MyMatchesScreen(uid: state.pathParameters['uid']!),
+          ),
+          GoRoute(
+            path: 'clubs',
+            builder: (_, state) =>
+                PlayerClubsScreen(uid: state.pathParameters['uid']!),
           ),
         ],
       ),
@@ -719,6 +780,21 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             path: 'members',
             builder: (_, state) =>
                 MembersScreen(orgId: state.pathParameters['orgId']!),
+          ),
+          GoRoute(
+            path: 'stats',
+            builder: (_, state) =>
+                ClubStatsScreen(orgId: state.pathParameters['orgId']!),
+            routes: [
+              GoRoute(
+                path: ':sportId',
+                builder: (_, state) => ClubSportStatsScreen(
+                  orgId: state.pathParameters['orgId']!,
+                  sportId:
+                      Uri.decodeComponent(state.pathParameters['sportId']!),
+                ),
+              ),
+            ],
           ),
           GoRoute(
             path: 'teams/new',

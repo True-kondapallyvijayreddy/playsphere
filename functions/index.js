@@ -47,6 +47,7 @@ export { computeClubStandings, rebuildClubStandings } from './clubs.js';
 export { backfillMatchSource } from './matchsource.js';
 export { backfillFixtureParticipants } from './participants.js';
 export { rebuildPlayerCareerStats } from './careerrebuild.js';
+export { computeLeaderboards, rebuildLeaderboards } from './leaderboard.js';
 
 initializeApp();
 const db = getFirestore();

@@ -408,6 +408,21 @@ abstract class ScoringPlugin {
   ) =>
       null;
 
+  /// The 1-2 tally keys, largest-first, that stand for "the" stat in this
+  /// sport for a leaderboard — cricket's `runs`, kabaddi's `raidPoints` then
+  /// `tacklePoints`. Always a plugin's own [StatColumn] key, never a
+  /// [StatColumn.derive]d one: a leaderboard is built by summing career
+  /// totals across every finished match, and a derived value (a percentage,
+  /// an average) does not sum into anything meaningful the way a raw counter
+  /// does.
+  ///
+  /// Empty by default, which quietly opts a sport out of ranking rather than
+  /// guessing. Athletics is the deliberate case: its headline number is a
+  /// personal best, not a count, and summing best marks across meets would
+  /// produce a number that means nothing — so it stays unranked rather than
+  /// leaderboarding a value that was never meant to be added up.
+  List<String> get headlineStats => const [];
+
   /// Result so far. [MatchOutcome.isComplete] flipping to true is what lets
   /// the scoring screen offer "finalize".
   MatchOutcome outcome(Map<String, dynamic> state, ScoringContext ctx);

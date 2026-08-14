@@ -27,6 +27,9 @@ class HockeyPlugin extends ScoringPlugin
   @override
   String get displayName => 'Hockey';
 
+  @override
+  List<String> get headlineStats => const [_goals];
+
   static const _goals = 'goals';
   static const _fieldGoals = 'fieldGoals';
   static const _pcGoals = 'pcGoals';

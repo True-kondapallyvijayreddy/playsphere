@@ -33,6 +33,9 @@ class BadmintonPlugin extends ScoringPlugin {
   @override
   String get displayName => 'Badminton';
 
+  @override
+  List<String> get headlineStats => const [_pointsWon];
+
   static const _pointsWon = 'pointsWon';
   static const _pointsOnServe = 'pointsOnServe';
   static const _pointsOnReceive = 'pointsOnReceive';

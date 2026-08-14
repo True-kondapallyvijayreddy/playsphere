@@ -24,6 +24,9 @@ class BasketballPlugin extends ScoringPlugin
   @override
   String get displayName => 'Basketball';
 
+  @override
+  List<String> get headlineStats => const [_points];
+
   static const _points = 'points';
   static const _fgMade = 'fgMade';
   static const _fgAttempted = 'fgAttempted';

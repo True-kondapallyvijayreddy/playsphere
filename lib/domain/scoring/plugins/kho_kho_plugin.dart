@@ -27,6 +27,9 @@ class KhoKhoPlugin extends ScoringPlugin {
   @override
   String get displayName => 'Kho Kho';
 
+  @override
+  List<String> get headlineStats => const [_touchPoints];
+
   static const _touchPoints = 'touchPoints';
   static const _poleDives = 'poleDives';
   static const _skyDives = 'skyDives';

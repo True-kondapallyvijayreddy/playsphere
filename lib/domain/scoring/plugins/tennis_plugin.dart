@@ -31,6 +31,9 @@ class TennisPlugin extends ScoringPlugin {
   @override
   String get displayName => 'Tennis';
 
+  @override
+  List<String> get headlineStats => const [_pointsWon];
+
   static const _aces = 'aces';
   static const _doubleFaults = 'doubleFaults';
   static const _winners = 'winners';

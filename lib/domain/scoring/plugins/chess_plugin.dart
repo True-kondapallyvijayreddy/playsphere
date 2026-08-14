@@ -28,6 +28,9 @@ class ChessPlugin extends ScoringPlugin {
   @override
   String get displayName => 'Chess';
 
+  @override
+  List<String> get headlineStats => const [_points];
+
   static const _wins = 'wins';
   static const _draws = 'draws';
   static const _losses = 'losses';

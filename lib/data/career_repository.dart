@@ -61,6 +61,27 @@ class CareerRepository {
         .map((snap) => snap.docs.map(Fixture.fromDoc).toList());
   }
 
+  /// Every match played under one club, across every sport and every team —
+  /// the source `ClubSportStats.forFixtures` aggregates into a club record.
+  ///
+  /// Capped the same way [watchPlayerFixtures] is, for the same reason: a
+  /// long-running club's history is unbounded and a stats screen answers
+  /// every question anybody asks of it from the most recent few hundred.
+  ///
+  /// A private club's own non-participant members will see an undercount
+  /// here: `firestore.rules` only opens a fixture to `orgIsReadable` (true
+  /// for a public club) or to someone actually named on it, so this club
+  /// stats feature is, for now, accurate for public clubs and a partial
+  /// view for private ones — a real limitation, not a bug, and one to widen
+  /// later rather than block this on.
+  Stream<List<Fixture>> watchOrgFixtures(String orgId, {int limit = 300}) {
+    return Refs.allFixturesQuery
+        .where('orgId', isEqualTo: orgId)
+        .limit(limit)
+        .snapshots()
+        .map((snap) => snap.docs.map(Fixture.fromDoc).toList());
+  }
+
   /// Every sport this player has a record in, most-played first.
   Stream<List<CareerLine>> watchCareer(String uid) {
     final stats = Refs.userCareerStats(uid).snapshots();

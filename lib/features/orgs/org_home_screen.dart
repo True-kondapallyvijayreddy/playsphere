@@ -311,7 +311,13 @@ class _ClubHeader extends ConsumerWidget {
                   label: 'Members',
                   onTap: () => context.push(Routes.members(orgId)),
                 ),
-                PsStat(value: psGrouped(sportIds.length), label: 'Sports'),
+                PsStat(
+                  value: psGrouped(sportIds.length),
+                  label: 'Sports',
+                  onTap: sportIds.isEmpty
+                      ? null
+                      : () => context.push(Routes.clubStats(orgId)),
+                ),
                 PsStat(
                   value: psGrouped(competitions.length),
                   label: 'Tournaments',
@@ -352,7 +358,7 @@ class _ClubHeader extends ConsumerWidget {
                 ),
               ),
               const SizedBox(height: 8),
-              _SportsStrip(sportIds: sportIds),
+              _SportsStrip(orgId: orgId, sportIds: sportIds),
             ],
             if (teams.isNotEmpty) ...[
               const SizedBox(height: 16),
@@ -433,8 +439,9 @@ class _InitialCrest extends StatelessWidget {
 
 /// The run of sport badges, with a "+N" once there are more than fit.
 class _SportsStrip extends StatelessWidget {
-  const _SportsStrip({required this.sportIds});
+  const _SportsStrip({required this.orgId, required this.sportIds});
 
+  final String orgId;
   final List<String> sportIds;
 
   /// Six, then overflow. Seven 32pt badges and their gaps is the point where
@@ -450,7 +457,11 @@ class _SportsStrip extends StatelessWidget {
         for (final id in shown)
           Padding(
             padding: const EdgeInsets.only(right: 8),
-            child: SportBadge(sportId: id, size: 34),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(10),
+              onTap: () => context.push(Routes.clubSportStats(orgId, id)),
+              child: SportBadge(sportId: id, size: 34),
+            ),
           ),
         if (extra > 0)
           Container(

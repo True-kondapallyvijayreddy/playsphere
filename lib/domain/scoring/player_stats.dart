@@ -166,6 +166,26 @@ class PlayerTally {
     };
   }
 
+  /// Every player's tally from this one match, summed into one counter map —
+  /// "the club's total" rather than any one person's. Used by
+  /// `ClubSportStats`, which credits a club with everything either side's
+  /// players did, not any single player's line.
+  static Map<String, num> everyone(Map<String, dynamic> state) {
+    final all = state[stateKey] as Map? ?? const {};
+    final out = <String, num>{};
+    for (final playerTally in all.values) {
+      if (playerTally is! Map) continue;
+      for (final e in playerTally.entries) {
+        final v = e.value;
+        if (v is num) {
+          final key = e.key.toString();
+          out[key] = (out[key] ?? 0) + v;
+        }
+      }
+    }
+    return out;
+  }
+
   /// Builds the box score for one side.
   static BoxScore boxScore({
     required Map<String, dynamic> state,

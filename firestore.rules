@@ -3875,6 +3875,22 @@ service cloud.firestore {
     }
 
     // -------------------------------------------------------------------
+    // Per-sport stat leaderboards — `functions/leaderboard.js`.
+    //
+    // One document per `{sportId}:{statKey}`, top 50 by that stat's career
+    // total. Public for the same reason `sportStats` is: a row is a name, a
+    // photo and a number, aggregated with the Admin SDK, which has already
+    // excluded anyone not `profileVisibility: 'public'` and every minor
+    // before this document was ever written — see the file's own doc for
+    // why a leaderboard gets no `scout` exception the way discovery boards
+    // do.
+    // -------------------------------------------------------------------
+    match /leaderboards/{boardId} {
+      allow read: if true;
+      allow write: if false; // Admin SDK only — see functions/leaderboard.js.
+    }
+
+    // -------------------------------------------------------------------
     // Talent discovery boards — `functions/talent.js`.
     //
     // Precomputed "Rising Talent" / "Rising Teams" leaderboards, one document

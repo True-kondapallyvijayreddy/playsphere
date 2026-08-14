@@ -6553,6 +6553,59 @@ describe('talent boards: public is open, scout boards need the claim', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Per-sport stat leaderboards — `functions/leaderboard.js`.
+//
+// Simpler than talent boards: there is no gated variant, because eligibility
+// (public visibility, not a minor) is decided entirely server-side before a
+// row is ever written — see the rules file's own comment. So this only has
+// to confirm the doc is public and that a client can never write one.
+// ---------------------------------------------------------------------------
+describe('leaderboards: public read, admin-sdk-only write', () => {
+  const BOARD_ID = 'cricket:runsScored';
+
+  const board = () => ({
+    sportId: 'cricket',
+    statKey: 'runsScored',
+    entries: [
+      { uid: 'uid_topscorer', displayName: 'Meera', photoUrl: null, value: 812, rank: 1 },
+    ],
+    updatedAt: serverTimestamp(),
+  });
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'leaderboards', BOARD_ID), board());
+    });
+  });
+
+  it('serves a board to anyone, signed in or not', async () => {
+    const anon = testEnv.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(anon, 'leaderboards', BOARD_ID)));
+
+    const signedIn = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertSucceeds(getDoc(doc(signedIn, 'leaderboards', BOARD_ID)));
+  });
+
+  it('allows listing the collection — a board id is not a secret the way a '
+    + 'scout board id is', async () => {
+    const db = testEnv.unauthenticatedContext().firestore();
+    await assertSucceeds(getDocs(collection(db, 'leaderboards')));
+  });
+
+  it('refuses every client write, even from an admin — boards are Admin SDK '
+    + 'only', async () => {
+    for (const claims of [{ admin: true }, {}]) {
+      const db = testEnv.authenticatedContext('uid_writer', claims).firestore();
+      await assertFails(setDoc(doc(db, 'leaderboards', BOARD_ID), board()));
+      await assertFails(
+        updateDoc(doc(db, 'leaderboards', BOARD_ID), { entries: [] }),
+      );
+      await assertFails(deleteDoc(doc(db, 'leaderboards', BOARD_ID)));
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Grounds marketplace.
 //
 // A ground is a business, not a club — see Refs.grounds' doc comment — so the

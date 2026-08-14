@@ -38,6 +38,9 @@ class CricketPlugin extends ScoringPlugin {
   @override
   String get displayName => 'Cricket (ball by ball)';
 
+  @override
+  List<String> get headlineStats => const [_runsScored, _wickets];
+
   // Per-player tally keys.
   //
   // Cricket keeps its authoritative figures inside the innings records, which

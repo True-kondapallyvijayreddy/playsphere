@@ -8,6 +8,7 @@ import '../data/gov_repository.dart';
 import '../data/razorpay_checkout.dart';
 import '../core/models/gov_aggregate_row.dart';
 import '../data/career_repository.dart';
+import '../data/leaderboard_repository.dart';
 import '../data/tournament_repository.dart';
 import '../data/community_repository.dart';
 import '../data/competition_repository.dart';
@@ -32,6 +33,7 @@ import '../data/food_repository.dart';
 import '../data/scoring_service.dart';
 import '../data/umpire_repository.dart';
 import '../domain/career/head_to_head.dart';
+import '../domain/career/leaderboard.dart';
 import '../domain/standings/standings_calculator.dart';
 import '../domain/tournament/player_boards.dart';
 import '../domain/tournament/tournament_leaderboard.dart';
@@ -533,6 +535,25 @@ final isScoutProvider = FutureProvider<bool>((ref) async {
   if (user == null) return false;
   final token = await user.getIdTokenResult();
   return token.claims?['scout'] == true || token.claims?['admin'] == true;
+});
+
+// --- Stat leaderboards --------------------------------------------------
+//
+// App-wide "who leads in this stat" rankings, precomputed the same way the
+// talent boards above are — see `functions/leaderboard.js` and
+// `lib/domain/career/leaderboard.dart`.
+
+final leaderboardRepositoryProvider =
+    Provider((ref) => const LeaderboardRepository());
+
+/// A live listener on one sport/stat board — a single document read by id,
+/// same as [talentBoardProvider].
+final leaderboardProvider =
+    StreamProvider.autoDispose.family<Leaderboard?, LeaderboardKey>((
+  ref,
+  key,
+) {
+  return ref.watch(leaderboardRepositoryProvider).watchBoard(key);
 });
 
 final communityRepositoryProvider =
@@ -1099,6 +1120,27 @@ final playerFixturesProvider =
   );
 });
 
+/// Every match played under one club — the source `ClubSportStats` builds a
+/// club's record from. See `CareerRepository.watchOrgFixtures` for what a
+/// private club's non-participant members will and will not see here.
+final orgFixturesProvider =
+    StreamProvider.family<List<Fixture>, String>((ref, orgId) {
+  return ref.watch(careerRepositoryProvider).watchOrgFixtures(orgId).map(
+    (fixtures) {
+      final sorted = [...fixtures];
+      sorted.sort((a, b) {
+        final at = a.completedAt ?? a.startedAt ?? a.scheduledAt;
+        final bt = b.completedAt ?? b.startedAt ?? b.scheduledAt;
+        if (at == null && bt == null) return 0;
+        if (at == null) return 1;
+        if (bt == null) return -1;
+        return bt.compareTo(at);
+      });
+      return sorted;
+    },
+  );
+});
+
 /// One player's matches in a single sport.
 ///
 /// Filters [playerFixturesProvider] rather than issuing its own query: a
@@ -1111,6 +1153,21 @@ final playerSportFixturesProvider = Provider.family<AsyncValue<List<Fixture>>,
   // (`chess:blitz`, see §7.11) — so compare on the base sport.
   final base = key.sportId.split(':').first;
   return ref.watch(playerFixturesProvider(key.uid)).whenData(
+        (fixtures) => [
+          for (final f in fixtures)
+            if (f.sport.split(':').first == base) f,
+        ],
+      );
+});
+
+/// One club's matches in a single sport — the [orgFixturesProvider]
+/// counterpart to [playerSportFixturesProvider], filtered the same way and
+/// for the same reason: reuse the one listener rather than open one per
+/// sport.
+final orgSportFixturesProvider = Provider.family<AsyncValue<List<Fixture>>,
+    ({String orgId, String sportId})>((ref, key) {
+  final base = key.sportId.split(':').first;
+  return ref.watch(orgFixturesProvider(key.orgId)).whenData(
         (fixtures) => [
           for (final f in fixtures)
             if (f.sport.split(':').first == base) f,

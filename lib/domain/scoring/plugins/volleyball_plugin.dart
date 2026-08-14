@@ -58,6 +58,9 @@ class VolleyballPlugin extends ScoringPlugin with SquadRotation, TeamTimeouts {
   @override
   String get displayName => 'Volleyball';
 
+  @override
+  List<String> get headlineStats => const [_kills];
+
   static const _kills = 'kills';
   static const _blocks = 'blocks';
   static const _aces = 'aces';

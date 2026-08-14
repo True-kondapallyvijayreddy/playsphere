@@ -32,13 +32,39 @@ import 'widgets/memory_grid.dart';
 /// Layout is deliberately close to a social profile: identity, then a stat
 /// strip, then sports, then a photo grid. That shape is the one every user
 /// already knows how to read, which matters more here than novelty.
-class CareerProfileScreen extends ConsumerWidget {
+class CareerProfileScreen extends ConsumerStatefulWidget {
   const CareerProfileScreen({super.key, required this.uid});
 
   final String uid;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<CareerProfileScreen> createState() =>
+      _CareerProfileScreenState();
+}
+
+class _CareerProfileScreenState extends ConsumerState<CareerProfileScreen> {
+  // Anchors for the "Sports" and "Memories" counters up top: both sections
+  // already exist in full further down this same page, so a tap jumps to
+  // them rather than opening a thinner screen that repeats what's already
+  // here. Held on the State, not rebuilt per `build`, so a key attached in
+  // one frame is still the one the next frame's tap scrolls to.
+  final _sportsKey = GlobalKey();
+  final _memoriesKey = GlobalKey();
+
+  void _scrollTo(GlobalKey key) {
+    final target = key.currentContext;
+    if (target != null) {
+      Scrollable.ensureVisible(
+        target,
+        duration: const Duration(milliseconds: 320),
+        curve: Curves.easeInOut,
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final uid = widget.uid;
     final profile = ref.watch(userProfileProvider(uid));
     final career = ref.watch(careerProvider(uid));
     final memories = ref.watch(playerMemoriesProvider(uid));
@@ -79,7 +105,13 @@ class CareerProfileScreen extends ConsumerWidget {
                     _Identity(user: user, isMe: isMe),
                     const SizedBox(height: 20),
 
-                    _CareerSummary(career: career, memories: memories),
+                    _CareerSummary(
+                      uid: uid,
+                      career: career,
+                      memories: memories,
+                      onSportsTap: () => _scrollTo(_sportsKey),
+                      onMemoriesTap: () => _scrollTo(_memoriesKey),
+                    ),
                     const SizedBox(height: 20),
 
                     // Only on your own profile: a squad you're on is not
@@ -100,7 +132,11 @@ class CareerProfileScreen extends ConsumerWidget {
                     _SportBreakdown(career: career, uid: uid),
                     const SizedBox(height: 24),
 
-                    Text('Sports', style: Theme.of(context).textTheme.titleMedium),
+                    Text(
+                      'Sports',
+                      key: _sportsKey,
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
                     const SizedBox(height: 4),
                     Text(
                       'Ratings settle after every match. A wide band means we '
@@ -122,6 +158,7 @@ class CareerProfileScreen extends ConsumerWidget {
                     const SizedBox(height: 28),
                     Text(
                       'Memories',
+                      key: _memoriesKey,
                       style: Theme.of(context).textTheme.titleMedium,
                     ),
                     const SizedBox(height: 4),
@@ -301,13 +338,25 @@ class _TeamsStrip extends ConsumerWidget {
   }
 }
 
-/// The stat strip: matches, sports, memories. The three numbers a person
-/// actually looks for when they open a profile.
+/// The stat strip: matches, sports, clubs, memories — each one now a
+/// shortcut to the list it's counting, the same "tap the number, see the
+/// list" pattern [PsStat.onTap] already uses for a club's member count.
+/// "Sports" and "Memories" jump down to the sections already on this page
+/// rather than opening a thinner screen that would just repeat them.
 class _CareerSummary extends StatelessWidget {
-  const _CareerSummary({required this.career, required this.memories});
+  const _CareerSummary({
+    required this.uid,
+    required this.career,
+    required this.memories,
+    required this.onSportsTap,
+    required this.onMemoriesTap,
+  });
 
+  final String uid;
   final AsyncValue<List<CareerLine>> career;
   final AsyncValue<List<Memory>> memories;
+  final VoidCallback onSportsTap;
+  final VoidCallback onMemoriesTap;
 
   @override
   Widget build(BuildContext context) {
@@ -325,15 +374,29 @@ class _CareerSummary extends StatelessWidget {
     return PsCard(
       child: PsStatRow(
         stats: [
-          PsStat(value: psGrouped(matches), label: 'Matches'),
+          PsStat(
+            value: psGrouped(matches),
+            label: 'Matches',
+            onTap: matches == 0
+                ? null
+                : () => context.push(Routes.playerMatches(uid)),
+          ),
           PsStat(
             value: '${lines.where((l) => l.matchesPlayed > 0).length}',
             label: 'Sports',
+            onTap: lines.isEmpty ? null : onSportsTap,
           ),
-          PsStat(value: '$clubs', label: 'Clubs'),
+          PsStat(
+            value: '$clubs',
+            label: 'Clubs',
+            onTap: clubs == 0 ? null : () => context.push(Routes.playerClubs(uid)),
+          ),
           PsStat(
             value: '${(memories.valueOrNull ?? const []).length}',
             label: 'Memories',
+            onTap: (memories.valueOrNull ?? const []).isEmpty
+                ? null
+                : onMemoriesTap,
           ),
         ],
       ),
@@ -454,7 +517,21 @@ class _SportBreakdownState extends State<_SportBreakdown> {
                 childAspectRatio: 1.75,
                 children: [
                   for (final tile in tiles)
-                    _CounterTile(label: tile.key, value: tile.value),
+                    _CounterTile(
+                      label: tile.key,
+                      value: tile.value,
+                      // Same destination as "Season, tournament and
+                      // challenge splits" below, landed on this exact
+                      // counter — CricHeroes' pattern of a stat being its
+                      // own drill-down rather than just a number on a card.
+                      onTap: () => context.push(
+                        Routes.playerStats(
+                          widget.uid,
+                          selected.sportId,
+                          highlight: tile.key,
+                        ),
+                      ),
+                    ),
                 ],
               );
             },
@@ -479,17 +556,26 @@ class _SportBreakdownState extends State<_SportBreakdown> {
   }
 }
 
-/// One counter from the tally — "Runs / 1,824".
+/// One counter from the tally — "Runs / 1,824". Tapping it opens that stat's
+/// own scoped breakdown (season/tournament/challenge splits, and — once a
+/// player has one — where it ranks), the same way a single number on
+/// CricHeroes opens into its own page rather than staying a static tile.
 class _CounterTile extends StatelessWidget {
-  const _CounterTile({required this.label, required this.value});
+  const _CounterTile({
+    required this.label,
+    required this.value,
+    required this.onTap,
+  });
 
   final String label;
   final num value;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     return PsCard(
       padding: const EdgeInsets.all(12),
+      onTap: onTap,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisAlignment: MainAxisAlignment.center,
