@@ -1,16 +1,17 @@
 import 'package:flutter/material.dart';
-import 'package:share_plus/share_plus.dart';
-import 'package:qr_flutter/qr_flutter.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../core/layout/responsive.dart';
 import '../../core/models/enums.dart';
 import '../../core/models/organization.dart';
+import '../../core/models/team.dart';
 import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
+import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/invite_card.dart';
 import 'widgets/ownership_actions.dart';
 
 /// Roster and approval queue.
@@ -27,8 +28,13 @@ class MembersScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final caps = ref.watch(myCapabilitiesProvider(orgId));
     final canManage = caps.contains(Capability.manageMembers);
+    // Raising a team reshapes the club's roster into a squad, which is why
+    // it takes the same authority as the rules give `canManageOrg` — the
+    // owner alone, not every admin. See `teamRuns()` in firestore.rules.
+    final canCreateTeam = caps.contains(Capability.manageOrganization);
     final members = ref.watch(orgMembersProvider(orgId));
     final org = ref.watch(organizationProvider(orgId)).valueOrNull;
+    final teams = ref.watch(clubTeamsProvider(orgId));
 
     return AppScaffold(
       orgId: orgId,
@@ -46,7 +52,13 @@ class MembersScreen extends ConsumerWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    if (org != null && canManage) _InviteCard(org: org),
+                    if (org != null && canManage) InviteCard(org: org),
+                    const SizedBox(height: 20),
+                    _TeamsSection(
+                      orgId: orgId,
+                      teams: teams.valueOrNull ?? const [],
+                      canCreate: canCreateTeam,
+                    ),
                     if (pending.isNotEmpty) ...[
                       const SizedBox(height: 20),
                       _SectionTitle(
@@ -78,6 +90,79 @@ class MembersScreen extends ConsumerWidget {
   }
 }
 
+/// The club's raised squads, with a way to raise another.
+///
+/// Lives right above the member list on purpose: a team is picked FROM this
+/// roster, so the person about to pick eleven names should not have to leave
+/// the page that has all of them to go find where "new team" lives.
+class _TeamsSection extends StatelessWidget {
+  const _TeamsSection({
+    required this.orgId,
+    required this.teams,
+    required this.canCreate,
+  });
+
+  final String orgId;
+  final List<Team> teams;
+  final bool canCreate;
+
+  @override
+  Widget build(BuildContext context) {
+    if (teams.isEmpty && !canCreate) return const SizedBox.shrink();
+    final theme = Theme.of(context);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text('Teams (${teams.length})',
+                  style: theme.textTheme.titleSmall),
+            ),
+            if (canCreate)
+              TextButton.icon(
+                onPressed: () => context.push(Routes.createTeam(orgId)),
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('New team'),
+              ),
+          ],
+        ),
+        for (final team in teams) _TeamChipTile(team: team),
+        if (teams.isEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Text(
+              'No teams yet. Pick players from the list below and raise one '
+              'for a tournament, a fixture, or the season.',
+              style: theme.textTheme.bodySmall,
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _TeamChipTile extends StatelessWidget {
+  const _TeamChipTile({required this.team});
+  final Team team;
+
+  @override
+  Widget build(BuildContext context) {
+    final sport = SportCatalog.byId(team.sportId);
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: ListTile(
+        leading: CircleAvatar(child: Text(sport.icon)),
+        title: Text(team.name),
+        subtitle: Text('${sport.name} · ${team.memberUids.length} players'),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: () => context.push(Routes.team(team.id)),
+      ),
+    );
+  }
+}
+
 class _SectionTitle extends StatelessWidget {
   const _SectionTitle(this.text);
   final String text;
@@ -87,113 +172,6 @@ class _SectionTitle extends StatelessWidget {
         padding: const EdgeInsets.only(bottom: 8),
         child: Text(text, style: Theme.of(context).textTheme.titleSmall),
       );
-}
-
-/// How a club actually grows.
-///
-/// A six-character code that has to be read out over a phone, retyped, and
-/// got wrong is the narrowest possible door into a club — and it was the only
-/// one. This gives the same invite three shapes: a code for someone standing
-/// next to you, a link to paste into a WhatsApp group, and a QR to hold up in
-/// front of a classroom or print on a poster at the ground.
-class _InviteCard extends StatelessWidget {
-  const _InviteCard({required this.org});
-  final Organization org;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final link = Routes.inviteUrl(org.inviteCode);
-
-    return Card(
-      color: theme.colorScheme.primaryContainer,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Invite code',
-                        style: theme.textTheme.labelMedium,
-                      ),
-                      const SizedBox(height: 4),
-                      SelectableText(
-                        org.inviteCode,
-                        style: theme.textTheme.headlineSmall?.copyWith(
-                          letterSpacing: 6,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Scan, tap the link, or type the code.',
-                        style: theme.textTheme.bodySmall,
-                      ),
-                    ],
-                  ),
-                ),
-                // White plate behind the QR regardless of theme: a scanner
-                // needs the quiet zone and the contrast, and a dark-mode QR
-                // rendered on a dark card does not scan.
-                Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: QrImageView(
-                    data: link,
-                    size: 108,
-                    padding: EdgeInsets.zero,
-                    backgroundColor: Colors.white,
-                    // A club name under the code would be nice and is
-                    // deliberately absent: embedded text costs error
-                    // correction, and this gets scanned off a phone screen in
-                    // sunlight.
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              children: [
-                FilledButton.tonalIcon(
-                  onPressed: () => SharePlus.instance.share(
-                    ShareParams(
-                      text: 'Join ${org.name} on PlaySphere: $link',
-                      subject: 'Join ${org.name}',
-                    ),
-                  ),
-                  icon: const Icon(Icons.ios_share, size: 18),
-                  label: const Text('Share invite'),
-                ),
-                TextButton.icon(
-                  onPressed: () async {
-                    await Clipboard.setData(ClipboardData(text: link));
-                    if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Invite link copied.')),
-                      );
-                    }
-                  },
-                  icon: const Icon(Icons.link, size: 18),
-                  label: const Text('Copy link'),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }
 
 class _PendingTile extends ConsumerWidget {
@@ -309,7 +287,14 @@ class _MemberTile extends ConsumerWidget {
               : null,
         ),
         title: Text(member.displayName + (isSelf ? ' (you)' : '')),
-        subtitle: Text(member.role.label),
+        subtitle: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _RoleDot(isOwner: targetIsOwner),
+            const SizedBox(width: 6),
+            Text(member.role.label),
+          ],
+        ),
         trailing: canProposeRemoval || canStepDown
             ? OwnershipActions(
                 orgId: orgId,
@@ -343,7 +328,27 @@ class _MemberTile extends ConsumerWidget {
                   }
                 },
               ),
+        onTap: () => context.push(Routes.profile(member.uid)),
       ),
     );
   }
+}
+
+/// Owner or not, at a glance. Green for the one role that can delete this
+/// club or hand it away; blue for everyone else, regardless of whether they
+/// can score matches or just showed up to play — the distinction a roster
+/// scan actually needs is "whose club is this", not the full role ladder.
+class _RoleDot extends StatelessWidget {
+  const _RoleDot({required this.isOwner});
+  final bool isOwner;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        width: 8,
+        height: 8,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: isOwner ? const Color(0xFF16A34A) : const Color(0xFF2563EB),
+        ),
+      );
 }

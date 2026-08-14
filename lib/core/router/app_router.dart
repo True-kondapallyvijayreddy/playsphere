@@ -77,6 +77,9 @@ import '../../features/profile/my_sports_screen.dart';
 import '../../features/profile/player_sport_screen.dart';
 import '../../features/profile/player_stats_screen.dart';
 import '../../features/rules/sport_rules_screen.dart';
+import '../../features/teams/create_team_screen.dart';
+import '../../features/teams/my_teams_screen.dart';
+import '../../features/teams/team_detail_screen.dart';
 import '../../features/scoring/live_matches_screen.dart';
 import '../../features/scoring/live_now_screen.dart';
 import '../../features/scoring/quick_match_screen.dart';
@@ -251,6 +254,12 @@ class Routes {
   /// The sports this player has a record in, each opening its own page.
   static const mySports = '/me/sports';
 
+  /// Every active squad the signed-in person is on — see [MyTeamsScreen].
+  static const myTeams = '/me/teams';
+
+  /// One team's roster, live — see [TeamDetailScreen].
+  static String team(String teamId) => '/teams/$teamId';
+
   /// One player's record in one sport, sliced by where the matches came from
   /// — `docs/Heart_of_the_playsphere.md` §18.
   static String playerStats(String uid, String sportId) =>
@@ -263,6 +272,7 @@ class Routes {
 
   static String org(String orgId) => '/org/$orgId';
   static String members(String orgId) => '/org/$orgId/members';
+  static String createTeam(String orgId) => '/org/$orgId/teams/new';
   static String clubSettings(String orgId) => '/org/$orgId/settings';
   static String analytics(String orgId) => '/org/$orgId/analytics';
   static String live(String orgId) => '/org/$orgId/live';
@@ -665,6 +675,15 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         builder: (_, __) => const _MyScopedScreen(_MyScope.sports),
       ),
       GoRoute(
+        path: Routes.myTeams,
+        builder: (_, __) => const _MyScopedScreen(_MyScope.teams),
+      ),
+      GoRoute(
+        path: '/teams/:teamId',
+        builder: (_, state) =>
+            TeamDetailScreen(teamId: state.pathParameters['teamId']!),
+      ),
+      GoRoute(
         path: '/player/:uid',
         builder: (_, state) =>
             CareerProfileScreen(uid: state.pathParameters['uid']!),
@@ -700,6 +719,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             path: 'members',
             builder: (_, state) =>
                 MembersScreen(orgId: state.pathParameters['orgId']!),
+          ),
+          GoRoute(
+            path: 'teams/new',
+            builder: (_, state) =>
+                CreateTeamScreen(orgId: state.pathParameters['orgId']!),
           ),
           GoRoute(
             path: 'settings',
@@ -942,7 +966,7 @@ class _MyProfileScreen extends ConsumerWidget {
 }
 
 /// Which of the signed-in player's own pages a `/me/...` route resolves to.
-enum _MyScope { matches, sports }
+enum _MyScope { matches, sports, teams }
 
 /// Resolves `/me/matches` and `/me/sports` to the signed-in player.
 ///
@@ -960,6 +984,7 @@ class _MyScopedScreen extends ConsumerWidget {
     return switch (scope) {
       _MyScope.matches => MyMatchesScreen(uid: uid),
       _MyScope.sports => MySportsScreen(uid: uid),
+      _MyScope.teams => MyTeamsScreen(uid: uid),
     };
   }
 }

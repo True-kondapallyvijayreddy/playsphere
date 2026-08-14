@@ -5,10 +5,12 @@ import 'package:go_router/go_router.dart';
 import '../core/models/app_user.dart';
 import '../core/models/enums.dart';
 import '../core/models/organization.dart';
+import '../core/permissions/capability.dart';
 import '../core/providers.dart';
 import '../core/router/app_router.dart';
 import '../features/settings/language_picker.dart';
 import 'app_scaffold.dart';
+import 'invite_card.dart';
 import 'playsphere_logo.dart';
 
 /// The avatar at the top right of every signed-in screen.
@@ -343,50 +345,72 @@ class _ClubRow extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final Organization? org = ref.watch(organizationProvider(orgId)).valueOrNull;
     final live = ref.watch(liveFixturesProvider(orgId)).valueOrNull ?? const [];
+    // Only admins/owners get a door to hand out — same rule as the Members
+    // screen's invite card, so a regular member never sees a code they
+    // couldn't already find by opening the club.
+    final canManage = !pending &&
+        ref.watch(myCapabilitiesProvider(orgId)).contains(Capability.manageMembers);
 
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: ListTile(
-        leading: CircleAvatar(
-          backgroundImage:
-              org?.logoUrl != null ? NetworkImage(org!.logoUrl!) : null,
-          child: org?.logoUrl != null
-              ? null
-              : Text((org?.name ?? '?').characters.first.toUpperCase()),
+    return Column(
+      children: [
+        Card(
+          margin: EdgeInsets.only(bottom: canManage ? 0 : 8),
+          shape: canManage
+              ? const RoundedRectangleBorder(
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
+                )
+              : null,
+          child: ListTile(
+            leading: CircleAvatar(
+              backgroundImage:
+                  org?.logoUrl != null ? NetworkImage(org!.logoUrl!) : null,
+              child: org?.logoUrl != null
+                  ? null
+                  : Text((org?.name ?? '?').characters.first.toUpperCase()),
+            ),
+            title: Text(org?.name ?? 'Loading…'),
+            subtitle: Text(
+              pending
+                  ? 'Waiting for an admin to approve you'
+                  : [
+                      org?.orgType.label,
+                      role.label,
+                      if (org != null) '${org.memberCount} members',
+                    ].whereType<String>().join(' · '),
+            ),
+            trailing: pending
+                ? const Icon(Icons.hourglass_empty, size: 20)
+                : live.isEmpty
+                    ? const Icon(Icons.chevron_right)
+                    : Chip(
+                        label: Text('${live.length} live'),
+                        visualDensity: VisualDensity.compact,
+                        side: BorderSide.none,
+                        backgroundColor: const Color(0xFFDC2626),
+                        labelStyle: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 11,
+                        ),
+                      ),
+            enabled: !pending,
+            onTap: pending
+                ? null
+                : () {
+                    Navigator.of(context).pop();
+                    context.push(Routes.org(orgId));
+                  },
+          ),
         ),
-        title: Text(org?.name ?? 'Loading…'),
-        subtitle: Text(
-          pending
-              ? 'Waiting for an admin to approve you'
-              : [
-                  org?.orgType.label,
-                  role.label,
-                  if (org != null) '${org.memberCount} members',
-                ].whereType<String>().join(' · '),
-        ),
-        trailing: pending
-            ? const Icon(Icons.hourglass_empty, size: 20)
-            : live.isEmpty
-                ? const Icon(Icons.chevron_right)
-                : Chip(
-                    label: Text('${live.length} live'),
-                    visualDensity: VisualDensity.compact,
-                    side: BorderSide.none,
-                    backgroundColor: const Color(0xFFDC2626),
-                    labelStyle: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w700,
-                      fontSize: 11,
-                    ),
-                  ),
-        enabled: !pending,
-        onTap: pending
-            ? null
-            : () {
-                Navigator.of(context).pop();
-                context.push(Routes.org(orgId));
-              },
-      ),
+        // The join key and QR live right under the club they open — an
+        // admin scrolling their own "My clubs" list shouldn't have to go
+        // find the Members screen just to hand someone the door in.
+        if (canManage && org != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: InviteCard(org: org),
+          ),
+      ],
     );
   }
 }

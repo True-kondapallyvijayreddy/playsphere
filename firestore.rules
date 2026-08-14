@@ -2985,8 +2985,40 @@ service cloud.firestore {
       allow read: if resource.data.openToNonMembers == true;
     }
 
+    // THE PLAYER BRANCH IS NOT REDUNDANT — same lesson as the memories rule
+    // below. Three different screens list this collection group with three
+    // different constraints, and a `list` is authorized against the QUERY
+    // rather than against the documents it would return: a field the query
+    // does not pin down is undefined here, and an undefined field is an
+    // evaluation error. Firestore lets the other side of an `||` rescue that
+    // error, which is what lets one rule serve all three:
+    //
+    //   live / club fixtures  → constrains (orgId, status)
+    //                           → the org branch decides it.
+    //   "what am I scoring"   → constrains (scorerUids, status)
+    //                           → the scorer branch decides it.
+    //   a career              → constrains (playerUids) and NOTHING else, by
+    //                           necessity: the whole promise of a portable
+    //                           record is that it spans clubs, so it cannot
+    //                           pin `orgId`. Both other branches error on
+    //                           undefined fields, and before this branch
+    //                           existed there was nothing left to rescue
+    //                           them — `CareerRepository.watchPlayerFixtures`
+    //                           was permission-denied with "Property orgId is
+    //                           undefined on object", so the Matches list,
+    //                           the sport page and head-to-head said "Could
+    //                           not load matches" on every profile no matter
+    //                           how many matches the player had.
+    //
+    // KNOWN LIMIT, deliberately accepted for now: this reads a player's own
+    // matches, so a VISITOR listing somebody else's career is still denied —
+    // their uid is in neither array and the org branch cannot evaluate.
+    // Closing that needs the same denormalization the memories rule uses: an
+    // `audience` field on the fixture that the query can pin. See the note on
+    // `watchPlayerFixtures`.
     match /{path=**}/fixtures/{fixtureId} {
       allow read: if (isSignedIn() && uid() in resource.data.scorerUids)
+        || (isSignedIn() && uid() in resource.data.playerUids)
         || orgIsReadable(resource.data.orgId);
     }
 

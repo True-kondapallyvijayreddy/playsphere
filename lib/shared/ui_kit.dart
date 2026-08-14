@@ -244,39 +244,58 @@ class PsSectionHeader extends StatelessWidget {
 /// One figure and its label, as used in the club header and the player
 /// profile — "28 / Matches", "1,824 / Runs".
 class PsStat extends StatelessWidget {
-  const PsStat({super.key, required this.value, required this.label});
+  const PsStat({super.key, required this.value, required this.label, this.onTap});
 
   final String value;
   final String label;
 
+  /// When set, this stat is a shortcut to the list it's counting — the
+  /// "12 Members" tile pushes the members screen — and gets a tap target and
+  /// a button role instead of just being read aloud. Null keeps a stat purely
+  /// informational, which is still most of them: nothing behind "68%" to
+  /// navigate to.
+  final VoidCallback? onTap;
+
   @override
   Widget build(BuildContext context) {
+    final column = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          value,
+          style: const TextStyle(
+            fontSize: 20,
+            fontWeight: FontWeight.w700,
+            color: Ps.ink,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          label,
+          style: const TextStyle(fontSize: 12, color: Ps.muted),
+          textAlign: TextAlign.center,
+        ),
+      ],
+    );
+
     // Announced as one phrase — "28 Matches" — rather than as two unrelated
     // labels. A screen reader walking a four-stat row otherwise reads
     // "28, 1824, 61, 68%" and then four headings, which is not recoverable
     // into which number went with which.
     return Semantics(
       label: '$value $label',
+      button: onTap != null,
       excludeSemantics: true,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            value,
-            style: const TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.w700,
-              color: Ps.ink,
+      child: onTap == null
+          ? column
+          : InkWell(
+              onTap: onTap,
+              borderRadius: BorderRadius.circular(8),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: column,
+              ),
             ),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            label,
-            style: const TextStyle(fontSize: 12, color: Ps.muted),
-            textAlign: TextAlign.center,
-          ),
-        ],
-      ),
     );
   }
 }

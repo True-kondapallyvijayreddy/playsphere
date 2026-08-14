@@ -120,7 +120,7 @@ before(async () => {
     firestore: {
       rules: readFileSync(RULES_FILE, 'utf8'),
       host: '127.0.0.1',
-      port: 8080,
+      port: Number(process.env.FIRESTORE_EMULATOR_PORT ?? 8080),
     },
     // Cloud Storage holds the actual bytes of every memory and every club
     // logo, and its rules are a completely separate ruleset with completely
@@ -129,7 +129,7 @@ before(async () => {
     storage: {
       rules: readFileSync(STORAGE_RULES_FILE, 'utf8'),
       host: '127.0.0.1',
-      port: 9199,
+      port: Number(process.env.STORAGE_EMULATOR_PORT ?? 9199),
     },
   });
 });
@@ -7362,5 +7362,76 @@ describe('teams', () => {
     await seedTeam();
     const db = testEnv.authenticatedContext(OUTSIDER).firestore();
     await assertSucceeds(getDoc(doc(db, 'teams', TEAM)));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The career query — "every match this player has appeared in, anywhere".
+//
+// `CareerRepository.watchPlayerFixtures` runs
+// `collectionGroup('fixtures').where('playerUids', arrayContains: uid)` with no
+// other constraint, and it is the only source for the Matches list on a career
+// profile, the sport page and the head-to-head table. Every fixtures test above
+// pins `orgId` or `scorerUids`, so this shape had never been exercised.
+// ---------------------------------------------------------------------------
+describe('career: a player reading their own matches across every club', () => {
+  const PLAYER = 'uid_player';
+  const OTHER_PUBLIC_ORG = 'org_public_2';
+
+  /** `count` public-org fixtures the player played in and did NOT score. */
+  async function seedCareer(count) {
+    await seed(async (db) => {
+      for (const orgId of [PUBLIC_ORG, OTHER_PUBLIC_ORG]) {
+        await setDoc(doc(db, 'orgs', orgId), organization(OWNER, 'public'));
+      }
+      for (let i = 0; i < count; i++) {
+        const orgId = i % 2 === 0 ? PUBLIC_ORG : OTHER_PUBLIC_ORG;
+        await setDoc(
+          doc(db, 'orgs', orgId, 'competitions', `comp${i}`, 'fixtures', `fx${i}`),
+          {
+            ...fixture(orgId, `comp${i}`, [SCORER], 'completed'),
+            playerUids: [PLAYER],
+          },
+        );
+      }
+    });
+  }
+
+  const careerQuery = (db) =>
+    query(
+      collectionGroup(db, 'fixtures'),
+      where('playerUids', 'array-contains', PLAYER),
+      limit(300),
+    );
+
+  it('reads a handful of matches', async () => {
+    await seedCareer(3);
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    const snap = await assertSucceeds(getDocs(careerQuery(db)));
+    assert.equal(snap.size, 3);
+  });
+
+  it('reads a real career — more matches than a rule may make lookups', async () => {
+    // The reason this is the interesting number: the rule resolved each
+    // fixture's club with a `get()`, and a query may make at most ten document
+    // lookups in total. A career of fifteen matches therefore failed outright,
+    // while the three above passed — which is why the Matches list said
+    // "Could not load matches" on an account whose statistics rendered fine.
+    await seedCareer(15);
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    const snap = await assertSucceeds(getDocs(careerQuery(db)));
+    assert.equal(snap.size, 15);
+  });
+
+  it('still refuses a VISITOR listing somebody else\'s career', async () => {
+    // The known limit recorded on the rule. A visitor is in neither array, and
+    // the org branch cannot be evaluated because a career query cannot pin
+    // `orgId` — so there is nothing left to authorize the list. Asserted
+    // rather than left untested so that closing it (an `audience` field on the
+    // fixture, as memories already carry) turns this red instead of going
+    // unnoticed.
+    await seedCareer(15);
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(getDocs(careerQuery(db)));
   });
 });

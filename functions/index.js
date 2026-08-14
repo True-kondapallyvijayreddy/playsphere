@@ -30,7 +30,7 @@ import { logger } from 'firebase-functions';
 
 import { awardsFor, ROUND_LABEL, WINDOW_DAYS } from './ranking.js';
 import { contributionWeights, ratingKeyFor } from './contribution.js';
-import { playerTally } from './career.js';
+import { RESULTED_STATUSES, careerContributions } from './career.js';
 import {
   DEFAULT_DEVIATION,
   DEFAULT_RATING,
@@ -46,6 +46,7 @@ export { computeSportStats, rebuildSportStats } from './sports.js';
 export { computeClubStandings, rebuildClubStandings } from './clubs.js';
 export { backfillMatchSource } from './matchsource.js';
 export { backfillFixtureParticipants } from './participants.js';
+export { rebuildPlayerCareerStats } from './careerrebuild.js';
 
 initializeApp();
 const db = getFirestore();
@@ -1040,6 +1041,76 @@ export const onMatchSettled = onDocumentUpdated(
     const after = event.data?.after.data();
     if (!before || !after) return;
 
+    // -----------------------------------------------------------------
+    // Career statistics, settled independently of the rating.
+    //
+    // These used to be written inside the rating loop below, which meant they
+    // inherited every one of the rating's preconditions — and a rating has
+    // preconditions a career record does not. Glicko needs a rated opponent,
+    // so a match where the other side was a guest returned before the loop and
+    // credited nobody: a player's forty-five points against a friend without
+    // an account showed on the splits screen, which reads the fixtures
+    // directly, and nowhere in their totals, which read this document. Same
+    // season, two answers.
+    //
+    // `careerContributions` applies the client's own rule — the one in
+    // `ScopedStats.forPlayer` and `Fixture.countsTowardsRecords` — so the two
+    // halves of the product now agree by construction rather than by
+    // coincidence.
+    // -----------------------------------------------------------------
+    if (!after.careerSettledAt && !RESULTED_STATUSES.has(before.status) &&
+        RESULTED_STATUSES.has(after.status)) {
+      const contributions = careerContributions(after, {
+        orgId: event.params.orgId,
+      });
+      if (contributions.length > 0) {
+        const careerBatch = db.batch();
+        for (const c of contributions) {
+          const tallyIncrement = {};
+          for (const [k, v] of Object.entries(c.tally)) {
+            if (v !== 0) tallyIncrement[k] = FieldValue.increment(v);
+          }
+          careerBatch.set(
+            db.doc(`users/${c.uid}/career_stats/${c.sportId}`),
+            {
+              uid: c.uid,
+              sportId: c.sportId,
+              matchesPlayed: FieldValue.increment(1),
+              wins: FieldValue.increment(c.outcome === 'won' ? 1 : 0),
+              draws: FieldValue.increment(c.outcome === 'drawn' ? 1 : 0),
+              losses: FieldValue.increment(c.outcome === 'lost' ? 1 : 0),
+              lastPlayedAt: c.playedAt ?? new Date(),
+              clubsPlayedFor: FieldValue.arrayUnion(event.params.orgId),
+              // The sport-specific breakdown — runs and wickets, goals and
+              // assists — which every stat screen renders and which was
+              // computed for the rating weight below and then discarded. A
+              // nested object under merge deep-merges into the existing map
+              // rather than replacing it.
+              ...(Object.keys(tallyIncrement).length > 0
+                ? { tally: tallyIncrement }
+                : {}),
+            },
+            { merge: true },
+          );
+        }
+        // The marker rides in the same batch as the increments it accounts
+        // for, for the reason `ratingSettledAt` does: an increment cannot be
+        // un-done, so a fixture re-finished after a retry must never be
+        // counted twice. Writing it leaves `status` resulted, so the next
+        // invocation of this trigger fails the transition test above.
+        careerBatch.set(
+          event.data.after.ref,
+          { careerSettledAt: new Date() },
+          { merge: true },
+        );
+        await careerBatch.commit();
+        logger.info(
+          `Fixture ${event.params.fixtureId}: ` +
+            `credited ${contributions.length} career records.`,
+        );
+      }
+    }
+
     const wasDone = before.status === 'completed';
     const isDone = after.status === 'completed';
     if (wasDone || !isDone) return;
@@ -1236,34 +1307,6 @@ export const onMatchSettled = onDocumentUpdated(
           { merge: true },
         );
 
-        const playerId = playerIdByUid.get(uid);
-        const tally = playerId ? playerTally(after.scoreState, playerId) : {};
-        const tallyIncrement = {};
-        for (const [k, v] of Object.entries(tally)) {
-          if (v !== 0) tallyIncrement[k] = FieldValue.increment(v);
-        }
-
-        batch.set(
-          db.doc(`users/${uid}/career_stats/${sportId}`),
-          {
-            uid,
-            sportId,
-            matchesPlayed: FieldValue.increment(1),
-            wins: FieldValue.increment(score === 1 ? 1 : 0),
-            draws: FieldValue.increment(score === 0.5 ? 1 : 0),
-            losses: FieldValue.increment(score === 0 ? 1 : 0),
-            lastPlayedAt: new Date(),
-            clubsPlayedFor: FieldValue.arrayUnion(orgId),
-            // Written for the first time by this trigger — the sport-specific
-            // per-player breakdown (runs/wickets, goals/assists, etc.) was
-            // always computed for the rating weight above and then discarded;
-            // it is the field every stat-breakdown screen reads and was
-            // permanently blank until now. A nested object under merge:true
-            // deep-merges into the existing tally map rather than replacing it.
-            ...(Object.keys(tallyIncrement).length > 0 ? { tally: tallyIncrement } : {}),
-          },
-          { merge: true },
-        );
         settled += 1;
       }
     }

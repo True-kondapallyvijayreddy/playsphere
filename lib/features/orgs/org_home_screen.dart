@@ -295,12 +295,27 @@ class _ClubHeader extends ConsumerWidget {
             const SizedBox(height: 16),
             PsStatRow(
               stats: [
-                PsStat(value: psGrouped(teams.length), label: 'Teams'),
-                PsStat(value: psGrouped(org.memberCount), label: 'Members'),
+                // Both open the members screen: that's where a club's real,
+                // rostered teams actually live and get raised from — see
+                // `_TeamsSection` there. This card's own "Teams" preview
+                // below is the lighter-weight sub-group list and stays as
+                // it was; the count and the tap target agree with the page
+                // they lead to rather than with each other.
+                PsStat(
+                  value: psGrouped(teams.length),
+                  label: 'Teams',
+                  onTap: () => context.push(Routes.members(orgId)),
+                ),
+                PsStat(
+                  value: psGrouped(org.memberCount),
+                  label: 'Members',
+                  onTap: () => context.push(Routes.members(orgId)),
+                ),
                 PsStat(value: psGrouped(sportIds.length), label: 'Sports'),
                 PsStat(
                   value: psGrouped(competitions.length),
                   label: 'Tournaments',
+                  onTap: () => context.push(Routes.tournaments(orgId)),
                 ),
               ],
             ),

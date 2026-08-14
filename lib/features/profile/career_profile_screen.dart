@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/layout/responsive.dart';
 import '../../core/models/app_user.dart';
 import '../../core/models/memory.dart';
+import '../../core/models/team.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../data/career_repository.dart';
@@ -80,6 +81,16 @@ class CareerProfileScreen extends ConsumerWidget {
 
                     _CareerSummary(career: career, memories: memories),
                     const SizedBox(height: 20),
+
+                    // Only on your own profile: a squad you're on is not
+                    // part of the public career record the way a match or a
+                    // rating is, and there's no reader-facing reason a
+                    // visitor to someone else's profile needs the roster
+                    // picker one tap away.
+                    if (isMe) ...[
+                      const _TeamsStrip(),
+                      const SizedBox(height: 20),
+                    ],
 
                     // The per-sport breakdown the sample design leads with:
                     // pick a sport, see that sport's own numbers. It sits
@@ -225,6 +236,67 @@ class _Identity extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// A quick look at the signed-in person's active squads, with a way to see
+/// every one of them.
+///
+/// Reads [myTeamsProvider] directly rather than taking it as a parameter —
+/// unlike career and memories, which the screen already has open for the
+/// stat strip below, nothing else on this page needs the team list, so there
+/// is nothing to share by lifting it.
+class _TeamsStrip extends ConsumerWidget {
+  const _TeamsStrip();
+
+  static const _preview = 3;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final teams = ref.watch(myTeamsProvider).valueOrNull ?? const <Team>[];
+    final theme = Theme.of(context);
+
+    return PsCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text('Teams', style: theme.textTheme.titleMedium),
+              ),
+              TextButton(
+                onPressed: () => context.push(Routes.myTeams),
+                child: Text(teams.isEmpty ? 'Browse' : 'See all'),
+              ),
+            ],
+          ),
+          if (teams.isEmpty)
+            Text(
+              'Not on a team yet. A club owner raises one from its members '
+              "list — you'll see it here the moment you're picked.",
+              style: theme.textTheme.bodySmall,
+            )
+          else
+            for (final team in teams.take(_preview))
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: CircleAvatar(
+                  backgroundImage: team.photoUrl != null
+                      ? NetworkImage(team.photoUrl!)
+                      : null,
+                  child: team.photoUrl == null
+                      ? Text(SportCatalog.byId(team.sportId).icon)
+                      : null,
+                ),
+                title: Text(team.name),
+                subtitle: Text('${team.memberUids.length} players'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => context.push(Routes.team(team.id)),
+              ),
+        ],
+      ),
     );
   }
 }
