@@ -187,6 +187,19 @@ class CommunityRepository {
     required DateTime selectedSlot,
     required String acceptedByUid,
   }) async {
+    // Accepting a date that was never on the table would produce a fixture
+    // one club never agreed to. Checked against `liveSlots` so that after a
+    // counter-offer it is the counter's dates that count — the original
+    // proposal is history at that point, and accepting one of its dates would
+    // be agreeing with nobody.
+    if (challenge.liveSlots.isNotEmpty &&
+        !challenge.liveSlots.any((s) => s.isAtSameMomentAs(selectedSlot))) {
+      throw const ValidationException(
+        'That date is not one of the dates on offer. Pick one of the '
+        'proposed slots.',
+      );
+    }
+
     // The club that accepted hosts; the club that issued the challenge is the
     // visitor. Side A is the challenger, which keeps "A v B" reading the same
     // way the challenge itself was worded.
@@ -252,7 +265,11 @@ class CommunityRepository {
         status: CompetitionStatus.scheduled,
         category: const CompetitionCategory(label: 'Open'),
         scoringPluginKey: sport.pluginKey,
-        venue: challenge.venue,
+        // `liveVenue`, not `venue`: once the challenge has been countered the
+        // ground on the table is the counter-offer's, and booking the match
+        // at the originally-proposed ground would send two clubs to different
+        // places on the same afternoon.
+        venue: challenge.liveVenue,
         startDate: selectedSlot,
         maxEntrants: 2,
         entrantCount: 2,
@@ -273,8 +290,16 @@ class CommunityRepository {
         entrantAName: challenge.fromOrgName,
         entrantBName: challenge.toOrgName,
         status: FixtureStatus.scheduled,
+        // §12 — carried so the match history can say this game came out of a
+        // challenge rather than a tournament, which is the whole point of
+        // recording a source. The id is the challenge's, not the
+        // competition's: the competition here is an implementation detail
+        // created to hold the fixture, and the challenge is the thing a
+        // player would recognise.
+        sourceType: MatchSource.challenge,
+        sourceId: challenge.id,
         scheduledAt: selectedSlot,
-        venue: challenge.venue,
+        venue: challenge.liveVenue,
         // The accepting admin can score immediately, so an agreed match is
         // never blocked on a second assignment step. Either club can add more
         // scorers afterwards from the match list.
@@ -329,6 +354,41 @@ class CommunityRepository {
       );
     }
     await Refs.challenge(challenge.id).update({'status': 'withdrawn'});
+  }
+
+  /// Answers a challenge with different terms rather than a yes or a no.
+  ///
+  /// The common real answer to "play us on the 25th" is "yes, but the 26th",
+  /// and without this the receiving club had to decline and issue a fresh
+  /// challenge back — which lost the thread and read to the first club as a
+  /// refusal.
+  ///
+  /// Guarded here as well as in `firestore.rules` so the caller gets a
+  /// sentence rather than a permission error. The rules are what actually
+  /// enforce it; this is what makes the failure legible.
+  Future<void> counterChallenge(
+    Challenge challenge, {
+    required String byOrgId,
+    required List<DateTime> slots,
+    String? venue,
+    String? note,
+  }) async {
+    if (!challenge.canCounterAs(byOrgId)) {
+      throw ValidationException(
+        challenge.isPending
+            ? 'Only the club that was challenged can propose different terms.'
+            : 'This challenge has already been answered.',
+      );
+    }
+    if (slots.isEmpty) {
+      throw const ValidationException(
+        'Propose at least one date, or the other club has nothing to agree '
+        'to.',
+      );
+    }
+    await Refs.challenge(challenge.id).update(
+      Challenge.counterUpdate(slots: slots, venue: venue, note: note),
+    );
   }
 
   // --- Looking For Community Board ---------------------------------------

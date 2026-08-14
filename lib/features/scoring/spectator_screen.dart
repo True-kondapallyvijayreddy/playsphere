@@ -159,6 +159,62 @@ class SpectatorScreen extends ConsumerWidget {
   }
 }
 
+/// "CRICKET · QUARTER-FINAL" over "10 May, 6:00 pm · Green Field Ground".
+///
+/// Every part is optional and the widget collapses to nothing when the
+/// fixture carries none of it — a casual quick match has no round, no
+/// schedule and no venue, and an empty two-line header above its score would
+/// be worse than no header.
+class _MatchMeta extends StatelessWidget {
+  const _MatchMeta({required this.fixture});
+
+  final Fixture fixture;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final sportId = fixture.sportId;
+
+    final top = [
+      if (sportId != null) SportCatalog.byId(sportId).name.toUpperCase(),
+      if (fixture.roundLabel case final round?
+          when round.trim().isNotEmpty)
+        round.toUpperCase(),
+    ].join('  ·  ');
+
+    final when = fixture.scheduledAt;
+    final bottom = [
+      if (when != null) DateFormat('d MMM, h:mm a').format(when),
+      if (fixture.venue case final venue? when venue.trim().isNotEmpty) venue,
+    ].join('  ·  ');
+
+    if (top.isEmpty && bottom.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      children: [
+        if (top.isNotEmpty)
+          Text(
+            top,
+            textAlign: TextAlign.center,
+            style: theme.textTheme.labelSmall?.copyWith(
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.8,
+              color: theme.colorScheme.primary,
+            ),
+          ),
+        if (bottom.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Text(
+            bottom,
+            textAlign: TextAlign.center,
+            style: theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
 class _BigScoreboard extends StatelessWidget {
   const _BigScoreboard({
     required this.fixture,
@@ -182,6 +238,13 @@ class _BigScoreboard extends StatelessWidget {
         padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 20),
         child: Column(
           children: [
+            // The match's own identity line, above the score: which sport,
+            // which round, when and where. A shared link often arrives with
+            // no other context — "Warriors 178/6" means nothing to a parent
+            // who does not know which of their child's three teams is
+            // playing, or whether this is happening now or last month.
+            _MatchMeta(fixture: fixture),
+            const SizedBox(height: 16),
             // Activity-aware, not the raw status field — see
             // [Fixture.isLiveAt]. A spectator who opened a link to a match
             // abandoned last Tuesday must not be told it is happening now.

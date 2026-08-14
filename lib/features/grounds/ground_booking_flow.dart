@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/models/billing.dart';
 import '../../core/models/ground.dart';
 import '../../core/providers.dart';
+import '../../core/router/app_router.dart';
 import '../../data/ground_repository.dart';
 import '../../shared/app_scaffold.dart';
 
@@ -101,6 +104,14 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
   /// would be a new Firestore listener.
   String _searchedCity = '';
 
+  /// "Near me" is a separate mode from the city search, not a filter on top
+  /// of it — a search-by-distance and a search-by-name return genuinely
+  /// different result sets (a ground can be 4km away in the next town over,
+  /// which a city search for "Warangal" would never surface).
+  List<GroundNearby>? _nearby;
+  bool _locating = false;
+  String? _nearbyError;
+
   late DateTime _date = widget.initialDate ?? DateTime.now();
   int _hours = 2;
 
@@ -124,6 +135,45 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
   void dispose() {
     _city.dispose();
     super.dispose();
+  }
+
+  Future<void> _searchNearby() async {
+    setState(() {
+      _locating = true;
+      _nearbyError = null;
+    });
+    try {
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        setState(() => _nearbyError =
+            'Location permission was declined. Allow it in your phone '
+            'settings to search nearby, or search by city instead.');
+        return;
+      }
+      if (!await Geolocator.isLocationServiceEnabled()) {
+        setState(() =>
+            _nearbyError = 'Turn on location services and try again.');
+        return;
+      }
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings:
+            const LocationSettings(accuracy: LocationAccuracy.medium),
+      );
+      final hits = await ref.read(groundRepositoryProvider).nearby(
+            latitude: pos.latitude,
+            longitude: pos.longitude,
+            sportId: widget.sportId,
+          );
+      if (mounted) setState(() => _nearby = hits);
+    } catch (e) {
+      if (mounted) setState(() => _nearbyError = e.toString());
+    } finally {
+      if (mounted) setState(() => _locating = false);
+    }
   }
 
   Future<void> _pickGround(Ground g) async {
@@ -225,15 +275,49 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
   }
 
   Widget _searchStep(ThemeData theme) {
+    final nearby = _nearby;
     return ListView(
       controller: widget.scrollController,
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
       children: [
+        OutlinedButton.icon(
+          onPressed: _locating ? null : _searchNearby,
+          icon: _locating
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.near_me_outlined),
+          label: Text(nearby == null ? 'Grounds near me' : 'Search again'),
+        ),
+        if (_nearbyError != null) ...[
+          const SizedBox(height: 8),
+          Text(_nearbyError!,
+              style: TextStyle(color: theme.colorScheme.error)),
+        ],
+        const SizedBox(height: 16),
+        Row(
+          children: [
+            const Expanded(child: Divider()),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Text('or search by city',
+                  style: theme.textTheme.bodySmall),
+            ),
+            const Expanded(child: Divider()),
+          ],
+        ),
+        const SizedBox(height: 16),
         TextField(
           controller: _city,
           textCapitalization: TextCapitalization.words,
           textInputAction: TextInputAction.search,
-          onSubmitted: (v) => setState(() => _searchedCity = v.trim()),
+          onSubmitted: (v) =>
+              setState(() {
+                _searchedCity = v.trim();
+                _nearby = null;
+              }),
           decoration: InputDecoration(
             labelText: 'City',
             hintText: 'e.g. Hyderabad',
@@ -241,8 +325,10 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
             border: const OutlineInputBorder(),
             suffixIcon: IconButton(
               icon: const Icon(Icons.search),
-              onPressed: () =>
-                  setState(() => _searchedCity = _city.text.trim()),
+              onPressed: () => setState(() {
+                _searchedCity = _city.text.trim();
+                _nearby = null;
+              }),
             ),
           ),
         ),
@@ -258,11 +344,13 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
         ),
         const SizedBox(height: 16),
 
-        if (_searchedCity.isEmpty)
+        if (nearby != null)
+          _NearbyResults(hits: nearby, onPick: _pickGround)
+        else if (_searchedCity.isEmpty)
           const EmptyState(
             icon: Icons.travel_explore_outlined,
             title: 'Where are you playing?',
-            message: 'Enter a city to see the grounds listed there.',
+            message: 'Search "Grounds near me", or enter a city.',
           )
         else
           _Results(
@@ -380,6 +468,67 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
   }
 }
 
+class _NearbyResults extends StatelessWidget {
+  const _NearbyResults({required this.hits, required this.onPick});
+
+  final List<GroundNearby> hits;
+  final ValueChanged<Ground> onPick;
+
+  @override
+  Widget build(BuildContext context) {
+    if (hits.isEmpty) {
+      return const EmptyState(
+        icon: Icons.stadium_outlined,
+        title: 'Nothing registered nearby yet',
+        message:
+            'No ground within 15km has its location set. Try a city search '
+            'instead — plenty of listings haven\'t pinned their map location.',
+      );
+    }
+    return Column(
+      children: [
+        for (final hit in hits)
+          Card(
+            margin: const EdgeInsets.only(bottom: 8),
+            child: ListTile(
+              leading: CircleAvatar(
+                backgroundColor:
+                    Theme.of(context).colorScheme.surfaceContainerHighest,
+                child: Text(hit.ground.isIndoor ? '🏟️' : '🌳'),
+              ),
+              title: Row(
+                children: [
+                  Flexible(child: Text(hit.ground.name)),
+                  if (hit.ground.isVerified) ...[
+                    const SizedBox(width: 4),
+                    Icon(Icons.verified,
+                        size: 14, color: Theme.of(context).colorScheme.primary),
+                  ],
+                ],
+              ),
+              subtitle: Text(
+                [hit.distanceLabel, hit.ground.rateLabel].join(' · '),
+              ),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    tooltip: 'Ground details & food',
+                    icon: const Icon(Icons.info_outline),
+                    onPressed: () =>
+                        context.push(Routes.ground(hit.ground.id)),
+                  ),
+                  const Icon(Icons.chevron_right),
+                ],
+              ),
+              onTap: () => onPick(hit.ground),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
 class _Results extends ConsumerWidget {
   const _Results({
     required this.city,
@@ -442,7 +591,22 @@ class _Results extends ConsumerWidget {
                       if (g.facilities.isNotEmpty) g.facilities.first,
                     ].join(' · '),
                   ),
-                  trailing: const Icon(Icons.chevron_right),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // A separate tap target from the tile itself: the tile
+                      // picks this ground for the booking in progress, but a
+                      // captain buying water for the team is not always
+                      // creating an event to reach this ground at all — see
+                      // `GroundDetailScreen`.
+                      IconButton(
+                        tooltip: 'Ground details & food',
+                        icon: const Icon(Icons.info_outline),
+                        onPressed: () => context.push(Routes.ground(g.id)),
+                      ),
+                      const Icon(Icons.chevron_right),
+                    ],
+                  ),
                   onTap: () => onPick(g),
                 ),
               ),

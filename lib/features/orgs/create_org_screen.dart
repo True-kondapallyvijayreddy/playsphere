@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/layout/responsive.dart';
+import '../../core/models/app_user.dart';
 import '../../core/models/billing.dart';
 import '../../core/models/enums.dart';
 import '../../core/models/organization.dart';
@@ -10,6 +11,7 @@ import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/plan_card.dart';
+import '../../shared/real_payment_sheet.dart';
 
 /// Which half of club creation is on screen.
 ///
@@ -66,37 +68,11 @@ class _CreateOrgScreenState extends ConsumerState<CreateOrgScreen> {
 
     setState(() => _busy = true);
     try {
-      final billing = ref.read(billingRepositoryProvider);
-
-      // Charge first. While the launch offer is on this is a no-op that
-      // returns a zero-rupee grant, but the ordering is the part that has to
-      // be right before it ever charges for real: a declined card must leave
-      // no club, no membership and no invite code behind.
-      final grant = await billing.purchasePlanForNewClub(
-        payerUid: user.uid,
-        plan: _plan,
-      );
-
-      final orgId = await ref.read(orgRepositoryProvider).createOrganization(
-            org: Organization(
-              id: '',
-              name: _name.text.trim(),
-              orgType: _type,
-              visibility: _visibility,
-              ownerUid: user.uid,
-              inviteCode: Organization.generateInviteCode(),
-              description: _description.text.trim().isEmpty
-                  ? null
-                  : _description.text.trim(),
-              city: _city.text.trim().isEmpty ? null : _city.text.trim(),
-              requiresApprovalToJoin: _requireApproval,
-            ),
-            founder: user,
-            planGrant: grant,
-          );
-      // The club exists now; backing into a half-filled creation form would
-      // only offer to create a second one.
-      if (mounted) context.pushReplacement(Routes.org(orgId));
+      if (Pricing.introOfferActive) {
+        await _createWithLaunchOfferGrant(user);
+      } else {
+        await _createFreeThenUpgrade(user);
+      }
     } catch (e) {
       // Back to the plan step rather than the details form: the details are
       // fine, it was the purchase that failed, and dumping the person at the
@@ -105,6 +81,64 @@ class _CreateOrgScreenState extends ConsumerState<CreateOrgScreen> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  Organization _draftOrg(AppUser user) => Organization(
+        id: '',
+        name: _name.text.trim(),
+        orgType: _type,
+        visibility: _visibility,
+        ownerUid: user.uid,
+        inviteCode: Organization.generateInviteCode(),
+        description:
+            _description.text.trim().isEmpty ? null : _description.text.trim(),
+        city: _city.text.trim().isEmpty ? null : _city.text.trim(),
+        requiresApprovalToJoin: _requireApproval,
+      );
+
+  /// The launch-offer path, unchanged: charge (a no-op at ₹0) before
+  /// creating, so a declined card — once cards are real — leaves no club, no
+  /// membership and no invite code behind.
+  Future<void> _createWithLaunchOfferGrant(AppUser user) async {
+    final billing = ref.read(billingRepositoryProvider);
+    final grant =
+        await billing.purchasePlanForNewClub(payerUid: user.uid, plan: _plan);
+    final orgId = await ref.read(orgRepositoryProvider).createOrganization(
+          org: _draftOrg(user),
+          founder: user,
+          planGrant: grant,
+        );
+    if (mounted) context.pushReplacement(Routes.org(orgId));
+  }
+
+  /// The real-money path. "Charge first, create second" cannot hold here —
+  /// there is no club to hand a plan to until *after* the club exists, and a
+  /// Razorpay redirect confirms on its own schedule, not this call's. So the
+  /// club is created immediately on [OrgPlan.free] (never a lockout — see
+  /// `Organization.hasPaidPlanAt`), and payment is asked for as an upgrade
+  /// against the club id that now exists. Declining the payment sheet leaves
+  /// a real, working free club behind rather than nothing — the honest
+  /// trade-off for a flow that can't collect the card before the thing being
+  /// paid for exists.
+  Future<void> _createFreeThenUpgrade(AppUser user) async {
+    final orgId = await ref.read(orgRepositoryProvider).createOrganization(
+          org: _draftOrg(user),
+          founder: user,
+        );
+    if (!mounted) return;
+
+    final pending = await ref.read(razorpayCheckoutProvider).start(
+          kind: PlanPaymentKind.orgPlan,
+          subjectId: orgId,
+          planWire: _plan.wire,
+        );
+    if (!mounted) return;
+    await showRealPaymentSheet(
+      context,
+      paymentId: pending.paymentId,
+      url: pending.url,
+    );
+    if (mounted) context.pushReplacement(Routes.org(orgId));
   }
 
   @override

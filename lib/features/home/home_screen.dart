@@ -18,6 +18,7 @@ import '../../shared/confirm_exit.dart';
 import '../../shared/live_dot.dart';
 import '../../shared/promo_banner.dart';
 import '../../shared/section_header.dart';
+import '../../shared/ui_kit.dart';
 import '../scoring/widgets/live_score_card.dart';
 import 'event_feed.dart';
 import 'home_providers.dart';
@@ -121,7 +122,19 @@ class HomeScreen extends ConsumerWidget {
                         clubCount: activeClubs.length,
                         liveCount: live.length,
                       ),
-                      const SizedBox(height: 16),
+                      const SizedBox(height: 14),
+
+                      // Points at the talent search rather than at a global
+                      // one. There is no index behind "matches, teams,
+                      // players and clubs" yet, and a box that accepts a
+                      // query and returns nothing is worse than a box that
+                      // says what it actually searches.
+                      PsSearchField(
+                        hint: 'Search players, teams and clubs...',
+                        readOnly: true,
+                        onTap: () => context.push(Routes.scoutSearch),
+                      ),
+                      const SizedBox(height: 4),
 
                       // --- PS-007: Live Matches Ticker at top (Cricbuzz style) ---
                       //
@@ -217,6 +230,19 @@ class HomeScreen extends ConsumerWidget {
                             child: _LiveFixture(fixture: f),
                           ),
                       ],
+
+                      // Below the live scores, deliberately — the same rule
+                      // the promo banner above follows. The sample design put
+                      // this grid directly under the banner, which on a 320pt
+                      // phone pushes a match being played right now off the
+                      // first screen. Browsing sports is something a member
+                      // does when nothing of theirs is on; it must not cost
+                      // them the thing they opened the app for.
+                      PsSectionHeader(
+                        title: 'Explore Sports',
+                        onAction: () => context.push(Routes.sports),
+                      ),
+                      const _ExploreSportsGrid(),
                       const SizedBox(height: 16),
 
                       // --- PS-006 & PS-009: Primary Hero Action CTA ("Play Match Now") ---
@@ -416,10 +442,10 @@ class _Greeting extends StatelessWidget {
     final theme = Theme.of(context);
 
     return Container(
-      padding: const EdgeInsets.fromLTRB(18, 14, 18, 14),
+      padding: const EdgeInsets.fromLTRB(20, 18, 20, 18),
       decoration: BoxDecoration(
         gradient: AppTheme.brandGradient,
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(Ps.radius),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -431,7 +457,33 @@ class _Greeting extends StatelessWidget {
               letterSpacing: 0.4,
             ),
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: 8),
+          // The mockup's masthead line. Kept to two short words a line so it
+          // holds its shape at 320pt — the banner is the first thing on the
+          // screen, and a headline that reflows to four ragged lines on a
+          // small phone is the first thing anyone sees go wrong.
+          Text(
+            'ALL SPORTS\nONE SPACE',
+            style: theme.textTheme.headlineSmall?.copyWith(
+              color: Colors.white,
+              fontWeight: FontWeight.w800,
+              height: 1.1,
+              letterSpacing: 0.2,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Play. Compete. Achieve.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: Colors.white.withValues(alpha: 0.85),
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 12),
+          // The status sentence stays. The mockup's banner is pure brand
+          // copy, but this line is the one piece of the old header that told
+          // a member something they did not already know — how many of their
+          // matches are being played right now.
           Text(
             clubCount == 0
                 ? 'Join a club with an invite code and everything you play '
@@ -444,6 +496,117 @@ class _Greeting extends StatelessWidget {
             style: theme.textTheme.bodyMedium?.copyWith(
               color: Colors.white.withValues(alpha: 0.92),
               fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The five-across run of sport tiles under the banner.
+///
+/// Nine sports and a "More", not the whole catalogue. The catalogue is
+/// fifteen entries and growing, and a grid that runs to three rows pushes the
+/// live scores — the thing a member opened the app for — off the first
+/// screen. "More" opens the full directory, where the counts and the filters
+/// live.
+class _ExploreSportsGrid extends StatelessWidget {
+  const _ExploreSportsGrid();
+
+  /// Deliberately hand-picked rather than `SportCatalog.all.take(9)`. The
+  /// catalogue is ordered by how the scoring engines group sports — bat and
+  /// ball, racquet, goal-scoring — so taking the first nine yields an
+  /// arbitrary set that changes whenever a sport is added. These are the nine
+  /// played most widely across Indian schools and clubs.
+  static const _featured = [
+    'cricket',
+    'football',
+    'badminton',
+    'volleyball',
+    'basketball',
+    'table_tennis',
+    'tennis',
+    'kabaddi',
+    'chess',
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Five across on a phone, more on a tablet where the same tile size
+        // would otherwise leave half the row empty.
+        final columns = (constraints.maxWidth / 78).floor().clamp(4, 8);
+        return GridView.count(
+          crossAxisCount: columns,
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          mainAxisSpacing: 14,
+          crossAxisSpacing: 8,
+          childAspectRatio: 0.82,
+          children: [
+            for (final id in _featured)
+              _SportTile(
+                sportId: id,
+                label: SportCatalog.byId(id).name,
+                onTap: () => context.push(Routes.sports),
+              ),
+            _SportTile(
+              sportId: null,
+              label: 'More',
+              onTap: () => context.push(Routes.sports),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _SportTile extends StatelessWidget {
+  const _SportTile({
+    required this.sportId,
+    required this.label,
+    required this.onTap,
+  });
+
+  /// Null renders the neutral "More" tile that opens the directory.
+  final String? sportId;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final id = sportId;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(Ps.radiusSm),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (id == null)
+            Container(
+              width: 46,
+              height: 46,
+              decoration: BoxDecoration(
+                color: Ps.border,
+                borderRadius: BorderRadius.circular(13),
+              ),
+              child: const Icon(Icons.more_horiz, color: Ps.muted, size: 22),
+            )
+          else
+            SportBadge(sportId: id, size: 46),
+          const SizedBox(height: 6),
+          Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w500,
+              color: Ps.ink,
             ),
           ),
         ],

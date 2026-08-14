@@ -141,6 +141,81 @@ enum EntrantType {
       );
 }
 
+/// What kind of team a `Team` document is.
+///
+/// ## Why `independent` is not just `clubId == null`
+///
+/// It very nearly is, and the redundancy is deliberate. The spec (§19–21)
+/// names three kinds and the product talks about them as three kinds, so a
+/// screen that has to say "Independent team" should not have to infer it from
+/// the absence of a foreign key — absence is also what a half-written
+/// document looks like. Carrying the intent explicitly means a team that lost
+/// its club by a bad write is distinguishable from one that never had one.
+///
+/// [Team] enforces the pairing so the two can never drift: `permanent`
+/// requires a club, `independent` forbids one.
+enum TeamType {
+  /// Belongs to a club and outlives any one competition (§19).
+  permanent('permanent', 'Club team'),
+
+  /// Belongs to no club and outlives any one competition (§20). Rule 4 — a
+  /// team does not need a club — is this value.
+  independent('independent', 'Independent team'),
+
+  /// Exists for exactly one competition (§21). Not a lesser team: it scores,
+  /// it appears in history, and §22 requires its record to survive the
+  /// competition ending.
+  event('event', 'Event team');
+
+  const TeamType(this.wire, this.label);
+  final String wire;
+  final String label;
+
+  /// Whether this team is meant to outlive a single competition.
+  ///
+  /// The question every caller actually has. Written as "not event" rather
+  /// than "permanent or independent" so a fourth kind added later has to be
+  /// classified deliberately instead of silently defaulting to transient.
+  bool get isPersistent => this != TeamType.event;
+
+  /// Whether this kind of team must carry a `clubId`.
+  bool get requiresClub => this == TeamType.permanent;
+
+  /// Whether this kind of team must NOT carry a `clubId`.
+  bool get forbidsClub => this == TeamType.independent;
+
+  static TeamType fromWire(String? w) => TeamType.values.firstWhere(
+        (e) => e.wire == w,
+        // An unreadable type is treated as independent rather than permanent:
+        // the fallback must not invent a club affiliation the document may
+        // not have, because affiliation drives who is allowed to edit it.
+        orElse: () => TeamType.independent,
+      );
+}
+
+/// Whether a team is still in use.
+///
+/// Teams are archived, never deleted. Rule 31 — historical records must not
+/// disappear because a team changes — applies as much to a squad that
+/// disbands as to one that renames: the matches it played, and every career
+/// statistic derived from them, still point at this document.
+enum TeamStatus {
+  active('active', 'Active'),
+
+  /// Disbanded, or a competition-scoped team whose competition has finished
+  /// (§22's HISTORICAL). Hidden from pickers; still readable forever.
+  archived('archived', 'Archived');
+
+  const TeamStatus(this.wire, this.label);
+  final String wire;
+  final String label;
+
+  static TeamStatus fromWire(String? w) => TeamStatus.values.firstWhere(
+        (e) => e.wire == w,
+        orElse: () => TeamStatus.active,
+      );
+}
+
 enum CompetitionFormat {
   roundRobin('round_robin', 'Round Robin'),
   knockout('knockout', 'Single Knockout'),
@@ -303,6 +378,132 @@ enum FixtureStatus {
 
   bool get acceptsScoring =>
       this == FixtureStatus.scheduled || this == FixtureStatus.live;
+}
+
+/// How ready a match is to be played, as distinct from whether it has been.
+///
+/// ## Why this is not more values on [FixtureStatus]
+///
+/// The architecture note (`docs/Heart_of_the_playsphere.md` §7) describes one
+/// machine running SCHEDULED → OFFICIALS ASSIGNED → READY → LIVE → ... →
+/// FINALIZED. Modelled as a single enum that would be wrong in a specific,
+/// expensive way: [FixtureStatus] is read by the scoring engine, the
+/// standings calculator, the ratings engine and the career aggregator, all
+/// through `isResulted` and `acceptsScoring`. Adding pre-match states to it
+/// means every one of those has to be re-audited, and a missed branch does
+/// not crash — it silently drops matches out of standings or off somebody's
+/// career record, which is the worst class of bug this product can have.
+///
+/// Readiness is genuinely orthogonal: a match can be live without an umpire
+/// (a club's Sunday game), and a match can have a full panel and never be
+/// played. Two axes model that; one axis has to pick.
+enum MatchReadiness {
+  /// The default. A fixture exists, with a time and two sides.
+  scheduled('scheduled', 'Scheduled'),
+
+  /// At least one official has been named.
+  officialsAssigned('officials_assigned', 'Officials assigned'),
+
+  /// The organizer has confirmed everything is in place. Nothing enforces
+  /// this — a scorer can still start a match that is merely `scheduled`,
+  /// because a club playing on a Sunday has no organizer to press it and
+  /// must not be blocked.
+  ready('ready', 'Ready');
+
+  const MatchReadiness(this.wire, this.label);
+  final String wire;
+  final String label;
+
+  static MatchReadiness fromWire(String? w) => MatchReadiness.values.firstWhere(
+        (e) => e.wire == w,
+        // Absent means scheduled: every fixture written before this field
+        // existed is a scheduled match, which is exactly what it means.
+        orElse: () => MatchReadiness.scheduled,
+      );
+}
+
+/// Whether a finished match's result has been verified.
+///
+/// §7 again: an official tournament wants *scorer submits → umpire verifies →
+/// finalized*, while a friendly should go straight to finalized. Both are
+/// expressible here without touching [FixtureStatus.completed], which
+/// continues to mean exactly what it meant — the match is over and a result
+/// is on the sheet.
+enum MatchResultState {
+  /// No result yet, or a competition that does not ask anyone to verify one.
+  ///
+  /// The default, deliberately: making verification opt-in means every
+  /// existing match and every casual game stays finalized the moment it ends,
+  /// and only competitions that asked for approval acquire the extra step.
+  none('none', 'Not verified'),
+
+  /// The scorer has ended the match and an official has still to confirm it.
+  awaitingApproval('awaiting_approval', 'Awaiting approval'),
+
+  /// Verified. The point at which the result is safe to project into
+  /// leaderboards, career statistics and rankings.
+  finalized('finalized', 'Finalized');
+
+  const MatchResultState(this.wire, this.label);
+  final String wire;
+  final String label;
+
+  static MatchResultState fromWire(String? w) =>
+      MatchResultState.values.firstWhere(
+        (e) => e.wire == w,
+        orElse: () => MatchResultState.none,
+      );
+
+  /// Whether this result is still waiting on somebody.
+  bool get blocksProjection => this == MatchResultState.awaitingApproval;
+}
+
+/// How a match went for one particular player.
+///
+/// A player-relative view of a result, which the fixture itself does not
+/// carry: `winnerEntrantId` says which side won, and turning that into "you
+/// won" needs to know which side the person was on.
+///
+/// Named `PlayerResult` rather than the more obvious `MatchOutcome` because
+/// the scoring engine already owns that name for a different idea — whether
+/// the contest is finished and which side took it. Two types called the same
+/// thing, one player-relative and one not, is a mix-up waiting to happen.
+enum PlayerResult {
+  won('Won'),
+  lost('Lost'),
+  drawn('Drawn');
+
+  const PlayerResult(this.label);
+  final String label;
+}
+
+/// Where a match came from.
+///
+/// `docs/Heart_of_the_playsphere.md` §12: every match carries a source, and
+/// the source is secondary to the match itself. A fixture's *path* already
+/// says which competition it belongs to, but the path cannot distinguish a
+/// challenge from a league fixture — both are competitions under a club — and
+/// §20's match history has to label them differently for the history to mean
+/// anything.
+enum MatchSource {
+  season('season', 'Season'),
+  tournament('tournament', 'Tournament'),
+  league('league', 'League'),
+  challenge('challenge', 'Challenge'),
+  singleMatch('single_match', 'Single Match'),
+  clubEvent('club_event', 'Club Event');
+
+  const MatchSource(this.wire, this.label);
+  final String wire;
+  final String label;
+
+  static MatchSource? fromWire(String? w) {
+    if (w == null || w.isEmpty) return null;
+    for (final v in MatchSource.values) {
+      if (v.wire == w) return v;
+    }
+    return null;
+  }
 }
 
 /// *How* a match ended, as distinct from what state it is in.
@@ -760,4 +961,72 @@ enum AdCampaignStatus {
 
   static AdCampaignStatus fromWire(String? w) => AdCampaignStatus.values
       .firstWhere((e) => e.wire == w, orElse: () => AdCampaignStatus.pending);
+}
+
+// -----------------------------------------------------------------------------
+// Food & delivery at the ground. See `lib/domain/food/delivery_partner.dart`
+// for the pluggable-fulfilment seam this vocabulary feeds.
+// -----------------------------------------------------------------------------
+
+/// What a ground's canteen sells. Small and generic on purpose — "bananas to
+/// water to food", in the product vision's own words, not a restaurant menu
+/// needing per-dish taxonomy.
+enum FoodItemCategory {
+  water('water', 'Water & drinks', '💧'),
+  snacks('snacks', 'Snacks', '🍿'),
+  meal('meal', 'Meals', '🍛'),
+  fruit('fruit', 'Fruit', '🍌'),
+  other('other', 'Other', '🧺');
+
+  const FoodItemCategory(this.wire, this.label, this.emoji);
+  final String wire;
+  final String label;
+  final String emoji;
+
+  static FoodItemCategory fromWire(String? w) => FoodItemCategory.values
+      .firstWhere((e) => e.wire == w, orElse: () => FoodItemCategory.other);
+}
+
+/// Who actually carries the order from the ground's canteen to the player.
+/// [manual] (ground staff themselves) is the only one anything in this
+/// codebase can fulfil today — see `ManualFulfillment` in
+/// `lib/domain/food/delivery_partner.dart`. The named vendors exist as a
+/// vocabulary a real partner integration slots straight into, without a
+/// migration, the day one of them is actually wired up.
+enum DeliveryPartnerType {
+  manual('manual', 'Ground staff'),
+  zepto('zepto', 'Zepto'),
+  zomato('zomato', 'Zomato'),
+  instamart('instamart', 'Instamart'),
+  other('other', 'Delivery partner');
+
+  const DeliveryPartnerType(this.wire, this.label);
+  final String wire;
+  final String label;
+
+  static DeliveryPartnerType fromWire(String? w) => DeliveryPartnerType.values
+      .firstWhere((e) => e.wire == w, orElse: () => DeliveryPartnerType.manual);
+}
+
+/// Where one food order stands. Mirrors `ClubOrderStatus`'s "a person hands
+/// this over by hand" shape rather than a courier-tracking pipeline — see
+/// `FoodOrder`'s class doc for why `outForDelivery` is still meaningful even
+/// when [DeliveryPartnerType.manual] is the only fulfiller that exists.
+enum FoodOrderStatus {
+  placed('placed', 'Placed', 0),
+  preparing('preparing', 'Preparing', 1),
+  outForDelivery('out_for_delivery', 'On its way', 2),
+  delivered('delivered', 'Delivered', 3),
+  cancelled('cancelled', 'Cancelled', 3);
+
+  const FoodOrderStatus(this.wire, this.label, this.step);
+  final String wire;
+  final String label;
+  final int step;
+
+  bool get isTerminal =>
+      this == FoodOrderStatus.delivered || this == FoodOrderStatus.cancelled;
+
+  static FoodOrderStatus fromWire(String? w) => FoodOrderStatus.values
+      .firstWhere((e) => e.wire == w, orElse: () => FoodOrderStatus.placed);
 }

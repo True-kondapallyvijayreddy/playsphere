@@ -39,7 +39,16 @@ class AppLocalizationsEn extends AppLocalizations {
   String get signInTitle => 'Sign in';
 
   @override
+  String get signInTagline => 'Run competitions, score matches live, and let everyone follow along from anywhere.';
+
+  @override
   String get signInWithGoogle => 'Continue with Google';
+
+  @override
+  String get signInInProgress => 'Signing in…';
+
+  @override
+  String get signInWatchWithoutAccount => 'You can watch any public live match without signing in — just open the link someone shares with you.';
 
   @override
   String get signOut => 'Sign out';

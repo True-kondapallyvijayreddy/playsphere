@@ -39,7 +39,16 @@ class AppLocalizationsTe extends AppLocalizations {
   String get signInTitle => 'సైన్ ఇన్';
 
   @override
+  String get signInTagline => 'పోటీలు నిర్వహించండి, మ్యాచ్‌లను లైవ్‌గా స్కోర్ చేయండి, అందరూ ఎక్కడి నుండైనా అనుసరించేలా చేయండి.';
+
+  @override
   String get signInWithGoogle => 'Google తో కొనసాగించండి';
+
+  @override
+  String get signInInProgress => 'సైన్ ఇన్ అవుతోంది…';
+
+  @override
+  String get signInWatchWithoutAccount => 'మీరు సైన్ ఇన్ చేయకుండానే ఏదైనా పబ్లిక్ లైవ్ మ్యాచ్ చూడవచ్చు — ఎవరైనా షేర్ చేసిన లింక్‌ను తెరవండి.';
 
   @override
   String get signOut => 'సైన్ అవుట్';

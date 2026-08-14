@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import '../../domain/geo/geohash.dart';
 import 'billing.dart';
 import 'firestore_codec.dart';
 
@@ -196,6 +197,13 @@ class Ground {
         'district': district,
         'latitude': latitude,
         'longitude': longitude,
+        // Derived, not owner-entered — see `GeoSearch` for why "near me"
+        // needs this on the document rather than computed at query time.
+        // Nine characters: fine enough that the query's 3×3 neighbourhood
+        // stays tight even for the smallest "near me" radius offered.
+        'geohash': latitude == null || longitude == null
+            ? null
+            : Geohash.encode(latitude!, longitude!, precision: 9),
         'sportIds': sportIds,
         'hourlyRatePaise': hourlyRatePaise,
         'openHour': openHour,

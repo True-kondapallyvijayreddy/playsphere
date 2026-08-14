@@ -49,5 +49,7 @@
 		<true/>
 		<key>UIViewControllerBasedStatusBarAppearance</key>
 		<false/>
+		<key>NSLocationWhenInUseUsageDescription</key>
+		<string>PlaySphere uses your location to find grounds near you and to help ground owners set a listing's location.</string>
 	</dict>
 </plist>

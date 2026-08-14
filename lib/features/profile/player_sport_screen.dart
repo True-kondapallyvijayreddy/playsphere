@@ -8,6 +8,7 @@ import '../../core/providers.dart';
 import '../../data/career_repository.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/ui_kit.dart';
 import 'my_matches_screen.dart';
 
 /// One sport within one player's career.
@@ -183,7 +184,7 @@ class _Stats extends StatelessWidget {
                 side: BorderSide.none,
                 backgroundColor: theme.colorScheme.surfaceContainerHighest,
                 label: Text(
-                  '${_humanize(e.key)} ${_format(e.value)}',
+                  '${psHumanizeCounter(e.key)} ${_format(e.value)}',
                   style: theme.textTheme.bodySmall,
                 ),
               ),
@@ -196,13 +197,6 @@ class _Stats extends StatelessWidget {
   static String _format(num v) =>
       v is int || v == v.roundToDouble() ? '${v.round()}' : v.toStringAsFixed(2);
 
-  static String _humanize(String key) {
-    final spaced = key.replaceAllMapped(
-      RegExp(r'(?<=[a-z0-9])(?=[A-Z])'),
-      (_) => ' ',
-    );
-    return spaced[0].toUpperCase() + spaced.substring(1).toLowerCase();
-  }
 }
 
 class _Matches extends StatelessWidget {

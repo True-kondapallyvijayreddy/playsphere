@@ -7,6 +7,7 @@ import '../../core/errors/app_exception.dart';
 import '../../core/models/app_user.dart';
 import '../../core/models/enums.dart';
 import '../../core/providers.dart';
+import '../../l10n/app_localizations.dart';
 import '../../shared/app_scaffold.dart';
 
 /// Collects what Google Sign-In cannot give us.
@@ -131,8 +132,10 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
       gender: _gender,
     ).ageAt(DateTime.now());
 
+    final l10n = AppLocalizations.of(context);
+
     return Scaffold(
-      appBar: AppBar(title: const Text('Complete your profile')),
+      appBar: AppBar(title: Text(l10n.profileSetupTitle)),
       body: SingleChildScrollView(
         child: ContentBounds(
           maxWidth: 520,
@@ -158,10 +161,10 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
                 TextFormField(
                   controller: _nameController,
                   textCapitalization: TextCapitalization.words,
-                  decoration: const InputDecoration(
-                    labelText: 'Full name',
+                  decoration: InputDecoration(
+                    labelText: l10n.profileName,
                     helperText: 'How you appear on team sheets and results',
-                    border: OutlineInputBorder(),
+                    border: const OutlineInputBorder(),
                   ),
                   validator: (v) => (v == null || v.trim().length < 2)
                       ? 'Enter your name'
@@ -172,7 +175,7 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
                   onTap: _pickDate,
                   child: InputDecorator(
                     decoration: InputDecoration(
-                      labelText: 'Date of birth',
+                      labelText: l10n.profileDateOfBirth,
                       border: const OutlineInputBorder(),
                       helperText: age == null
                           ? 'Required'
@@ -189,10 +192,10 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
                 const SizedBox(height: 20),
                 DropdownButtonFormField<Gender>(
                   value: _gender,
-                  decoration: const InputDecoration(
-                    labelText: 'Gender',
+                  decoration: InputDecoration(
+                    labelText: l10n.profileGender,
                     helperText: 'Used only for gender-based categories',
-                    border: OutlineInputBorder(),
+                    border: const OutlineInputBorder(),
                   ),
                   items: [
                     for (final g in Gender.values)

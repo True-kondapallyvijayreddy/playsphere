@@ -13,6 +13,7 @@ import '../../domain/career/head_to_head.dart';
 import '../../domain/rating/glicko2.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/ui_kit.dart';
 import 'widgets/memory_grid.dart';
 
 /// A player's lifelong profile — the thing CLAUDE.md §1 promises when it says a
@@ -78,6 +79,14 @@ class CareerProfileScreen extends ConsumerWidget {
                     const SizedBox(height: 20),
 
                     _CareerSummary(career: career, memories: memories),
+                    const SizedBox(height: 20),
+
+                    // The per-sport breakdown the sample design leads with:
+                    // pick a sport, see that sport's own numbers. It sits
+                    // above the rating cards because "how many runs have I
+                    // scored" is the question people open a profile for, and
+                    // the Glicko band below is the specialist answer.
+                    _SportBreakdown(career: career, uid: uid),
                     const SizedBox(height: 24),
 
                     Text('Sports', style: Theme.of(context).textTheme.titleMedium),
@@ -236,43 +245,211 @@ class _CareerSummary extends StatelessWidget {
       for (final l in lines) ...?l.stats?.clubsPlayedFor,
     }.length;
 
-    return Row(
+    // Matches / Sports / Clubs / Memories, not the sample design's
+    // Matches / Runs / Wickets / Win Rate. Runs and wickets are cricket
+    // counters and this header is above every sport a person plays — a chess
+    // player's summary cannot lead with wickets. The sport-specific numbers
+    // are one section down, under the sport they belong to.
+    return PsCard(
+      child: PsStatRow(
+        stats: [
+          PsStat(value: psGrouped(matches), label: 'Matches'),
+          PsStat(
+            value: '${lines.where((l) => l.matchesPlayed > 0).length}',
+            label: 'Sports',
+          ),
+          PsStat(value: '$clubs', label: 'Clubs'),
+          PsStat(
+            value: '${(memories.valueOrNull ?? const []).length}',
+            label: 'Memories',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A tab per sport played, and that sport's own totals underneath.
+///
+/// The tally is a `Map<String, num>` keyed exactly as each sport's engine
+/// keys it — `runs`, `wickets`, `strikeRate` for cricket; `points`, `aces`
+/// for volleyball. That is why this renders whatever keys are present rather
+/// than a fixed Runs/Wickets/Average grid: the same widget has to be correct
+/// for fifteen sports whose engines share no vocabulary, and hard-coding
+/// cricket's would leave every other sport blank.
+class _SportBreakdown extends StatefulWidget {
+  const _SportBreakdown({required this.career, required this.uid});
+
+  final AsyncValue<List<CareerLine>> career;
+  final String uid;
+
+  @override
+  State<_SportBreakdown> createState() => _SportBreakdownState();
+}
+
+class _SportBreakdownState extends State<_SportBreakdown> {
+  /// The sport id showing, or null to mean "whatever is most prominent".
+  /// Held as an id rather than an index so it survives the list reordering
+  /// underneath when a match finishes and changes what someone plays most.
+  String? _selected;
+
+  /// Six, then stop. The tally for a full cricket career runs to a dozen-odd
+  /// counters, and a profile that opens with twelve tiles is a spreadsheet.
+  /// The sport's own page shows every one of them.
+  static const _maxTiles = 6;
+
+  @override
+  Widget build(BuildContext context) {
+    final lines = (widget.career.valueOrNull ?? const <CareerLine>[])
+        .where((l) => l.matchesPlayed > 0)
+        .toList()
+      ..sort((a, b) => b.prominence.compareTo(a.prominence));
+
+    if (lines.isEmpty) return const SizedBox.shrink();
+
+    final selected = lines.firstWhere(
+      (l) => l.sportId == _selected,
+      orElse: () => lines.first,
+    );
+
+    final tally = selected.stats?.tally ?? const <String, num>{};
+    final counters = tally.entries.where((e) => e.value != 0).toList()
+      ..sort((a, b) => b.value.abs().compareTo(a.value.abs()));
+    final tiles = counters.take(_maxTiles).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _Stat(label: 'Matches', value: '$matches'),
-        _Stat(label: 'Sports', value: '${lines.where((l) => l.matchesPlayed > 0).length}'),
-        _Stat(label: 'Clubs', value: '$clubs'),
-        _Stat(
-          label: 'Memories',
-          value: '${(memories.valueOrNull ?? const []).length}',
+        SizedBox(
+          height: 38,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: lines.length,
+            separatorBuilder: (_, __) => const SizedBox(width: 8),
+            itemBuilder: (context, i) {
+              final line = lines[i];
+              final isSelected = line.sportId == selected.sportId;
+              return InkWell(
+                onTap: () => setState(() => _selected = line.sportId),
+                borderRadius: BorderRadius.circular(Ps.radiusSm),
+                child: Container(
+                  alignment: Alignment.center,
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  decoration: BoxDecoration(
+                    border: Border(
+                      bottom: BorderSide(
+                        color: isSelected ? Ps.primary : Colors.transparent,
+                        width: 2,
+                      ),
+                    ),
+                  ),
+                  child: Text(
+                    SportCatalog.byId(line.sportId).name,
+                    style: TextStyle(
+                      fontSize: 13.5,
+                      fontWeight:
+                          isSelected ? FontWeight.w700 : FontWeight.w500,
+                      color: isSelected ? Ps.primary : Ps.muted,
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
         ),
+        const SizedBox(height: 12),
+        if (tiles.isEmpty)
+          PsCard(
+            child: Text(
+              'No totals recorded for '
+              '${SportCatalog.byId(selected.sportId).name} yet.',
+              style: const TextStyle(fontSize: 13, color: Ps.muted),
+            ),
+          )
+        else ...[
+          LayoutBuilder(
+            builder: (context, constraints) {
+              // Three across on a phone, more where there is room. Fixed at
+              // three would leave a tablet with a third of a row of tiles and
+              // two thirds of nothing.
+              final columns = (constraints.maxWidth / 130).floor().clamp(2, 4);
+              return GridView.count(
+                crossAxisCount: columns,
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                mainAxisSpacing: 10,
+                crossAxisSpacing: 10,
+                childAspectRatio: 1.75,
+                children: [
+                  for (final tile in tiles)
+                    _CounterTile(label: tile.key, value: tile.value),
+                ],
+              );
+            },
+          ),
+          const SizedBox(height: 10),
+          // The way through to §18's scoped view. The tiles above are this
+          // sport's lifetime totals; this is where "and how many of those
+          // were in a tournament" gets answered.
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: () => context.push(
+                Routes.playerStats(widget.uid, selected.sportId),
+              ),
+              icon: const Icon(Icons.query_stats, size: 18),
+              label: const Text('Season, tournament and challenge splits'),
+            ),
+          ),
+        ],
       ],
     );
   }
 }
 
-class _Stat extends StatelessWidget {
-  const _Stat({required this.label, required this.value});
+/// One counter from the tally — "Runs / 1,824".
+class _CounterTile extends StatelessWidget {
+  const _CounterTile({required this.label, required this.value});
 
   final String label;
-  final String value;
+  final num value;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Expanded(
-      child: Semantics(
-        label: '$value $label',
-        excludeSemantics: true,
-        child: Column(
-          children: [
-            Text(value, style: theme.textTheme.headlineSmall),
-            const SizedBox(height: 2),
-            Text(label, style: theme.textTheme.bodySmall),
-          ],
-        ),
+    return PsCard(
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            psHumanizeCounter(label),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 11.5, color: Ps.muted),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            _formatValue(value),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w700,
+              color: Ps.ink,
+            ),
+          ),
+        ],
       ),
     );
   }
+
+  /// Whole numbers stay whole; averages and rates keep two places. A strike
+  /// rate rendered as "132" and an average as "45" would both be wrong in the
+  /// direction that flatters, which is the direction people notice.
+  static String _formatValue(num v) =>
+      v is int || v == v.roundToDouble() ? psGrouped(v.round()) : v.toStringAsFixed(2);
+
 }
 
 class _SportsList extends StatelessWidget {
@@ -470,7 +647,7 @@ class _TallyStrip extends StatelessWidget {
             side: BorderSide.none,
             backgroundColor: theme.colorScheme.surfaceContainerHighest,
             label: Text(
-              '${_humanize(e.key)} ${_format(e.value)}',
+              '${psHumanizeCounter(e.key)} ${_format(e.value)}',
               style: theme.textTheme.bodySmall,
             ),
           ),
@@ -481,14 +658,6 @@ class _TallyStrip extends StatelessWidget {
   static String _format(num v) =>
       v is int || v == v.roundToDouble() ? '${v.round()}' : v.toStringAsFixed(2);
 
-  /// `raidPoints` → `Raid points`.
-  static String _humanize(String key) {
-    final spaced = key.replaceAllMapped(
-      RegExp(r'(?<=[a-z0-9])(?=[A-Z])'),
-      (_) => ' ',
-    );
-    return spaced[0].toUpperCase() + spaced.substring(1).toLowerCase();
-  }
 }
 
 /// Every rival this player has faced, best-known record first.

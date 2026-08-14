@@ -465,6 +465,14 @@ void main() {
 
     final more = find.text('More · 2 more live');
     expect(more, findsOneWidget);
+    // Scrolled into view before tapping. The redesigned banner and the search
+    // field above it are ~110pt taller than what this test was written
+    // against, which puts this button just below an 800x600 test viewport
+    // once three live cards are stacked above it. Tapping an off-screen
+    // widget lands on whatever occupies those coordinates instead, so the
+    // failure reads as "navigation did not happen" and hides the real cause.
+    await tester.ensureVisible(more);
+    await settle(tester);
     await tester.tap(more);
     await settle(tester);
     expect(find.text('AT /live'), findsOneWidget);

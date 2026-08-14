@@ -39,7 +39,16 @@ class AppLocalizationsHi extends AppLocalizations {
   String get signInTitle => 'साइन इन';
 
   @override
+  String get signInTagline => 'प्रतियोगिताएं चलाएं, मैचों को लाइव स्कोर करें, और सभी को कहीं से भी साथ जुड़ने दें।';
+
+  @override
   String get signInWithGoogle => 'Google से जारी रखें';
+
+  @override
+  String get signInInProgress => 'साइन इन हो रहा है…';
+
+  @override
+  String get signInWatchWithoutAccount => 'आप बिना साइन इन किए कोई भी सार्वजनिक लाइव मैच देख सकते हैं — बस कोई साझा किया गया लिंक खोलें।';
 
   @override
   String get signOut => 'साइन आउट';

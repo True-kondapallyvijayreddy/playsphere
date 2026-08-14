@@ -91,12 +91,6 @@ class TournamentDetailScreen extends ConsumerWidget {
                     ),
                     const SizedBox(height: 16),
                     if (canManage)
-                      _ScheduleCard(
-                        orgId: orgId,
-                        tournament: tournament,
-                        overview: overview.valueOrNull,
-                      ),
-                    if (canManage)
                       Card(
                         margin: const EdgeInsets.only(bottom: 16),
                         child: ListTile(
@@ -114,10 +108,14 @@ class TournamentDetailScreen extends ConsumerWidget {
                       ),
                     if (canManage)
                       RunningLateCard(
-                        fixtures: ref
-                                .watch(tournamentFixturesProvider(key))
-                                .valueOrNull ??
-                            const [],
+                        // Draft placeholders are never "running late" — see
+                        // `Fixture.isDraft`.
+                        fixtures: (ref
+                                    .watch(tournamentFixturesProvider(key))
+                                    .valueOrNull ??
+                                const [])
+                            .where((f) => !f.isDraft)
+                            .toList(),
                         onShift: ({by, newStart}) => ref
                             .read(tournamentRepositoryProvider)
                             .shiftSchedule(
@@ -140,6 +138,15 @@ class TournamentDetailScreen extends ConsumerWidget {
                     LeaderboardCard(
                       leaderboard: ref
                           .watch(tournamentLeaderboardProvider(key))
+                          .valueOrNull,
+                    ),
+                    // Directly under the leaderboard: that board says who had
+                    // the best tournament, this one says what they actually
+                    // did. Reading one without the other is the gap between
+                    // "Rahul won five" and "Rahul scored 642".
+                    PlayerBoardsCard(
+                      bySport: ref
+                          .watch(tournamentPlayerBoardsBySportProvider(key))
                           .valueOrNull,
                     ),
                     _Events(
@@ -426,114 +433,6 @@ class _Stat extends StatelessWidget {
         ),
       ],
     );
-  }
-}
-
-/// Lays every event's matches onto the shared courts, in one pass.
-class _ScheduleCard extends ConsumerStatefulWidget {
-  const _ScheduleCard({
-    required this.orgId,
-    required this.tournament,
-    required this.overview,
-  });
-
-  final String orgId;
-  final Tournament tournament;
-  final TournamentOverview? overview;
-
-  @override
-  ConsumerState<_ScheduleCard> createState() => _ScheduleCardState();
-}
-
-class _ScheduleCardState extends ConsumerState<_ScheduleCard> {
-  bool _busy = false;
-  String? _summary;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final t = widget.tournament;
-    final blocked = t.venueIds.isEmpty
-        ? 'Pick at least one venue before generating a schedule.'
-        : (widget.overview?.events.isEmpty ?? true)
-            ? 'Add events to this tournament first.'
-            : null;
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Card(
-        color: theme.colorScheme.secondaryContainer,
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Order of play', style: theme.textTheme.titleMedium),
-              const SizedBox(height: 6),
-              Text(
-                blocked ??
-                    'Lays every event onto the shared courts at once — so two '
-                        'draws can never take the same court, and nobody '
-                        'entered in three events is called to two of them at '
-                        'the same minute.',
-                style: theme.textTheme.bodySmall,
-              ),
-              if (_summary != null) ...[
-                const SizedBox(height: 10),
-                Text(_summary!, style: theme.textTheme.bodyMedium),
-              ],
-              const SizedBox(height: 12),
-              FilledButton.tonalIcon(
-                onPressed: _busy || blocked != null ? null : _generate,
-                icon: _busy
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.calendar_month_outlined),
-                label: const Text('Generate the schedule'),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _generate() async {
-    setState(() {
-      _busy = true;
-      _summary = null;
-    });
-    try {
-      final report =
-          await ref.read(tournamentRepositoryProvider).generateSchedule(
-                orgId: widget.orgId,
-                tournamentId: widget.tournament.id,
-              );
-      if (!mounted) return;
-      final finish = report.finishesAt;
-      setState(() {
-        _summary = [
-          '${report.scheduled} matches placed across ${report.courts} courts '
-              'in ${report.events} events.',
-          if (finish != null)
-            'Last match starts '
-                '${finish.day.toString().padLeft(2, '0')}/'
-                '${finish.month.toString().padLeft(2, '0')} at '
-                '${finish.hour.toString().padLeft(2, '0')}:'
-                '${finish.minute.toString().padLeft(2, '0')}.',
-          if (report.unscheduled > 0)
-            '${report.unscheduled} could not be placed:',
-          ...report.problems,
-        ].join('\n');
-      });
-    } catch (e) {
-      if (mounted) showError(context, e);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
   }
 }
 

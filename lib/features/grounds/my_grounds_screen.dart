@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/layout/responsive.dart';
@@ -177,6 +179,11 @@ class _GroundCard extends ConsumerWidget {
                   ),
                 ),
                 IconButton(
+                  tooltip: 'Food menu',
+                  icon: const Icon(Icons.fastfood_outlined),
+                  onPressed: () => context.push('/grounds/${ground.id}/food/manage'),
+                ),
+                IconButton(
                   tooltip: 'Edit',
                   icon: const Icon(Icons.edit_outlined),
                   onPressed: onEdit,
@@ -288,7 +295,57 @@ class _GroundEditorState extends ConsumerState<GroundEditor> {
   late int _closeHour = widget.existing?.closeHour ?? 22;
   late bool _isIndoor = widget.existing?.isIndoor ?? false;
   late bool _isActive = widget.existing?.isActive ?? true;
+  late double? _lat = widget.existing?.latitude;
+  late double? _lng = widget.existing?.longitude;
+  bool _locating = false;
   bool _busy = false;
+
+  /// Pins the listing to exactly where the owner is standing. This is the
+  /// realistic version of "drop a pin on the map" for a ground owner filling
+  /// this form on a phone — see `Ground.latitude`'s doc comment on why the
+  /// search never depends on this being set, but "grounds near me" does.
+  Future<void> _useMyLocation() async {
+    setState(() => _locating = true);
+    try {
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        if (mounted) {
+          showError(
+            context,
+            'Location permission was declined. You can still list the '
+            'ground — it just won\'t show up in "near me" search until '
+            'you allow location and try again.',
+          );
+        }
+        return;
+      }
+      if (!await Geolocator.isLocationServiceEnabled()) {
+        if (mounted) {
+          showError(context, 'Turn on location services and try again.');
+        }
+        return;
+      }
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.medium,
+        ),
+      );
+      if (mounted) {
+        setState(() {
+          _lat = pos.latitude;
+          _lng = pos.longitude;
+        });
+      }
+    } catch (e) {
+      if (mounted) showError(context, e);
+    } finally {
+      if (mounted) setState(() => _locating = false);
+    }
+  }
 
   static const _facilityOptions = [
     'Floodlights',
@@ -333,6 +390,9 @@ class _GroundEditorState extends ConsumerState<GroundEditor> {
         name: _name.text.trim(),
         city: _city.text.trim(),
         address: _address.text.trim().isEmpty ? null : _address.text.trim(),
+        district: widget.existing?.district,
+        latitude: _lat,
+        longitude: _lng,
         sportIds: _sports.toList(),
         // Rupees in the form, paise in the model. The conversion happens in
         // exactly one place so it cannot be done twice or not at all.
@@ -407,6 +467,60 @@ class _GroundEditorState extends ConsumerState<GroundEditor> {
                     border: OutlineInputBorder(),
                   ),
                 ),
+                const SizedBox(height: 20),
+
+                const _Heading('Map location'),
+                const SizedBox(height: 4),
+                Text(
+                  'Lets players find this ground in "near me" search. Stand '
+                  'at the ground and tap below, or leave it — the listing '
+                  'still works, it just won\'t appear in distance search.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _locating ? null : _useMyLocation,
+                        icon: _locating
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.my_location),
+                        label: Text(
+                          _lat == null
+                              ? 'Use my current location'
+                              : 'Update to my current location',
+                        ),
+                      ),
+                    ),
+                    if (_lat != null) ...[
+                      const SizedBox(width: 8),
+                      IconButton(
+                        tooltip: 'Clear location',
+                        icon: const Icon(Icons.close),
+                        onPressed: () =>
+                            setState(() {
+                              _lat = null;
+                              _lng = null;
+                            }),
+                      ),
+                    ],
+                  ],
+                ),
+                if (_lat != null) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    'Pinned at ${_lat!.toStringAsFixed(5)}, '
+                    '${_lng!.toStringAsFixed(5)}',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
                 const SizedBox(height: 20),
 
                 const _Heading('Sports played here'),

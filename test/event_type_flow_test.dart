@@ -55,7 +55,9 @@ void main() {
         // choice landed rather than merely that something happened.
         for (final path in [
           '/org/:orgId/new-event/tournament',
+          '/org/:orgId/new-event/tournament/guided',
           '/org/:orgId/new-event/season',
+          '/org/:orgId/new-event/season/guided',
           '/org/:orgId/quick-match',
           '/org/:orgId/challenges',
         ])
@@ -123,18 +125,62 @@ void main() {
   });
 
   group('each type opens its own flow', () {
-    testWidgets('Season opens the multi-sport form', (tester) async {
+    testWidgets('Season opens the guided multi-sport flow', (tester) async {
       await pump(tester);
       await choose(tester, 'Season');
 
-      expect(find.text('AT /org/$orgId/new-event/season'), findsOneWidget);
+      expect(
+        find.text('AT /org/$orgId/new-event/season/guided'),
+        findsOneWidget,
+      );
     });
 
-    testWidgets('Tournament opens the single-sport form', (tester) async {
+    testWidgets('Tournament opens the guided flow', (tester) async {
       await pump(tester);
       await choose(tester, 'Tournament');
 
+      expect(
+        find.text('AT /org/$orgId/new-event/tournament/guided'),
+        findsOneWidget,
+      );
+    });
+
+    /// Both Tournament and Season carry a "Quick create", so a bare
+    /// `find.text` matches two. Scoped to the card the button sits in.
+    Finder quickCreateIn(String typeLabel) => find.descendant(
+          of: find.ancestor(
+            of: find.text(typeLabel),
+            matching: find.byType(Card),
+          ),
+          matching: find.text('Quick create'),
+        );
+
+    testWidgets('Quick create still reaches the one-page tournament form',
+        (tester) async {
+      // The guided flow is the default, but the single page it was built
+      // beside must stay reachable — an organizer setting up eight events for
+      // a sports day should not walk six steps eight times, which is the
+      // reason `CreateCompetitionScreen` is one page in the first place.
+      await pump(tester);
+      await tester.tap(quickCreateIn('Tournament'));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
       expect(find.text('AT /org/$orgId/new-event/tournament'), findsOneWidget);
+    });
+
+    testWidgets('Quick create still reaches the one-page season form',
+        (tester) async {
+      // Not merely a shortcut here: the one-page season form is the only
+      // route to the same sport twice under different age bands, which a
+      // school sports week genuinely runs. The guided flow deliberately
+      // offers one entry per sport.
+      await pump(tester);
+      await tester.tap(quickCreateIn('Season'));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(find.text('AT /org/$orgId/new-event/season'), findsOneWidget);
     });
 
     testWidgets('Single match goes to the quick-match screen', (tester) async {

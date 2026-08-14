@@ -12,6 +12,47 @@ import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
 
+/// One configured entry in a season: a sport, played in one arrangement
+/// (singles, doubles, 11-a-side...), for one age/gender category.
+///
+/// A season is not "sports", it is "categories" — a school sports week
+/// genuinely runs Badminton Singles Boys U-14 *and* Badminton Doubles Open as
+/// two separate draws with two separate entry lists, not one Badminton entry
+/// that can only ever mean one of them. Each draft here becomes exactly one
+/// [Competition] when the season is created, which is also what lets the
+/// same sport appear twice — once per arrangement — instead of being capped
+/// at one entry each.
+class _CategoryDraft {
+  _CategoryDraft({
+    required this.sportId,
+    required this.sideFormat,
+    required this.category,
+  })  : format = SportCatalog.byId(sportId).competitionFormats.first,
+        entries = TextEditingController();
+
+  final String sportId;
+  final SideFormat sideFormat;
+  final CompetitionCategory category;
+
+  /// Editable after the draft is added — an organizer picks the draw shape
+  /// once they can see the whole season laid out, not while still choosing
+  /// the sport.
+  CompetitionFormat format;
+  final TextEditingController entries;
+
+  SportSpec get sport => SportCatalog.byId(sportId);
+
+  /// Whether [other] configures the same slot — same sport, same
+  /// arrangement, same category — which would otherwise silently create two
+  /// identical draws under one season with no way to tell them apart.
+  bool clashesWith(_CategoryDraft other) =>
+      sportId == other.sportId &&
+      sideFormat.id == other.sideFormat.id &&
+      category.label == other.category.label;
+
+  void dispose() => entries.dispose();
+}
+
 /// Creating a multi-sport season (Feature #8).
 ///
 /// ## What a season is, and why it is not just several tournaments
@@ -25,7 +66,8 @@ import '../../shared/app_scaffold.dart';
 /// separately and attach it by hand.
 ///
 /// This creates the whole thing in one pass: the season, plus one event per
-/// sport chosen, each carrying its own entry limit.
+/// category chosen, each carrying its own arrangement, its own age/gender
+/// band and its own entry limit.
 ///
 /// ## External entries
 ///
@@ -49,20 +91,13 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
   final _name = TextEditingController();
   final _venue = TextEditingController();
 
-  /// Sport id → the entry limit typed for it. Presence in this map is what
-  /// "this sport is included" means, so adding and removing a sport cannot
-  /// drift out of step with its own settings.
-  final _entriesBySport = <String, TextEditingController>{};
-
-  /// Sport id → the draw format chosen for it. Every sport in a season can
-  /// need a different one — a five-team cricket league plays a round robin,
-  /// a thirty-two-player badminton draw wants a knockout — so this is per
-  /// sport rather than one setting for the whole season.
-  final _formatBySport = <String, CompetitionFormat>{};
+  /// Every sport/arrangement/category combination this season runs. Presence
+  /// in this list is what "included" means, so the entries, format and
+  /// category for one draw can never drift out of step with each other.
+  final List<_CategoryDraft> _categories = [];
 
   DateTime? _startDate;
   DateTime? _endDate;
-  late CompetitionCategory _category = CompetitionCategory.presets().first;
   bool _externalEntries = false;
   bool _busy = false;
 
@@ -70,30 +105,21 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
   void dispose() {
     _name.dispose();
     _venue.dispose();
-    for (final c in _entriesBySport.values) {
+    for (final c in _categories) {
       c.dispose();
     }
     super.dispose();
   }
 
-  List<String> get _chosenSports => _entriesBySport.keys.toList();
-
-  void _toggleSport(String sportId, bool on) {
-    setState(() {
-      if (on) {
-        _entriesBySport[sportId] = TextEditingController();
-        _formatBySport[sportId] = SportCatalog.byId(sportId).competitionFormats.first;
-      } else {
-        _entriesBySport.remove(sportId)?.dispose();
-        _formatBySport.remove(sportId);
-      }
-    });
-  }
-
-  int? _entriesFor(String sportId) {
-    final text = _entriesBySport[sportId]?.text.trim() ?? '';
-    if (text.isEmpty) return null;
-    return int.tryParse(text);
+  /// The earliest a season is allowed to start: tomorrow.
+  ///
+  /// A season starting today gives entrants no notice at all, and a start
+  /// date in the past is not a smaller season, it is a mistake. Bounding the
+  /// date picker here means the wrong date is never offered in the first
+  /// place, rather than being accepted and rejected on submit.
+  static DateTime get _earliestStart {
+    final today = DateTime.now();
+    return DateTime(today.year, today.month, today.day + 1);
   }
 
   /// Entries from outside the club must be approved, not auto-confirmed.
@@ -104,10 +130,71 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
   ParticipationModel get _participation =>
       _externalEntries ? ParticipationModel.approval : ParticipationModel.open;
 
+  void _onStartDateChanged(DateTime picked) {
+    setState(() {
+      _startDate = picked;
+      // The end date answers "and ends when" — once it is earlier than a
+      // newly-picked start it is not a shorter season, it is nonsense, so it
+      // is cleared rather than silently carried forward invalid.
+      if (_endDate != null && _endDate!.isBefore(picked)) {
+        _endDate = null;
+      }
+    });
+  }
+
+  Future<void> _addCategory() async {
+    final draft = await showModalBottomSheet<_CategoryDraft>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _AddCategorySheet(cutOff: _startDate),
+    );
+    if (draft == null) return;
+    if (_categories.any(draft.clashesWith)) {
+      if (mounted) {
+        showError(
+          context,
+          '${draft.sport.name} · ${draft.sideFormat.name} · '
+          '${draft.category.label} is already in this season.',
+        );
+      }
+      draft.dispose();
+      return;
+    }
+    setState(() => _categories.add(draft));
+  }
+
+  void _removeCategory(_CategoryDraft draft) {
+    setState(() => _categories.remove(draft));
+    draft.dispose();
+  }
+
+  int? _entriesFor(_CategoryDraft draft) {
+    final text = draft.entries.text.trim();
+    if (text.isEmpty) return null;
+    return int.tryParse(text);
+  }
+
   Future<void> _create() async {
     if (!_formKey.currentState!.validate()) return;
-    if (_chosenSports.isEmpty) {
-      showError(context, 'Pick at least one sport for this season.');
+    if (_categories.isEmpty) {
+      showError(context, 'Add at least one category for this season.');
+      return;
+    }
+    final start = _startDate;
+    if (start == null) {
+      showError(context, 'Pick a start date.');
+      return;
+    }
+    // Defence in depth alongside the date pickers' own bounds: the pickers
+    // stop these being chosen, this stops them being submitted if the device
+    // clock moved on while the form sat open.
+    if (start.isBefore(_earliestStart)) {
+      showError(context, 'Start date must be at least tomorrow.');
+      return;
+    }
+    final end = _endDate;
+    if (end != null && end.isBefore(start)) {
+      showError(context, 'End date cannot be before the start date.');
       return;
     }
     final uid = ref.read(currentUidProvider);
@@ -127,35 +214,43 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
           orgId: widget.orgId,
           name: _name.text.trim(),
           status: TournamentStatus.draft,
-          startDate: _startDate,
-          endDate: _endDate ?? _startDate,
-          eventCount: _chosenSports.length,
+          startDate: start,
+          endDate: end ?? start,
+          eventCount: _categories.length,
           createdBy: uid,
         ),
       );
 
-      for (final sportId in _chosenSports) {
-        final sport = SportCatalog.byId(sportId);
+      for (final draft in _categories) {
+        final sport = draft.sport;
+        // Only worth saying in the name when the sport actually has more
+        // than one arrangement — cricket does not need "(11 a side)"
+        // appended to every event when that is the only option it has.
+        final showsArrangement = sport.sideFormats.length > 1;
         await competitions.createCompetition(
           Competition(
             id: '',
             orgId: widget.orgId,
             tournamentId: seasonId,
-            // Named for the sport within the season rather than repeating the
-            // season's name: a list of events reading "Sports Week 2026" five
-            // times tells an organizer nothing.
-            name: '${_name.text.trim()} — ${sport.name}',
+            name: showsArrangement
+                ? '${_name.text.trim()} — ${sport.name} '
+                    '(${draft.sideFormat.name})'
+                : '${_name.text.trim()} — ${sport.name}',
             sportId: sport.id,
             sportName: sport.name,
             archetype: sport.archetype,
             entrantType: sport.defaultEntrantType,
-            format: _formatBySport[sportId] ?? sport.competitionFormats.first,
+            format: draft.format,
             status: CompetitionStatus.draft,
-            category: _category,
+            category: draft.category,
             scoringPluginKey: sport.pluginKey,
+            // The arrangement's own rule tweaks — doubles' serve rotation,
+            // a smaller side's player count — layered over the sport's
+            // default preset. See [Competition.effectiveScoringConfig].
+            scoringConfig: draft.sideFormat.configOverrides,
             venue: _venue.text.trim().isEmpty ? null : _venue.text.trim(),
-            startDate: _startDate,
-            maxEntrants: _entriesFor(sportId),
+            startDate: start,
+            maxEntrants: _entriesFor(draft),
             participationModel: _participation,
             waitlistEnabled: true,
             openToNonMembers: _externalEntries,
@@ -171,7 +266,7 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
       tournaments.noteEventsCreated(
         orgId: widget.orgId,
         tournamentId: seasonId,
-        count: _chosenSports.length,
+        count: _categories.length,
       );
 
       if (mounted) {
@@ -189,7 +284,6 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final presets = CompetitionCategory.presets(cutOff: _startDate);
 
     return AppScaffold(
       orgId: widget.orgId,
@@ -222,15 +316,18 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
 
                   _DateField(
                     label: 'Starts',
-                    helper: 'Ages are measured on this date',
+                    helper: 'Ages are measured on this date. Must be at '
+                        'least tomorrow.',
                     value: _startDate,
-                    onPick: (d) => setState(() => _startDate = d),
+                    firstSelectableDate: _earliestStart,
+                    onPick: _onStartDateChanged,
                   ),
                   const SizedBox(height: 20),
                   _DateField(
                     label: 'Ends (optional)',
                     helper: 'Leave blank for a one-day season',
                     value: _endDate,
+                    firstSelectableDate: _startDate ?? _earliestStart,
                     onPick: (d) => setState(() => _endDate = d),
                   ),
                   const SizedBox(height: 20),
@@ -243,60 +340,50 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
                       border: OutlineInputBorder(),
                     ),
                   ),
-                  const SizedBox(height: 20),
-
-                  DropdownButtonFormField<String>(
-                    value: _category.label,
-                    isExpanded: true,
-                    decoration: const InputDecoration(
-                      labelText: 'Category',
-                      helperText: 'Applied to every sport in the season',
-                      border: OutlineInputBorder(),
-                    ),
-                    items: [
-                      for (final c in presets)
-                        DropdownMenuItem(value: c.label, child: Text(c.label)),
-                    ],
-                    onChanged: (label) => setState(
-                      () => _category =
-                          presets.firstWhere((c) => c.label == label),
-                    ),
-                  ),
                   const SizedBox(height: 28),
 
-                  // ---- Sports, and the entries each takes ----------------
-                  Text('Sports included', style: theme.textTheme.titleMedium),
-                  const SizedBox(height: 2),
+                  // ---- Categories -----------------------------------------
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Categories',
+                          style: theme.textTheme.titleMedium,
+                        ),
+                      ),
+                      TextButton.icon(
+                        onPressed: _addCategory,
+                        icon: const Icon(Icons.add),
+                        label: const Text('Add'),
+                      ),
+                    ],
+                  ),
                   Text(
-                    'Pick every sport this season runs. Each becomes its own '
-                    'event with its own entry list, all under this season.',
+                    'Each one becomes its own draw with its own entry list — '
+                    'add Badminton Singles and Badminton Doubles separately '
+                    'if this season runs both.',
                     style: theme.textTheme.bodySmall,
                   ),
                   const SizedBox(height: 12),
 
-                  for (final sport in SportCatalog.all)
-                    _SportRow(
-                      sportId: sport.id,
-                      icon: sport.icon,
-                      name: sport.name,
-                      included: _entriesBySport.containsKey(sport.id),
-                      entries: _entriesBySport[sport.id],
-                      format: _formatBySport[sport.id],
-                      onFormatChanged: (f) =>
-                          setState(() => _formatBySport[sport.id] = f),
-                      onToggle: (on) => _toggleSport(sport.id, on),
-                      onConfigChanged: (config) {},
-                    ),
-
-                  if (_chosenSports.isEmpty)
+                  if (_categories.isEmpty)
                     Padding(
-                      padding: const EdgeInsets.only(top: 8),
+                      padding: const EdgeInsets.symmetric(vertical: 8),
                       child: Text(
-                        'Pick at least one sport.',
+                        'No categories yet — add at least one.',
                         style: theme.textTheme.bodySmall
                             ?.copyWith(color: theme.colorScheme.error),
                       ),
-                    ),
+                    )
+                  else
+                    for (final draft in _categories)
+                      _CategoryCard(
+                        key: ObjectKey(draft),
+                        draft: draft,
+                        onFormatChanged: (f) =>
+                            setState(() => draft.format = f),
+                        onRemove: () => _removeCategory(draft),
+                      ),
                   const SizedBox(height: 28),
 
                   // ---- Who may enter -------------------------------------
@@ -324,10 +411,10 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
                     ),
                     icon: const Icon(Icons.calendar_month_outlined),
                     label: Text(
-                      _chosenSports.isEmpty
+                      _categories.isEmpty
                           ? 'Create season'
-                          : 'Create season with ${_chosenSports.length} '
-                              '${_chosenSports.length == 1 ? 'sport' : 'sports'}',
+                          : 'Create season with ${_categories.length} '
+                              '${_categories.length == 1 ? 'category' : 'categories'}',
                     ),
                   ),
                 ],
@@ -340,78 +427,87 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
   }
 }
 
-class _SportRow extends StatefulWidget {
-  const _SportRow({
-    required this.sportId,
-    required this.icon,
-    required this.name,
-    required this.included,
-    required this.entries,
-    required this.format,
+/// One category already added to the season, shown with its format and
+/// entry limit editable in place.
+class _CategoryCard extends StatelessWidget {
+  const _CategoryCard({
+    super.key,
+    required this.draft,
     required this.onFormatChanged,
-    required this.onToggle,
-    required this.onConfigChanged,
+    required this.onRemove,
   });
 
-  final String sportId;
-  final String icon;
-  final String name;
-  final bool included;
-  final TextEditingController? entries;
-
-  /// Null while the sport is not included — [CreateSeasonScreen._toggleSport]
-  /// picks a default the moment it is checked, so this is only ever null for
-  /// the instant before that setState lands.
-  final CompetitionFormat? format;
+  final _CategoryDraft draft;
   final ValueChanged<CompetitionFormat> onFormatChanged;
-  final ValueChanged<bool> onToggle;
-  final ValueChanged<Map<String, dynamic>> onConfigChanged;
-
-  @override
-  State<_SportRow> createState() => _SportRowState();
-}
-
-class _SportRowState extends State<_SportRow> {
-  String _overs = '20';
-  String _ballType = 'Leather';
-  String _discipline = 'Singles';
-
-  void _notify() {
-    widget.onConfigChanged({
-      'overs': int.tryParse(_overs) ?? 20,
-      'ballType': _ballType,
-      'discipline': _discipline,
-    });
-  }
+  final VoidCallback onRemove;
 
   @override
   Widget build(BuildContext context) {
-    final isCricket = widget.sportId == 'cricket';
-    final isRacquet = widget.sportId == 'tennis' ||
-        widget.sportId == 'badminton' ||
-        widget.sportId == 'table_tennis';
+    final theme = Theme.of(context);
+    final sport = draft.sport;
+    final showsArrangement = sport.sideFormats.length > 1;
 
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: CheckboxListTile(
-                  contentPadding: EdgeInsets.zero,
-                  controlAffinity: ListTileControlAffinity.leading,
-                  value: widget.included,
-                  onChanged: (v) => widget.onToggle(v ?? false),
-                  title: Text('${widget.icon}  ${widget.name}'),
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Wrap(
+                    spacing: 6,
+                    runSpacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      Text(
+                        '${sport.icon}  ${sport.name}',
+                        style: theme.textTheme.titleSmall,
+                      ),
+                      if (showsArrangement) _Chip(draft.sideFormat.name),
+                      if (!draft.category.isOpen) _Chip(draft.category.label),
+                    ],
+                  ),
                 ),
-              ),
-              if (widget.included)
-                SizedBox(
-                  width: 108,
+                IconButton(
+                  onPressed: onRemove,
+                  icon: const Icon(Icons.close),
+                  tooltip: 'Remove',
+                  visualDensity: VisualDensity.compact,
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  flex: 3,
+                  child: DropdownButtonFormField<CompetitionFormat>(
+                    value: draft.format,
+                    isDense: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Format',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                    items: [
+                      for (final f in sport.competitionFormats)
+                        DropdownMenuItem(value: f, child: Text(f.label)),
+                    ],
+                    onChanged: (f) {
+                      if (f != null) onFormatChanged(f);
+                    },
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  flex: 2,
                   child: TextFormField(
-                    controller: widget.entries,
+                    controller: draft.entries,
                     keyboardType: TextInputType.number,
                     decoration: const InputDecoration(
                       labelText: 'Entries',
@@ -427,115 +523,159 @@ class _SportRowState extends State<_SportRow> {
                     },
                   ),
                 ),
-            ],
-          ),
-          if (widget.included && widget.format != null)
-            Padding(
-              padding: const EdgeInsets.only(left: 32, bottom: 4),
-              child: SizedBox(
-                width: 220,
-                child: DropdownButtonFormField<CompetitionFormat>(
-                  value: widget.format,
-                  isDense: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Format',
-                    isDense: true,
-                    border: OutlineInputBorder(),
-                  ),
-                  items: [
-                    for (final f in SportCatalog.byId(widget.sportId).competitionFormats)
-                      DropdownMenuItem(value: f, child: Text(f.label)),
-                  ],
-                  onChanged: (f) {
-                    if (f != null) widget.onFormatChanged(f);
-                  },
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _Chip extends StatelessWidget {
+  const _Chip(this.label);
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.secondaryContainer,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Text(
+        label,
+        style: theme.textTheme.labelSmall
+            ?.copyWith(color: theme.colorScheme.onSecondaryContainer),
+      ),
+    );
+  }
+}
+
+/// Asks the questions that fully describe one season category, in the order
+/// an organizer actually thinks in: which sport, then which arrangement it
+/// is played in (skipped entirely when the sport only has one), then which
+/// age/gender band it is for.
+class _AddCategorySheet extends StatefulWidget {
+  const _AddCategorySheet({required this.cutOff});
+
+  /// The season's start date, so age presets are measured against it rather
+  /// than today — a U-14 category should not silently mean something
+  /// different depending on when the organizer happened to build the season.
+  final DateTime? cutOff;
+
+  @override
+  State<_AddCategorySheet> createState() => _AddCategorySheetState();
+}
+
+class _AddCategorySheetState extends State<_AddCategorySheet> {
+  late SportSpec _sport = SportCatalog.all.first;
+  late SideFormat _sideFormat = _sport.defaultSideFormat;
+  late final List<CompetitionCategory> _presets =
+      CompetitionCategory.presets(cutOff: widget.cutOff);
+  late CompetitionCategory _category = _presets.first;
+
+  void _pickSport(String id) {
+    setState(() {
+      _sport = SportCatalog.byId(id);
+      _sideFormat = _sport.defaultSideFormat;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final showsArrangement = _sport.sideFormats.length > 1;
+
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 20,
+        right: 20,
+        top: 20,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 20,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Add a category', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 16),
+
+          DropdownButtonFormField<String>(
+            value: _sport.id,
+            isExpanded: true,
+            decoration: const InputDecoration(
+              labelText: 'Sport',
+              border: OutlineInputBorder(),
+            ),
+            items: [
+              for (final s in SportCatalog.all)
+                DropdownMenuItem(
+                  value: s.id,
+                  child: Text('${s.icon}  ${s.name}'),
                 ),
+            ],
+            onChanged: (id) {
+              if (id != null) _pickSport(id);
+            },
+          ),
+          const SizedBox(height: 16),
+
+          if (showsArrangement) ...[
+            DropdownButtonFormField<String>(
+              value: _sideFormat.id,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                labelText: 'Sport type',
+                helperText: 'How this category is played',
+                border: OutlineInputBorder(),
+              ),
+              items: [
+                for (final f in _sport.sideFormats)
+                  DropdownMenuItem(value: f.id, child: Text(f.name)),
+              ],
+              onChanged: (id) {
+                if (id == null) return;
+                setState(
+                  () => _sideFormat =
+                      _sport.sideFormats.firstWhere((f) => f.id == id),
+                );
+              },
+            ),
+            const SizedBox(height: 16),
+          ],
+
+          DropdownButtonFormField<String>(
+            value: _category.label,
+            isExpanded: true,
+            decoration: const InputDecoration(
+              labelText: 'Category',
+              border: OutlineInputBorder(),
+            ),
+            items: [
+              for (final c in _presets)
+                DropdownMenuItem(value: c.label, child: Text(c.label)),
+            ],
+            onChanged: (label) => setState(
+              () => _category = _presets.firstWhere((c) => c.label == label),
+            ),
+          ),
+          const SizedBox(height: 20),
+
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(
+              _CategoryDraft(
+                sportId: _sport.id,
+                sideFormat: _sideFormat,
+                category: _category,
               ),
             ),
-          if (widget.included && (isCricket || isRacquet))
-            Padding(
-              padding: const EdgeInsets.only(left: 32, top: 4, bottom: 8),
-              child: Wrap(
-                spacing: 12,
-                runSpacing: 8,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  if (isCricket) ...[
-                    SizedBox(
-                      width: 130,
-                      child: DropdownButtonFormField<String>(
-                        value: _overs,
-                        isDense: true,
-                        decoration: const InputDecoration(
-                          labelText: 'Overs',
-                          border: OutlineInputBorder(),
-                        ),
-                        items: const [
-                          DropdownMenuItem(value: '20', child: Text('20 Overs (T20)')),
-                          DropdownMenuItem(value: '15', child: Text('15 Overs')),
-                          DropdownMenuItem(value: '12', child: Text('12 Overs')),
-                          DropdownMenuItem(value: '10', child: Text('10 Overs')),
-                          DropdownMenuItem(value: '8', child: Text('8 Overs')),
-                        ],
-                        onChanged: (v) {
-                          if (v != null) {
-                            setState(() => _overs = v);
-                            _notify();
-                          }
-                        },
-                      ),
-                    ),
-                    SizedBox(
-                      width: 140,
-                      child: DropdownButtonFormField<String>(
-                        value: _ballType,
-                        isDense: true,
-                        decoration: const InputDecoration(
-                          labelText: 'Ball Type',
-                          border: OutlineInputBorder(),
-                        ),
-                        items: const [
-                          DropdownMenuItem(value: 'Leather', child: Text('Leather Ball')),
-                          DropdownMenuItem(value: 'Tennis', child: Text('Tennis Ball')),
-                          DropdownMenuItem(value: 'Tape', child: Text('Tape Ball')),
-                          DropdownMenuItem(value: 'Soft', child: Text('Soft Ball')),
-                        ],
-                        onChanged: (v) {
-                          if (v != null) {
-                            setState(() => _ballType = v);
-                            _notify();
-                          }
-                        },
-                      ),
-                    ),
-                  ],
-                  if (isRacquet) ...[
-                    SizedBox(
-                      width: 160,
-                      child: DropdownButtonFormField<String>(
-                        value: _discipline,
-                        isDense: true,
-                        decoration: const InputDecoration(
-                          labelText: 'Discipline',
-                          border: OutlineInputBorder(),
-                        ),
-                        items: const [
-                          DropdownMenuItem(value: 'Singles', child: Text('Singles (1v1)')),
-                          DropdownMenuItem(value: 'Doubles', child: Text('Doubles (2v2)')),
-                          DropdownMenuItem(value: 'Mixed', child: Text('Mixed Doubles')),
-                        ],
-                        onChanged: (v) {
-                          if (v != null) {
-                            setState(() => _discipline = v);
-                            _notify();
-                          }
-                        },
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
+            style:
+                FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
+            child: const Text('Add category'),
+          ),
         ],
       ),
     );
@@ -548,6 +688,7 @@ class _DateField extends StatelessWidget {
     required this.helper,
     required this.value,
     required this.onPick,
+    this.firstSelectableDate,
   });
 
   final String label;
@@ -555,16 +696,24 @@ class _DateField extends StatelessWidget {
   final DateTime? value;
   final ValueChanged<DateTime> onPick;
 
+  /// Earliest date the picker will offer. This is what actually enforces
+  /// "start date is at least tomorrow" and "end date is not before the
+  /// start date" — the wheel simply never shows anything earlier, rather
+  /// than accepting a bad date and rejecting it after the fact.
+  final DateTime? firstSelectableDate;
+
   @override
   Widget build(BuildContext context) {
+    final first = firstSelectableDate ?? DateTime.now();
     return InkWell(
       onTap: () async {
-        final now = DateTime.now();
+        final initial =
+            value != null && !value!.isBefore(first) ? value! : first;
         final picked = await showDatePicker(
           context: context,
-          initialDate: value ?? now,
-          firstDate: DateTime(now.year - 1),
-          lastDate: DateTime(now.year + 3),
+          initialDate: initial,
+          firstDate: first,
+          lastDate: DateTime(first.year + 3),
         );
         if (picked != null) onPick(picked);
       },

@@ -79,16 +79,23 @@ class HeadToHead {
       // player's uid. Falling back to the entrant is what makes this work for
       // singles, which is the overwhelming majority of what it is read for.
       final lineup = mine == 'a' ? f.lineupB : f.lineupA;
+      // The opponent's recorded account is preferred over their entrant id —
+      // it is the field the draw and every advancement now write, and the one
+      // the rules freeze. The entrant id remains the fallback for fixtures
+      // predating it, where the two are equal anyway.
+      final otherUid = mine == 'a' ? f.entrantBUid : f.entrantAUid;
+      final otherId = mine == 'a' ? f.entrantBId : f.entrantAId;
+      final otherName = mine == 'a' ? f.entrantBName : f.entrantAName;
       final opponents = lineup.isNotEmpty
           ? [
               for (final p in lineup)
                 if (p.uid != null) (uid: p.uid!, name: p.name),
             ]
           : [
-              if (mine == 'a' && f.entrantBId.isNotEmpty)
-                (uid: f.entrantBId, name: f.entrantBName)
-              else if (mine == 'b' && f.entrantAId.isNotEmpty)
-                (uid: f.entrantAId, name: f.entrantAName),
+              if (otherUid != null)
+                (uid: otherUid, name: otherName)
+              else if (otherId.isNotEmpty)
+                (uid: otherId, name: otherName),
             ];
 
       final won = mine == 'a'
@@ -165,10 +172,16 @@ class HeadToHead {
 
   /// Which side of a fixture a player was on, or null if they were on neither.
   static String? _sideOf(String uid, Fixture f) {
-    if (f.lineupA.any((p) => p.uid == uid)) return 'a';
-    if (f.lineupB.any((p) => p.uid == uid)) return 'b';
-    // An individual event names its competitor on the entrant rather than in a
-    // line-up, so the entrant id is the uid.
+    // `Fixture.sideForUid` is the one definition of this — line-ups first,
+    // then the account recorded for a side that IS one person. Kept as a
+    // delegate rather than a second copy so head-to-head and the match list
+    // can never disagree about which side somebody played for.
+    final side = f.sideForUid(uid);
+    if (side != null) return side;
+    // Legacy fallback for fixtures written before `entrantAUid` existed and
+    // not yet reached by `backfillFixtureParticipants`: for an individual
+    // entrant the document id IS the uid (see
+    // `CompetitionRepository.closeEntries`).
     if (f.entrantAId == uid) return 'a';
     if (f.entrantBId == uid) return 'b';
     return null;

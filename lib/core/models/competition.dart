@@ -316,6 +316,24 @@ class Competition {
   /// that this draw shares courts and players with fourteen others.
   final String? tournamentId;
 
+  /// What a match born out of this competition should record as its origin —
+  /// `docs/Heart_of_the_playsphere.md` §12.
+  ///
+  /// The season wins when there is one. A player looking at their history
+  /// wants to see "Hyderabad Sports Season 2026", not the internal
+  /// single-sport event underneath it — and the season is also the thing that
+  /// has a name they would recognise. Where there is no season, a standalone
+  /// competition *is* the doc's "Tournament": one competition, one sport.
+  MatchSource get matchSource {
+    if (tournamentId != null) return MatchSource.season;
+    if (format == CompetitionFormat.leagueTable) return MatchSource.league;
+    return MatchSource.tournament;
+  }
+
+  /// The id that goes with [matchSource] — the season's when there is one,
+  /// otherwise this competition's own.
+  String get matchSourceId => tournamentId ?? id;
+
   /// How match points are awarded when the margin matters — volleyball's
   /// 3-0/3-1 versus 3-2 split, a losing bonus point. Disabled by default, so
   /// an existing league keeps exactly the points it has been awarding.
@@ -869,6 +887,7 @@ class Entrant {
     this.seed,
     this.memberUids = const [],
     this.clubId,
+    this.teamId,
     this.withdrawn = false,
   });
 
@@ -887,6 +906,38 @@ class Entrant {
   /// Populated for team entrants.
   final List<String> memberUids;
 
+  /// The persistent `teams/{teamId}` document this entrant is, when it is one.
+  ///
+  /// Null for an individual, and null for a team entered ad hoc by typing a
+  /// name into the registration form — both remain valid, because Rule 5 says
+  /// nobody is forced into a structure to compete.
+  ///
+  /// ## Why this is a link and not a replacement
+  ///
+  /// [displayName] and [memberUids] stay exactly as they were: they are the
+  /// snapshot of who this side was *on the day*, and Rule 31 requires the
+  /// record to survive the team renaming itself or changing its roster
+  /// afterwards. This field adds continuity on top of that snapshot — it is
+  /// what lets a team profile list every competition it ever entered, and
+  /// what a future team-statistics aggregation groups by. Reading the name
+  /// from the team document instead would silently rewrite history every time
+  /// somebody edited their squad.
+  final String? teamId;
+
+  /// This entrant's account when the entrant IS one person — and null for
+  /// every team, however small.
+  ///
+  /// The single definition of "this side is a player, not a squad", so that
+  /// [Fixture.entrantAUid] and the settlement trigger cannot come to different
+  /// conclusions about the same document. Both [entrantType] and [uid] are
+  /// checked: `EntrantType.fromWire` falls back to `individual` for an
+  /// unrecognised value, so the type alone is not proof, and a team entrant
+  /// that happens to carry its captain's uid must not be mistaken for them.
+  String? get soloUid =>
+      entrantType == EntrantType.individual && uid != null && uid!.isNotEmpty
+          ? uid
+          : null;
+
   /// Returns this entrant carrying [seed], for handing a freshly-computed
   /// seeding to the draw generator without mutating what was read.
   Entrant withSeed(int? seed) => Entrant(
@@ -898,6 +949,7 @@ class Entrant {
         seed: seed,
         memberUids: memberUids,
         clubId: clubId,
+        teamId: teamId,
         withdrawn: withdrawn,
       );
 
@@ -922,6 +974,7 @@ class Entrant {
       seed: d['seed'] == null ? null : Fs.integer(d['seed']),
       memberUids: Fs.strList(d['memberUids']),
       clubId: Fs.strOrNull(d['clubId']),
+      teamId: Fs.strOrNull(d['teamId']),
       withdrawn: Fs.boolean(d['withdrawn']),
     );
   }
@@ -934,6 +987,7 @@ class Entrant {
         'seed': seed,
         'memberUids': memberUids,
         'clubId': clubId,
+        'teamId': teamId,
         'withdrawn': withdrawn,
       };
 }

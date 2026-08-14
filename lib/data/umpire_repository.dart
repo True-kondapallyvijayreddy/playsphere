@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../core/errors/app_exception.dart';
 import '../core/firebase/firestore_refs.dart';
+import '../core/models/enums.dart';
 import '../core/models/fixture.dart';
 import '../core/models/match_official.dart';
 import '../core/models/umpire_profile.dart';
@@ -110,6 +111,131 @@ class UmpireRepository {
     await fixRef.update({
       'officials': MatchOfficial.listTo(existingOfficials),
       'scorerUids': updatedScorers,
+      // Naming an official advances the match's readiness — §7's
+      // SCHEDULED -> OFFICIALS ASSIGNED. Only ever forwards, and never past
+      // `ready`: declaring a match ready is the organizer's deliberate act in
+      // the Match Center, not a side effect of filling one of several slots.
+      if (fixture.readiness == MatchReadiness.scheduled)
+        'readiness': MatchReadiness.officialsAssigned.wire,
     });
+  }
+
+  /// Removes an official from a match, and their scoring access with them.
+  ///
+  /// The counterpart to [assignOfficialToFixture], and its absence was a real
+  /// gap: an umpire assigned by mistake, or one who cannot make it, could
+  /// only be replaced by assigning somebody else — which left the first one
+  /// still holding the pen on a match they are not officiating.
+  Future<void> removeOfficialFromFixture({
+    required String orgId,
+    required String compId,
+    required String fixtureId,
+    required String officialUid,
+  }) async {
+    final fixRef = Refs.fixture(orgId, compId, fixtureId);
+    final doc = await fixRef.get();
+    if (!doc.exists) return;
+
+    final fixture = Fixture.fromDoc(doc);
+    final remaining =
+        fixture.officials.where((o) => o.uid != officialUid).toList();
+
+    await fixRef.update({
+      'officials': MatchOfficial.listTo(remaining),
+      // Scoring access goes with the role. Leaving it behind would mean an
+      // official removed from a match could still write its score, which is
+      // the one thing removing them was meant to stop.
+      'scorerUids': fixture.scorerUids.where((u) => u != officialUid).toList(),
+      // Back to `scheduled` once the last official is gone, so the Match
+      // Center stops claiming a panel that no longer exists.
+      if (remaining.isEmpty &&
+          fixture.readiness == MatchReadiness.officialsAssigned)
+        'readiness': MatchReadiness.scheduled.wire,
+    });
+  }
+
+  /// Hands somebody the pen for one match — §6.
+  ///
+  /// Separate from [assignOfficialToFixture] because a scorer is not
+  /// necessarily an official. The doc lists an official scorer, a team
+  /// scorer, the organizer and a remote scorer as four ways to fill the role,
+  /// and at grassroots level it is routinely a captain or a parent on the
+  /// boundary. All four are the same fact to the model — a uid that may write
+  /// this match's score — so this takes a person rather than a category.
+  ///
+  /// No availability check, unlike an umpire: one person can legitimately
+  /// score two matches on adjacent courts, and blocking that would be
+  /// inventing a rule the sport does not have.
+  Future<void> assignScorer({
+    required String orgId,
+    required String compId,
+    required String fixtureId,
+    required String scorerUid,
+  }) async {
+    await Refs.fixture(orgId, compId, fixtureId).update({
+      'scorerUids': FieldValue.arrayUnion([scorerUid]),
+    });
+  }
+
+  /// Takes the pen back.
+  ///
+  /// `arrayRemove` rather than a read-modify-write: two organizers editing
+  /// the panel at once would otherwise each write a list computed from what
+  /// they read, and the later write would silently restore whoever the
+  /// earlier one removed.
+  Future<void> removeScorer({
+    required String orgId,
+    required String compId,
+    required String fixtureId,
+    required String scorerUid,
+  }) async {
+    await Refs.fixture(orgId, compId, fixtureId).update({
+      'scorerUids': FieldValue.arrayRemove([scorerUid]),
+    });
+  }
+
+  /// An official confirming a submitted result — §23's VERIFY step.
+  ///
+  /// Only reachable for a match the scorer left `awaiting_approval`, and
+  /// `firestore.rules` is what actually enforces that only an organizer may
+  /// write `finalized`. Guarded here too so the caller gets a sentence rather
+  /// than a permission error.
+  Future<void> finalizeResult({
+    required String orgId,
+    required String compId,
+    required String fixtureId,
+  }) async {
+    final fixRef = Refs.fixture(orgId, compId, fixtureId);
+    final doc = await fixRef.get();
+    if (!doc.exists) return;
+
+    final fixture = Fixture.fromDoc(doc);
+    if (!fixture.status.isResulted) {
+      throw const ValidationException(
+        'This match has no result to verify yet.',
+      );
+    }
+    if (fixture.resultState != MatchResultState.awaitingApproval) {
+      throw const ValidationException(
+        'This result is not waiting for approval.',
+      );
+    }
+    await fixRef.update({'resultState': MatchResultState.finalized.wire});
+  }
+
+  /// The organizer's explicit "this match is good to go" — §7's READY.
+  ///
+  /// Deliberately not enforced anywhere: a club's Sunday game has no
+  /// organizer to press it, and blocking scoring on a state nobody set would
+  /// stop exactly the grassroots matches this product exists for. It is a
+  /// signal to everyone looking at the fixture, not a gate.
+  Future<void> setMatchReadiness({
+    required String orgId,
+    required String compId,
+    required String fixtureId,
+    required MatchReadiness readiness,
+  }) async {
+    await Refs.fixture(orgId, compId, fixtureId)
+        .update({'readiness': readiness.wire});
   }
 }

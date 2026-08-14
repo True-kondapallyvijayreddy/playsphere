@@ -32,6 +32,8 @@ class Fixture {
     required this.entrantAName,
     required this.entrantBName,
     required this.status,
+    this.entrantAUid,
+    this.entrantBUid,
     this.round = 1,
     this.matchIndex = 0,
     this.roundLabel,
@@ -74,6 +76,12 @@ class Fixture {
     this.completedAt,
     this.lastEventAt,
     this.startedEarly = const {},
+    this.isDraft = false,
+    this.ratingSettledAt,
+    this.readiness = MatchReadiness.scheduled,
+    this.resultState = MatchResultState.none,
+    this.sourceType,
+    this.sourceId,
   });
 
   final String id;
@@ -86,6 +94,34 @@ class Fixture {
   /// Denormalized names so a fixture list renders without N extra reads.
   final String entrantAName;
   final String entrantBName;
+
+  /// The registered account behind a side, when that side IS one person.
+  ///
+  /// Null for every team entrant, and that asymmetry is the point. An
+  /// individual event — badminton singles, chess, a tennis draw — names its
+  /// competitors on the *entrant* document and never fills a line-up
+  /// (`TournamentRepository.assignOfficialsAcrossTournament` says so at
+  /// length, and the scheduler already reaches into `entrants` to work around
+  /// it). So for those matches [lineupA]/[lineupB] are empty forever, and
+  /// anything derived from them — [playerUids], [sideForUid], every screen
+  /// that queries a career — silently skipped the match while the settlement
+  /// trigger counted it. A career total and a match list computed from the
+  /// same season disagreed, which is exactly the drift this pair closes.
+  ///
+  /// Deliberately NOT the team roster for a team entrant. `Entrant.memberUids`
+  /// is a squad, not a team sheet: folding twenty-five names in would credit
+  /// a match to fourteen people who watched it, and `firestore.rules` gates
+  /// career-stat writes on [playerUids], so it would hand a scorer the right
+  /// to write results onto their profiles. A team's line-up stays the only
+  /// evidence that a team's player played.
+  final String? entrantAUid;
+  final String? entrantBUid;
+
+  /// [entrantAUid]/[entrantBUid] as a set, skipping the nulls.
+  List<String> get entrantUids => <String>{
+        if (entrantAUid != null) entrantAUid!,
+        if (entrantBUid != null) entrantBUid!,
+      }.toList(growable: false);
 
   final FixtureStatus status;
   final int round;
@@ -254,10 +290,40 @@ class Fixture {
   /// career stats onto other people's profiles, and rules cannot reach inside
   /// the lineup maps to find out. Derived rather than stored as a field so it
   /// can never drift from the line-ups it summarises.
+  ///
+  /// Includes [entrantUids] because an individual event has no line-up to
+  /// summarise — see [entrantAUid]. Both sources are unioned rather than
+  /// chosen between: a mixed draw where one side is a club team and the other
+  /// a lone qualifier is a real shape, and taking only one source would drop
+  /// half of it.
   List<String> get playerUids => <String>{
         for (final p in lineupA) ...[if (p.uid != null) p.uid!],
         for (final p in lineupB) ...[if (p.uid != null) p.uid!],
+        ...entrantUids,
       }.toList(growable: false);
+
+  /// Everyone whose individual performance this match recorded, keyed the way
+  /// the scoring engine keyed them.
+  ///
+  /// The line-ups, plus a stand-in for a side that IS one person. An
+  /// individual event never fills a line-up, so anything that walked
+  /// `lineupA + lineupB` to find per-player figures — the tournament's batting
+  /// and bowling charts, most obviously — found nobody and drew an empty
+  /// board for a draw that had been played to a final.
+  ///
+  /// The stand-in's [MatchPlayer.id] is the ENTRANT id, not the uid, because
+  /// that is the key `scoreState.players` is written under for these matches.
+  /// The two are equal by construction today — `closeEntries` gives an
+  /// individual entrant its own uid as a document id — and keying on the
+  /// entrant id keeps this correct if that ever stops being true.
+  List<MatchPlayer> get scoredPlayers => [
+        ...lineupA,
+        ...lineupB,
+        if (lineupA.isEmpty && entrantAUid != null)
+          MatchPlayer(id: entrantAId, name: entrantAName, uid: entrantAUid),
+        if (lineupB.isEmpty && entrantBUid != null)
+          MatchPlayer(id: entrantBId, name: entrantBName, uid: entrantBUid),
+      ];
 
   /// The registered accounts of everyone officiating — umpires, referees,
   /// the third umpire.
@@ -415,6 +481,107 @@ class Fixture {
   /// Whether this match was played ahead of its original slot.
   bool get wasStartedEarly => startedEarly.isNotEmpty;
 
+  /// True for a fixture built by [CompetitionRepository.generateDraftSchedule]
+  /// against placeholder teams — "Team A", "Team B" — before real entrants
+  /// exist, so an organizer can lay out rounds, courts, times and officials
+  /// ahead of registration instead of waiting for it to close.
+  ///
+  /// Everywhere a real schedule is counted, watched or offered as a match to
+  /// join — the tournament progress bar, "on court now", "running late" —
+  /// this must be excluded: nobody is really playing it, and telling a
+  /// spectator to show up for a placeholder is worse than showing nothing.
+  /// Editing it — venue, time, court, officials — is exactly the point and
+  /// stays open, same as any other unplayed fixture. Once real entrants
+  /// close, `generateDraw` deletes every draft fixture and writes the real
+  /// draw in its place, same as it already replaces any unscored draw.
+  final bool isDraft;
+
+  // --- The match's own lifecycle, alongside [status] ------------------------
+  //
+  // See `MatchReadiness` and `MatchResultState` for why these are separate
+  // axes rather than extra values on [FixtureStatus].
+
+  /// How prepared this match is — officials named, organizer satisfied.
+  final MatchReadiness readiness;
+
+  /// Whether a finished result has been verified.
+  final MatchResultState resultState;
+
+  /// When the finalize trigger settled ratings and career statistics for this
+  /// match, or null if it has not run yet.
+  ///
+  /// Written by `functions/index.js` in the same batch as the ratings it
+  /// accounts for, so the marker and the payment cannot come apart. It is the
+  /// only honest answer to "have this match's statistics been applied" — the
+  /// trigger is asynchronous, and a result screen that claimed stats were
+  /// updated the instant the scorer pressed end would be guessing.
+  final DateTime? ratingSettledAt;
+
+  /// Where this match came from — `docs/Heart_of_the_playsphere.md` §12.
+  ///
+  /// Null on fixtures written before the field existed. [resolvedSource]
+  /// derives one for those rather than showing a match with no origin.
+  final MatchSource? sourceType;
+
+  /// The id of the thing in [sourceType] — a tournament id, a challenge id.
+  final String? sourceId;
+
+  /// This match's source, derived when it was not recorded.
+  ///
+  /// Every fixture predating the field still has an origin; it simply was not
+  /// written down. A fixture under a tournament is a tournament match, and
+  /// one without is a standalone game — which is what a "Single Match" is.
+  /// This keeps §20's match history complete rather than leaving years of
+  /// matches unlabelled while a backfill catches up.
+  MatchSource get resolvedSource =>
+      sourceType ??
+      (tournamentId != null ? MatchSource.tournament : MatchSource.singleMatch);
+
+  /// Which side [uid] played for — 'a', 'b', or null if they did not play.
+  ///
+  /// Reads the line-ups, not `participantOrgIds`: a person can be a member of
+  /// both contesting clubs (a coach, a player who moved mid-season), so club
+  /// membership cannot decide which side they were on. Being named on a team
+  /// sheet can.
+  String? sideForUid(String uid) {
+    if (lineupA.any((p) => p.uid == uid)) return 'a';
+    if (lineupB.any((p) => p.uid == uid)) return 'b';
+    // An individual entrant is their own team sheet. Checked after the
+    // line-ups, not before, so a player who somehow appears in both keeps the
+    // answer the line-up gives — that is the one a scorer actually typed.
+    if (entrantAUid == uid) return 'a';
+    if (entrantBUid == uid) return 'b';
+    return null;
+  }
+
+  /// How this match went for [uid] — won, lost, drawn, or null when it cannot
+  /// be told.
+  ///
+  /// Null rather than a guess in three real cases: the match has no result
+  /// yet, the person is not on either team sheet (a quick match scored
+  /// without line-ups), or it was drawn — which is reported as its own
+  /// outcome rather than folded into a loss.
+  PlayerResult? outcomeForUid(String uid) {
+    if (!status.isResulted) return null;
+    if (isDraw) return PlayerResult.drawn;
+    final side = sideForUid(uid);
+    if (side == null) return null;
+    final theirEntrantId = side == 'a' ? entrantAId : entrantBId;
+    final winner = winnerEntrantId;
+    if (winner == null) return null;
+    return winner == theirEntrantId ? PlayerResult.won : PlayerResult.lost;
+  }
+
+  /// Whether the result is settled enough to project into leaderboards,
+  /// career statistics and rankings.
+  ///
+  /// A match awaiting an umpire's verification has a score on the sheet but
+  /// is not yet a fact — §23. Everything else keeps the behaviour it had:
+  /// [FixtureStatus.isResulted] alone decided this before verification
+  /// existed, and still does for every competition that does not ask for it.
+  bool get countsTowardsRecords =>
+      status.isResulted && !resultState.blocksProjection;
+
   /// How long a scoreboard may sit untouched before it stops claiming to be
   /// live.
   ///
@@ -480,6 +647,8 @@ class Fixture {
       entrantBId: Fs.str(d['entrantBId']),
       entrantAName: Fs.str(d['entrantAName'], 'Entrant A'),
       entrantBName: Fs.str(d['entrantBName'], 'Entrant B'),
+      entrantAUid: Fs.strOrNull(d['entrantAUid']),
+      entrantBUid: Fs.strOrNull(d['entrantBUid']),
       status: FixtureStatus.fromWire(Fs.str(d['status'])),
       round: Fs.integer(d['round'], 1),
       matchIndex: Fs.integer(d['matchIndex']),
@@ -535,6 +704,12 @@ class Fixture {
       completedAt: Fs.dateOrNull(d['completedAt']),
       lastEventAt: Fs.dateOrNull(d['lastEventAt']),
       startedEarly: Fs.map(d['startedEarly']),
+      isDraft: Fs.boolean(d['isDraft']),
+      ratingSettledAt: Fs.dateOrNull(d['ratingSettledAt']),
+      readiness: MatchReadiness.fromWire(Fs.strOrNull(d['readiness'])),
+      resultState: MatchResultState.fromWire(Fs.strOrNull(d['resultState'])),
+      sourceType: MatchSource.fromWire(Fs.strOrNull(d['sourceType'])),
+      sourceId: Fs.strOrNull(d['sourceId']),
     );
   }
 
@@ -545,6 +720,8 @@ class Fixture {
         'entrantBId': entrantBId,
         'entrantAName': entrantAName,
         'entrantBName': entrantBName,
+        'entrantAUid': entrantAUid,
+        'entrantBUid': entrantBUid,
         'status': status.wire,
         'round': round,
         'matchIndex': matchIndex,
@@ -585,6 +762,11 @@ class Fixture {
         'tournamentId': tournamentId,
         'resultType': resultType.wire,
         'resultNote': resultNote,
+        'isDraft': isDraft,
+        'readiness': readiness.wire,
+        'resultState': resultState.wire,
+        'sourceType': sourceType?.wire,
+        'sourceId': sourceId,
         'createdAt': FieldValue.serverTimestamp(),
       };
 
@@ -610,6 +792,8 @@ class Fixture {
     String? resultNote,
     DateTime? lastEventAt,
     Map<String, dynamic>? startedEarly,
+    MatchReadiness? readiness,
+    MatchResultState? resultState,
   }) {
     return Fixture(
       id: id,
@@ -619,6 +803,11 @@ class Fixture {
       entrantBId: entrantBId,
       entrantAName: entrantAName,
       entrantBName: entrantBName,
+      // Carried through, not a parameter, for the same reason the entrant ids
+      // are: who is playing is decided when the slot is filled, and a copy
+      // made to record a score must never be able to change it.
+      entrantAUid: entrantAUid,
+      entrantBUid: entrantBUid,
       status: status ?? this.status,
       round: round,
       matchIndex: matchIndex,
@@ -671,6 +860,22 @@ class Fixture {
       completedAt: completedAt,
       lastEventAt: lastEventAt ?? this.lastEventAt,
       startedEarly: startedEarly ?? this.startedEarly,
+      // Not a parameter: nothing that runs through copyWith — scoring events,
+      // reschedules — is how a draft fixture is meant to stop being one. That
+      // only happens by `generateDraw` deleting it outright and writing a
+      // real fixture in its place, so carrying this through explicitly is
+      // what stops some other write path silently laundering a placeholder
+      // match into a real one.
+      isDraft: isDraft,
+      readiness: readiness ?? this.readiness,
+      resultState: resultState ?? this.resultState,
+      // Not parameters, for the same reason as `isDraft` above: where a match
+      // came from is fixed when it is created. A scoring event must not be
+      // able to relabel a challenge as a tournament match, which is what
+      // would happen the first time some caller passed a fresh Fixture
+      // through here without them.
+      sourceType: sourceType,
+      sourceId: sourceId,
     );
   }
 }

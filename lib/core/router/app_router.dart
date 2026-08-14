@@ -22,6 +22,8 @@ import '../../features/competitions/challenges_screen.dart';
 import '../../features/competitions/competition_detail_screen.dart';
 import '../../features/competitions/choose_event_type_screen.dart';
 import '../../features/competitions/create_competition_screen.dart';
+import '../../features/competitions/guided_tournament_screen.dart';
+import '../../features/competitions/guided_season_screen.dart';
 import '../../features/competitions/create_season_screen.dart';
 import '../../features/competitions/entrant_detail_screen.dart';
 import '../../features/competitions/my_events_screen.dart';
@@ -44,8 +46,16 @@ import '../../features/sponsor/sponsor_my_listings_screen.dart';
 import '../../features/sponsor/sponsor_my_pledges_screen.dart';
 import '../../features/sponsor/sponsor_listing_detail_screen.dart';
 import '../../features/sponsor/sponsor_incoming_offers_screen.dart';
+import '../../features/scout/rising_talent_screen.dart';
+import '../../features/sports/sports_directory_screen.dart';
 import '../../features/scout/scout_search_screen.dart';
 import '../../features/ads/ad_console_screen.dart';
+import '../../features/gov/gov_dashboard_screen.dart';
+import '../../features/grounds/ground_detail_screen.dart';
+import '../../features/grounds/ground_food_screen.dart';
+import '../../features/grounds/ground_food_manage_screen.dart';
+import '../../features/grounds/ground_food_orders_screen.dart';
+import '../../features/grounds/my_food_orders_screen.dart';
 import '../../features/shop/club_store_screen.dart';
 import '../../features/shop/club_store_manage_screen.dart';
 import '../../features/shop/club_store_orders_screen.dart';
@@ -54,6 +64,7 @@ import '../../features/orgs/club_files_screen.dart';
 import '../../features/orgs/club_gallery_screen.dart';
 import '../../features/orgs/create_org_screen.dart';
 import '../../features/orgs/join_org_screen.dart';
+import '../../features/orgs/club_settings_screen.dart';
 import '../../features/orgs/members_screen.dart';
 import '../../features/orgs/org_home_screen.dart';
 import '../../features/orgs/org_picker_screen.dart';
@@ -64,10 +75,13 @@ import '../../features/profile/career_profile_screen.dart';
 import '../../features/profile/my_matches_screen.dart';
 import '../../features/profile/my_sports_screen.dart';
 import '../../features/profile/player_sport_screen.dart';
+import '../../features/profile/player_stats_screen.dart';
 import '../../features/rules/sport_rules_screen.dart';
 import '../../features/scoring/live_matches_screen.dart';
 import '../../features/scoring/live_now_screen.dart';
 import '../../features/scoring/quick_match_screen.dart';
+import '../../features/scoring/match_center_screen.dart';
+import '../../features/scoring/match_result_screen.dart';
 import '../../features/scoring/scoring_screen.dart';
 import '../../features/scoring/spectator_screen.dart';
 import '../models/app_user.dart';
@@ -186,9 +200,31 @@ class Routes {
   /// enforced per-profile by `firestore.rules`, not by who is allowed to ask.
   static const scoutSearch = '/scout/search';
 
+  /// Talent discovery's other half — the precomputed "who is improving"
+  /// boards rather than a "who is good" search. Also role-free: the boards
+  /// that include minors are a different set of documents, gated on the
+  /// `scout` claim in `firestore.rules` rather than on reaching this route.
+  static const risingTalent = '/scout/rising';
+
+  /// The sport directory — every sport the platform runs, with how much is
+  /// happening in each.
+  ///
+  /// Distinct from [mySports], which is the sports *this person* plays. The
+  /// two were easy to conflate and answer opposite questions: one is "where
+  /// do I stand", the other is "what is worth entering". Org-free for the
+  /// same reason as [globalEvents] — discovering a sport must not require
+  /// already being in a club that plays it.
+  static const sports = '/sports';
+
   /// The advertiser self-serve console. Org-free — an advertiser is a
   /// business acting for itself, not a club.
   static const adConsole = '/ads';
+
+  /// Restricted to the `admin` custom claim — see `GovDashboardScreen`. A
+  /// route, not a sub-route of anything, because it belongs to no club and
+  /// no sport: it is PlaySphere talking to a district or state, not to a
+  /// player.
+  static const govDashboard = '/gov';
 
   /// Grounds available to hire, searchable by city, sport and time.
   ///
@@ -202,6 +238,10 @@ class Routes {
 
   static String ground(String groundId) => '/grounds/$groundId';
 
+  /// A buyer's own food orders, across every ground — org-free, same
+  /// reasoning as [myClubOrders].
+  static const myFoodOrders = '/me/food-orders';
+
   /// Every match this player has appeared in. A destination of its own, not
   /// an anchor on the profile: "Matches" and "Sports" both used to push
   /// `/me`, so the two counters on the home screen led to the same page and
@@ -211,6 +251,11 @@ class Routes {
   /// The sports this player has a record in, each opening its own page.
   static const mySports = '/me/sports';
 
+  /// One player's record in one sport, sliced by where the matches came from
+  /// — `docs/Heart_of_the_playsphere.md` §18.
+  static String playerStats(String uid, String sportId) =>
+      '/player/$uid/stats/${Uri.encodeComponent(sportId)}';
+
   /// One sport within a player's career — their matches in it, the
   /// scorecards, and where they sit in the ranking.
   static String playerSport(String uid, String sportId) =>
@@ -218,6 +263,7 @@ class Routes {
 
   static String org(String orgId) => '/org/$orgId';
   static String members(String orgId) => '/org/$orgId/members';
+  static String clubSettings(String orgId) => '/org/$orgId/settings';
   static String analytics(String orgId) => '/org/$orgId/analytics';
   static String live(String orgId) => '/org/$orgId/live';
   static String challenges(String orgId) => '/org/$orgId/challenges';
@@ -229,12 +275,32 @@ class Routes {
   static String createCompetition(String orgId) => '/org/$orgId/new-event';
 
   /// The single-sport competition form, reached by choosing Tournament.
+  ///
+  /// This is the one-page "quick create" — see [CreateCompetitionScreen] for
+  /// why one page is right for an organizer setting up a sports day.
   static String createTournamentEvent(String orgId) =>
       '/org/$orgId/new-event/tournament';
+
+  /// The same tournament, created one step at a time.
+  ///
+  /// The guided route for a first tournament, where the single page's six
+  /// formats and three participation models are choices the organizer does
+  /// not yet have the vocabulary to make. Writes an identical [Competition]
+  /// through the same repository, so nothing downstream can tell which
+  /// entrance was used.
+  static String createTournamentGuided(String orgId) =>
+      '/org/$orgId/new-event/tournament/guided';
 
   /// The multi-sport season form: which sports, how many entries each, and
   /// whether outside clubs may enter.
   static String createSeason(String orgId) => '/org/$orgId/new-event/season';
+
+  /// The same season, one step at a time. Same relationship to
+  /// [createSeason] as [createTournamentGuided] has to
+  /// [createTournamentEvent] — guided by default, one page for the organizer
+  /// who already knows what they want.
+  static String createSeasonGuided(String orgId) =>
+      '/org/$orgId/new-event/season/guided';
 
   /// Two people or two scratch sides playing right now, with none of the
   /// event machinery in between.
@@ -259,6 +325,17 @@ class Routes {
   }
   static String competition(String orgId, String compId) =>
       '/org/$orgId/event/$compId';
+  /// The hub a match opens into, whatever created it —
+  /// `docs/Heart_of_the_playsphere.md` §4. Officials, configuration and the
+  /// start button live here; [scoring] and [watch] are what it leads to.
+  static String matchCenter(String orgId, String compId, String fixtureId) =>
+      '/org/$orgId/event/$compId/match/$fixtureId';
+
+  /// Where a finished match lands — the result, who won, and what has
+  /// actually happened to it since. See `MatchResultScreen`.
+  static String matchResult(String orgId, String compId, String fixtureId) =>
+      '/org/$orgId/event/$compId/result/$fixtureId';
+
   static String scoring(String orgId, String compId, String fixtureId) =>
       '/org/$orgId/event/$compId/score/$fixtureId';
   static String watch(String orgId, String compId, String fixtureId) =>
@@ -450,6 +527,34 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         builder: (_, __) => const GroundsScreen(),
       ),
       GoRoute(
+        path: '/grounds/:groundId/food/manage',
+        builder: (_, state) => GroundFoodManageScreen(
+          groundId: state.pathParameters['groundId']!,
+        ),
+      ),
+      GoRoute(
+        path: '/grounds/:groundId/food/orders',
+        builder: (_, state) => GroundFoodOrdersScreen(
+          groundId: state.pathParameters['groundId']!,
+        ),
+      ),
+      GoRoute(
+        path: '/grounds/:groundId/food',
+        builder: (_, state) => GroundFoodScreen(
+          groundId: state.pathParameters['groundId']!,
+        ),
+      ),
+      GoRoute(
+        path: '/grounds/:groundId',
+        builder: (_, state) => GroundDetailScreen(
+          groundId: state.pathParameters['groundId']!,
+        ),
+      ),
+      GoRoute(
+        path: Routes.myFoodOrders,
+        builder: (_, __) => const MyFoodOrdersScreen(),
+      ),
+      GoRoute(
         path: Routes.shop,
         // `?sport=` arrives from a promo banner, and only preselects the
         // filter — the chips are still there and "All sports" is one tap away.
@@ -533,8 +638,20 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         builder: (_, __) => const ScoutSearchScreen(),
       ),
       GoRoute(
+        path: Routes.risingTalent,
+        builder: (_, __) => const RisingTalentScreen(),
+      ),
+      GoRoute(
+        path: Routes.sports,
+        builder: (_, __) => const SportsDirectoryScreen(),
+      ),
+      GoRoute(
         path: Routes.adConsole,
         builder: (_, __) => const AdConsoleScreen(),
+      ),
+      GoRoute(
+        path: Routes.govDashboard,
+        builder: (_, __) => const GovDashboardScreen(),
       ),
       // "Matches" and "Sports" are destinations in their own right, not
       // anchors on the profile. Both home-screen tiles used to push `/me`,
@@ -562,6 +679,16 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                   Uri.decodeComponent(state.pathParameters['sportId']!),
             ),
           ),
+          GoRoute(
+            path: 'stats/:sportId',
+            builder: (_, state) => PlayerStatsScreen(
+              uid: state.pathParameters['uid']!,
+              // Same percent-encoding round trip as the sport page above:
+              // chess ids carry a `:` qualifier.
+              sportId:
+                  Uri.decodeComponent(state.pathParameters['sportId']!),
+            ),
+          ),
         ],
       ),
       GoRoute(
@@ -573,6 +700,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             path: 'members',
             builder: (_, state) =>
                 MembersScreen(orgId: state.pathParameters['orgId']!),
+          ),
+          GoRoute(
+            path: 'settings',
+            builder: (_, state) =>
+                ClubSettingsScreen(orgId: state.pathParameters['orgId']!),
           ),
           GoRoute(
             path: 'analytics',
@@ -683,12 +815,28 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                 builder: (_, state) => CreateCompetitionScreen(
                   orgId: state.pathParameters['orgId']!,
                 ),
+                routes: [
+                  GoRoute(
+                    path: 'guided',
+                    builder: (_, state) => GuidedTournamentScreen(
+                      orgId: state.pathParameters['orgId']!,
+                    ),
+                  ),
+                ],
               ),
               GoRoute(
                 path: 'season',
                 builder: (_, state) => CreateSeasonScreen(
                   orgId: state.pathParameters['orgId']!,
                 ),
+                routes: [
+                  GoRoute(
+                    path: 'guided',
+                    builder: (_, state) => GuidedSeasonScreen(
+                      orgId: state.pathParameters['orgId']!,
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
@@ -708,6 +856,22 @@ final appRouterProvider = Provider<GoRouter>((ref) {
               compId: state.pathParameters['compId']!,
             ),
             routes: [
+              GoRoute(
+                path: 'match/:fixtureId',
+                builder: (_, state) => MatchCenterScreen(
+                  orgId: state.pathParameters['orgId']!,
+                  compId: state.pathParameters['compId']!,
+                  fixtureId: state.pathParameters['fixtureId']!,
+                ),
+              ),
+              GoRoute(
+                path: 'result/:fixtureId',
+                builder: (_, state) => MatchResultScreen(
+                  orgId: state.pathParameters['orgId']!,
+                  compId: state.pathParameters['compId']!,
+                  fixtureId: state.pathParameters['fixtureId']!,
+                ),
+              ),
               GoRoute(
                 path: 'score/:fixtureId',
                 builder: (_, state) => ScoringScreen(

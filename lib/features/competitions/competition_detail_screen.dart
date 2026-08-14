@@ -72,6 +72,18 @@ class CompetitionDetailScreen extends ConsumerWidget {
                     _Header(competition: comp),
                     const SizedBox(height: 16),
                     if (canManage) _OrganizerActions(competition: comp),
+                    // Before real entries close there is nothing to draw a
+                    // real bracket from, but an organizer still wants to see
+                    // its shape — rounds, groups, quarters and semis — and
+                    // start lining up venues, times and officials against it.
+                    // Gone once entries close: from there on
+                    // `_OrganizerActions` offers the real draw, over real
+                    // entrants, and the two must not be on screen together.
+                    if (canManage &&
+                        !comp.format.isSingleMatch &&
+                        (comp.status == CompetitionStatus.draft ||
+                            comp.status == CompetitionStatus.registrationOpen))
+                      _DraftScheduleCard(competition: comp),
                     if (canManage) _QualifierCard(competition: comp),
                     // Only for a standalone event: one inside a tournament is
                     // shifted from the tournament screen, because its matches
@@ -81,11 +93,15 @@ class CompetitionDetailScreen extends ConsumerWidget {
                       Padding(
                         padding: const EdgeInsets.only(top: 12),
                         child: RunningLateCard(
-                          fixtures: ref
-                                  .watch(fixturesProvider(
-                                      CompRef(comp.orgId, comp.id)))
-                                  .valueOrNull ??
-                              const [],
+                          // Draft placeholders are never "running late" —
+                          // see `Fixture.isDraft`.
+                          fixtures: (ref
+                                      .watch(fixturesProvider(
+                                          CompRef(comp.orgId, comp.id)))
+                                      .valueOrNull ??
+                                  const [])
+                              .where((f) => !f.isDraft)
+                              .toList(),
                           onShift: ({by, newStart}) => ref
                               .read(competitionRepositoryProvider)
                               .shiftSchedule(
@@ -384,6 +400,224 @@ class _OrganizerActions extends ConsumerWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Lets an organizer see the shape of the draw — rounds, groups, quarters
+/// and semis — before real entries exist, using placeholder teams instead of
+/// waiting for registration to close. See
+/// `CompetitionRepository.generateDraftSchedule`.
+class _DraftScheduleCard extends ConsumerWidget {
+  const _DraftScheduleCard({required this.competition});
+  final Competition competition;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final c = competition;
+    final fixtures =
+        ref.watch(fixturesProvider(CompRef(c.orgId, c.id))).valueOrNull ??
+            const <Fixture>[];
+    final hasDraft = fixtures.any((f) => f.isDraft);
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 16),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              hasDraft ? 'Draft schedule' : 'Plan the schedule early',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 6),
+            Text(
+              hasDraft
+                  ? 'Placeholder teams stand in for real entrants until '
+                      'registration closes. Edit the venue, time and '
+                      'official on any match below — regenerating replaces '
+                      'every placeholder match with a fresh set.'
+                  : 'See the shape of a ${c.format.label.toLowerCase()} — '
+                      'rounds, groups, quarters and semis — and start lining '
+                      'up venues, times and officials before anyone has '
+                      'registered.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: () => _open(context, ref),
+              icon: const Icon(Icons.auto_awesome_motion_outlined),
+              label:
+                  Text(hasDraft ? 'Regenerate the draft' : 'Create a schedule'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _open(BuildContext context, WidgetRef ref) async {
+    final plan =
+        await _DraftScheduleSheet.show(context, competition: competition);
+    if (plan == null) return;
+    try {
+      final outcome =
+          await ref.read(competitionRepositoryProvider).generateDraftSchedule(
+                competition: competition,
+                teamCount: plan.teamCount,
+                teamsPerGroup: plan.teamsPerGroup,
+              );
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '${outcome.written} placeholder matches created below — edit '
+              'any of them freely.',
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) showError(context, e);
+    }
+  }
+}
+
+/// Asks only what a draft schedule genuinely needs: how many teams to plan
+/// for, and — for a groups format — how big a group is. Everything else
+/// (venue, time, court, officials) is set afterwards, per match, once the
+/// organizer can see the actual bracket rather than guessing at it blind.
+class _DraftScheduleSheet extends StatefulWidget {
+  const _DraftScheduleSheet({required this.competition});
+
+  final Competition competition;
+
+  static Future<({int teamCount, int? teamsPerGroup})?> show(
+    BuildContext context, {
+    required Competition competition,
+  }) =>
+      showModalBottomSheet<({int teamCount, int? teamsPerGroup})>(
+        context: context,
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (_) => _DraftScheduleSheet(competition: competition),
+      );
+
+  @override
+  State<_DraftScheduleSheet> createState() => _DraftScheduleSheetState();
+}
+
+class _DraftScheduleSheetState extends State<_DraftScheduleSheet> {
+  // The registration limit set when the event was created, when there is
+  // one — an organizer who already said "32 teams" should not be asked
+  // again. Otherwise a small, typical field, easy to change with the
+  // stepper below.
+  late int _teamCount = (widget.competition.maxEntrants ?? 8).clamp(2, 64);
+  int _teamsPerGroup = 4;
+
+  bool get _isGroups =>
+      widget.competition.format == CompetitionFormat.groupThenKnockout;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          20,
+          0,
+          20,
+          MediaQuery.of(context).viewInsets.bottom + 20,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('Plan a schedule', style: theme.textTheme.titleLarge),
+            const SizedBox(height: 4),
+            Text(
+              '${widget.competition.format.label} · placeholder teams '
+              'stand in until real entries close',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 16),
+            _CountStepper(
+              label: 'Teams to plan for',
+              value: _teamCount,
+              min: 2,
+              max: 64,
+              onChanged: (v) => setState(() => _teamCount = v),
+            ),
+            if (_isGroups) ...[
+              const SizedBox(height: 4),
+              _CountStepper(
+                label: 'Teams per group',
+                value: _teamsPerGroup,
+                min: 2,
+                max: 4,
+                onChanged: (v) => setState(() => _teamsPerGroup = v),
+              ),
+            ],
+            const SizedBox(height: 20),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop((
+                teamCount: _teamCount,
+                teamsPerGroup: _isGroups ? _teamsPerGroup : null,
+              )),
+              style:
+                  FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
+              child: const Text('Generate'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CountStepper extends StatelessWidget {
+  const _CountStepper({
+    required this.label,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.onChanged,
+  });
+
+  final String label;
+  final int value;
+  final int min;
+  final int max;
+  final ValueChanged<int> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        children: [
+          Expanded(child: Text(label)),
+          IconButton(
+            icon: const Icon(Icons.remove_circle_outline),
+            onPressed: value > min ? () => onChanged(value - 1) : null,
+          ),
+          SizedBox(
+            width: 32,
+            child: Text(
+              '$value',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.add_circle_outline),
+            onPressed: value < max ? () => onChanged(value + 1) : null,
+          ),
+        ],
       ),
     );
   }
@@ -1392,15 +1626,43 @@ class _Fixtures extends ConsumerWidget {
                 child: LiveScoreCard(
                   fixture: f,
                   dense: true,
-                  onTap: () {
-                    final canScore = myUid != null &&
-                        f.canBeScoredBy(myUid, isOrgManager: canManage);
-                    context.push(
-                      canScore
-                          ? Routes.scoring(c.orgId, c.id, f.id)
-                          : Routes.watch(c.orgId, c.id, f.id),
-                    );
-                  },
+                  // A draft fixture is placeholder teams — there is nothing
+                  // to score or watch yet, so the tap goes straight to
+                  // editing it instead of a scoring pad or scoreboard with
+                  // nobody real on it.
+                  onTap: f.isDraft
+                      ? () => MoveMatchSheet.show(
+                            context,
+                            fixture: f,
+                            siblings: fixtures,
+                          )
+                      : () {
+                          // A match that has not started opens the Match
+                          // Center — `docs/Heart_of_the_playsphere.md` §3/§4:
+                          // tapping a match opens the hub where it is
+                          // prepared and started, not a scoring pad for a
+                          // game with no umpire or an empty scoreboard.
+                          //
+                          // A live or finished match still goes straight to
+                          // the score. Somebody opening a game in progress
+                          // wants the ball-by-ball, not a step in front of
+                          // it.
+                          final started = f.isLiveAt(DateTime.now()) ||
+                              f.status.isResulted;
+                          if (!started) {
+                            context.push(
+                              Routes.matchCenter(c.orgId, c.id, f.id),
+                            );
+                            return;
+                          }
+                          final canScore = myUid != null &&
+                              f.canBeScoredBy(myUid, isOrgManager: canManage);
+                          context.push(
+                            canScore
+                                ? Routes.scoring(c.orgId, c.id, f.id)
+                                : Routes.watch(c.orgId, c.id, f.id),
+                          );
+                        },
                 ),
               ),
               // Only while there is something to watch. A link to a match
@@ -1409,22 +1671,14 @@ class _Fixtures extends ConsumerWidget {
               // Bug #1 / #15: use activity-aware isLiveAt rather than the
               // raw status field, so a match abandoned by its scorer days
               // ago is not treated as in-progress.
-              if (f.isLiveAt(DateTime.now()) || f.hasResult)
+              if (!f.isDraft && (f.isLiveAt(DateTime.now()) || f.hasResult))
                 ShareMatchButton(fixture: f, compact: true),
-              // A match already played is history; one in progress has a
-              // scorer standing over it. Neither is the organizer's to move.
-              if (canManage && !f.hasResult && !f.isLiveAt(DateTime.now())) ...[
+              if (f.isDraft) ...[
+                // Editing is the entire point of a draft match, so the icon
+                // stays even though the tap above already opens the same
+                // sheet — a visible affordance, not just a hidden gesture.
                 IconButton(
-                  tooltip: 'Start this match early',
-                  icon: const Icon(Icons.play_circle_outline, color: Colors.green),
-                  onPressed: () => StartEarlySheet.show(
-                    context,
-                    fixture: f,
-                    sportId: c.sportId,
-                  ),
-                ),
-                IconButton(
-                  tooltip: 'Move this match',
+                  tooltip: 'Edit venue, time and court',
                   icon: const Icon(Icons.edit_calendar_outlined),
                   onPressed: () => MoveMatchSheet.show(
                     context,
@@ -1432,25 +1686,51 @@ class _Fixtures extends ConsumerWidget {
                     siblings: fixtures,
                   ),
                 ),
+              ] else ...[
+                // A match already played is history; one in progress has a
+                // scorer standing over it. Neither is the organizer's to move.
+                if (canManage &&
+                    !f.hasResult &&
+                    !f.isLiveAt(DateTime.now())) ...[
+                  IconButton(
+                    tooltip: 'Start this match early',
+                    icon: const Icon(Icons.play_circle_outline,
+                        color: Colors.green),
+                    onPressed: () => StartEarlySheet.show(
+                      context,
+                      fixture: f,
+                      sportId: c.sportId,
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Move this match',
+                    icon: const Icon(Icons.edit_calendar_outlined),
+                    onPressed: () => MoveMatchSheet.show(
+                      context,
+                      fixture: f,
+                      siblings: fixtures,
+                    ),
+                  ),
+                ],
+                if (canManage)
+                  IconButton(
+                    tooltip: f.scorerUids.isEmpty
+                        ? 'No scorer assigned'
+                        : '${f.scorerUids.length} scorer(s) assigned',
+                    icon: Icon(
+                      f.scorerUids.isEmpty
+                          ? Icons.person_off_outlined
+                          : Icons.how_to_reg_outlined,
+                      color: f.scorerUids.isEmpty
+                          ? Theme.of(context).colorScheme.error
+                          : null,
+                    ),
+                    onPressed: () => showDialog<void>(
+                      context: context,
+                      builder: (_) => _AssignScorersDialog(fixture: f),
+                    ),
+                  ),
               ],
-              if (canManage)
-                IconButton(
-                  tooltip: f.scorerUids.isEmpty
-                      ? 'No scorer assigned'
-                      : '${f.scorerUids.length} scorer(s) assigned',
-                  icon: Icon(
-                    f.scorerUids.isEmpty
-                        ? Icons.person_off_outlined
-                        : Icons.how_to_reg_outlined,
-                    color: f.scorerUids.isEmpty
-                        ? Theme.of(context).colorScheme.error
-                        : null,
-                  ),
-                  onPressed: () => showDialog<void>(
-                    context: context,
-                    builder: (_) => _AssignScorersDialog(fixture: f),
-                  ),
-                ),
             ],
           ),
         );
@@ -1470,10 +1750,27 @@ class _Fixtures extends ConsumerWidget {
         ? a.round.compareTo(b.round)
         : a.matchIndex.compareTo(b.matchIndex);
 
+    // A draft schedule and a real one are never mixed — generating either
+    // wipes whatever the competition had before — so one banner is enough
+    // rather than marking every row.
+    final isDraftSchedule = fixtures.any((f) => f.isDraft);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Text('Matches', style: Theme.of(context).textTheme.titleMedium),
+        if (isDraftSchedule) ...[
+          const SizedBox(height: 4),
+          Text(
+            'Draft schedule — "Team A", "Team B" and the rest are '
+            'placeholders. Real entrants replace them once you generate the '
+            'draw after entries close.',
+            style: Theme.of(context)
+                .textTheme
+                .bodySmall
+                ?.copyWith(color: Theme.of(context).colorScheme.primary),
+          ),
+        ],
         const SizedBox(height: 10),
         if (groupIds.isEmpty)
           for (final f in [...fixtures]..sort(byRound)) matchRow(f)

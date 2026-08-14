@@ -50,6 +50,32 @@ class ChooseEventTypeScreen extends ConsumerWidget {
                   _TypeCard(
                     type: type,
                     onTap: () => _open(context, type),
+                    // The one-page form, kept one tap away rather than
+                    // replaced. An organizer setting up eight events for a
+                    // sports day should not walk six steps eight times — see
+                    // `CreateCompetitionScreen`'s own doc comment. The guided
+                    // flow is the default because most people create one
+                    // tournament, not eight.
+                    secondaryLabel: switch (type) {
+                      EventType.tournament ||
+                      EventType.season =>
+                        'Quick create',
+                      _ => null,
+                    },
+                    onSecondary: switch (type) {
+                      EventType.tournament => () => context.push(
+                            Routes.createTournamentEvent(orgId),
+                          ),
+                      // The one-page season form does something the guided
+                      // flow deliberately does not: the same sport twice
+                      // under different age bands, which a school sports week
+                      // genuinely needs. So this is not merely a shortcut —
+                      // it is the only route to that.
+                      EventType.season => () => context.push(
+                            Routes.createSeason(orgId),
+                          ),
+                      _ => null,
+                    },
                   ),
               ],
             ),
@@ -67,9 +93,9 @@ class ChooseEventTypeScreen extends ConsumerWidget {
   void _open(BuildContext context, EventType type) {
     switch (type) {
       case EventType.season:
-        context.push(Routes.createSeason(orgId));
+        context.push(Routes.createSeasonGuided(orgId));
       case EventType.tournament:
-        context.push(Routes.createTournamentEvent(orgId));
+        context.push(Routes.createTournamentGuided(orgId));
       case EventType.singleMatch:
         // The quick-match screen writes the competition and its one fixture
         // together — a single match created through the ordinary event form
@@ -82,10 +108,20 @@ class ChooseEventTypeScreen extends ConsumerWidget {
 }
 
 class _TypeCard extends StatelessWidget {
-  const _TypeCard({required this.type, required this.onTap});
+  const _TypeCard({
+    required this.type,
+    required this.onTap,
+    this.secondaryLabel,
+    this.onSecondary,
+  });
 
   final EventType type;
   final VoidCallback onTap;
+
+  /// An alternative route into the same event type, shown as a text button
+  /// under the description. Absent for types that have only one.
+  final String? secondaryLabel;
+  final VoidCallback? onSecondary;
 
   @override
   Widget build(BuildContext context) {
@@ -116,6 +152,26 @@ class _TypeCard extends StatelessWidget {
                     ),
                     const SizedBox(height: 8),
                     Text(type.description, style: theme.textTheme.bodySmall),
+                    if (secondaryLabel != null && onSecondary != null) ...[
+                      const SizedBox(height: 4),
+                      // Aligned left under the description and visually
+                      // quieter than the card itself: it is the shortcut for
+                      // somebody who already knows what they want, not a
+                      // choice a first-time organizer has to weigh.
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton(
+                          onPressed: onSecondary,
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(vertical: 4),
+                            minimumSize: Size.zero,
+                            tapTargetSize:
+                                MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          child: Text(secondaryLabel!),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),

@@ -29,6 +29,8 @@ class Organization {
     this.geo = GeoLocation.empty,
     this.logoUrl,
     this.memberCount = 0,
+    this.homeGroundId,
+    this.homeGroundName,
     this.requiresApprovalToJoin = true,
     this.plan = OrgPlan.free,
     this.planState = PlanState.none,
@@ -73,6 +75,26 @@ class Organization {
 
   final String? logoUrl;
   final int memberCount;
+
+  /// The club's own ground — where its matches are actually played,
+  /// distinct from a [Ground] booked one-off through the marketplace.
+  ///
+  /// Settable and changeable at any time by whoever can manage the
+  /// organization, not just at creation, because a club's ground changes far
+  /// less often than its roster but does change: a lease ends, a school gets
+  /// a new court. Two fields rather than one, deliberately:
+  /// [homeGroundId] links to a real `Ground` document when the club's ground
+  /// is registered in the marketplace (so the profile can show its rate,
+  /// hours and booking calendar); [homeGroundName] is a free-text fallback
+  /// for the common case — a school hall, a village maidan — that will never
+  /// be a bookable marketplace listing but is still worth naming on the
+  /// club's own profile.
+  final String? homeGroundId;
+  final String? homeGroundName;
+
+  bool get hasHomeGround =>
+      (homeGroundId != null && homeGroundId!.isNotEmpty) ||
+      (homeGroundName != null && homeGroundName!.trim().isNotEmpty);
 
   /// When false, anyone with the invite code becomes active immediately.
   /// Schools generally want this true; a casual apartment community usually
@@ -123,6 +145,8 @@ class Organization {
       ),
       logoUrl: Fs.strOrNull(d['logoUrl']),
       memberCount: Fs.integer(d['memberCount']),
+      homeGroundId: Fs.strOrNull(d['homeGroundId']),
+      homeGroundName: Fs.strOrNull(d['homeGroundName']),
       requiresApprovalToJoin: Fs.boolean(d['requiresApprovalToJoin'], true),
       plan: OrgPlan.fromWire(Fs.str(d['plan'])),
       planState: PlanState.fromDocData(
@@ -214,6 +238,11 @@ class Organization {
       geo: geo ?? this.geo,
       logoUrl: logoUrl ?? this.logoUrl,
       memberCount: memberCount,
+      // Not settable through copyWith — see [OrgRepository.setHomeGround],
+      // the dedicated write path. Carried through verbatim so a profile-form
+      // save (which goes through copyWith) can never silently erase it.
+      homeGroundId: homeGroundId,
+      homeGroundName: homeGroundName,
       requiresApprovalToJoin:
           requiresApprovalToJoin ?? this.requiresApprovalToJoin,
       plan: plan,

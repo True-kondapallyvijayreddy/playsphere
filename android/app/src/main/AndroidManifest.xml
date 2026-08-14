@@ -1,4 +1,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Used to find grounds near the player and, on the owner side, to fill
+         a new ground's location with one tap instead of typing coordinates —
+         see GroundRepository.watchNearby and the "Use my location" control
+         on the ground registration form. Coarse is requested alongside fine
+         because a ground search only ever needs street-level accuracy, and
+         asking for less is asking for less trust. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <application
         android:label="playsphere"
         android:name="${applicationName}"

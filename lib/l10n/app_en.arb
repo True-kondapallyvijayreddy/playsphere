@@ -25,8 +25,14 @@
 
   "signInTitle": "Sign in",
   "@signInTitle": { "description": "Sign-in screen heading" },
+  "signInTagline": "Run competitions, score matches live, and let everyone follow along from anywhere.",
+  "@signInTagline": { "description": "Sign-in screen subtitle, under the app name" },
   "signInWithGoogle": "Continue with Google",
   "@signInWithGoogle": { "description": "Google sign-in button" },
+  "signInInProgress": "Signing in…",
+  "@signInInProgress": { "description": "Sign-in button label while the Google sign-in is running" },
+  "signInWatchWithoutAccount": "You can watch any public live match without signing in — just open the link someone shares with you.",
+  "@signInWatchWithoutAccount": { "description": "Sign-in screen footnote about the public /watch/ link" },
   "signOut": "Sign out",
   "@signOut": { "description": "Sign out menu item" },
 

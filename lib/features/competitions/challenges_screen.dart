@@ -240,6 +240,41 @@ class _ChallengeCardState extends ConsumerState<_ChallengeCard> {
     }
   }
 
+  /// Answers with different terms — new dates, optionally a new ground.
+  Future<void> _counter() async {
+    if (_busy) return;
+    final result = await showDialog<_CounterTerms>(
+      context: context,
+      builder: (_) => _CounterOfferDialog(challenge: widget.challenge),
+    );
+    if (result == null || !mounted) return;
+
+    setState(() => _busy = true);
+    try {
+      await ref.read(communityRepositoryProvider).counterChallenge(
+            widget.challenge,
+            byOrgId: widget.orgId,
+            slots: result.slots,
+            venue: result.venue,
+            note: result.note,
+          );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Counter offer sent to '
+              '${widget.challenge.opponentNameFor(widget.orgId)}.',
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) showError(context, e);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   Future<void> _withdraw() async {
     if (_busy) return;
     // Confirmed because the other club has already been notified and may have
@@ -286,7 +321,11 @@ class _ChallengeCardState extends ConsumerState<_ChallengeCard> {
 
   /// Lets the accepting club choose among the dates the challenger proposed.
   Future<void> _chooseSlotAndAccept() async {
-    final slots = widget.challenge.proposedSlots;
+    // `liveSlots`, not `proposedSlots`: once countered, the dates on the
+    // table are the counter-offer's. Offering the original ones would let a
+    // club agree to a date the other side has already said it cannot make —
+    // and `acceptChallenge` now rejects exactly that.
+    final slots = widget.challenge.liveSlots;
     if (slots.isEmpty) return;
     if (slots.length == 1) {
       await _accept(slots.first);
@@ -403,6 +442,33 @@ class _ChallengeCardState extends ConsumerState<_ChallengeCard> {
                     icon: const Icon(Icons.check),
                     label: Text(_busy ? 'Working…' : 'Accept'),
                   ),
+                  // The third answer, and in practice the most common one:
+                  // "yes, but not then". Without it a club that wanted the
+                  // match but not the date had to decline and issue a fresh
+                  // challenge back, which lost the thread and read to the
+                  // other club as a refusal.
+                  OutlinedButton(
+                    onPressed: _busy ? null : _counter,
+                    child: const Text('Counter offer'),
+                  ),
+                  OutlinedButton(
+                    onPressed: _busy ? null : _decline,
+                    child: const Text('Decline'),
+                  ),
+                ],
+              )
+            // The challenging club's turn again: the opponent has come back
+            // with different terms and this club now accepts or declines
+            // them.
+            else if (c.canAnswerCounterAs(widget.orgId) && widget.canManage)
+              Wrap(
+                spacing: 8,
+                children: [
+                  FilledButton.icon(
+                    onPressed: _busy ? null : _chooseSlotAndAccept,
+                    icon: const Icon(Icons.check),
+                    label: Text(_busy ? 'Working…' : 'Accept new terms'),
+                  ),
                   OutlinedButton(
                     onPressed: _busy ? null : _decline,
                     child: const Text('Decline'),
@@ -428,6 +494,168 @@ class _ChallengeCardState extends ConsumerState<_ChallengeCard> {
   }
 }
 
+/// What the receiving club is proposing instead.
+class _CounterTerms {
+  const _CounterTerms({required this.slots, this.venue, this.note});
+
+  final List<DateTime> slots;
+  final String? venue;
+  final String? note;
+}
+
+/// Collects a counter-offer: at least one new date, optionally a new ground
+/// and a note saying why.
+class _CounterOfferDialog extends StatefulWidget {
+  const _CounterOfferDialog({required this.challenge});
+
+  final Challenge challenge;
+
+  @override
+  State<_CounterOfferDialog> createState() => _CounterOfferDialogState();
+}
+
+class _CounterOfferDialogState extends State<_CounterOfferDialog> {
+  final _venue = TextEditingController();
+  final _note = TextEditingController();
+  final _slots = <DateTime>[];
+
+  @override
+  void initState() {
+    super.initState();
+    // Prefilled with the ground already offered, so a club countering only
+    // the date does not have to retype a venue both sides already agreed on.
+    _venue.text = widget.challenge.venue ?? '';
+  }
+
+  @override
+  void dispose() {
+    _venue.dispose();
+    _note.dispose();
+    super.dispose();
+  }
+
+  Future<void> _addSlot() async {
+    final now = DateTime.now();
+    final date = await showDatePicker(
+      context: context,
+      initialDate: now.add(const Duration(days: 1)),
+      firstDate: now,
+      lastDate: now.add(const Duration(days: 365)),
+    );
+    if (date == null || !mounted) return;
+    final time = await showTimePicker(
+      context: context,
+      initialTime: const TimeOfDay(hour: 9, minute: 0),
+    );
+    if (!mounted) return;
+    setState(() {
+      _slots.add(
+        DateTime(
+          date.year,
+          date.month,
+          date.day,
+          time?.hour ?? 9,
+          time?.minute ?? 0,
+        ),
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Propose different terms'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'The dates you propose replace the ones offered. '
+              '${widget.challenge.fromOrgName} then accepts or declines.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 14),
+            if (_slots.isEmpty)
+              Text(
+                'No dates proposed yet.',
+                style: Theme.of(context).textTheme.bodySmall,
+              )
+            else
+              for (final s in _slots)
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.event, size: 18),
+                  title: Text(
+                    _formatSlot(s),
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.close, size: 18),
+                    tooltip: 'Remove this date',
+                    onPressed: () => setState(() => _slots.remove(s)),
+                  ),
+                ),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: _addSlot,
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('Add a date'),
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _venue,
+              decoration: const InputDecoration(
+                labelText: 'Venue',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _note,
+              maxLines: 2,
+              textCapitalization: TextCapitalization.sentences,
+              decoration: const InputDecoration(
+                labelText: 'Message (optional)',
+                hintText: 'Ground is booked that day — how about the 26th?',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          // Disabled until there is something to agree to. A counter-offer
+          // with no dates is a decline wearing a different word.
+          onPressed: _slots.isEmpty
+              ? null
+              : () => Navigator.pop(
+                    context,
+                    _CounterTerms(
+                      slots: List.of(_slots),
+                      venue: _venue.text.trim().isEmpty
+                          ? null
+                          : _venue.text.trim(),
+                      note: _note.text.trim().isEmpty
+                          ? null
+                          : _note.text.trim(),
+                    ),
+                  ),
+          child: const Text('Send counter offer'),
+        ),
+      ],
+    );
+  }
+}
+
 class _StatusChip extends StatelessWidget {
   const _StatusChip({required this.challenge, required this.incoming});
 
@@ -446,6 +674,13 @@ class _StatusChip extends StatelessWidget {
       'withdrawn' => (
           incoming ? 'Withdrawn' : 'You withdrew',
           scheme.surfaceContainerHighest,
+        ),
+      // Also perspective-dependent, and the turn has swapped: the club that
+      // countered is now waiting, and the club that issued the challenge owes
+      // the answer.
+      'countered' => (
+          incoming ? 'You countered' : 'Their move',
+          scheme.tertiaryContainer,
         ),
       _ => (incoming ? 'Your move' : 'Awaiting reply', scheme.tertiaryContainer),
     };
@@ -472,6 +707,16 @@ class _IssueChallengeDialogState
     extends ConsumerState<_IssueChallengeDialog> {
   final _search = TextEditingController();
   final _venue = TextEditingController();
+
+  /// The note that travels with the offer — "Shall we play at 7pm on the
+  /// 26th?". Optional, and the thing that makes a challenge read as coming
+  /// from a person rather than from a form.
+  final _message = TextEditingController();
+
+  /// What each side puts in, in whole rupees. Blank means a friendly, which
+  /// is what almost every challenge is.
+  final _entryFee = TextEditingController();
+
   Organization? _opponent;
   /// The contests being proposed, in the order they were added.
   ///
@@ -522,6 +767,8 @@ class _IssueChallengeDialogState
   void dispose() {
     _search.dispose();
     _venue.dispose();
+    _message.dispose();
+    _entryFee.dispose();
     super.dispose();
   }
 
@@ -571,6 +818,12 @@ class _IssueChallengeDialogState
               status: 'pending',
               proposedSlots: List.of(_slots),
               venue: _venue.text.trim().isEmpty ? null : _venue.text.trim(),
+              message:
+                  _message.text.trim().isEmpty ? null : _message.text.trim(),
+              // Anything unparseable reads as a friendly rather than as a
+              // stake nobody agreed to. The field is optional and most
+              // challenges leave it blank.
+              entryFeeRupees: int.tryParse(_entryFee.text.trim()) ?? 0,
             ),
           );
       if (!mounted) return;
@@ -730,6 +983,28 @@ class _IssueChallengeDialogState
                 controller: _venue,
                 decoration: const InputDecoration(
                   labelText: 'Venue (optional)',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _entryFee,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Entry fee per side (optional)',
+                  prefixText: '₹ ',
+                  helperText: 'Settled between the clubs, not collected here',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _message,
+                maxLines: 2,
+                textCapitalization: TextCapitalization.sentences,
+                decoration: const InputDecoration(
+                  labelText: 'Message (optional)',
+                  hintText: 'Shall we play at 7pm on the 26th?',
                   border: OutlineInputBorder(),
                 ),
               ),

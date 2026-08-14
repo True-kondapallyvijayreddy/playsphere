@@ -15,6 +15,7 @@ import '../../domain/scoring/rule_config.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../domain/team/team_balancer.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/ui_kit.dart';
 
 /// Start a match and score it, now.
 ///
@@ -489,8 +490,7 @@ class _QuickMatchScreenState extends ConsumerState<QuickMatchScreen> {
                 // Singles or doubles; eleven, eight or six. This is the choice
                 // that decides everything below it, so it comes first.
                 if (_sport.sideFormats.length > 1) ...[
-                  Text('Match type', style: theme.textTheme.titleSmall),
-                  const SizedBox(height: 8),
+                  const PsSectionHeader(title: 'Match Type'),
                   Wrap(
                     spacing: 8,
                     children: [
@@ -509,24 +509,13 @@ class _QuickMatchScreenState extends ConsumerState<QuickMatchScreen> {
                   const SizedBox(height: 16),
                 ],
 
-                // --- The ruleset --------------------------------------------
-                if (presets.isNotEmpty || _config.isNotEmpty)
-                  _RulesetCard(
-                    sportId: _sport.id,
-                    presets: presets,
-                    preset: _preset,
-                    config: _config,
-                    onPreset: (p) => setState(() {
-                      _preset = p;
-                      _rebuildConfig();
-                    }),
-                    onChanged: (key, value) => setState(() {
-                      _config = {..._config, key: value};
-                    }),
-                  ),
-                const SizedBox(height: 20),
-
                 // --- The two sides ------------------------------------------
+                //
+                // Participants before rules, following the sample flow's
+                // order. It is also the better order on its own merits: who is
+                // playing is decided at the ground and is what people arrive
+                // knowing, where the ruleset is usually left at its preset.
+                const PsSectionHeader(title: 'Participants'),
                 Row(
                   children: [
                     Expanded(
@@ -682,6 +671,7 @@ class _QuickMatchScreenState extends ConsumerState<QuickMatchScreen> {
                   ),
                 const SizedBox(height: 20),
 
+                const PsSectionHeader(title: 'Venue & Time'),
                 TextField(
                   controller: _venue,
                   decoration: const InputDecoration(
@@ -689,6 +679,29 @@ class _QuickMatchScreenState extends ConsumerState<QuickMatchScreen> {
                     hintText: 'e.g. Main court',
                   ),
                 ),
+                const SizedBox(height: 20),
+
+                // --- The ruleset --------------------------------------------
+                //
+                // Moved below the sides and the venue. It is the section most
+                // matches never touch — the sport's preset is usually right —
+                // so it sits after the two that every match does.
+                if (presets.isNotEmpty || _config.isNotEmpty) ...[
+                  const PsSectionHeader(title: 'Match Rules'),
+                  _RulesetCard(
+                    sportId: _sport.id,
+                    presets: presets,
+                    preset: _preset,
+                    config: _config,
+                    onPreset: (p) => setState(() {
+                      _preset = p;
+                      _rebuildConfig();
+                    }),
+                    onChanged: (key, value) => setState(() {
+                      _config = {..._config, key: value};
+                    }),
+                  ),
+                ],
                 const SizedBox(height: 24),
 
                 FilledButton.icon(

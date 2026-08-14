@@ -168,6 +168,37 @@ class Refs {
   ) =>
       tournamentInvites.doc(inviteId);
 
+  /// Teams, top-level and org-free.
+  ///
+  /// Not `orgs/{orgId}/teams` on purpose: Rule 4 says a team does not need a
+  /// club, and a path with an org segment in it makes the club compulsory no
+  /// matter how nullable the `clubId` field is. Club affiliation is a field
+  /// here, and a query — see [teamsForClub]. `subgroups` remains the
+  /// club-scoped concept.
+  static CollectionReference<Map<String, dynamic>> get teams =>
+      db.collection('teams');
+
+  static DocumentReference<Map<String, dynamic>> team(String teamId) =>
+      teams.doc(teamId);
+
+  /// Every team a person is on the roster of.
+  ///
+  /// Filtered to active teams, because the caller is always building a picker
+  /// or a profile list and an archived squad from 2023 is noise in both. The
+  /// history of a disbanded team is reached from the matches it played, which
+  /// is where somebody looking for it is actually looking.
+  static Query<Map<String, dynamic>> teamsForMember(String uid) => teams
+      .where('memberUids', arrayContains: uid)
+      .where('status', isEqualTo: 'active');
+
+  /// A club's teams, permanent and event alike.
+  static Query<Map<String, dynamic>> teamsForClub(String orgId) =>
+      teams.where('clubId', isEqualTo: orgId).where('status', isEqualTo: 'active');
+
+  /// The event teams raised for one competition.
+  static Query<Map<String, dynamic>> teamsForCompetition(String compId) =>
+      teams.where('competitionId', isEqualTo: compId);
+
   static CollectionReference<Map<String, dynamic>> get lookingForPosts =>
       db.collection('lookingForPosts');
 
@@ -209,6 +240,24 @@ class Refs {
   /// can only ever return the caller's own memberships.
   static Query<Map<String, dynamic>> get myMembershipsQuery =>
       db.collectionGroup('members');
+
+  /// Who follows a club. Distinct from membership on purpose: following is a
+  /// reader's relationship — it asks for a club's news on the home feed and
+  /// confers nothing else — where membership is a roster entry with a role.
+  static CollectionReference<Map<String, dynamic>> followers(String orgId) =>
+      org(orgId).collection('followers');
+
+  static DocumentReference<Map<String, dynamic>> follower(
+    String orgId,
+    String uid,
+  ) =>
+      followers(orgId).doc(uid);
+
+  /// Collection-group query across every org's followers. Restricted by rules
+  /// to rows whose document id is the caller's uid, exactly like
+  /// [myMembershipsQuery], so it can only return the caller's own follows.
+  static Query<Map<String, dynamic>> get myFollowsQuery =>
+      db.collectionGroup('followers');
 
   // --- Competitions -----------------------------------------------------
 
@@ -267,6 +316,11 @@ class Refs {
   /// every club at once. Server-written only — see `firestore.rules`.
   static CollectionReference<Map<String, dynamic>> get rankingEntries =>
       db.collection('rankingEntries');
+
+  /// One club ladder per sport, written nightly by `functions/clubs.js`.
+  /// Server-written only — see `firestore.rules`.
+  static CollectionReference<Map<String, dynamic>> get clubStandings =>
+      db.collection('clubStandings');
 
   /// Venues belong to the organization, not to any one competition — a club
   /// plays at the same two or three places all season, and re-declaring them
@@ -496,6 +550,30 @@ class Refs {
   ) =>
       groundBookings(groundId).doc(bookingId);
 
+  /// One document per hour a booking covers, at
+  /// `grounds/{groundId}/hourHolds/{dayKey}_{hour}` — the mechanism that
+  /// actually makes [GroundRepository.book] exclusive.
+  ///
+  /// Nothing reads this collection; the booking calendar is [groundBookings].
+  /// It exists purely so two people racing for the same hour collide on a
+  /// document id inside one transaction. A `Transaction` can only detect a
+  /// conflict on a document it read BY REFERENCE — reading it via a `Query`
+  /// (which is what the exclusivity check used to do) is untracked and
+  /// proves nothing. See `firestore.rules` on `hourHolds` for the full
+  /// story, and `GroundRepository.book`/`cancelBooking` for where these are
+  /// created and released.
+  static CollectionReference<Map<String, dynamic>> groundHourHolds(
+    String groundId,
+  ) =>
+      ground(groundId).collection('hourHolds');
+
+  static DocumentReference<Map<String, dynamic>> groundHourHold(
+    String groundId,
+    String dayKey,
+    int hour,
+  ) =>
+      groundHourHolds(groundId).doc('${dayKey}_$hour');
+
   /// Every booking a club or a player has made, across every ground.
   ///
   /// The mirror image of [allMemoriesQuery], and needed for the same reason:
@@ -511,6 +589,31 @@ class Refs {
   /// not user content. Kept in Firestore rather than compiled into the app so
   /// a price change or a seasonal range does not need a store release — the
   /// app ships a small bundled catalog only as the offline fallback.
+  /// District rollups written by `functions/gov.js` — see
+  /// `GovAggregateRow`. Admin-claim gated in `firestore.rules`.
+  static CollectionReference<Map<String, dynamic>> get govAggregates =>
+      db.collection('gov_aggregates');
+
+  /// Precomputed talent-discovery leaderboards written by
+  /// `functions/talent.js`. The document id is a `TalentBoardKey`, and its
+  /// final segment (`__public` / `__scout`) is what `firestore.rules` gates
+  /// the read on — see `TalentBoard` for why the audience lives in the id.
+  static CollectionReference<Map<String, dynamic>> get talentBoards =>
+      db.collection('talentBoards');
+
+  static DocumentReference<Map<String, dynamic>> talentBoard(String boardId) =>
+      talentBoards.doc(boardId);
+
+  /// Per-sport directory totals written nightly by `functions/sports.js`.
+  /// The document id is the `SportCatalog` sport id. Publicly readable —
+  /// see the rule's comment in `firestore.rules` for why this aggregate is
+  /// ungated where the others are not.
+  static CollectionReference<Map<String, dynamic>> get sportStats =>
+      db.collection('sportStats');
+
+  static DocumentReference<Map<String, dynamic>> sportStat(String sportId) =>
+      sportStats.doc(sportId);
+
   static CollectionReference<Map<String, dynamic>> get products =>
       db.collection('products');
 
@@ -614,4 +717,24 @@ class Refs {
     String campaignId,
   ) =>
       adCampaigns.doc(campaignId);
+
+  // --- Food & delivery at the ground ---------------------------------------
+
+  /// One ground's canteen menu, at `groundMenuItems/{itemId}`. Top-level,
+  /// denormalized `groundId`/`groundName`, same reasoning as [clubProducts].
+  static CollectionReference<Map<String, dynamic>> get groundMenuItems =>
+      db.collection('groundMenuItems');
+
+  static DocumentReference<Map<String, dynamic>> groundMenuItem(
+    String itemId,
+  ) =>
+      groundMenuItems.doc(itemId);
+
+  /// Every food order, at `foodOrders/{orderId}`. Top-level, same reasoning
+  /// as [clubOrders].
+  static CollectionReference<Map<String, dynamic>> get foodOrders =>
+      db.collection('foodOrders');
+
+  static DocumentReference<Map<String, dynamic>> foodOrder(String orderId) =>
+      foodOrders.doc(orderId);
 }

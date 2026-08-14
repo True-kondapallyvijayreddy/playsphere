@@ -307,9 +307,7 @@ class _LineupEditorState extends ConsumerState<LineupEditor> {
         );
       } else {
         await repo.setLineups(
-          orgId: f.orgId,
-          compId: f.compId,
-          fixtureId: f.id,
+          fixture: f,
           lineupA: _a,
           lineupB: _b,
         );

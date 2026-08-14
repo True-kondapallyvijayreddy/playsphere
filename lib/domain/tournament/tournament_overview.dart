@@ -93,8 +93,17 @@ class TournamentOverview {
     DateTime? now,
   }) {
     final clock = now ?? DateTime.now();
+    // Draft fixtures — see `Fixture.isDraft` — are an organizer's own preview
+    // against placeholder teams. Filtered out here, once, so nothing derived
+    // below has to remember to: the progress bar must not report "6 of 20
+    // played" when six of the twenty were never real, and nobody standing in
+    // the car park should be told a placeholder is on court now.
+    final real = [
+      for (final f in fixtures)
+        if (!f.isDraft) f,
+    ];
     final byComp = <String, List<Fixture>>{};
-    for (final f in fixtures) {
+    for (final f in real) {
       byComp.putIfAbsent(f.compId, () => []).add(f);
     }
 
@@ -127,7 +136,7 @@ class TournamentOverview {
     summaries.sort((a, b) => a.competition.name.compareTo(b.competition.name));
 
     final scheduled = [
-      for (final f in fixtures)
+      for (final f in real)
         if (f.scheduledAt != null) f.scheduledAt!,
     ];
 
@@ -137,11 +146,11 @@ class TournamentOverview {
       playedMatches: played,
       liveMatches: live,
       onCourtNow: [
-        for (final f in fixtures)
+        for (final f in real)
           if (f.isLiveAt(clock)) f,
       ],
       upNext: [
-        for (final f in fixtures)
+        for (final f in real)
           if (f.status == FixtureStatus.scheduled &&
               f.scheduledAt != null &&
               f.scheduledAt!.isAfter(clock.subtract(const Duration(minutes: 15))))

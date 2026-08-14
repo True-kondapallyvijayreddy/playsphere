@@ -1216,7 +1216,15 @@ class CompetitionRepository {
             entrantBId: p.entrantB?.id ?? '',
             entrantAName: p.entrantA?.displayName ?? 'To be decided',
             entrantBName: p.entrantB?.displayName ?? 'To be decided',
+            // An individual event never fills a line-up, so this is the only
+            // record of who is actually playing. Null for a team entrant and
+            // for a knockout slot still waiting on a qualifier — both fill in
+            // later, from `_maybeAdvanceWinner` and `promoteGroupQualifiers`.
+            entrantAUid: p.entrantA?.soloUid,
+            entrantBUid: p.entrantB?.soloUid,
             status: FixtureStatus.scheduled,
+            sourceType: competition.matchSource,
+            sourceId: competition.matchSourceId,
             round: p.round,
             matchIndex: p.matchIndex,
             roundLabel: p.roundLabel,
@@ -1297,6 +1305,163 @@ class CompetitionRepository {
           scheduleProblems: timetable.problems,
         );
       });
+
+  /// Generates a draft schedule against placeholder teams — "Team A", "Team
+  /// B", … — before real entrants exist, so an organizer can lay out rounds,
+  /// pick venues and times, and line up officials ahead of registration
+  /// instead of waiting for it to close.
+  ///
+  /// Runs the exact same [FixtureGenerator] [generateDraw] does, over
+  /// synthetic entrants, so the bracket an organizer plans against — round
+  /// robin, knockout, or groups feeding a knockout — is shaped by the same
+  /// engine that will draw the real one. All that is asked for here is how
+  /// many teams to plan for and, for a groups format, how many a group
+  /// holds.
+  ///
+  /// Deliberately leaves the competition's `status` and `fixtureCount`
+  /// untouched: this is a preview, not a milestone in the event's lifecycle.
+  /// Analytics and the tournament progress bar both read one of those two, so
+  /// leaving them alone is what stops a draft schedule inflating either.
+  /// Every fixture this writes carries [Fixture.isDraft], which is what the
+  /// rest of the app reads to leave placeholders out of anything it counts,
+  /// schedules a spectator against, or offers to reschedule in bulk.
+  ///
+  /// Refused under the same guard as [generateDraw] — nothing here is
+  /// regenerated over a match that already has a score — and for the same
+  /// reason: on the ordinary path this only ever runs before real entrants
+  /// exist, so there should be nothing to protect, but a competition an
+  /// organizer somehow scored by hand must still not be silently wiped.
+  Future<DrawOutcome> generateDraftSchedule({
+    required Competition competition,
+    required int teamCount,
+    int? teamsPerGroup,
+  }) =>
+      guard(() async {
+        final orgId = competition.orgId;
+        final compId = competition.id;
+
+        final existing = await Refs.fixtures(orgId, compId).get();
+        final anyScored = existing.docs
+            .map(Fixture.fromDoc)
+            .any((f) => f.lastSeq > 0 || f.hasResult);
+        if (anyScored) {
+          throw const ValidationException(
+            'Some matches already have scores. Clear those results before '
+            'generating a new schedule.',
+          );
+        }
+
+        final placeholders = <Entrant>[
+          for (var i = 0; i < teamCount; i++)
+            Entrant(
+              id: 'draft_$i',
+              displayName: 'Team ${_draftTeamLabel(i)}',
+              entrantType: competition.entrantType,
+            ),
+        ];
+
+        final planned = const FixtureGenerator().generate(
+          format: competition.format,
+          entrants: placeholders,
+          groupSize: teamsPerGroup,
+          qualifiersPerGroup: 2,
+        );
+        final kept = <PlannedFixture>[
+          for (final p in planned)
+            if (p.isPlayable) p,
+        ];
+        if (kept.isEmpty) {
+          throw const ValidationException(
+            'Not enough teams to plan a schedule — try a higher number.',
+          );
+        }
+
+        final refByPlannedIndex = <int, DocumentReference<Map<String, dynamic>>>{
+          for (final p in kept) p.matchIndex: Refs.fixtures(orgId, compId).doc(),
+        };
+        String? idFor(int? plannedIndex) =>
+            plannedIndex == null ? null : refByPlannedIndex[plannedIndex]?.id;
+
+        final sport = SportCatalog.byId(competition.sportId);
+        final effectiveConfig = competition.effectiveScoringConfig(sport.config);
+
+        final batch = ChunkedBatch(Refs.db);
+
+        // Clear any previous draft (or unscored real draw — the guard above
+        // already refused if anything in it was scored) so regenerating does
+        // not leave stale fixtures sitting alongside the new ones.
+        for (final doc in existing.docs) {
+          batch.delete(doc.reference);
+        }
+
+        for (final p in kept) {
+          final ref = refByPlannedIndex[p.matchIndex]!;
+          final fixture = Fixture(
+            id: ref.id,
+            orgId: orgId,
+            compId: compId,
+            entrantAId: p.entrantA?.id ?? '',
+            entrantBId: p.entrantB?.id ?? '',
+            entrantAName: p.entrantA?.displayName ?? 'To be decided',
+            entrantBName: p.entrantB?.displayName ?? 'To be decided',
+            // An individual event never fills a line-up, so this is the only
+            // record of who is actually playing. Null for a team entrant and
+            // for a knockout slot still waiting on a qualifier — both fill in
+            // later, from `_maybeAdvanceWinner` and `promoteGroupQualifiers`.
+            entrantAUid: p.entrantA?.soloUid,
+            entrantBUid: p.entrantB?.soloUid,
+            status: FixtureStatus.scheduled,
+            sourceType: competition.matchSource,
+            sourceId: competition.matchSourceId,
+            round: p.round,
+            matchIndex: p.matchIndex,
+            roundLabel: p.roundLabel,
+            venue: competition.venue,
+            scheduledAt: competition.startDate,
+            tournamentId: competition.tournamentId,
+            scoringPluginKey: competition.scoringPluginKey,
+            sportId: competition.sportId,
+            rulesetVersion: competition.rulesetVersion,
+            scoringConfig: effectiveConfig,
+            scoreState: ScoringRegistry.resolve(competition.scoringPluginKey)
+                .initialState(_contextFor(p, effectiveConfig)),
+            feedsWinnerToFixtureId: idFor(p.feedsWinnerToIndex),
+            feedsWinnerToSlot: p.feedsWinnerToSlot,
+            feedsLoserToFixtureId: idFor(p.feedsLoserToIndex),
+            feedsLoserToSlot: p.feedsLoserToSlot,
+            bracket: p.bracket,
+            groupId: p.groupId,
+            qualifierA: p.qualifierA,
+            qualifierB: p.qualifierB,
+            isDraft: true,
+          );
+          batch.set(ref, fixture.toCreate());
+        }
+
+        unawaited(batch.commitAll().catchError((Object error) {
+          _writeFailures.add(_translateWriteFailure(error));
+        }));
+
+        return DrawOutcome(
+          planned: planned.length,
+          written: kept.length,
+          chunks: batch.chunkCount,
+          drawId: UuidV7.generate(),
+        );
+      });
+
+  /// "Team A", "Team B", … "Team Z", "Team AA" — spreadsheet-style, so
+  /// running out of single letters degrades to something still readable
+  /// instead of a number nobody can place in the bracket by eye.
+  static String _draftTeamLabel(int index) {
+    var n = index;
+    var label = '';
+    do {
+      label = String.fromCharCode(65 + n % 26) + label;
+      n = n ~/ 26 - 1;
+    } while (n >= 0);
+    return label;
+  }
 
   /// Counts how much of a draw actually reached the server.
   ///
@@ -1420,6 +1585,10 @@ class CompetitionRepository {
           // showing 0-0 with nothing happening. Live means a scorecard has
           // started.
           status: FixtureStatus.scheduled,
+          // §12 — a quick match is the archetypal standalone game: no
+          // tournament above it and nobody to answer to.
+          sourceType: MatchSource.singleMatch,
+          sourceId: compRef.id,
           roundLabel: 'Match',
           venue: venue,
           scheduledAt: startsAt ?? DateTime.now(),
@@ -1519,6 +1688,11 @@ class CompetitionRepository {
           }
           final opponentName =
               f.entrantAId == entrantId ? f.entrantBName : f.entrantAName;
+          // Carried forward with the id it belongs to. Read off this fixture
+          // rather than looked up again: the beneficiary is already one of
+          // these two sides, so the answer is in hand.
+          final opponentUid =
+              f.entrantAId == entrantId ? f.entrantBUid : f.entrantAUid;
 
           batch.update(Refs.fixture(orgId, compId, f.id), {
             'status': FixtureStatus.walkover.wire,
@@ -1550,6 +1724,14 @@ class CompetitionRepository {
               {
                 'entrant${slot}Id': opponentId,
                 'entrant${slot}Name': opponentName,
+                'entrant${slot}Uid': opponentUid,
+                // `playerUids` is a stored summary of a derived getter, so a
+                // slot filled after the fixture was written has to extend it
+                // here or the promoted player's own match list never learns
+                // they are in the next round. arrayUnion, not a rewrite: the
+                // opposite slot may already hold somebody.
+                if (opponentUid != null)
+                  'playerUids': FieldValue.arrayUnion([opponentUid]),
               },
             );
           }
@@ -1631,12 +1813,25 @@ class CompetitionRepository {
               entry.key: entry.value,
         };
 
+        // A standing carries an entrant id and a display name, not an account.
+        // The entrants are already loaded above for the tables, so resolving
+        // the promoted player's uid costs nothing more than this map.
+        final soloUidByEntrantId = <String, String>{
+          for (final e in entrants)
+            if (e.soloUid != null) e.id: e.soloUid!,
+        };
+
         final batch = Refs.db.batch();
         var resolved = 0;
         final waiting = <String>{};
 
         for (final fixture in fixtures) {
           final updates = <String, Object?>{};
+          // Both slots of one fixture can resolve in the same pass, so the
+          // promoted accounts are gathered before the single arrayUnion below.
+          // Writing `playerUids` inside `fill` would let the second slot's
+          // union silently replace the first's.
+          final promotedUids = <String>[];
 
           void fill(String slot, QualifierSource? source, String existingId) {
             if (source == null || existingId.isNotEmpty) return;
@@ -1654,10 +1849,17 @@ class CompetitionRepository {
             final standing = table[source.position - 1];
             updates['entrant${slot}Id'] = standing.entrantId;
             updates['entrant${slot}Name'] = standing.displayName;
+            final soloUid = soloUidByEntrantId[standing.entrantId];
+            updates['entrant${slot}Uid'] = soloUid;
+            if (soloUid != null) promotedUids.add(soloUid);
           }
 
           fill('A', fixture.qualifierA, fixture.entrantAId);
           fill('B', fixture.qualifierB, fixture.entrantBId);
+
+          if (promotedUids.isNotEmpty) {
+            updates['playerUids'] = FieldValue.arrayUnion(promotedUids);
+          }
 
           if (updates.isEmpty) continue;
           batch.update(Refs.fixture(orgId, compId, fixture.id), updates);
@@ -2345,6 +2547,11 @@ class CompetitionRepository {
         final playerUids = <String>{
           for (final p in [...lineup, ...other])
             if (p.uid != null) p.uid!,
+          // Individual entrants are named on the entrant document, never in a
+          // line-up. Recomputing from the two sheets alone would erase them
+          // from a fixture that has both shapes — a club team against a lone
+          // qualifier — the moment the club edited its own squad.
+          ...fixture.entrantUids,
         }.toList();
 
         final update = <String, Object?>{
@@ -2364,16 +2571,20 @@ class CompetitionRepository {
         );
       });
 
+  /// Names both team sheets at once, for the host-managed case.
+  ///
+  /// Takes the whole [fixture] rather than its three ids because
+  /// `playerUids` cannot be rebuilt from the line-ups alone — see the note on
+  /// [Fixture.entrantAUid]. Passing the ids separately is what made it
+  /// possible to write a summary that quietly dropped an individual entrant.
   Future<void> setLineups({
-    required String orgId,
-    required String compId,
-    required String fixtureId,
+    required Fixture fixture,
     required List<MatchPlayer> lineupA,
     required List<MatchPlayer> lineupB,
   }) =>
       guard(() async {
         unawaited(
-          Refs.fixture(orgId, compId, fixtureId).update({
+          Refs.fixture(fixture.orgId, fixture.compId, fixture.id).update({
             'lineupA': MatchPlayer.listTo(lineupA),
             'lineupB': MatchPlayer.listTo(lineupB),
             // Written in the same update as the line-ups it summarises.
@@ -2384,6 +2595,7 @@ class CompetitionRepository {
             'playerUids': <String>{
               for (final p in [...lineupA, ...lineupB])
                 if (p.uid != null) p.uid!,
+              ...fixture.entrantUids,
             }.toList(),
           }).catchError((Object error) {
             _writeFailures.add(_translateWriteFailure(error));

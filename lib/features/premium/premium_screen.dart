@@ -7,6 +7,7 @@ import '../../core/models/billing.dart';
 import '../../core/providers.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/plan_card.dart';
+import '../../shared/real_payment_sheet.dart';
 
 /// PlaySphere Premium — what a player can buy for themselves.
 ///
@@ -40,14 +41,34 @@ class _PremiumScreenState extends ConsumerState<PremiumScreen> {
 
     setState(() => _busy = true);
     try {
-      await ref.read(billingRepositoryProvider).purchaseMemberPlan(
-            uid: me.uid,
-            plan: MemberPlan.premium,
-            // Passing the current state is what makes an early renewal add to
-            // the remaining term instead of resetting it — see
-            // PlanState.extendedFrom.
-            existing: me.planState,
-          );
+      if (Pricing.introOfferActive) {
+        // The launch-offer path: synchronous, ₹0, entitlement written in the
+        // same call. Unchanged by any of this.
+        await ref.read(billingRepositoryProvider).purchaseMemberPlan(
+              uid: me.uid,
+              plan: MemberPlan.premium,
+              // Passing the current state is what makes an early renewal add
+              // to the remaining term instead of resetting it — see
+              // PlanState.extendedFrom.
+              existing: me.planState,
+            );
+      } else {
+        // The real-money path: start a Razorpay payment link, send the payer
+        // to it, and wait for the server's own confirmation. Nothing here
+        // writes the entitlement — see `RazorpayCheckout`'s doc comment.
+        final pending = await ref.read(razorpayCheckoutProvider).start(
+              kind: PlanPaymentKind.memberPlan,
+              subjectId: me.uid,
+              planWire: MemberPlan.premium.wire,
+            );
+        if (!mounted) return;
+        final paid = await showRealPaymentSheet(
+          context,
+          paymentId: pending.paymentId,
+          url: pending.url,
+        );
+        if (!paid) return;
+      }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Premium is active. Enjoy.')),

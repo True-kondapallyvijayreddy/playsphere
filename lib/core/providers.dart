@@ -4,6 +4,9 @@ import 'package:firebase_auth/firebase_auth.dart' as fb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/billing_repository.dart';
+import '../data/gov_repository.dart';
+import '../data/razorpay_checkout.dart';
+import '../core/models/gov_aggregate_row.dart';
 import '../data/career_repository.dart';
 import '../data/tournament_repository.dart';
 import '../data/community_repository.dart';
@@ -14,16 +17,23 @@ import '../data/memory_repository.dart';
 import '../data/notification_repository.dart';
 import '../data/ground_repository.dart';
 import '../data/org_repository.dart';
+import '../data/team_repository.dart';
+import 'models/team.dart';
 import '../data/give_repository.dart';
 import '../data/shop_repository.dart';
 import '../data/scout_repository.dart';
+import '../data/talent_board_repository.dart';
+import '../data/sport_stats_repository.dart';
+import '../core/models/sport_stat_row.dart';
 import '../data/sponsor_repository.dart';
 import '../data/club_commerce_repository.dart';
 import '../data/ad_repository.dart';
+import '../data/food_repository.dart';
 import '../data/scoring_service.dart';
 import '../data/umpire_repository.dart';
 import '../domain/career/head_to_head.dart';
 import '../domain/standings/standings_calculator.dart';
+import '../domain/tournament/player_boards.dart';
 import '../domain/tournament/tournament_leaderboard.dart';
 import '../domain/tournament/tournament_overview.dart';
 import 'ads/promo.dart';
@@ -47,7 +57,9 @@ import '../domain/cheer.dart';
 import 'models/group_entry.dart';
 import 'models/organization.dart';
 import 'models/owner_proposal.dart';
+import 'models/club_standing.dart';
 import 'models/ranking_entry.dart';
+import 'models/sub_group.dart';
 import 'models/scoring_request.dart';
 import 'models/shop_product.dart';
 import 'models/give_collection_center.dart';
@@ -57,6 +69,8 @@ import 'models/give_need.dart';
 import 'models/sponsorship.dart';
 import 'models/club_product.dart';
 import 'models/ad_campaign.dart';
+import 'models/food_order.dart';
+import '../domain/scout/talent_board.dart';
 import '../domain/scout/talent_profile.dart';
 import 'models/club_file.dart';
 import 'models/squad_entry.dart';
@@ -71,8 +85,35 @@ import 'permissions/capability.dart';
 final authServiceProvider = Provider<AuthService>((ref) => AuthService());
 final userRepositoryProvider = Provider((ref) => const UserRepository());
 final orgRepositoryProvider = Provider((ref) => const OrgRepository());
+final teamRepositoryProvider = Provider((ref) => const TeamRepository());
 final competitionRepositoryProvider =
     Provider((ref) => const CompetitionRepository());
+
+/// One team, live.
+final teamProvider = StreamProvider.family<Team?, String>(
+  (ref, teamId) => ref.watch(teamRepositoryProvider).watchTeam(teamId),
+);
+
+/// The signed-in person's active teams.
+///
+/// Empty — not an error — when nobody is signed in, so a picker on a screen
+/// that renders before auth settles shows "no teams yet" rather than throwing.
+final myTeamsProvider = StreamProvider<List<Team>>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(const <Team>[]);
+  return ref.watch(teamRepositoryProvider).watchMyTeams(uid);
+});
+
+/// A club's active teams — permanent squads and any event teams it has raised.
+final clubTeamsProvider = StreamProvider.family<List<Team>, String>(
+  (ref, orgId) => ref.watch(teamRepositoryProvider).watchClubTeams(orgId),
+);
+
+/// The event teams raised for one competition.
+final competitionTeamsProvider = StreamProvider.family<List<Team>, String>(
+  (ref, compId) =>
+      ref.watch(teamRepositoryProvider).watchCompetitionTeams(compId),
+);
 /// One [ScoringService] for the container, disposed with it.
 ///
 /// It owns two broadcast `StreamController`s — the write-failure feed the
@@ -93,6 +134,22 @@ final scoringServiceProvider = Provider<ScoringService>((ref) {
 /// gateway that records what it was asked to collect.
 final billingRepositoryProvider =
     Provider((ref) => const BillingRepository());
+
+/// The real-money checkout — see `RazorpayCheckout`'s doc comment for why
+/// this is a separate flow from [billingRepositoryProvider] rather than a
+/// second `PaymentGateway`. Dormant while `Pricing.introOfferActive` is
+/// true: nothing calls it, and the Cloud Function it talks to refuses to run
+/// while the offer is on regardless.
+final razorpayCheckoutProvider =
+    Provider((ref) => const RazorpayCheckout());
+
+/// Live status of one payment this device started through
+/// [razorpayCheckoutProvider] — watched by [showRealPaymentSheet] so the
+/// waiting screen updates itself the moment the webhook lands.
+final paymentStatusProvider =
+    StreamProvider.family<PlanPaymentStatus, String>((ref, paymentId) {
+  return ref.watch(razorpayCheckoutProvider).watchStatus(paymentId);
+});
 
 /// Whether the signed-in player currently holds Premium.
 ///
@@ -353,6 +410,33 @@ final promoForSlotProvider = Provider.family<Promo?, PromoSlot>((ref, slot) {
   );
 });
 
+final foodRepositoryProvider = Provider((ref) => const FoodRepository());
+
+/// One ground's active canteen menu.
+final groundActiveMenuProvider =
+    StreamProvider.family<List<GroundMenuItem>, String>((ref, groundId) {
+  return ref.watch(foodRepositoryProvider).watchActiveMenu(groundId);
+});
+
+/// The ground owner's full menu management view.
+final groundFullMenuProvider =
+    StreamProvider.family<List<GroundMenuItem>, String>((ref, groundId) {
+  return ref.watch(foodRepositoryProvider).watchFullMenu(groundId);
+});
+
+/// Every food order this person has placed, across every ground.
+final myFoodOrdersProvider = StreamProvider<List<FoodOrder>>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(const []);
+  return ref.watch(foodRepositoryProvider).watchMyOrders(uid);
+});
+
+/// Orders waiting on one ground to fulfil.
+final groundFoodOrdersProvider =
+    StreamProvider.family<List<FoodOrder>, String>((ref, groundId) {
+  return ref.watch(foodRepositoryProvider).watchGroundOrders(groundId);
+});
+
 final scoutRepositoryProvider = Provider((ref) => const ScoutRepository());
 
 /// One search's parameters, bundled so the search screen watches a single
@@ -394,8 +478,75 @@ final scoutSearchResultsProvider =
       );
 });
 
+// --- Talent discovery boards --------------------------------------------
+//
+// The counterpart to the scout *search* above. Search answers "who is good at
+// this, here"; the boards answer "who is getting better", which is a ranking
+// across players no client may read and is therefore precomputed server-side.
+// See `functions/talent.js` and `lib/domain/scout/talent_board.dart`.
+
+final talentBoardRepositoryProvider =
+    Provider((ref) => const TalentBoardRepository());
+
+final sportStatsRepositoryProvider =
+    Provider((ref) => const SportStatsRepository());
+
+/// The sports directory's totals, keyed by sport id.
+///
+/// Not `autoDispose`: the directory is a browse screen people step in and out
+/// of while deciding what to open, and a nightly-refreshed collection of
+/// fifteen small documents is worth keeping warm across those trips rather
+/// than re-reading each time.
+final sportStatsProvider = StreamProvider<Map<String, SportStatRow>>(
+  (ref) => ref.watch(sportStatsRepositoryProvider).watchAll(),
+);
+
+/// Which board the discovery screen is showing.
+///
+/// Defaults to the national, all-ages, public cricket board — the one scope
+/// guaranteed to exist for the largest number of users, so the screen has
+/// content before anyone touches a filter.
+final talentBoardKeyProvider = StateProvider(
+  (ref) => const TalentBoardKey(
+    sportId: 'cricket',
+    audience: BoardAudience.public,
+  ),
+);
+
+/// A live listener, unlike `scoutSearchResultsProvider`: this is a single
+/// document read by id, which is exactly the shape a snapshot listener is
+/// cheapest for.
+final talentBoardProvider = StreamProvider.autoDispose<TalentBoard?>((ref) {
+  final key = ref.watch(talentBoardKeyProvider);
+  return ref.watch(talentBoardRepositoryProvider).watchBoard(key);
+});
+
+/// Whether this account may read `__scout` boards — the variant that includes
+/// minors.
+///
+/// Reads the custom claim from the ID token. This is a UI affordance only:
+/// the claim is enforced in `firestore.rules`, and a client that lies here
+/// gets a denied read and an empty board. Its only job is to avoid offering a
+/// toggle that would visibly do nothing.
+final isScoutProvider = FutureProvider<bool>((ref) async {
+  final user = ref.watch(authStateProvider).value;
+  if (user == null) return false;
+  final token = await user.getIdTokenResult();
+  return token.claims?['scout'] == true || token.claims?['admin'] == true;
+});
+
 final communityRepositoryProvider =
     Provider((ref) => const CommunityRepository());
+
+/// A club's named teams — its age-group sides, house teams and squads.
+///
+/// The club header counts these as "Teams". A club's *members* and its
+/// *teams* are different numbers and a club with 256 members can field 12
+/// sides, which is exactly the distinction the header exists to draw.
+final subGroupsProvider = StreamProvider.family<List<SubGroup>, String>(
+  (ref, orgId) =>
+      ref.watch(communityRepositoryProvider).watchSubGroups(orgId),
+);
 final umpireRepositoryProvider = Provider((ref) => const UmpireRepository());
 
 /// Queued scoring events not yet confirmed by the server.
@@ -437,6 +588,25 @@ final authStateProvider = StreamProvider<fb.User?>(
 final currentUidProvider = Provider<String?>(
   (ref) => ref.watch(authStateProvider).valueOrNull?.uid,
 );
+
+/// Whether the signed-in account carries the `admin` custom claim —
+/// PlaySphere's one platform-staff role, already what `firestore.rules`'
+/// `isGiveStaff()` checks for the Give collection centres and what gates the
+/// government dashboard below it. Re-reads the token rather than trusting a
+/// cached value: a claim is granted server-side and a client that has been
+/// open since before the grant must not need a sign-out to see it.
+final isPlatformAdminProvider = FutureProvider<bool>((ref) async {
+  final user = ref.watch(authStateProvider).valueOrNull;
+  if (user == null) return false;
+  final token = await user.getIdTokenResult();
+  return token.claims?['admin'] == true;
+});
+
+final govRepositoryProvider = Provider((ref) => const GovRepository());
+
+final govAggregatesProvider = StreamProvider<List<GovAggregateRow>>((ref) {
+  return ref.watch(govRepositoryProvider).watchAll();
+});
 
 /// The device half of push notifications.
 ///
@@ -786,6 +956,33 @@ final tournamentLeaderboardProvider = Provider.family<
   );
 });
 
+/// Per-player charts across a whole tournament — §17's Batting/Bowling/
+/// Fielding boards, discovered from whatever counters the matches recorded.
+///
+/// Derived from the fixtures already streamed for the overview and the
+/// leaderboard rather than a query of its own, so opening the charts costs
+/// nothing beyond the computation.
+final tournamentPlayerBoardsProvider = Provider.family<AsyncValue<PlayerBoards>,
+    ({String orgId, String tournamentId})>((ref, key) {
+  return ref
+      .watch(tournamentFixturesProvider(key))
+      .whenData(PlayerBoards.from);
+});
+
+/// The same charts, split per sport — §17's season view.
+///
+/// A multi-sport season is the shape this exists for: one set of charts across
+/// five sports is a list nobody's sport is near the top of. Watches the same
+/// fixture stream as [tournamentPlayerBoardsProvider], so a screen showing
+/// both costs one query, not two.
+final tournamentPlayerBoardsBySportProvider = Provider.family<
+    AsyncValue<Map<String, PlayerBoards>>,
+    ({String orgId, String tournamentId})>((ref, key) {
+  return ref
+      .watch(tournamentFixturesProvider(key))
+      .whenData(PlayerBoards.bySport);
+});
+
 /// Protests raised against one fixture's result.
 final disputesProvider = StreamProvider.family<List<Dispute>,
     ({String orgId, String compId, String fixtureId})>((ref, key) {
@@ -812,6 +1009,30 @@ final rankingProvider =
       .watch(tournamentRepositoryProvider)
       .watchRankingEntries(sportId: sportId)
       .map(buildRanking);
+});
+
+/// The clubs this person follows.
+///
+/// Empty rather than an error when signed out — a signed-out visitor follows
+/// nothing, which is a fact, not a failure.
+final myFollowedOrgIdsProvider = StreamProvider<List<String>>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(const []);
+  return ref.watch(orgRepositoryProvider).watchMyFollowedOrgIds(uid);
+});
+
+/// Whether the signed-in person follows one particular club.
+final isFollowingOrgProvider =
+    StreamProvider.family<bool, String>((ref, orgId) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(false);
+  return ref.watch(orgRepositoryProvider).watchIsFollowing(orgId, uid);
+});
+
+/// One sport's club ladder, from the nightly inter-club rollup.
+final clubStandingsProvider =
+    StreamProvider.family<ClubStandings, String>((ref, sportId) {
+  return ref.watch(tournamentRepositoryProvider).watchClubStandings(sportId);
 });
 
 /// Titles won at tournaments this club has run.

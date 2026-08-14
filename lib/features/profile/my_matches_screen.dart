@@ -156,6 +156,7 @@ class PlayerMatchTile extends StatelessWidget {
     final sport = SportCatalog.byId(fixture.sport.split(':').first);
 
     final when = fixture.completedAt ?? fixture.startedAt ?? fixture.scheduledAt;
+    final outcome = fixture.outcomeForUid(uid);
 
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
@@ -166,22 +167,48 @@ class PlayerMatchTile extends StatelessWidget {
           maxLines: 2,
           overflow: TextOverflow.ellipsis,
         ),
-        subtitle: Text(
-          [
-            if (fixture.roundLabel != null) fixture.roundLabel!,
-            if (when != null) friendlyDate(when),
-            if (fixture.summary.isNotEmpty) fixture.summary,
-          ].join(' · '),
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Where the match came from — `docs/Heart_of_the_playsphere.md`
+            // §20. Without it a career reads as an undifferentiated list, and
+            // "51 not out in a tournament final" looks the same as one in a
+            // friendly. `resolvedSource` rather than `sourceType` so matches
+            // played before the field existed still say something true.
+            Text(
+              [
+                fixture.resolvedSource.label,
+                if (fixture.roundLabel != null) fixture.roundLabel!,
+              ].join(' · '),
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: theme.colorScheme.primary,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            Text(
+              [
+                if (when != null) friendlyDate(when),
+                if (fixture.summary.isNotEmpty) fixture.summary,
+              ].join(' · '),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
         ),
+        isThreeLine: true,
         trailing: isLive
             ? const _LiveChip()
             : (fixture.status.isResulted
-                ? Icon(
-                    Icons.chevron_right,
-                    color: theme.hintColor,
-                  )
+                // Won/Lost/Drawn from THIS player's side, which is the only
+                // reading that means anything on a personal match list — the
+                // fixture knows which entrant won, not which one was theirs.
+                // Falls back to a chevron when the person is not on either
+                // team sheet, which happens for a quick match scored without
+                // line-ups.
+                ? (outcome == null
+                    ? Icon(Icons.chevron_right, color: theme.hintColor)
+                    : _OutcomeChip(outcome: outcome))
                 // Bug #1 / #15: a stale-live match still carries
                 // status == FixtureStatus.live, so its label would read
                 // "Live". Say "Paused" instead — the scorer stopped.
@@ -193,6 +220,45 @@ class PlayerMatchTile extends StatelessWidget {
           // A live match opens the spectator view; a finished one opens the
           // same route, which renders the completed scorecard.
           Routes.watch(fixture.orgId, fixture.compId, fixture.id),
+        ),
+      ),
+    );
+  }
+}
+
+/// Won / Lost / Drawn, from the viewing player's side.
+class _OutcomeChip extends StatelessWidget {
+  const _OutcomeChip({required this.outcome});
+
+  final PlayerResult outcome;
+
+  @override
+  Widget build(BuildContext context) {
+    // Green for a win and grey for everything else. A loss is deliberately
+    // not red: this is somebody's own career list, they already know how it
+    // went, and colouring half a season in alarm red is a way to make a
+    // record people avoid looking at.
+    final (fg, bg) = switch (outcome) {
+      PlayerResult.won => (
+          const Color(0xFF16A34A),
+          const Color(0xFF16A34A).withValues(alpha: 0.12),
+        ),
+      _ => (const Color(0xFF64748B), const Color(0xFFF1F5F9)),
+    };
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(
+        outcome.label.toUpperCase(),
+        style: TextStyle(
+          fontSize: 10,
+          fontWeight: FontWeight.w800,
+          letterSpacing: 0.4,
+          color: fg,
         ),
       ),
     );

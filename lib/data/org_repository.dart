@@ -1,4 +1,7 @@
+import 'dart:typed_data';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 
 import '../core/errors/app_exception.dart';
 import '../core/firebase/firestore_refs.dart';
@@ -191,7 +194,13 @@ class PlayerLookup {
 }
 
 class OrgRepository {
-  const OrgRepository();
+  const OrgRepository({FirebaseStorage? storage}) : _storage = storage;
+
+  /// Injectable so a test can drive the branding upload against a fake
+  /// bucket, matching [MemoryRepository] and [ClubFileRepository].
+  final FirebaseStorage? _storage;
+
+  FirebaseStorage get _bucket => _storage ?? FirebaseStorage.instance;
 
   Stream<Organization?> watch(String orgId) => Refs.org(orgId).snapshots().map(
         (doc) => doc.exists ? Organization.fromDoc(doc) : null,
@@ -221,6 +230,102 @@ class OrgRepository {
           .map((snap) => snap.docs.map(Membership.fromDoc).toList()),
     );
   }
+
+  // --- Branding ---------------------------------------------------------
+
+  /// Uploads a club crest and links it, in that order.
+  ///
+  /// ## Why the object is written before the document
+  ///
+  /// `orgs/{orgId}.logoUrl` is what every screen actually reads, and
+  /// `storage.rules` deliberately allows any signed-in person to write under
+  /// their own uid segment — Cloud Storage rules cannot read Firestore, so
+  /// "admins only" is not expressible there (see that file's note). The real
+  /// gate is this Firestore write, which only an org admin may make. So an
+  /// object that fails to be linked is an object nobody can reach, which is
+  /// the failure mode worth having: the reverse order would point the club at
+  /// an image that may not exist.
+  ///
+  /// The previous object is not deleted. A logo URL may already be sitting in
+  /// a cached feed, a notification payload or somebody's open tab, and
+  /// breaking those to reclaim a few hundred kilobytes is a poor trade.
+  Future<String> uploadClubLogo({
+    required String orgId,
+    required String uid,
+    required Uint8List bytes,
+    required String contentType,
+  }) =>
+      guard(() async {
+        if (bytes.lengthInBytes >= 4 * 1024 * 1024) {
+          throw const ValidationException(
+            'That image is too large. Please keep logos under 4 MB.',
+          );
+        }
+        // The uid segment is what `storage.rules` gates on; the timestamp
+        // makes each upload a new object so a replaced crest is never served
+        // from a CDN cache of the old one.
+        final path = 'orgs/$orgId/logo/$uid/'
+            '${DateTime.now().millisecondsSinceEpoch}.jpg';
+        final ref = _bucket.ref(path);
+        await ref.putData(
+          bytes,
+          SettableMetadata(
+            contentType: contentType,
+            // A crest at a versioned path never changes, so let devices and
+            // the CDN keep it. Re-fetching an image the user has already seen
+            // is the biggest avoidable data cost on a metered connection.
+            cacheControl: 'public, max-age=31536000, immutable',
+          ),
+        );
+        final url = await ref.getDownloadURL();
+        await Refs.org(orgId).update({
+          'logoUrl': url,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+        return url;
+      });
+
+  // --- Following --------------------------------------------------------
+  //
+  // Following is not a lightweight membership and must not drift into one. It
+  // puts a public club's events on your home feed and grants nothing else —
+  // no roster seat, no capability, no read the club had not already
+  // published. That is what lets it be self-served with no approval queue.
+
+  /// Every club this person follows.
+  ///
+  /// A collection-group query, safe for the same reason the memberships one
+  /// is: rules restrict rows to those whose document id is the caller's uid.
+  Stream<List<String>> watchMyFollowedOrgIds(String uid) {
+    return guardStream(
+      () => Refs.myFollowsQuery
+          .where('uid', isEqualTo: uid)
+          .snapshots()
+          .map((snap) => [
+                for (final doc in snap.docs)
+                  if (doc.data()['orgId'] is String)
+                    doc.data()['orgId'] as String,
+              ]),
+    );
+  }
+
+  /// Whether this person follows [orgId] — a single document read, so the
+  /// button on a club page does not wait on the whole follow list.
+  Stream<bool> watchIsFollowing(String orgId, String uid) {
+    return guardStream(
+      () => Refs.follower(orgId, uid).snapshots().map((d) => d.exists),
+    );
+  }
+
+  Future<void> followOrg({required String orgId, required String uid}) =>
+      guard(() => Refs.follower(orgId, uid).set({
+            'uid': uid,
+            'orgId': orgId,
+            'followedAt': FieldValue.serverTimestamp(),
+          }));
+
+  Future<void> unfollowOrg({required String orgId, required String uid}) =>
+      guard(() => Refs.follower(orgId, uid).delete());
 
   Stream<Membership?> watchMembership(String orgId, String uid) {
     return guardStream(
@@ -302,6 +407,24 @@ class OrgRepository {
 
   Future<void> updateOrganization(Organization org) =>
       guard(() => Refs.org(org.id).update(org.toUpdate()));
+
+  /// Sets or clears the club's own ground — see [Organization.homeGroundId].
+  ///
+  /// A raw write rather than going through [Organization.toUpdate]: that map
+  /// is pruned of nulls so a general profile save never wipes a field the
+  /// form didn't touch, but clearing a chosen ground here *is* the action —
+  /// switching from a registered [Ground] back to a free-text name, or
+  /// removing it altogether, both pass `groundId: null`.
+  Future<void> setHomeGround(
+    String orgId, {
+    String? groundId,
+    String? groundName,
+  }) =>
+      guard(() => Refs.org(orgId).update({
+            'homeGroundId': groundId,
+            'homeGroundName': groundName,
+            'updatedAt': FieldValue.serverTimestamp(),
+          }));
 
   /// Resolves a shareable invite code to the club it opens.
   ///

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/errors/app_exception.dart';
 import '../../core/layout/responsive.dart';
 import '../../core/providers.dart';
+import '../../l10n/app_localizations.dart';
 import '../../shared/app_scaffold.dart';
 
 class SignInScreen extends ConsumerStatefulWidget {
@@ -34,6 +35,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final l10n = AppLocalizations.of(context);
 
     return Scaffold(
       body: Center(
@@ -51,7 +53,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
                 ),
                 const SizedBox(height: 20),
                 Text(
-                  'PlaySphere',
+                  l10n.appTitle,
                   textAlign: TextAlign.center,
                   style: theme.textTheme.headlineMedium?.copyWith(
                     fontWeight: FontWeight.w700,
@@ -59,8 +61,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'Run competitions, score matches live, and let everyone '
-                  'follow along from anywhere.',
+                  l10n.signInTagline,
                   textAlign: TextAlign.center,
                   style: theme.textTheme.bodyMedium?.copyWith(
                     color: theme.hintColor,
@@ -76,15 +77,16 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
                       : const Icon(Icons.login),
-                  label: Text(_busy ? 'Signing in…' : 'Continue with Google'),
+                  label: Text(
+                    _busy ? l10n.signInInProgress : l10n.signInWithGoogle,
+                  ),
                   style: FilledButton.styleFrom(
                     minimumSize: const Size.fromHeight(50),
                   ),
                 ),
                 const SizedBox(height: 24),
                 Text(
-                  'You can watch any public live match without signing in — '
-                  'just open the link someone shares with you.',
+                  l10n.signInWatchWithoutAccount,
                   textAlign: TextAlign.center,
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: theme.hintColor,

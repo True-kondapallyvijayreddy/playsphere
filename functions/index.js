@@ -30,6 +30,7 @@ import { logger } from 'firebase-functions';
 
 import { awardsFor, ROUND_LABEL, WINDOW_DAYS } from './ranking.js';
 import { contributionWeights, ratingKeyFor } from './contribution.js';
+import { playerTally } from './career.js';
 import {
   DEFAULT_DEVIATION,
   DEFAULT_RATING,
@@ -37,10 +38,31 @@ import {
   rate,
 } from './glicko2.js';
 
+export { createPaymentLink, razorpayWebhook } from './razorpay.js';
+export { computeGovAggregates } from './gov.js';
+export { syncGovAggregates, runAnalyticsSync } from './analytics.js';
+export { computeTalentBoards, rebuildTalentBoards } from './talent.js';
+export { computeSportStats, rebuildSportStats } from './sports.js';
+export { computeClubStandings, rebuildClubStandings } from './clubs.js';
+export { backfillMatchSource } from './matchsource.js';
+export { backfillFixtureParticipants } from './participants.js';
+
 initializeApp();
 const db = getFirestore();
 
 setGlobalOptions({ region: 'asia-south1', maxInstances: 10 });
+
+/**
+ * How many rating snapshots each rating document keeps — see the `trail`
+ * write in `onMatchSettled`.
+ *
+ * MUST equal `RatingTrail.maxLength` in
+ * `lib/domain/scout/talent_trend.dart`. A server keeping fewer snapshots
+ * than the client's window expects silently shortens every trend it can
+ * measure, with no error anywhere. `test/talent_trend_test.dart` asserts the
+ * Dart side of this constant.
+ */
+const TRAIL_LENGTH = 24;
 
 /**
  * Sends one notification to a set of users, and durably records it for each
@@ -1052,16 +1074,49 @@ export const onMatchSettled = onDocumentUpdated(
     // its 1500 default forever.
     const ratingKey = ratingKeyFor(after);
 
-    // Who played, per side. Individual events name nobody in a line-up — the
-    // entrant id is the uid — so both shapes are handled.
+    // uid -> the engine's own player id, needed to look up this player's
+    // tally (PlayerTally keys by player id, not by uid — see career.js).
+    const playerIdByUid = new Map();
+    for (const p of [...(after.lineupA ?? []), ...(after.lineupB ?? [])]) {
+      if (p?.uid) playerIdByUid.set(p.uid, p.id);
+    }
+    // Individual sport matches name nobody in a lineup, so the account behind
+    // a side comes off the fixture itself.
+    //
+    // `entrantAUid`/`entrantBUid` are preferred over the entrant id because
+    // they are the field the CLIENT derives `playerUids` from, and the field
+    // the rules freeze once the match completes. Reading anything else here is
+    // how this trigger and the career screens came to disagree about the same
+    // match in the first place — settlement counted a chess game that the
+    // player's own match list could not see. One source, one answer.
+    //
+    // The entrant-id fallback stays for fixtures written before those fields
+    // existed and not yet reached by `backfillFixtureParticipants`: for an
+    // individual entrant the document id IS the uid (see
+    // `CompetitionRepository.closeEntries`), which is what made the old
+    // heuristic work. Each side is handled independently to cover mixed
+    // fixtures where one side has a line-up and the other does not.
+    const soloA =
+      after.entrantAUid ??
+      ((after.lineupA ?? []).length === 0 ? after.entrantAId : null);
+    const soloB =
+      after.entrantBUid ??
+      ((after.lineupB ?? []).length === 0 ? after.entrantBId : null);
+
+    // scoreState.players is keyed by that same id for these matches, so
+    // mapping uid -> uid is what lets playerTally() find the tally.
+    if (soloA) playerIdByUid.set(soloA, soloA);
+    if (soloB) playerIdByUid.set(soloB, soloB);
+
+    // Who played, per side.
     const sideA = (after.lineupA ?? [])
       .map((p) => p.uid)
       .filter(Boolean);
     const sideB = (after.lineupB ?? [])
       .map((p) => p.uid)
       .filter(Boolean);
-    if (sideA.length === 0 && after.entrantAId) sideA.push(after.entrantAId);
-    if (sideB.length === 0 && after.entrantBId) sideB.push(after.entrantBId);
+    if (sideA.length === 0 && soloA) sideA.push(soloA);
+    if (sideB.length === 0 && soloB) sideB.push(soloB);
     if (sideA.length === 0 || sideB.length === 0) return;
 
     // Compared explicitly rather than by `===` alone: a fixture missing BOTH
@@ -1096,6 +1151,7 @@ export const onMatchSettled = onDocumentUpdated(
         volatility: d?.volatility ?? DEFAULT_VOLATILITY,
         gamesPlayed: d?.gamesPlayed ?? 0,
         settled: d?.settledFixtures ?? [],
+        trail: Array.isArray(d?.trail) ? d.trail : [],
       });
     }
 
@@ -1119,6 +1175,12 @@ export const onMatchSettled = onDocumentUpdated(
 
     const batch = db.batch();
     let settled = 0;
+
+    // One instant for every trail entry this match writes. Calling
+    // `new Date()` per player would stamp the same match with times a few
+    // milliseconds apart, which is harmless for ordering but makes two
+    // teammates' trails disagree about when their shared match happened.
+    const settledAt = new Date();
 
     for (const [uids, opponentAvg, opponentRd, won] of [
       [sideA, avgB, rdB, aWon],
@@ -1151,10 +1213,35 @@ export const onMatchSettled = onDocumentUpdated(
             // used to be paid for twice. Kept because it catches a retry of
             // THIS invocation, and because rating documents already carry it.
             settledFixtures: [...player.settled, fixtureId].slice(-50),
+            // The rating's own history, and the only record of it anywhere.
+            //
+            // A rating document holds a single mutable number, so before this
+            // trail existed the product could say how good a player IS and had
+            // no way at all to say whether they were getting better — which is
+            // the signal talent discovery actually runs on (see
+            // `lib/domain/scout/talent_trend.dart`). Nothing can reconstruct
+            // it after the fact: the previous value is overwritten right here.
+            //
+            // Bounded for the same reason `settledFixtures` is: an array that
+            // grows for a whole career eventually becomes the largest thing in
+            // the document and is re-read on every single match. TRAIL_LENGTH
+            // snapshots is roughly five months for a weekly player, comfortably
+            // longer than the 90-day window the boards measure over.
+            trail: [
+              ...player.trail,
+              { r: next.rating, t: settledAt.toISOString() },
+            ].slice(-TRAIL_LENGTH),
             updatedAt: new Date(),
           },
           { merge: true },
         );
+
+        const playerId = playerIdByUid.get(uid);
+        const tally = playerId ? playerTally(after.scoreState, playerId) : {};
+        const tallyIncrement = {};
+        for (const [k, v] of Object.entries(tally)) {
+          if (v !== 0) tallyIncrement[k] = FieldValue.increment(v);
+        }
 
         batch.set(
           db.doc(`users/${uid}/career_stats/${sportId}`),
@@ -1167,6 +1254,13 @@ export const onMatchSettled = onDocumentUpdated(
             losses: FieldValue.increment(score === 0 ? 1 : 0),
             lastPlayedAt: new Date(),
             clubsPlayedFor: FieldValue.arrayUnion(orgId),
+            // Written for the first time by this trigger — the sport-specific
+            // per-player breakdown (runs/wickets, goals/assists, etc.) was
+            // always computed for the rating weight above and then discarded;
+            // it is the field every stat-breakdown screen reads and was
+            // permanently blank until now. A nested object under merge:true
+            // deep-merges into the existing tally map rather than replacing it.
+            ...(Object.keys(tallyIncrement).length > 0 ? { tally: tallyIncrement } : {}),
           },
           { merge: true },
         );

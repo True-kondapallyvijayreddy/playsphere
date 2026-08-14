@@ -128,9 +128,23 @@ final clubmateLiveFixturesProvider =
           ]);
 });
 
-/// Every competition across every club, newest first.
+/// The clubs whose events belong on this person's dashboard: the ones they
+/// are in, plus the ones they follow.
+///
+/// Following is a reader's relationship — it is a request for exactly this,
+/// a club's news on your own home screen, and it is the only thing following
+/// does. A club is listed once even if both apply, because a member who also
+/// followed would otherwise see every event twice.
+final myFeedOrgIdsProvider = Provider<List<String>>((ref) {
+  final mine = ref.watch(myActiveOrgIdsProvider);
+  final followed = ref.watch(myFollowedOrgIdsProvider).valueOrNull ?? const [];
+  // Membership first, so the dashboard still leads with your own clubs.
+  return <String>{...mine, ...followed}.toList();
+});
+
+/// Every competition across every club on the feed, newest first.
 final myClubEventsProvider = Provider<AsyncValue<List<Competition>>>((ref) {
-  final orgIds = ref.watch(myActiveOrgIdsProvider);
+  final orgIds = ref.watch(myFeedOrgIdsProvider);
   if (orgIds.isEmpty) return const AsyncValue.data([]);
   return combineAsyncAll([
     for (final id in orgIds) ref.watch(competitionsProvider(id)),

@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/errors/app_exception.dart';
 import '../core/firebase/firestore_refs.dart';
+import '../core/models/draw_slot.dart' show Bracket;
 import '../core/models/enums.dart';
 import '../core/models/fixture.dart';
 import '../core/sync/sync_batch_planner.dart';
@@ -15,6 +16,7 @@ import '../domain/cheer.dart';
 import '../domain/scoring/match_award.dart';
 import '../domain/scoring/scoring_plugin.dart';
 import '../domain/scoring/scoring_registry.dart';
+import 'competition_repository.dart';
 import 'org_repository.dart' show guard, guardStream;
 import 'rating_service.dart';
 
@@ -402,11 +404,43 @@ class ScoringService {
     // reconnect. Failures arrive asynchronously on [writeFailures].
     unawaited(
       batch.commit()
-          .then((_) => _dequeue(clientEventId))
+          .then<void>((_) {
+            _dequeue(clientEventId);
+            if (outcome.isComplete) _maybeResolveQualifiers(fixture);
+          })
           .catchError((Object error) => _report(_translateWriteFailure(error))),
     );
 
     return updated;
+  }
+
+  /// Fires the exact same qualifier-fill `CompetitionRepository
+  /// .resolveQualifiers` already runs from the "Update the bracket" button
+  /// on [fixture]'s competition — automatically, the instant a group-stage
+  /// fixture becomes resulted, instead of needing an organizer to notice a
+  /// group finished and remember to tap something.
+  ///
+  /// Gated on [Bracket.group] rather than firing after every completed
+  /// fixture: a knockout match completing can never complete a group, so
+  /// checking would only be a wasted read of every fixture and entrant in
+  /// the competition.
+  ///
+  /// Fire-and-forget for the same reason every write in this class is:
+  /// `resolveQualifiers` is idempotent (see its own doc comment) and a
+  /// failed read here just leaves the bracket exactly as manual as before —
+  /// the button stays as a fallback — not corrupted.
+  void _maybeResolveQualifiers(Fixture fixture) {
+    if (fixture.bracket != Bracket.group) return;
+    unawaited(_resolveQualifiers(fixture));
+  }
+
+  Future<void> _resolveQualifiers(Fixture fixture) async {
+    try {
+      await const CompetitionRepository()
+          .resolveQualifiers(orgId: fixture.orgId, compId: fixture.compId);
+    } catch (error) {
+      debugPrint('Auto-resolve qualifiers failed: $error');
+    }
   }
 
   AppException _translateWriteFailure(Object error) {
@@ -752,6 +786,7 @@ class ScoringService {
       'resultNote': note,
       'completedAt': FieldValue.serverTimestamp(),
     });
+    if (status.isResulted) _maybeResolveQualifiers(fixture);
   }
 
   // --- Offline queue ----------------------------------------------------
@@ -1109,9 +1144,24 @@ class ScoringService {
       final name = entrantId == fixture.entrantAId
           ? fixture.entrantAName
           : fixture.entrantBName;
+      // The account travels with the id. In an individual draw this is the
+      // only record that the promoted player is in the next round — there is
+      // no line-up on a knockout fixture and never will be — so without it a
+      // semi-finalist's own match list stops at the quarter-final.
+      final entrantUid = entrantId == fixture.entrantAId
+          ? fixture.entrantAUid
+          : fixture.entrantBUid;
       batch.update(
         Refs.fixture(fixture.orgId, fixture.compId, targetFixtureId),
-        {'entrant${slot}Id': entrantId, 'entrant${slot}Name': name},
+        {
+          'entrant${slot}Id': entrantId,
+          'entrant${slot}Name': name,
+          'entrant${slot}Uid': entrantUid,
+          // Extends the target's stored summary rather than rewriting it: the
+          // other half of that fixture may already be decided.
+          if (entrantUid != null)
+            'playerUids': FieldValue.arrayUnion([entrantUid]),
+        },
       );
     }
 

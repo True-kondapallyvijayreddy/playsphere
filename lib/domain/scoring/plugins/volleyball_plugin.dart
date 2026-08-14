@@ -94,7 +94,138 @@ class VolleyballPlugin extends ScoringPlugin with SquadRotation, TeamTimeouts {
         PlayerTally.stateKey: <String, dynamic>{},
         ...rotationInitialState(ctx),
         ...timeoutInitialState(ctx),
+        ..._liberoInitialState,
       };
+
+  // --- Libero -----------------------------------------------------------
+  //
+  // A libero is not an ordinary substitute, and modelling it as one would
+  // get the rule wrong: a libero swap does not count against
+  // `SquadRotation`'s substitution allowance, does not trip its "no return"
+  // rule, and is reciprocal — the same libero goes back out the moment the
+  // player they replaced rotates back to that spot, potentially many times
+  // a set. `SquadRotation.subsUsedKey`/`subbedOffKey` book-keeping is built
+  // for a permanent, capped change and is wrong on all three counts here, so
+  // this is a second, independent on/off toggle that shares nothing with it
+  // — a libero swap never touches `onCourtKey` through the shared mixin's
+  // own substitution path, only through the two actions below.
+  static const _liberoIdKey = 'liberoId'; // {'a': id?, 'b': id?}
+  static const _liberoOnKey = 'liberoOn'; // {'a': bool, 'b': bool}
+  static const _liberoReplacingKey = 'liberoReplacing'; // {'a': id?, 'b': id?}
+
+  static const Map<String, dynamic> _liberoInitialState = {
+    _liberoIdKey: {'a': null, 'b': null},
+    _liberoOnKey: {'a': false, 'b': false},
+    _liberoReplacingKey: {'a': null, 'b': null},
+  };
+
+  String? liberoIdFor(Map<String, dynamic> state, Side side) =>
+      (state[_liberoIdKey] as Map?)?[side.wire] as String?;
+
+  bool liberoIsOn(Map<String, dynamic> state, Side side) =>
+      (state[_liberoOnKey] as Map?)?[side.wire] == true;
+
+  ScoringResult _applySetLibero(
+    Map<String, dynamic> state,
+    ScoreAction action,
+    ScoringContext ctx,
+  ) {
+    if (action.side == Side.neutral) {
+      return const ScoringResult.rejected('Which side is this libero for?');
+    }
+    // A libero designated mid-set would retroactively make earlier digs and
+    // kills legal or not depending on who was "really" on court — simplest
+    // and clearest to require this settled before the set it applies to.
+    if (liberoIsOn(state, action.side)) {
+      return const ScoringResult.rejected(
+        'Swap the current libero off before naming a new one.',
+      );
+    }
+    final id = action.payload['playerId'] as String?;
+    if (id == null) {
+      return const ScoringResult.rejected('Who is the libero?');
+    }
+    final squad = ctx.lineupFor(action.side).map((p) => p.id).toSet();
+    if (!squad.contains(id)) {
+      return ScoringResult.rejected(
+          '${ctx.playerName(id)} is not in this squad.');
+    }
+    return ScoringResult.ok(mutate(state, (s) {
+      final ids = Map<String, dynamic>.from(s[_liberoIdKey] as Map? ?? {});
+      ids[action.side.wire] = id;
+      s[_liberoIdKey] = ids;
+    }));
+  }
+
+  ScoringResult _applyLiberoSwap(
+    Map<String, dynamic> state,
+    ScoreAction action,
+    ScoringContext ctx,
+  ) {
+    if (action.side == Side.neutral) {
+      return const ScoringResult.rejected('Which side is swapping?');
+    }
+    final side = action.side;
+    final libero = liberoIdFor(state, side);
+    if (libero == null) {
+      return const ScoringResult.rejected(
+        'Name this side\'s libero first.',
+      );
+    }
+    final court = Map<String, dynamic>.from(
+        state[SquadRotation.onCourtKey] as Map? ?? {});
+    final onCourtIds = List<String>.from(court[side.wire] as List? ?? const []);
+    final onMap = Map<String, dynamic>.from(state[_liberoOnKey] as Map? ?? {});
+    final replacingMap =
+        Map<String, dynamic>.from(state[_liberoReplacingKey] as Map? ?? {});
+
+    if (liberoIsOn(state, side)) {
+      // Swap back out: restore whoever the libero replaced.
+      final replaced = replacingMap[side.wire] as String?;
+      if (replaced == null) {
+        return const ScoringResult.rejected(
+          'No record of who the libero replaced.',
+        );
+      }
+      final idx = onCourtIds.indexOf(libero);
+      if (idx == -1) {
+        return const ScoringResult.rejected(
+          'The libero is not currently on court.',
+        );
+      }
+      onCourtIds[idx] = replaced;
+      onMap[side.wire] = false;
+      replacingMap[side.wire] = null;
+    } else {
+      final forId = action.payload['forId'] as String?;
+      if (forId == null) {
+        return const ScoringResult.rejected(
+          'Which player is the libero coming on for?',
+        );
+      }
+      if (!onCourtIds.contains(forId)) {
+        return ScoringResult.rejected(
+          '${ctx.playerName(forId)} is not on court.',
+        );
+      }
+      if (forId == libero) {
+        return const ScoringResult.rejected(
+          'The libero cannot replace themselves.',
+        );
+      }
+      final idx = onCourtIds.indexOf(forId);
+      onCourtIds[idx] = libero;
+      onMap[side.wire] = true;
+      replacingMap[side.wire] = forId;
+    }
+
+    court[side.wire] = onCourtIds;
+    return ScoringResult.ok(mutate(state, (s) {
+      s[SquadRotation.onCourtKey] = court;
+      s[_liberoOnKey] = onMap;
+      s[_liberoReplacingKey] = replacingMap;
+    }));
+  }
 
   /// Whether the set being played is the decider.
   bool isDecidingSet(Map<String, dynamic> state, ScoringContext ctx) {
@@ -106,9 +237,7 @@ class VolleyballPlugin extends ScoringPlugin with SquadRotation, TeamTimeouts {
 
   /// The target for the set being played. The deciding set is shorter.
   int targetForCurrentSet(Map<String, dynamic> state, ScoringContext ctx) =>
-      isDecidingSet(state, ctx)
-          ? _decidingSetPoints(ctx)
-          : _setPoints(ctx);
+      isDecidingSet(state, ctx) ? _decidingSetPoints(ctx) : _setPoints(ctx);
 
   /// True once a side reaches the switch score in the deciding set and the
   /// change of ends has not yet been recorded.
@@ -138,11 +267,58 @@ class VolleyballPlugin extends ScoringPlugin with SquadRotation, TeamTimeouts {
       );
     }
 
+    // The ordinary substitution control (`SquadRotation._applySubstitution`,
+    // reached below via `applyRotationAction`) knows nothing about a libero:
+    // it validates purely against `onCourtKey`, which a libero swap edits
+    // directly. Left unguarded, two real bugs follow from that — both found
+    // by tracing what happens when the two mixins touch the same court slot:
+    //
+    //   * subbing OUT the on-court libero through the ordinary control would
+    //     silently spend a substitution credit and add the libero to the
+    //     no-return list, neither of which a libero swap is allowed to do
+    //     under the actual rules of the sport;
+    //   * subbing IN the player a libero is currently standing in for — who
+    //     reads as "on the bench" to the ordinary control, because the
+    //     libero occupies their slot in `onCourtKey` — would put that player
+    //     on court a SECOND time the moment the libero is later swapped back
+    //     off, since the swap-off restores them into the libero's slot too.
+    //
+    // Both are rejected here, before either action reaches the shared
+    // mixin, rather than taught to `SquadRotation` itself: the libero is a
+    // volleyball-only concept, and `SquadRotation` is shared by every sport
+    // that substitutes. See test/volleyball_libero_test.dart.
+    if (action.type == 'substitution' && action.side != Side.neutral) {
+      final side = action.side;
+      if (liberoIsOn(state, side)) {
+        final off = action.payload['playerOffId'] as String?;
+        final on = action.payload['playerOnId'] as String?;
+        final libero = liberoIdFor(state, side);
+        final standingInFor =
+            (state[_liberoReplacingKey] as Map?)?[side.wire] as String?;
+        if (off != null && off == libero) {
+          return const ScoringResult.rejected(
+            'That is the libero on court — swap them off with the libero '
+            'control, not an ordinary substitution.',
+          );
+        }
+        if (on != null && on == standingInFor) {
+          return ScoringResult.rejected(
+            '${ctx.playerName(on)} is off court only because the libero is '
+            'standing in for them. Swap the libero off first.',
+          );
+        }
+      }
+    }
+
     final shared = applyRotationAction(state, action, ctx) ??
         applyTimeoutAction(state, action, ctx);
     if (shared != null) return shared;
 
     switch (action.type) {
+      case 'set_libero':
+        return _applySetLibero(state, action, ctx);
+      case 'libero_swap':
+        return _applyLiberoSwap(state, action, ctx);
       case 'point':
         if (action.side == Side.neutral) {
           return const ScoringResult.rejected('A point needs a side.');
@@ -277,6 +453,11 @@ class VolleyballPlugin extends ScoringPlugin with SquadRotation, TeamTimeouts {
       s[TeamTimeouts.usedKey] = {'a': 0, 'b': 0};
       s[SquadRotation.subsUsedKey] = {'a': 0, 'b': 0};
       s[SquadRotation.subbedOffKey] = <String>[];
+      // Libero state (who is designated, whether they are currently on
+      // court, who they are standing in for) is deliberately left alone
+      // here. `onCourtKey` is not reset between sets by this method either
+      // — resetting only the libero half of "who is on court" would leave
+      // the two disagreeing about it.
       if (matchOver) {
         s['complete'] = true;
         s['winner'] = setsA > setsB ? 'a' : 'b';
@@ -294,8 +475,9 @@ class VolleyballPlugin extends ScoringPlugin with SquadRotation, TeamTimeouts {
           key: 'points',
           label: 'Points won',
           shortLabel: 'PTS',
-          derive: (t) => ((t[_kills] ?? 0) + (t[_blocks] ?? 0) + (t[_aces] ?? 0))
-              .toDouble(),
+          derive: (t) =>
+              ((t[_kills] ?? 0) + (t[_blocks] ?? 0) + (t[_aces] ?? 0))
+                  .toDouble(),
         ),
         const StatColumn(
           key: _attackErrors,
@@ -411,62 +593,102 @@ class VolleyballPlugin extends ScoringPlugin with SquadRotation, TeamTimeouts {
       final starters = startersControl(state, ctx, side);
       final sub = substitutionControl(state, ctx, side);
       final timeout = timeoutControl(state, ctx, side);
+      final liberoId = liberoIdFor(state, side);
+      final squadIds = ctx.lineupFor(side).map((p) => p.id).toList();
+
+      final liberoControl = squadIds.isEmpty
+          ? null
+          : liberoId == null
+              ? ScoreControl(
+                  action: 'set_libero',
+                  label: 'Name libero',
+                  side: side,
+                  style: ControlStyle.subtle,
+                  prompts: const [
+                    PlayerPrompt(key: 'playerId', label: 'Who is the libero?'),
+                  ],
+                )
+              : liberoIsOn(state, side)
+                  ? ScoreControl(
+                      action: 'libero_swap',
+                      label: 'Libero off (${ctx.playerName(liberoId)})',
+                      side: side,
+                      style: ControlStyle.subtle,
+                    )
+                  : ScoreControl(
+                      action: 'libero_swap',
+                      label: 'Libero on (${ctx.playerName(liberoId)})',
+                      side: side,
+                      style: ControlStyle.subtle,
+                      prompts: [
+                        PlayerPrompt(
+                          key: 'forId',
+                          label: 'Coming on for?',
+                          only: List<String>.from(
+                            (state[SquadRotation.onCourtKey]
+                                    as Map?)?[side.wire] as List? ??
+                                const [],
+                          ),
+                        ),
+                      ],
+                    );
 
       return [
-          ScoreControl(
-            action: 'point',
-            label: 'Kill',
-            side: side,
-            style: ControlStyle.primary,
-            payload: const {'how': 'attack'},
-            shortcut: killKey,
-            prompts: const [
-              PlayerPrompt(key: 'playerId', label: 'Who hit it?'),
-            ],
-          ),
-          ScoreControl(
-            action: 'point',
-            label: 'Block',
-            side: side,
-            payload: const {'how': 'block'},
-            prompts: const [
-              PlayerPrompt(key: 'playerId', label: 'Who blocked?'),
-            ],
-          ),
-          ScoreControl(
-            action: 'point',
-            label: 'Ace',
-            side: side,
-            payload: const {'how': 'ace'},
-            prompts: const [
-              PlayerPrompt(key: 'playerId', label: 'Who served it?'),
-            ],
-          ),
-          ScoreControl(
-            action: 'point',
-            label: 'Opp. error',
-            side: side,
-            style: ControlStyle.subtle,
-            payload: const {'how': 'opponent_error'},
-          ),
-          ScoreControl(
-            action: 'dig',
-            label: 'Dig',
-            side: side,
-            prompts: const [
-              PlayerPrompt(key: 'playerId', label: 'Who dug it up?'),
-            ],
-          ),
-          ScoreControl(
-            action: 'correct',
-            label: '−1',
-            side: side,
-            style: ControlStyle.subtle,
-          ),
-          if (starters != null) starters,
-          if (sub != null) sub,
-          if (timeout != null) timeout,
-        ];
+        ScoreControl(
+          action: 'point',
+          label: 'Kill',
+          side: side,
+          style: ControlStyle.primary,
+          payload: const {'how': 'attack'},
+          shortcut: killKey,
+          prompts: const [
+            PlayerPrompt(key: 'playerId', label: 'Who hit it?'),
+          ],
+        ),
+        ScoreControl(
+          action: 'point',
+          label: 'Block',
+          side: side,
+          payload: const {'how': 'block'},
+          prompts: const [
+            PlayerPrompt(key: 'playerId', label: 'Who blocked?'),
+          ],
+        ),
+        ScoreControl(
+          action: 'point',
+          label: 'Ace',
+          side: side,
+          payload: const {'how': 'ace'},
+          prompts: const [
+            PlayerPrompt(key: 'playerId', label: 'Who served it?'),
+          ],
+        ),
+        ScoreControl(
+          action: 'point',
+          label: 'Opp. error',
+          side: side,
+          style: ControlStyle.subtle,
+          payload: const {'how': 'opponent_error'},
+        ),
+        ScoreControl(
+          action: 'dig',
+          label: 'Dig',
+          side: side,
+          prompts: const [
+            PlayerPrompt(key: 'playerId', label: 'Who dug it up?'),
+          ],
+        ),
+        ScoreControl(
+          action: 'correct',
+          label: '−1',
+          side: side,
+          style: ControlStyle.subtle,
+        ),
+        if (starters != null) starters,
+        if (sub != null) sub,
+        if (timeout != null) timeout,
+        if (liberoControl != null) liberoControl,
+      ];
     }
 
     return [

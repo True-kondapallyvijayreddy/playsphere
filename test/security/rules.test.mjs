@@ -415,6 +415,120 @@ describe('my memberships collection-group query', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Following a club — a reader's relationship, not a lightweight membership
+// ---------------------------------------------------------------------------
+describe('following a club', () => {
+  const follow = (orgId, uid) => ({
+    uid,
+    orgId,
+    followedAt: serverTimestamp(),
+  });
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PRIVATE_ORG),
+        organization(OWNER, 'unlisted'),
+      );
+    });
+  });
+
+  it('lets anyone signed in follow a public club', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertSucceeds(
+      setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'followers', OUTSIDER),
+        follow(PUBLIC_ORG, OUTSIDER),
+      ),
+    );
+  });
+
+  it('refuses following a club that has not published itself', async () => {
+    // Following a private club would be a request to see something the club
+    // has not published, and this is not the mechanism for asking — that is
+    // membership, which has an approval queue.
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'orgs', PRIVATE_ORG, 'followers', OUTSIDER),
+        follow(PRIVATE_ORG, OUTSIDER),
+      ),
+    );
+  });
+
+  it('refuses following on somebody else\'s behalf', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'followers', OWNER),
+        follow(PUBLIC_ORG, OWNER),
+      ),
+    );
+    // ...nor by keeping their own document id and claiming another uid.
+    await assertFails(
+      setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'followers', OUTSIDER),
+        follow(PUBLIC_ORG, OWNER),
+      ),
+    );
+  });
+
+  it('refuses a client-stamped follow date', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(doc(db, 'orgs', PUBLIC_ORG, 'followers', OUTSIDER), {
+        uid: OUTSIDER,
+        orgId: PUBLIC_ORG,
+        followedAt: new Date('2020-01-01'),
+      }),
+    );
+  });
+
+  it('lets a follower unfollow, and nobody else', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'followers', OUTSIDER),
+        { uid: OUTSIDER, orgId: PUBLIC_ORG, followedAt: serverTimestamp() },
+      );
+    });
+    const stranger = testEnv.authenticatedContext(ADMIN).firestore();
+    await assertFails(
+      deleteDoc(doc(stranger, 'orgs', PUBLIC_ORG, 'followers', OUTSIDER)),
+    );
+    const own = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertSucceeds(
+      deleteDoc(doc(own, 'orgs', PUBLIC_ORG, 'followers', OUTSIDER)),
+    );
+  });
+
+  it('lets a user list their own follows across every club', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'followers', OUTSIDER),
+        { uid: OUTSIDER, orgId: PUBLIC_ORG, followedAt: serverTimestamp() },
+      );
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    const snap = await assertSucceeds(
+      getDocs(
+        query(collectionGroup(db, 'followers'), where('uid', '==', OUTSIDER)),
+      ),
+    );
+    assert.equal(snap.size, 1);
+  });
+
+  it('refuses reading whom somebody else follows', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      getDocs(
+        query(collectionGroup(db, 'followers'), where('uid', '==', OWNER)),
+      ),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // P0-2 — collection-group queries over fixtures
 // ---------------------------------------------------------------------------
 describe('P0-2: fixtures collection-group queries', () => {
@@ -616,6 +730,93 @@ describe('scoring writes', () => {
     );
   });
 
+  // An individual draw — badminton singles, chess, a tennis bracket — never
+  // fills a line-up, so the account behind a side lives on the fixture as
+  // `entrantAUid`/`entrantBUid` and is the ONLY record that a promoted player
+  // is in the next round. Advancement therefore has to carry it, and has to
+  // extend `playerUids` alongside it, or the semi-finalist's own match list
+  // and every career screen stop at the quarter-final.
+  it('lets a scorer carry the account and playerUids with an advancing winner',
+    async () => {
+      await seed(async (db) => {
+        await setDoc(
+          doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'final'),
+          {
+            ...fixture(PUBLIC_ORG, 'comp1', [SCORER], 'scheduled'),
+            entrantAId: '',
+            entrantAName: 'To be decided',
+            entrantAUid: null,
+            entrantBId: 'entrant_b',
+            entrantBUid: 'uid_bhavya',
+            playerUids: ['uid_bhavya'],
+          },
+        );
+      });
+      const db = testEnv.authenticatedContext(SCORER).firestore();
+      await assertSucceeds(
+        setDoc(
+          doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'final'),
+          {
+            entrantAId: 'entrant_a',
+            entrantAName: 'Alice',
+            entrantAUid: 'uid_alice',
+            playerUids: ['uid_bhavya', 'uid_alice'],
+          },
+          { merge: true },
+        ),
+      );
+    });
+
+  // The additions-only guard. This statement is reachable by a scorer of
+  // either contesting club, and `playerUids` is what the settlement rules
+  // consult before writing ratings onto a profile — so promoting a player in
+  // must never be usable to drop the opposite half of the bracket out.
+  it('refuses an advancement that drops a player already in playerUids',
+    async () => {
+      await seed(async (db) => {
+        await setDoc(
+          doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'final'),
+          {
+            ...fixture(PUBLIC_ORG, 'comp1', [SCORER], 'scheduled'),
+            entrantAId: '',
+            entrantAName: 'To be decided',
+            entrantBId: 'entrant_b',
+            entrantBUid: 'uid_bhavya',
+            playerUids: ['uid_bhavya'],
+          },
+        );
+      });
+      const db = testEnv.authenticatedContext(SCORER).firestore();
+      await assertFails(
+        setDoc(
+          doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'final'),
+          {
+            entrantAId: 'entrant_a',
+            entrantAName: 'Alice',
+            entrantAUid: 'uid_alice',
+            // Bhavya erased on the way past.
+            playerUids: ['uid_alice'],
+          },
+          { merge: true },
+        ),
+      );
+    });
+
+  // Scoring a match must never redirect who the result accrues to. The
+  // line-up freeze has always covered team sports; this is the same attack on
+  // the shape that has no line-up to freeze.
+  it('refuses a scoring write that reassigns the account behind a side',
+    async () => {
+      const db = testEnv.authenticatedContext(SCORER).firestore();
+      const batch = scoreBatch(db, 1);
+      batch.set(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'fix1'),
+        { entrantAUid: 'uid_impostor' },
+        { merge: true },
+      );
+      await assertFails(batch.commit());
+    });
+
   it('refuses advancing into a match that has already been scored', async () => {
     await seed(async (db) => {
       await setDoc(
@@ -652,6 +853,111 @@ describe('scoring writes', () => {
         note: null,
       }),
     );
+  });
+
+  // `docs/Heart_of_the_playsphere.md` §23: a scorer submits a result, an
+  // official verifies it. The scoring statement in the rules freezes named
+  // fields rather than allow-listing them, so every field added to a fixture
+  // becomes writable by a scorer unless something says otherwise — which is
+  // exactly how a scorer would quietly acquire the power to certify their own
+  // match.
+  describe('result verification is not the scorer\'s to grant', () => {
+    it('refuses a scorer marking their own result finalized', async () => {
+      const db = testEnv.authenticatedContext(SCORER).firestore();
+      const batch = writeBatch(db);
+      batch.set(doc(db, ...eventPath('000000001')), {
+        seq: 1,
+        type: 'point',
+        payload: { side: 'a' },
+        byUid: SCORER,
+        at: serverTimestamp(),
+        clientEventId: 'fx1:1:point',
+        note: null,
+      });
+      batch.update(doc(db, ...fixturePath), {
+        scoreState: { currentA: 1, currentB: 0 },
+        lastSeq: 1,
+        summary: '1-0',
+        status: 'completed',
+        resultState: 'finalized',
+      });
+      await assertFails(batch.commit());
+    });
+
+    it('lets a scorer submit a result for approval', async () => {
+      // The legitimate half: ending the match and handing it to an official.
+      const db = testEnv.authenticatedContext(SCORER).firestore();
+      const batch = writeBatch(db);
+      batch.set(doc(db, ...eventPath('000000001')), {
+        seq: 1,
+        type: 'point',
+        payload: { side: 'a' },
+        byUid: SCORER,
+        at: serverTimestamp(),
+        clientEventId: 'fx1:1:point',
+        note: null,
+      });
+      batch.update(doc(db, ...fixturePath), {
+        scoreState: { currentA: 1, currentB: 0 },
+        lastSeq: 1,
+        summary: '1-0',
+        status: 'completed',
+        resultState: 'awaiting_approval',
+      });
+      await assertSucceeds(batch.commit());
+    });
+
+    it('refuses a scorer relabelling which competition the match came from',
+      async () => {
+        // §12. Moving a match's source moves its result onto a different
+        // leaderboard, which is a way to manufacture standings out of games
+        // that were never part of that competition.
+        const db = testEnv.authenticatedContext(SCORER).firestore();
+        const batch = writeBatch(db);
+        batch.set(doc(db, ...eventPath('000000001')), {
+          seq: 1,
+          type: 'point',
+          payload: { side: 'a' },
+          byUid: SCORER,
+          at: serverTimestamp(),
+          clientEventId: 'fx1:1:point',
+          note: null,
+        });
+        batch.update(doc(db, ...fixturePath), {
+          scoreState: { currentA: 1, currentB: 0 },
+          lastSeq: 1,
+          summary: '1-0',
+          status: 'live',
+          sourceType: 'season',
+          sourceId: 'someone_elses_season',
+        });
+        await assertFails(batch.commit());
+      });
+
+    it('lets an organizer finalize a result', async () => {
+      // The other half of §23: verification exists, and somebody can do it.
+      await seed(async (db) => {
+        // The surrounding beforeEach seeds a scorer and a plain member but no
+        // organizer, so this block adds one. Without the membership document
+        // `canManageCompetitions` is false and the test fails for the wrong
+        // reason — an absent role rather than a refused write.
+        await setDoc(
+          doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER),
+          membership(OWNER, PUBLIC_ORG, 'owner'),
+        );
+        await setDoc(
+          doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'fx1'),
+          {
+            ...fixture(PUBLIC_ORG, 'comp1', [SCORER], 'completed'),
+            resultState: 'awaiting_approval',
+          },
+        );
+      });
+      const db = testEnv.authenticatedContext(OWNER).firestore();
+      await assertSucceeds(
+        updateDoc(doc(db, ...fixturePath), { resultState: 'finalized' }),
+      );
+    });
   });
 });
 
@@ -1014,6 +1320,13 @@ describe('inter-club challenges', () => {
     venue: null,
     createdFixtureId: null,
     createdAt: serverTimestamp(),
+    message: null,
+    entryFeeRupees: 0,
+    // Written empty at creation so the rules can hold them unchanged on
+    // every update except the counter itself.
+    counterSlots: [],
+    counterVenue: null,
+    counterMessage: null,
     ...overrides,
   });
 
@@ -1130,6 +1443,107 @@ describe('inter-club challenges', () => {
         updateDoc(doc(db, 'challenges', 'ch1'), { status: 'withdrawn' }),
       );
     });
+  });
+
+  // A counter-offer is the receiving club's third answer — "yes, but not
+  // then". It is the only field on a challenge that one club writes and the
+  // other is expected to trust, which makes forging it the interesting
+  // attack: a challenging club that could write its own counter could show
+  // the opponent as having proposed terms it never offered.
+  describe('countering', () => {
+    const counter = {
+      status: 'countered',
+      counterSlots: [],
+      counterVenue: 'City Sports Arena',
+      counterMessage: 'Ground is booked that day — how about the 26th?',
+    };
+
+    it('lets an admin of the TO club counter an open challenge', async () => {
+      await seed(async (db) => {
+        await setDoc(doc(db, 'challenges', 'ch1'), challengeDoc());
+      });
+      const db = testEnv.authenticatedContext(ADMIN).firestore();
+      await assertSucceeds(updateDoc(doc(db, 'challenges', 'ch1'), counter));
+    });
+
+    it('refuses the FROM club countering its own challenge', async () => {
+      // The forgery this rule exists to stop: the issuing club writing the
+      // opponent's reply into a document it also controls.
+      await seed(async (db) => {
+        await setDoc(doc(db, 'challenges', 'ch1'), challengeDoc());
+      });
+      const db = testEnv.authenticatedContext(OWNER).firestore();
+      await assertFails(updateDoc(doc(db, 'challenges', 'ch1'), counter));
+    });
+
+    it('refuses countering a challenge already accepted', async () => {
+      // Same orphaning the withdrawal branch prevents: there is a fixture and
+      // probably a booked ground behind an accepted challenge.
+      await seed(async (db) => {
+        await setDoc(
+          doc(db, 'challenges', 'ch1'),
+          challengeDoc({ status: 'accepted' }),
+        );
+      });
+      const db = testEnv.authenticatedContext(ADMIN).firestore();
+      await assertFails(updateDoc(doc(db, 'challenges', 'ch1'), counter));
+    });
+
+    it('refuses a stranger countering', async () => {
+      await seed(async (db) => {
+        await setDoc(doc(db, 'challenges', 'ch1'), challengeDoc());
+      });
+      const db = testEnv.authenticatedContext(SCORER).firestore();
+      await assertFails(updateDoc(doc(db, 'challenges', 'ch1'), counter));
+    });
+
+    it('refuses a challenge created with a counter-offer already filled in',
+      async () => {
+        const db = testEnv.authenticatedContext(OWNER).firestore();
+        await assertFails(
+          setDoc(
+            doc(db, 'challenges', 'ch_forged'),
+            challengeDoc({ counterMessage: 'We agree to your terms' }),
+          ),
+        );
+      });
+
+    it('refuses either club rewriting the counter while accepting', async () => {
+      // Accepting must take the counter as it stands. A club that could
+      // amend it in the same write could agree to terms of its own invention.
+      await seed(async (db) => {
+        await setDoc(
+          doc(db, 'challenges', 'ch1'),
+          challengeDoc({ status: 'countered', counterVenue: 'City Arena' }),
+        );
+      });
+      const db = testEnv.authenticatedContext(OWNER).firestore();
+      await assertFails(
+        updateDoc(doc(db, 'challenges', 'ch1'), {
+          status: 'accepted',
+          counterVenue: 'Our Own Ground',
+        }),
+      );
+    });
+
+    it('refuses rewriting the message or the entry fee after the fact',
+      async () => {
+        // What was offered is a matter of record between two clubs, and the
+        // fee is money.
+        await seed(async (db) => {
+          await setDoc(
+            doc(db, 'challenges', 'ch1'),
+            challengeDoc({ entryFeeRupees: 2000 }),
+          );
+        });
+        const db = testEnv.authenticatedContext(OWNER).firestore();
+        await assertFails(
+          updateDoc(doc(db, 'challenges', 'ch1'), { entryFeeRupees: 0 }),
+        );
+        await assertFails(
+          updateDoc(doc(db, 'challenges', 'ch1'), { message: 'rewritten' }),
+        );
+      });
   });
 });
 
@@ -6017,5 +6431,936 @@ describe('ad campaigns: self-serve submission, staff-only review', () => {
     await assertFails(
       updateDoc(doc(db, 'adCampaigns', 'camp_1'), { impressions: 2, headline: 'Hijacked' }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Talent discovery boards.
+//
+// The whole minor-safety story for §6 rests on these rules. `functions/talent.js`
+// decides who is listed on which board, but that decision is only worth
+// something if the gated board is actually gated — a `__scout` document served
+// to anyone would make the public/scout split decorative.
+// ---------------------------------------------------------------------------
+describe('talent boards: public is open, scout boards need the claim', () => {
+  const PUBLIC_BOARD = 'kabaddi__telangana__nalgonda___any__public';
+  const SCOUT_BOARD = 'kabaddi__telangana__nalgonda___any__scout';
+
+  const board = (audience) => ({
+    sportId: 'kabaddi',
+    state: 'telangana',
+    district: 'nalgonda',
+    ageGroup: '_any',
+    audience,
+    windowDays: 90,
+    playerPoolSize: 1,
+    teamPoolSize: 0,
+    players: [
+      {
+        uid: 'uid_climber',
+        displayName: 'Asha',
+        rank: 1,
+        score: 62.5,
+        ratingDelta: 100,
+        matchesInWindow: 5,
+        ageGroupLabel: audience === 'scout' ? 'U-17' : 'Senior',
+      },
+    ],
+    teams: [],
+    computedAt: serverTimestamp(),
+  });
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'talentBoards', PUBLIC_BOARD), board('public'));
+      await setDoc(doc(db, 'talentBoards', SCOUT_BOARD), board('scout'));
+    });
+  });
+
+  it('serves a public board to anyone, signed in or not', async () => {
+    const anon = testEnv.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(anon, 'talentBoards', PUBLIC_BOARD)));
+
+    const signedIn = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertSucceeds(getDoc(doc(signedIn, 'talentBoards', PUBLIC_BOARD)));
+  });
+
+  it('refuses a scout board to an ordinary signed-in account', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(getDoc(doc(db, 'talentBoards', SCOUT_BOARD)));
+  });
+
+  it('refuses a scout board to an anonymous reader', async () => {
+    const db = testEnv.unauthenticatedContext().firestore();
+    await assertFails(getDoc(doc(db, 'talentBoards', SCOUT_BOARD)));
+  });
+
+  it('serves a scout board to the scout claim', async () => {
+    const db = testEnv
+      .authenticatedContext('uid_scout', { scout: true })
+      .firestore();
+    await assertSucceeds(getDoc(doc(db, 'talentBoards', SCOUT_BOARD)));
+  });
+
+  it('serves a scout board to platform staff, so support can see what a '
+    + 'scout sees', async () => {
+    const db = testEnv
+      .authenticatedContext('uid_operator', { admin: true })
+      .firestore();
+    await assertSucceeds(getDoc(doc(db, 'talentBoards', SCOUT_BOARD)));
+  });
+
+  it('a claim of any other value does not open the gate', async () => {
+    for (const claims of [{ scout: false }, { scout: 'yes' }, { scoutish: true }]) {
+      const db = testEnv.authenticatedContext('uid_liar', claims).firestore();
+      await assertFails(getDoc(doc(db, 'talentBoards', SCOUT_BOARD)));
+    }
+  });
+
+  it('refuses every client write, even from a scout or an admin — boards are '
+    + 'Admin SDK only', async () => {
+    for (const claims of [{ scout: true }, { admin: true }, {}]) {
+      const db = testEnv.authenticatedContext('uid_writer', claims).firestore();
+      await assertFails(
+        setDoc(doc(db, 'talentBoards', PUBLIC_BOARD), board('public')),
+      );
+      await assertFails(
+        updateDoc(doc(db, 'talentBoards', PUBLIC_BOARD), { players: [] }),
+      );
+      await assertFails(deleteDoc(doc(db, 'talentBoards', PUBLIC_BOARD)));
+    }
+  });
+
+  it('a board id with neither suffix is denied by default, not served', async () => {
+    // Guards the id-matching approach itself: a malformed or future id must
+    // fall through to a deny rather than matching the public branch loosely.
+    await seed(async (db) => {
+      await setDoc(doc(db, 'talentBoards', 'kabaddi___any___any___any'), board('public'));
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      getDoc(doc(db, 'talentBoards', 'kabaddi___any___any___any')),
+    );
+  });
+
+  it('listing the collection is denied even for a scout — a board is read by '
+    + 'id, never enumerated', async () => {
+    const db = testEnv
+      .authenticatedContext('uid_scout', { scout: true })
+      .firestore();
+    await assertFails(getDocs(collection(db, 'talentBoards')));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Grounds marketplace.
+//
+// A ground is a business, not a club — see Refs.grounds' doc comment — so the
+// trust shape is "one owner, checked by uid" throughout, the same pattern
+// `groundOwnerUid` gives `groundMenuItems`/`foodOrders` below.
+// ---------------------------------------------------------------------------
+describe('grounds: owner-only listing, world-readable, isVerified/bookingCount locked', () => {
+  const GROUND = 'ground_1';
+  const GROUND_OWNER = 'uid_ground_owner';
+
+  const ground = (overrides = {}) => ({
+    ownerUid: GROUND_OWNER,
+    name: 'Sunrise Turf',
+    city: 'Hyderabad',
+    cityKey: 'hyderabad',
+    address: null,
+    district: null,
+    latitude: null,
+    longitude: null,
+    geohash: null,
+    sportIds: ['cricket'],
+    hourlyRatePaise: 100000,
+    openHour: 6,
+    closeHour: 22,
+    facilities: [],
+    surface: null,
+    isIndoor: false,
+    capacity: null,
+    contactPhone: null,
+    photoUrl: null,
+    notes: null,
+    isActive: true,
+    isVerified: false,
+    bookingCount: 0,
+    createdAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  it('lets a signed-in person list a ground naming themselves owner', async () => {
+    const db = testEnv.authenticatedContext(GROUND_OWNER).firestore();
+    await assertSucceeds(setDoc(doc(db, 'grounds', GROUND), ground()));
+  });
+
+  it('refuses listing a ground already verified, or owned by someone else', async () => {
+    const db = testEnv.authenticatedContext(GROUND_OWNER).firestore();
+    await assertFails(
+      setDoc(doc(db, 'grounds', GROUND), ground({ isVerified: true })),
+    );
+    await assertFails(
+      setDoc(
+        doc(db, 'grounds', GROUND),
+        ground({ ownerUid: 'uid_someone_else' }),
+      ),
+    );
+  });
+
+  it('is world-readable, even signed out', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'grounds', GROUND), ground());
+    });
+    const anon = testEnv.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(anon, 'grounds', GROUND)));
+  });
+
+  it('lets the owner reprice, refuses a stranger editing at all', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'grounds', GROUND), ground());
+    });
+    const asOwner = testEnv.authenticatedContext(GROUND_OWNER).firestore();
+    await assertSucceeds(
+      updateDoc(doc(asOwner, 'grounds', GROUND), { hourlyRatePaise: 120000 }),
+    );
+    const asStranger = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      updateDoc(doc(asStranger, 'grounds', GROUND), { hourlyRatePaise: 1 }),
+    );
+  });
+
+  it('refuses the owner setting their own isVerified or bookingCount', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'grounds', GROUND), ground());
+    });
+    const asOwner = testEnv.authenticatedContext(GROUND_OWNER).firestore();
+    await assertFails(
+      updateDoc(doc(asOwner, 'grounds', GROUND), { isVerified: true }),
+    );
+    await assertFails(
+      updateDoc(doc(asOwner, 'grounds', GROUND), { bookingCount: 999 }),
+    );
+  });
+
+  it('never allows a delete — isActive: false is the only way a listing '
+    + 'goes away', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'grounds', GROUND), ground());
+    });
+    const asOwner = testEnv.authenticatedContext(GROUND_OWNER).firestore();
+    await assertFails(deleteDoc(doc(asOwner, 'grounds', GROUND)));
+  });
+});
+
+describe('ground bookings: price derived server-side, hourHolds are the real '
+  + 'exclusivity guard', () => {
+  const GROUND = 'ground_2';
+  const GROUND_OWNER = 'uid_ground_owner_2';
+  const BOOKER = 'uid_booker';
+
+  const booking = (overrides = {}) => ({
+    groundId: GROUND,
+    groundName: 'Sunrise Turf',
+    dayKey: '2026-08-10',
+    startHour: 18,
+    endHour: 20,
+    startsAt: serverTimestamp(),
+    bookedByUid: BOOKER,
+    bookedByName: 'Test Booker',
+    bookedForOrgId: null,
+    competitionId: null,
+    sportId: 'cricket',
+    amountPaise: 200000, // 2 hours at the ground's 100,000-paise hourly rate
+    paymentId: null,
+    notes: null,
+    status: 'confirmed',
+    createdAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'grounds', GROUND), {
+        ownerUid: GROUND_OWNER,
+        name: 'Sunrise Turf',
+        city: 'Hyderabad',
+        cityKey: 'hyderabad',
+        hourlyRatePaise: 100000,
+        openHour: 6,
+        closeHour: 22,
+        sportIds: ['cricket'],
+        facilities: [],
+        isActive: true,
+        isVerified: false,
+        bookingCount: 0,
+        createdAt: serverTimestamp(),
+      });
+    });
+  });
+
+  it('accepts a booking priced at exactly hourlyRate × hours', async () => {
+    const db = testEnv.authenticatedContext(BOOKER).firestore();
+    await assertSucceeds(
+      setDoc(doc(db, 'grounds', GROUND, 'bookings', 'bk_1'), booking()),
+    );
+  });
+
+  it("refuses a booking that understates the ground's own rate", async () => {
+    const db = testEnv.authenticatedContext(BOOKER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'grounds', GROUND, 'bookings', 'bk_1'),
+        booking({ amountPaise: 1 }),
+      ),
+    );
+  });
+
+  it('refuses a booking longer than 12 hours', async () => {
+    const db = testEnv.authenticatedContext(BOOKER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'grounds', GROUND, 'bookings', 'bk_1'),
+        booking({ startHour: 6, endHour: 19, amountPaise: 1300000 }),
+      ),
+    );
+  });
+
+  it("refuses booking in somebody else's name", async () => {
+    const db = testEnv.authenticatedContext(BOOKER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'grounds', GROUND, 'bookings', 'bk_1'),
+        booking({ bookedByUid: OUTSIDER }),
+      ),
+    );
+  });
+
+  it('lets the booker or the ground owner cancel, refuses a stranger', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'grounds', GROUND, 'bookings', 'bk_1'), booking());
+    });
+    const asStranger = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      updateDoc(doc(asStranger, 'grounds', GROUND, 'bookings', 'bk_1'), {
+        status: 'cancelled',
+      }),
+    );
+    const asOwner = testEnv.authenticatedContext(GROUND_OWNER).firestore();
+    await assertSucceeds(
+      updateDoc(doc(asOwner, 'grounds', GROUND, 'bookings', 'bk_1'), {
+        status: 'cancelled',
+        cancelledAt: serverTimestamp(),
+      }),
+    );
+  });
+
+  it("refuses moving a confirmed booking's hours instead of its status", async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'grounds', GROUND, 'bookings', 'bk_1'), booking());
+    });
+    const asBooker = testEnv.authenticatedContext(BOOKER).firestore();
+    await assertFails(
+      updateDoc(doc(asBooker, 'grounds', GROUND, 'bookings', 'bk_1'), {
+        startHour: 10,
+        endHour: 12,
+      }),
+    );
+  });
+
+  // -------------------------------------------------------------------
+  // hourHolds — the fix for the double-booking race. See firestore.rules
+  // and GroundRepository.book for the full story: a query-based check
+  // inside a transaction cannot prevent two clients racing for the same
+  // hour, and this per-hour, deterministically-id'd document is what
+  // actually can.
+  // -------------------------------------------------------------------
+
+  const hold = (overrides = {}) => ({
+    bookingId: 'bk_1',
+    bookedByUid: BOOKER,
+    dayKey: '2026-08-10',
+    hour: 18,
+    createdAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  it('lets a booking create its own hour holds in the same batch', async () => {
+    const db = testEnv.authenticatedContext(BOOKER).firestore();
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'grounds', GROUND, 'bookings', 'bk_1'), booking());
+    batch.set(
+      doc(db, 'grounds', GROUND, 'hourHolds', '2026-08-10_18'),
+      hold({ hour: 18 }),
+    );
+    batch.set(
+      doc(db, 'grounds', GROUND, 'hourHolds', '2026-08-10_19'),
+      hold({ hour: 19 }),
+    );
+    await assertSucceeds(batch.commit());
+  });
+
+  it('refuses an hour hold with no matching booking in the same batch', async () => {
+    const db = testEnv.authenticatedContext(BOOKER).firestore();
+    await assertFails(
+      setDoc(doc(db, 'grounds', GROUND, 'hourHolds', '2026-08-10_18'), hold()),
+    );
+  });
+
+  it("refuses an hour hold outside the booking's own [startHour, endHour)", async () => {
+    const db = testEnv.authenticatedContext(BOOKER).firestore();
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'grounds', GROUND, 'bookings', 'bk_1'), booking());
+    // bk_1 covers 18–20; 21 is not in range.
+    batch.set(
+      doc(db, 'grounds', GROUND, 'hourHolds', '2026-08-10_21'),
+      hold({ hour: 21 }),
+    );
+    await assertFails(batch.commit());
+  });
+
+  it("refuses an hour hold claimed under somebody else's booking", async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'grounds', GROUND, 'bookings', 'bk_owned_by_someone_else'),
+        booking({ bookedByUid: OUTSIDER }),
+      );
+    });
+    const db = testEnv.authenticatedContext(BOOKER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'grounds', GROUND, 'hourHolds', '2026-08-10_18'),
+        hold({ bookingId: 'bk_owned_by_someone_else' }),
+      ),
+    );
+  });
+
+  it("refuses a hold id that does not match its own dayKey/hour", async () => {
+    const db = testEnv.authenticatedContext(BOOKER).firestore();
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'grounds', GROUND, 'bookings', 'bk_1'), booking());
+    batch.set(
+      // Payload says hour 18; the document id claims 19.
+      doc(db, 'grounds', GROUND, 'hourHolds', '2026-08-10_19'),
+      hold({ hour: 18 }),
+    );
+    await assertFails(batch.commit());
+  });
+
+  it('refuses overwriting an hour hold that already exists — the actual '
+    + 'exclusivity guarantee behind the fix', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'grounds', GROUND, 'hourHolds', '2026-08-10_18'),
+        hold({ bookingId: 'bk_first' }),
+      );
+    });
+    // A second booking trying to take the same hour hits `allow update: if
+    // false` the instant the document already exists. This is the rule that
+    // makes the race GroundRepository.book guards against actually
+    // unwinnable — a client racing to `tx.set` this id after another
+    // transaction already committed it finds this exact denial on retry.
+    const db = testEnv.authenticatedContext('uid_second_booker').firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'grounds', GROUND, 'hourHolds', '2026-08-10_18'),
+        hold({ bookingId: 'bk_second', bookedByUid: 'uid_second_booker' }),
+      ),
+    );
+  });
+
+  it('is never client-readable — the booking calendar is `bookings`, not '
+    + 'this', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'grounds', GROUND, 'hourHolds', '2026-08-10_18'),
+        hold(),
+      );
+    });
+    const db = testEnv.authenticatedContext(BOOKER).firestore();
+    await assertFails(
+      getDoc(doc(db, 'grounds', GROUND, 'hourHolds', '2026-08-10_18')),
+    );
+  });
+
+  it('lets the booker release their own hold, and the ground owner release '
+    + 'it too', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'grounds', GROUND, 'bookings', 'bk_1'), booking());
+      await setDoc(
+        doc(db, 'grounds', GROUND, 'hourHolds', '2026-08-10_18'),
+        hold(),
+      );
+    });
+    const asStranger = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      deleteDoc(
+        doc(asStranger, 'grounds', GROUND, 'hourHolds', '2026-08-10_18'),
+      ),
+    );
+    const asOwner = testEnv.authenticatedContext(GROUND_OWNER).firestore();
+    await assertSucceeds(
+      deleteDoc(doc(asOwner, 'grounds', GROUND, 'hourHolds', '2026-08-10_18')),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Food & delivery at the ground.
+// ---------------------------------------------------------------------------
+describe('ground food: menu is owner-only to price, orders are launch-offer '
+  + 'bounded', () => {
+  const GROUND = 'ground_food_1';
+  const GROUND_OWNER = 'uid_food_ground_owner';
+  const BUYER = 'uid_food_buyer';
+
+  const menuItem = (overrides = {}) => ({
+    groundId: GROUND,
+    groundName: 'Sunrise Turf',
+    name: 'Water bottle',
+    description: '',
+    category: 'drinks',
+    priceInPaise: 2000,
+    isActive: true,
+    createdByUid: GROUND_OWNER,
+    createdAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'grounds', GROUND), {
+        ownerUid: GROUND_OWNER,
+        name: 'Sunrise Turf',
+        city: 'Hyderabad',
+        cityKey: 'hyderabad',
+        hourlyRatePaise: 100000,
+        openHour: 6,
+        closeHour: 22,
+        sportIds: [],
+        facilities: [],
+        isActive: true,
+        isVerified: false,
+        bookingCount: 0,
+        createdAt: serverTimestamp(),
+      });
+    });
+  });
+
+  it('lets the ground owner list a menu item', async () => {
+    const db = testEnv.authenticatedContext(GROUND_OWNER).firestore();
+    await assertSucceeds(
+      setDoc(doc(db, 'groundMenuItems', 'item_1'), menuItem()),
+    );
+  });
+
+  it("refuses a non-owner listing an item on someone else's ground", async () => {
+    const db = testEnv.authenticatedContext(BUYER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'groundMenuItems', 'item_1'),
+        menuItem({ createdByUid: BUYER }),
+      ),
+    );
+  });
+
+  it('is world-readable, even signed out', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'groundMenuItems', 'item_1'), menuItem());
+    });
+    const anon = testEnv.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(anon, 'groundMenuItems', 'item_1')));
+  });
+
+  it('lets the owner reprice, refuses a stranger editing at all', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'groundMenuItems', 'item_1'), menuItem());
+    });
+    const asOwner = testEnv.authenticatedContext(GROUND_OWNER).firestore();
+    await assertSucceeds(
+      updateDoc(doc(asOwner, 'groundMenuItems', 'item_1'), {
+        priceInPaise: 2500,
+      }),
+    );
+    const asStranger = testEnv.authenticatedContext(BUYER).firestore();
+    await assertFails(
+      updateDoc(doc(asStranger, 'groundMenuItems', 'item_1'), {
+        priceInPaise: 1,
+      }),
+    );
+  });
+
+  it('refuses a negative price', async () => {
+    const db = testEnv.authenticatedContext(GROUND_OWNER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'groundMenuItems', 'item_1'),
+        menuItem({ priceInPaise: -100 }),
+      ),
+    );
+  });
+
+  const order = (overrides = {}) => ({
+    groundId: GROUND,
+    groundName: 'Sunrise Turf',
+    lines: [
+      { menuItemId: 'item_1', name: 'Water bottle', quantity: 2, unitPricePaise: 2000 },
+    ],
+    buyerUid: BUYER,
+    buyerName: 'Test Buyer',
+    deliveryPartner: 'manual',
+    partnerRef: null,
+    amountPaidPaise: 0,
+    status: 'placed',
+    createdAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  it('lets a signed-in buyer place a launch-offer (₹0) order', async () => {
+    const db = testEnv.authenticatedContext(BUYER).firestore();
+    await assertSucceeds(setDoc(doc(db, 'foodOrders', 'order_1'), order()));
+  });
+
+  it('refuses an order claiming a nonzero amount was collected', async () => {
+    const db = testEnv.authenticatedContext(BUYER).firestore();
+    await assertFails(
+      setDoc(doc(db, 'foodOrders', 'order_1'), order({ amountPaidPaise: 4000 })),
+    );
+  });
+
+  it("refuses an empty order, and one placed in somebody else's name", async () => {
+    const db = testEnv.authenticatedContext(BUYER).firestore();
+    await assertFails(
+      setDoc(doc(db, 'foodOrders', 'order_1'), order({ lines: [] })),
+    );
+    await assertFails(
+      setDoc(doc(db, 'foodOrders', 'order_1'), order({ buyerUid: OUTSIDER })),
+    );
+  });
+
+  it('lets the buyer and the ground owner read the order, refuses a '
+    + 'stranger', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'foodOrders', 'order_1'), order());
+    });
+    const asBuyer = testEnv.authenticatedContext(BUYER).firestore();
+    await assertSucceeds(getDoc(doc(asBuyer, 'foodOrders', 'order_1')));
+    const asOwner = testEnv.authenticatedContext(GROUND_OWNER).firestore();
+    await assertSucceeds(getDoc(doc(asOwner, 'foodOrders', 'order_1')));
+    const asStranger =
+      testEnv.authenticatedContext('uid_food_stranger').firestore();
+    await assertFails(getDoc(doc(asStranger, 'foodOrders', 'order_1')));
+  });
+
+  it('lets the ground owner advance an order, refuses the buyer fulfilling '
+    + 'their own', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'foodOrders', 'order_1'), order());
+    });
+    const asBuyer = testEnv.authenticatedContext(BUYER).firestore();
+    await assertFails(
+      updateDoc(doc(asBuyer, 'foodOrders', 'order_1'), { status: 'preparing' }),
+    );
+    const asOwner = testEnv.authenticatedContext(GROUND_OWNER).firestore();
+    await assertSucceeds(
+      updateDoc(doc(asOwner, 'foodOrders', 'order_1'), { status: 'preparing' }),
+    );
+  });
+
+  it("refuses the owner smuggling a paid amount in through a status update", async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'foodOrders', 'order_1'), order());
+    });
+    const asOwner = testEnv.authenticatedContext(GROUND_OWNER).firestore();
+    await assertFails(
+      updateDoc(doc(asOwner, 'foodOrders', 'order_1'), {
+        status: 'preparing',
+        amountPaidPaise: 4000,
+      }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Government dashboard rollups — `functions/gov.js`. Admin-claim gated read,
+// no client write path at all — see the rule's own comment for why.
+// ---------------------------------------------------------------------------
+describe('gov aggregates: admin-claim read, no client write ever', () => {
+  const ROW = 'telangana__nalgonda';
+
+  const row = (overrides = {}) => ({
+    state: 'telangana',
+    district: 'nalgonda',
+    clubCount: 12,
+    memberCount: 480,
+    competitionCount: 30,
+    completedMatchCount: 210,
+    source: 'firestore-scan',
+    computedAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'gov_aggregates', ROW), row());
+    });
+  });
+
+  it('refuses a read from an ordinary signed-in account', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(getDoc(doc(db, 'gov_aggregates', ROW)));
+  });
+
+  it('refuses a read from a signed-out visitor', async () => {
+    const db = testEnv.unauthenticatedContext().firestore();
+    await assertFails(getDoc(doc(db, 'gov_aggregates', ROW)));
+  });
+
+  it('serves the row to the admin claim', async () => {
+    const db = testEnv
+      .authenticatedContext('uid_gov_admin', { admin: true })
+      .firestore();
+    await assertSucceeds(getDoc(doc(db, 'gov_aggregates', ROW)));
+  });
+
+  it('refuses every client write, even from an admin — Admin SDK only', async () => {
+    const db = testEnv
+      .authenticatedContext('uid_gov_admin', { admin: true })
+      .firestore();
+    await assertFails(setDoc(doc(db, 'gov_aggregates', ROW), row()));
+    await assertFails(
+      updateDoc(doc(db, 'gov_aggregates', ROW), { clubCount: 999 }),
+    );
+    await assertFails(deleteDoc(doc(db, 'gov_aggregates', ROW)));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Teams — top-level, club-optional (Rule 4)
+// ---------------------------------------------------------------------------
+//
+// The rules carry three jobs the client cannot be trusted with: the
+// type/clubId pairing, the freeze on the fields that decide authority
+// (`createdByUid`, `clubId`, `sportId`), and the no-delete guarantee that
+// keeps match history walkable.
+describe('teams', () => {
+  const TEAM = 'team_strikers';
+  const CAPTAIN = 'uid_captain';
+  const PLAYER = 'uid_player';
+
+  /** A team document as TeamRepository.createTeam writes it. */
+  const team = (over = {}) => ({
+    name: 'Hyderabad Strikers',
+    sportId: 'cricket',
+    type: 'independent',
+    createdByUid: CAPTAIN,
+    clubId: null,
+    captainUid: CAPTAIN,
+    managerUid: null,
+    memberUids: [CAPTAIN, PLAYER],
+    status: 'active',
+    competitionId: null,
+    baseTeamId: null,
+    photoUrl: null,
+    homeArea: 'Gachibowli',
+    createdAt: serverTimestamp(),
+    ...over,
+  });
+
+  const seedTeam = (over = {}) =>
+    seed(async (db) => {
+      await setDoc(doc(db, 'teams', TEAM), team(over));
+    });
+
+  it('lets a signed-in person found a club-less team', async () => {
+    // Rule 4 in one assertion: no club, no org membership, still a team.
+    const db = testEnv.authenticatedContext(CAPTAIN).firestore();
+    await assertSucceeds(setDoc(doc(db, 'teams', TEAM), team()));
+  });
+
+  it('refuses a team created in somebody else name', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(setDoc(doc(db, 'teams', TEAM), team()));
+  });
+
+  it('refuses a founder who leaves themselves off the roster', async () => {
+    const db = testEnv.authenticatedContext(CAPTAIN).firestore();
+    await assertFails(
+      setDoc(doc(db, 'teams', TEAM), team({ memberUids: [PLAYER] })),
+    );
+  });
+
+  it('refuses an independent team that names a club', async () => {
+    // The pairing matters for authority, not tidiness: the admin branch only
+    // fires when clubId is set, so a mistyped team is a team with a confused
+    // owner.
+    const db = testEnv.authenticatedContext(CAPTAIN).firestore();
+    await assertFails(
+      setDoc(doc(db, 'teams', TEAM), team({ clubId: PUBLIC_ORG })),
+    );
+  });
+
+  it('refuses a permanent team with no club', async () => {
+    const db = testEnv.authenticatedContext(CAPTAIN).firestore();
+    await assertFails(
+      setDoc(doc(db, 'teams', TEAM), team({ type: 'permanent' })),
+    );
+  });
+
+  it('refuses claiming a club the creator cannot manage', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'teams', TEAM),
+        team({
+          type: 'permanent',
+          clubId: PUBLIC_ORG,
+          createdByUid: OUTSIDER,
+          captainUid: OUTSIDER,
+          memberUids: [OUTSIDER],
+        }),
+      ),
+    );
+  });
+
+  it('refuses an event team that does not name its competition', async () => {
+    const db = testEnv.authenticatedContext(CAPTAIN).firestore();
+    await assertFails(setDoc(doc(db, 'teams', TEAM), team({ type: 'event' })));
+  });
+
+  it('lets the captain rename the team', async () => {
+    await seedTeam();
+    const db = testEnv.authenticatedContext(CAPTAIN).firestore();
+    await assertSucceeds(
+      updateDoc(doc(db, 'teams', TEAM), { name: 'Strikers XI' }),
+    );
+  });
+
+  it('refuses an outsider renaming the team', async () => {
+    await seedTeam();
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(updateDoc(doc(db, 'teams', TEAM), { name: 'Mine now' }));
+  });
+
+  it('refuses a roster member editing the team they merely play for', async () => {
+    // Being on the roster is not authority. Only creator/captain/manager, or
+    // an admin of a club the team already names.
+    await seedTeam();
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(updateDoc(doc(db, 'teams', TEAM), { name: 'Mine now' }));
+  });
+
+  it('freezes createdByUid against an owner takeover', async () => {
+    await seedTeam();
+    const db = testEnv.authenticatedContext(CAPTAIN).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'teams', TEAM), { createdByUid: OUTSIDER }),
+    );
+  });
+
+  it('freezes clubId, so a team cannot be walked into a club', async () => {
+    // Moving a team between clubs would carry its whole match history with
+    // it, which is not something one field write may do.
+    await seedTeam();
+    const db = testEnv.authenticatedContext(CAPTAIN).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'teams', TEAM), {
+        clubId: PUBLIC_ORG,
+        type: 'permanent',
+      }),
+    );
+  });
+
+  it('freezes sportId', async () => {
+    await seedTeam();
+    const db = testEnv.authenticatedContext(CAPTAIN).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'teams', TEAM), { sportId: 'football' }),
+    );
+  });
+
+  it('lets a player remove themselves without the captain', async () => {
+    await seedTeam();
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertSucceeds(
+      updateDoc(doc(db, 'teams', TEAM), { memberUids: [CAPTAIN] }),
+    );
+  });
+
+  it('refuses a departure that also adds somebody', async () => {
+    // The subset check is what stops self-leave being a general roster edit.
+    await seedTeam();
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'teams', TEAM), { memberUids: [CAPTAIN, OUTSIDER] }),
+    );
+  });
+
+  it('refuses removing somebody else under cover of leaving', async () => {
+    await seedTeam();
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(updateDoc(doc(db, 'teams', TEAM), { memberUids: [] }));
+  });
+
+  it('refuses a departing player installing a captain on the way out', async () => {
+    // Probes `isSelfLeave` specifically, so the caller must be somebody with
+    // no other authority — a captain doing this is exercising the ordinary
+    // management branch, which is allowed and is covered separately below.
+    await seedTeam();
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'teams', TEAM), {
+        memberUids: [CAPTAIN],
+        captainUid: OUTSIDER,
+      }),
+    );
+  });
+
+  it('clears the captaincy when the captain is the one leaving', async () => {
+    // The one role change a departure may make, and it may only be a clear.
+    await seedTeam();
+    const db = testEnv.authenticatedContext(CAPTAIN).firestore();
+    await assertSucceeds(
+      updateDoc(doc(db, 'teams', TEAM), {
+        memberUids: [PLAYER],
+        captainUid: null,
+      }),
+    );
+  });
+
+  it('lets the captain manage the roster and name a successor', async () => {
+    // Deliberate, not an oversight: running the squad is what a captain is
+    // for. This is the ordinary management branch, not `isSelfLeave`.
+    await seedTeam();
+    const db = testEnv.authenticatedContext(CAPTAIN).firestore();
+    await assertSucceeds(
+      updateDoc(doc(db, 'teams', TEAM), {
+        memberUids: [CAPTAIN],
+        captainUid: PLAYER,
+      }),
+    );
+  });
+
+  it('never allows a delete, however senior the caller', async () => {
+    // Rule 31/16: fixtures, entrants and career statistics point here.
+    await seedTeam();
+    const db = testEnv.authenticatedContext(CAPTAIN).firestore();
+    await assertFails(deleteDoc(doc(db, 'teams', TEAM)));
+  });
+
+  it('requires an account to read a roster', async () => {
+    await seedTeam();
+    const db = testEnv.unauthenticatedContext().firestore();
+    await assertFails(getDoc(doc(db, 'teams', TEAM)));
+  });
+
+  it('serves a team to any signed-in person', async () => {
+    await seedTeam();
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertSucceeds(getDoc(doc(db, 'teams', TEAM)));
   });
 });

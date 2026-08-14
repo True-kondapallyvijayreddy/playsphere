@@ -157,11 +157,29 @@ abstract class AppLocalizations {
   /// **'Sign in'**
   String get signInTitle;
 
+  /// Sign-in screen subtitle, under the app name
+  ///
+  /// In en, this message translates to:
+  /// **'Run competitions, score matches live, and let everyone follow along from anywhere.'**
+  String get signInTagline;
+
   /// Google sign-in button
   ///
   /// In en, this message translates to:
   /// **'Continue with Google'**
   String get signInWithGoogle;
+
+  /// Sign-in button label while the Google sign-in is running
+  ///
+  /// In en, this message translates to:
+  /// **'Signing in…'**
+  String get signInInProgress;
+
+  /// Sign-in screen footnote about the public /watch/ link
+  ///
+  /// In en, this message translates to:
+  /// **'You can watch any public live match without signing in — just open the link someone shares with you.'**
+  String get signInWatchWithoutAccount;
 
   /// Sign out menu item
   ///

@@ -10,6 +10,7 @@ import '../core/models/draw_slot.dart';
 import '../core/models/enums.dart';
 import '../core/models/fixture.dart';
 import '../core/models/match_official.dart';
+import '../core/models/club_standing.dart';
 import '../core/models/ranking_entry.dart';
 import '../core/models/tournament.dart';
 import '../core/models/tournament_invite.dart';
@@ -502,6 +503,19 @@ class TournamentRepository {
         .map((snap) => snap.docs.map(RankingEntry.fromDoc).toList()
           ..sort((a, b) => (b.awardedAt ?? DateTime(0))
               .compareTo(a.awardedAt ?? DateTime(0))));
+  }
+
+  /// One sport's club ladder.
+  ///
+  /// A single document read, not a query: the nightly rollup has already done
+  /// the cross-club scan that no client is permitted to do — see
+  /// `functions/clubs.js` for why counting this from the client would give
+  /// every visitor a different, silently smaller ladder.
+  Stream<ClubStandings> watchClubStandings(String sportId) {
+    return Refs.clubStandings
+        .doc(sportId)
+        .snapshots()
+        .map((doc) => ClubStandings.fromMap(doc.data(), sportId));
   }
 
   /// One player's ranking results, for their profile.

@@ -298,6 +298,7 @@ class PlanPayment {
     required this.validUntil,
     this.gateway = 'none',
     this.gatewayRef,
+    this.status = PlanPaymentStatus.paid,
     this.createdAt,
   });
 
@@ -334,6 +335,8 @@ class PlanPayment {
   /// The processor's own id for this charge, for reconciliation.
   final String? gatewayRef;
 
+  final PlanPaymentStatus status;
+
   final DateTime? createdAt;
 
   bool get isFree => amountPaise == 0;
@@ -351,6 +354,7 @@ class PlanPayment {
       validUntil: Fs.dateOrNull(d['validUntil']),
       gateway: Fs.str(d['gateway'], 'none'),
       gatewayRef: Fs.strOrNull(d['gatewayRef']),
+      status: PlanPaymentStatus.fromWire(Fs.strOrNull(d['status'])),
       createdAt: Fs.dateOrNull(d['createdAt']),
     );
   }
@@ -366,6 +370,11 @@ class PlanPayment {
         'validUntil': Fs.ts(validUntil),
         'gateway': gateway,
         'gatewayRef': gatewayRef,
+        // Written explicitly rather than left to `fromWire`'s default: this
+        // constructor is only ever called once money has already moved (or
+        // the launch offer made ₹0 count as moved), never for a pending
+        // Razorpay row — those are written by `createPaymentLink` directly.
+        'status': PlanPaymentStatus.paid.wire,
         'createdAt': FieldValue.serverTimestamp(),
       };
 }
@@ -444,5 +453,38 @@ enum PlanPaymentKind {
       PlanPaymentKind.values.firstWhere(
         (e) => e.wire == w,
         orElse: () => PlanPaymentKind.orgPlan,
+      );
+}
+
+/// Where a row stands, for the payments that do not settle in the same
+/// breath they were created — see `createPaymentLink` in
+/// `functions/razorpay.js`.
+///
+/// Every row written before this existed was written only *after* money had
+/// already changed hands (`FreeCheckout`, at ₹0, or nothing at all) — there
+/// was never a pending state to record. So a legacy row with no `status`
+/// field reads back as [paid] rather than [pending]: the absence means
+/// "written under the old, always-settled model", not "still waiting".
+enum PlanPaymentStatus {
+  /// The Razorpay order/link exists but no money has moved yet.
+  created('created'),
+
+  /// Waiting on Razorpay's webhook — the payer has the checkout page open.
+  pending('pending'),
+
+  /// The webhook confirmed the charge and the entitlement was granted.
+  paid('paid'),
+
+  /// The gateway request itself failed, or the webhook never arrived and the
+  /// link expired. No entitlement was granted.
+  failed('failed');
+
+  const PlanPaymentStatus(this.wire);
+  final String wire;
+
+  static PlanPaymentStatus fromWire(String? w) =>
+      PlanPaymentStatus.values.firstWhere(
+        (e) => e.wire == w,
+        orElse: () => PlanPaymentStatus.paid,
       );
 }

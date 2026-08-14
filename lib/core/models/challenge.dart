@@ -82,6 +82,11 @@ class Challenge {
     this.createdTournamentId,
     this.agreedSlot,
     this.createdAt,
+    this.message,
+    this.entryFeeRupees = 0,
+    this.counterSlots = const [],
+    this.counterVenue,
+    this.counterMessage,
   });
 
   final String id;
@@ -151,6 +156,64 @@ class Challenge {
 
   final DateTime? createdAt;
 
+  /// A note from the challenging club — "Shall we play at 7pm on the 26th?".
+  ///
+  /// Written once, at creation, and immutable afterwards. A challenge is a
+  /// record of what was offered, and a message the issuer could rewrite after
+  /// the fact would make it evidence of nothing.
+  final String? message;
+
+  /// What each side pays into the match pot, in whole rupees. Zero means a
+  /// friendly, which is the overwhelming majority.
+  ///
+  /// Rupees rather than paise, unlike `Competition.entryFeeRupees`'s
+  /// neighbours in billing — this is a figure two clubs agree between
+  /// themselves and settle in cash at the ground, not something the platform
+  /// collects.
+  final int entryFeeRupees;
+
+  // --- The counter-offer ---------------------------------------------------
+  //
+  // A challenge used to have two answers: yes and no. In practice the common
+  // answer is "yes, but not then" — and with no way to express it the
+  // receiving club had to decline and issue a fresh challenge back, which
+  // lost the thread and read to the first club as a refusal.
+  //
+  // Only the club that *received* the challenge may write these, and only
+  // while it is still pending. See `firestore.rules`.
+
+  /// Dates the receiving club proposes instead of [proposedSlots].
+  final List<DateTime> counterSlots;
+
+  /// A different ground, where the receiving club cannot host at the one
+  /// offered. Null means the original [venue] stands.
+  final String? counterVenue;
+
+  /// The receiving club's note explaining the counter.
+  final String? counterMessage;
+
+  bool get isCountered => status == 'countered';
+
+  /// True when [orgId] may answer a counter-offer — the club that issued the
+  /// original challenge, now on the receiving end of the negotiation.
+  bool canAnswerCounterAs(String orgId) => isCountered && orgId == fromOrgId;
+
+  /// True when [orgId] may counter — the challenged club, while the offer is
+  /// still open. A club cannot counter its own challenge, and cannot counter
+  /// one it has already answered.
+  bool canCounterAs(String orgId) => isPending && orgId == toOrgId;
+
+  /// The slots actually on the table right now.
+  ///
+  /// Once countered, the counter-offer's dates are the live proposal and the
+  /// original's are history — a screen showing both would ask the challenging
+  /// club to agree to a date nobody is offering any more.
+  List<DateTime> get liveSlots =>
+      isCountered && counterSlots.isNotEmpty ? counterSlots : proposedSlots;
+
+  /// The ground currently on the table, by the same reasoning.
+  String? get liveVenue => isCountered ? (counterVenue ?? venue) : venue;
+
   bool get isPending => status == 'pending';
   bool get isAccepted => status == 'accepted';
   bool get isDeclined => status == 'declined';
@@ -200,6 +263,11 @@ class Challenge {
       createdTournamentId: Fs.strOrNull(d['createdTournamentId']),
       agreedSlot: Fs.dateOrNull(d['agreedSlot']),
       createdAt: Fs.dateOrNull(d['createdAt']),
+      message: Fs.strOrNull(d['message']),
+      entryFeeRupees: Fs.integer(d['entryFeeRupees']),
+      counterSlots: Fs.dateList(d['counterSlots']),
+      counterVenue: Fs.strOrNull(d['counterVenue']),
+      counterMessage: Fs.strOrNull(d['counterMessage']),
     );
   }
 
@@ -219,5 +287,31 @@ class Challenge {
         'createdTournamentId': createdTournamentId,
         'agreedSlot': Fs.ts(agreedSlot),
         'createdAt': FieldValue.serverTimestamp(),
+        'message': message,
+        'entryFeeRupees': entryFeeRupees,
+        // The counter fields are written empty at creation rather than
+        // omitted, so `firestore.rules` can hold them unchanged on every
+        // update except the counter itself — a field that does not exist
+        // cannot be compared against.
+        'counterSlots': const <Object?>[],
+        'counterVenue': null,
+        'counterMessage': null,
+      };
+
+  /// The receiving club's counter-offer, as a partial update.
+  ///
+  /// Deliberately narrow: it writes the status and the three counter fields
+  /// and nothing else, so a counter can never quietly rewrite the sport, the
+  /// entry fee or the original offer it is answering.
+  static Map<String, Object?> counterUpdate({
+    required List<DateTime> slots,
+    String? venue,
+    String? note,
+  }) =>
+      {
+        'status': 'countered',
+        'counterSlots': slots.map(Fs.ts).toList(),
+        'counterVenue': venue,
+        'counterMessage': note,
       };
 }

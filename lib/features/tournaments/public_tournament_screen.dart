@@ -127,6 +127,15 @@ class PublicTournamentScreen extends ConsumerWidget {
 
                     GroupsSummaryCard(leaderboard: board),
                     LeaderboardCard(leaderboard: board),
+                    // The public page is the link that gets shared, so the
+                    // charts belong here as much as on the organizer's copy —
+                    // "who is top of the run chart" is the thing people open a
+                    // tournament link to find out.
+                    PlayerBoardsCard(
+                      bySport: ref
+                          .watch(tournamentPlayerBoardsBySportProvider(key))
+                          .valueOrNull,
+                    ),
 
                     if (overview != null && overview.champions.isNotEmpty)
                       _PublicChampions(overview: overview),

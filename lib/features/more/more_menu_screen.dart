@@ -110,9 +110,17 @@ class MoreMenuScreen extends ConsumerWidget {
             subtitle: 'Back a rising player or team, directly and by name',
             onTap: () => context.push(Routes.sponsor),
           ),
+          // Discovery sits above search deliberately: it is the one that
+          // answers a question the visitor has not already had to formulate.
+          _MenuItemTile(
+            icon: Icons.trending_up_outlined,
+            title: 'Rising Talent',
+            subtitle: 'Players and clubs improving fastest near you',
+            onTap: () => context.push(Routes.risingTalent),
+          ),
           _MenuItemTile(
             icon: Icons.travel_explore_outlined,
-            title: 'Talent Discovery',
+            title: 'Talent Search',
             subtitle: 'Search players by sport, age, district and form',
             onTap: () => context.push(Routes.scoutSearch),
           ),
@@ -128,6 +136,23 @@ class MoreMenuScreen extends ConsumerWidget {
             subtitle: 'Reach players by sport, club and ground',
             onTap: () => context.push(Routes.adConsole),
           ),
+          _MenuItemTile(
+            icon: Icons.fastfood_outlined,
+            title: 'My Food Orders',
+            subtitle: 'Water, snacks and meals ordered at a ground',
+            onTap: () => context.push(Routes.myFoodOrders),
+          ),
+          // Platform staff only — hidden rather than shown-and-denied for
+          // everyone else, the same call `AdConsoleScreen`'s own entry point
+          // does not make (that one is for anybody). A menu item that leads
+          // to "Restricted" for 99.9% of accounts is worse than no item.
+          if (ref.watch(isPlatformAdminProvider).valueOrNull == true)
+            _MenuItemTile(
+              icon: Icons.query_stats_outlined,
+              title: 'Government Dashboard',
+              subtitle: 'Clubs, members and matches by district',
+              onTap: () => context.push(Routes.govDashboard),
+            ),
           _MenuItemTile(
             icon: Icons.person_search_outlined,
             title: 'Looking For Board',
