@@ -174,7 +174,8 @@ async function publishLeaderboards(boards) {
   return { written: boards.size, removed };
 }
 
-async function runLeaderboards() {
+/** Exported for `run_leaderboard_rebuild.mjs` — see that script's own doc. */
+export async function runLeaderboards() {
   const candidates = await loadLeaderboardCandidates();
   const boards = buildLeaderboards(candidates);
   const result = await publishLeaderboards(boards);
