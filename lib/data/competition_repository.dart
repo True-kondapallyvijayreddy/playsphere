@@ -18,14 +18,32 @@ import '../core/models/venue.dart' as venue_model;
 import '../core/sync/uuid_v7.dart';
 import '../domain/draw/fixture_generator.dart';
 import '../domain/draw/match_scheduler.dart';
+import '../domain/draw/tournament_scheduler.dart';
 import '../domain/draw/schedule_shift.dart';
 import '../domain/draw/seeding.dart';
 import '../domain/rating/glicko2.dart';
+import '../domain/tournament/entrant_promoter.dart';
+import '../domain/tournament/team_partitioner.dart';
 import 'rating_service.dart';
 import '../domain/standings/standings_calculator.dart';
 import '../domain/scoring/scoring_plugin.dart';
 import '../domain/scoring/scoring_registry.dart';
 import 'org_repository.dart' show guard, guardStream;
+
+/// Specification for forming a team from a player pool or draft.
+class TeamDraftSpec {
+  const TeamDraftSpec({
+    required this.name,
+    required this.memberUids,
+    this.captainUid,
+    this.houseName,
+  });
+
+  final String name;
+  final List<String> memberUids;
+  final String? captainUid;
+  final String? houseName;
+}
 
 class CompetitionRepository {
   const CompetitionRepository();
@@ -110,15 +128,38 @@ class CompetitionRepository {
             ),
       );
 
-  Stream<List<Fixture>> watchFixtures(String orgId, String compId) =>
+  /// Every match in one competition.
+  ///
+  /// [canManage] is not a convenience — it decides which QUERY is sent, and
+  /// sending the wrong one is a permission error rather than a wrong answer.
+  /// `firestore.rules` opens a draft fixture only to whoever can manage the
+  /// competition, and Firestore rejects a list it cannot prove is allowed
+  /// instead of quietly filtering it. So a member has to pin `isDraft`
+  /// themselves; an organizer must NOT, or they would stop seeing the drafts
+  /// they are in the middle of editing.
+  ///
+  /// Callers pass what the permission matrix says (see `fixturesProvider`),
+  /// never a guess. Passing `true` without the capability does not grant
+  /// anything — the rule still refuses — it just turns a filtered list into a
+  /// denied one.
+  Stream<List<Fixture>> watchFixtures(
+    String orgId,
+    String compId, {
+    bool canManage = false,
+  }) =>
       guardStream(
-        () => Refs.fixtures(orgId, compId).snapshots().map(
-              (snap) => snap.docs.map(Fixture.fromDoc).toList()
-                ..sort((a, b) {
-                  final r = a.round.compareTo(b.round);
-                  return r != 0 ? r : a.matchIndex.compareTo(b.matchIndex);
-                }),
-            ),
+        () {
+          final Query<Map<String, dynamic>> q = canManage
+              ? Refs.fixtures(orgId, compId)
+              : Refs.fixtures(orgId, compId).where('isDraft', isEqualTo: false);
+          return q.snapshots().map(
+                (snap) => snap.docs.map(Fixture.fromDoc).toList()
+                  ..sort((a, b) {
+                    final r = a.round.compareTo(b.round);
+                    return r != 0 ? r : a.matchIndex.compareTo(b.matchIndex);
+                  }),
+              );
+        },
       );
 
   /// Live matches across an entire organization — powers the spectator
@@ -606,6 +647,11 @@ class CompetitionRepository {
   Future<RegistrationStatus> register({
     required Competition competition,
     required AppUser user,
+    String? houseName,
+    String? partnerUid,
+    String? partnerName,
+    bool isSoloDoubles = false,
+    String? teamName,
   }) =>
       guard(() async {
         if (!competition.registrationIsOpen) {
@@ -677,7 +723,19 @@ class CompetitionRepository {
                 displayName: user.displayName,
                 photoUrl: user.photoUrl,
                 status: outcome,
-              ).toCreate(status: outcome, waitlistPosition: position),
+                houseName: houseName,
+                partnerUid: partnerUid,
+                partnerName: partnerName,
+                isSoloDoubles: isSoloDoubles,
+                teamName: teamName,
+              ).toCreate(
+                status: outcome,
+                waitlistPosition: position,
+                houseName: houseName,
+                partnerUid: partnerUid,
+                partnerName: partnerName,
+                isSoloDoubles: isSoloDoubles,
+              ),
             );
 
             // Only the counter that the outcome belongs to moves, and only by
@@ -999,16 +1057,21 @@ class CompetitionRepository {
   /// is applied to the local cache and NOT awaited — the count this method
   /// returns is correct the instant the batch is built, regardless of when
   /// the server acknowledges it. A failure is reported on [writeFailures].
+  /// Closes entries and converts registrations into official draw entrants.
+  /// Handles individual entrants, school house squads, doubles pairs, and preformed teams.
   Future<int> lockFieldAndCreateEntrants({
     required String orgId,
     required String compId,
   }) =>
       guard(() async {
+        final compDoc = await Refs.competition(orgId, compId).get();
+        final comp = compDoc.exists ? Competition.fromDoc(compDoc) : null;
+
         final snap = await Refs.registrations(orgId, compId)
             .where('status', isEqualTo: RegistrationStatus.confirmed.wire)
             .get();
 
-        if (snap.docs.length < 2) {
+        if (snap.docs.isEmpty) {
           throw const ValidationException(
             'At least two confirmed entries are needed before you can close '
             'entries and make a draw.',
@@ -1016,29 +1079,111 @@ class CompetitionRepository {
         }
 
         final batch = Refs.db.batch();
-        for (final doc in snap.docs) {
-          final reg = Registration.fromDoc(doc);
+        int finalEntrantCount = 0;
+
+        // The promotion rules live in `EntrantPromoter` so they can be
+        // tested without a database. Everything this method still does is the
+        // part that genuinely needs Firestore: read the confirmed list, write
+        // the field it resolves to.
+        final promotion = const EntrantPromoter().promote(
+          mode: comp?.teamEntryMode ?? TeamEntryMode.individual,
+          confirmed: snap.docs.map(Registration.fromDoc).toList(),
+        );
+        if (!promotion.isReady) {
+          throw ValidationException(promotion.problems.join('\n'));
+        }
+        for (final entrant in promotion.entrants) {
           batch.set(
-            Refs.entrants(orgId, compId).doc(reg.uid),
-            Entrant(
-              id: reg.uid,
-              displayName: reg.displayName,
-              entrantType: EntrantType.individual,
-              uid: reg.uid,
-              photoUrl: reg.photoUrl,
-            ).toMap(),
+            Refs.entrants(orgId, compId).doc(entrant.id),
+            entrant.toMap(),
           );
         }
+        finalEntrantCount = promotion.entrants.length;
+
         batch.update(Refs.competition(orgId, compId), {
           'status': CompetitionStatus.registrationClosed.wire,
-          'entrantCount': snap.docs.length,
+          'entrantCount': finalEntrantCount,
           'updatedAt': FieldValue.serverTimestamp(),
         });
 
         unawaited(batch.commit().catchError((Object error) {
           _writeFailures.add(_translateWriteFailure(error));
         }));
-        return snap.docs.length;
+        return finalEntrantCount;
+      });
+
+  /// Forms custom squads or drafts from the solo player pool.
+  ///
+  /// Replaces the entrant list wholesale, which is why it refuses to run once
+  /// fixtures exist: a fixture stores the entrant ids it is between, so
+  /// deleting an entrant a scheduled match points at leaves that match
+  /// referring to nothing, and there is no safe way to guess which new squad
+  /// inherited the old one's place. [generateDraw] guards its own regenerate
+  /// for the same reason; this path was reachable without any such check.
+  ///
+  /// The commit is deliberately not awaited, matching
+  /// [lockFieldAndCreateEntrants]: every id written here is known
+  /// client-side, so the count is correct the moment the batch is built and
+  /// the organizer is not made to wait on a round trip at the ground. A
+  /// failure surfaces on [writeFailures].
+  Future<int> formTeamsFromPool({
+    required String orgId,
+    required String compId,
+    required List<TeamDraftSpec> teams,
+  }) =>
+      guard(() async {
+        if (teams.length < 2) {
+          throw const ValidationException(
+            'At least two teams are required to make a draw.',
+          );
+        }
+
+        final existingFixtures = await Refs.fixtures(orgId, compId).get();
+        if (existingFixtures.docs.isNotEmpty) {
+          final anyScored = existingFixtures.docs
+              .map(Fixture.fromDoc)
+              .any((f) => f.lastSeq > 0 || f.hasResult);
+          throw ValidationException(
+            anyScored
+                ? 'Some matches in this competition already have scores. '
+                    'Squads cannot be re-formed once results exist.'
+                : 'A draw has already been made for this competition. '
+                    'Clear the existing fixtures before re-forming squads.',
+          );
+        }
+
+        final batch = Refs.db.batch();
+        final existingEntrants = await Refs.entrants(orgId, compId).get();
+        for (final doc in existingEntrants.docs) {
+          batch.delete(doc.reference);
+        }
+
+        for (var i = 0; i < teams.length; i++) {
+          final t = teams[i];
+          final entrantId =
+              'team_${i + 1}_${DateTime.now().millisecondsSinceEpoch % 10000}';
+          batch.set(
+            Refs.entrants(orgId, compId).doc(entrantId),
+            Entrant(
+              id: entrantId,
+              displayName: t.name,
+              entrantType: EntrantType.team,
+              memberUids: t.memberUids,
+              uid: t.captainUid ?? (t.memberUids.isNotEmpty ? t.memberUids.first : null),
+            ).toMap(),
+          );
+        }
+
+        batch.update(Refs.competition(orgId, compId), {
+          'status': CompetitionStatus.registrationClosed.wire,
+          'entrantCount': teams.length,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+
+        unawaited(batch.commit().catchError((Object error) {
+          _writeFailures.add(_translateWriteFailure(error));
+        }));
+        return teams.length;
       });
 
   // --- Draw -------------------------------------------------------------
@@ -1085,6 +1230,29 @@ class CompetitionRepository {
           );
         }
 
+        // The readiness gate. `validateDrawReadiness` was written with unit
+        // tests but never called from anywhere, so a competition could reach
+        // a bracket with students still sitting unassigned in the draft pool
+        // and squads too short to field a side. Green tests for a gate that
+        // does not run are worse than no gate: they read as assurance.
+        //
+        // It belongs here rather than in the team builder because the builder
+        // is one of several ways a field gets decided (a house split and a
+        // doubles pairing both bypass it), and this is the one point every
+        // one of them has to pass through.
+        final confirmedRegs = await Refs.registrations(orgId, compId)
+            .where('status', isEqualTo: RegistrationStatus.confirmed.wire)
+            .get();
+        final readiness = const TeamPartitioner().validateDrawReadiness(
+          competition: competition,
+          entrants: entrants,
+          confirmedRegistrations:
+              confirmedRegs.docs.map(Registration.fromDoc).toList(),
+        );
+        if (!readiness.isReady) {
+          throw ValidationException(readiness.reasons.join('\n'));
+        }
+
         // Every parameter the generator accepts is passed. Until this call
         // carried them, a groups+knockout draw silently took the fallback of
         // roughly four per group with two qualifiers each no matter what the
@@ -1128,6 +1296,7 @@ class CompetitionRepository {
           numGroups: draw.numGroups,
           qualifiersPerGroup: draw.qualifiersPerGroup,
           method: DrawMethod.fromWire(draw.method),
+          useGroups: draw.useGroups,
         );
         if (planned.isEmpty) {
           throw const ValidationException(
@@ -1335,6 +1504,22 @@ class CompetitionRepository {
     required Competition competition,
     required int teamCount,
     int? teamsPerGroup,
+
+    /// Entrants who have actually registered, placed into the draw ahead of
+    /// any placeholder.
+    ///
+    /// The case this exists for: entries are open, ten people have signed up,
+    /// the field is capped at thirty-two, and the organizer needs a timetable
+    /// *now* — venues booked, officials rostered, a programme to hand out.
+    /// Planning against thirty-two anonymous "Team A" placeholders throws away
+    /// the ten names already known; waiting for the field to fill means
+    /// planning nothing until the week of the event. Seeding the real ten and
+    /// leaving twenty-two open slots is what an organizer does on paper, and
+    /// it is what this does.
+    ///
+    /// Withdrawn entrants are dropped rather than given a slot. Order is the
+    /// caller's — registration order on the ordinary path.
+    List<Entrant> seedWith = const [],
   }) =>
       guard(() async {
         final orgId = competition.orgId;
@@ -1351,11 +1536,52 @@ class CompetitionRepository {
           );
         }
 
+        var real = [
+          for (final e in seedWith)
+            if (!e.withdrawn) e,
+        ];
+        if (real.isEmpty) {
+          final eSnap = await Refs.entrants(orgId, compId).get();
+          real = [
+            for (final doc in eSnap.docs)
+              if (!Entrant.fromDoc(doc).withdrawn) Entrant.fromDoc(doc),
+          ];
+          if (real.isEmpty) {
+            final rSnap = await Refs.registrations(orgId, compId).get();
+            real = [
+              for (final doc in rSnap.docs)
+                if (doc.data()['status'] == RegistrationStatus.confirmed.name ||
+                    doc.data()['status'] == RegistrationStatus.pending.name)
+                  Entrant(
+                    id: doc.id,
+                    displayName: (doc.data()['displayName'] as String?)?.isNotEmpty == true
+                        ? doc.data()['displayName'] as String
+                        : 'Player ${doc.id.length > 4 ? doc.id.substring(0, 4) : doc.id}',
+                    entrantType: competition.entrantType,
+                    uid: doc.id,
+                  ),
+            ];
+          }
+        }
+        // A field already larger than the plan is not an error — the
+        // organizer asked for a smaller bracket than the entry list, and the
+        // extra entrants simply do not fit in it. Taking the first
+        // [teamCount] keeps the draw the size that was asked for.
+        final seeded = real.length > teamCount ? real.sublist(0, teamCount) : real;
+
         final placeholders = <Entrant>[
-          for (var i = 0; i < teamCount; i++)
+          ...seeded,
+          for (var i = seeded.length; i < teamCount; i++)
             Entrant(
               id: 'draft_$i',
-              displayName: 'Team ${_draftTeamLabel(i)}',
+              // Two vocabularies, because they answer different questions. A
+              // draw with nobody in it yet is a shape, and "Team A vs Team B"
+              // reads as one. A draw with ten real names in it has gaps, and
+              // a gap wants to be called a gap — "Open slot 11" next to ten
+              // people, not another "Team K" competing with them for the eye.
+              displayName: seeded.isEmpty
+                  ? 'Team ${_draftTeamLabel(i)}'
+                  : 'Open slot ${i + 1}',
               entrantType: competition.entrantType,
             ),
         ];
@@ -1385,6 +1611,86 @@ class CompetitionRepository {
         final sport = SportCatalog.byId(competition.sportId);
         final effectiveConfig = competition.effectiveScoringConfig(sport.config);
 
+        // ── Court & time-slot allocation ──────────────────────────────
+        // Build courts from ScheduleConfig venues (or ad-hoc names) and
+        // compute time slots so every draft fixture gets a real court and
+        // start time instead of the blanket competition.startDate.
+        final sc = competition.scheduleConfig;
+        final courtRefs = <CourtRef>[];
+
+        if (sc.usesVenues) {
+          for (final vid in sc.venueIds) {
+            final vDoc = await Refs.venue(orgId, vid).get();
+            if (!vDoc.exists) continue;
+            final v = venue_model.Venue.fromDoc(vDoc);
+            for (final c in v.usableCourts) {
+              courtRefs.add(CourtRef(
+                venueId: v.id,
+                venueName: v.name,
+                courtId: c.id,
+                courtName: c.name,
+              ));
+            }
+          }
+        } else if (sc.courts.isNotEmpty) {
+          for (var i = 0; i < sc.courts.length; i++) {
+            courtRefs.add(CourtRef(
+              venueId: 'adhoc',
+              venueName: competition.venue ?? '',
+              courtId: 'court_$i',
+              courtName: sc.courts[i],
+            ));
+          }
+        }
+
+        // Build the placement map: matchIndex → (court, scheduledAt).
+        // Falls back gracefully when no courts/venues are configured.
+        final placements = <int, Placement>{};
+        if (courtRefs.isNotEmpty && competition.startDate != null) {
+          final startDate = competition.startDate!;
+          final endDate = competition.endDate ?? startDate;
+          final dayCount = endDate.difference(startDate).inDays + 1;
+
+          final slots = TournamentScheduler.buildSlots(
+            firstDay: startDate,
+            dayCount: dayCount,
+            openHour: sc.dayStartHour,
+            closeHour: sc.dayEndHour,
+            slotMinutes: sc.slotMinutes,
+          );
+
+          final schedulable = <SchedulableMatch>[
+            for (final p in kept)
+              SchedulableMatch(
+                compId: compId,
+                matchIndex: p.matchIndex,
+                round: p.round,
+                playerUids: <String>{
+                  if (p.entrantA?.soloUid != null) p.entrantA!.soloUid!,
+                  if (p.entrantB?.soloUid != null) p.entrantB!.soloUid!,
+                },
+                isGroupStage: p.groupId != null,
+                matchMinutes: sc.matchMinutes,
+              ),
+          ];
+
+          final result = const TournamentScheduler().schedule(
+            matches: schedulable,
+            courts: courtRefs,
+            slots: slots,
+            minRestBetweenMatches: Duration(minutes: sc.restGapMinutes),
+          );
+
+          for (final entry in result.placements.entries) {
+            // Key is "compId#matchIndex" — extract matchIndex.
+            final parts = entry.key.split('#');
+            if (parts.length == 2) {
+              final idx = int.tryParse(parts[1]);
+              if (idx != null) placements[idx] = entry.value;
+            }
+          }
+        }
+
         final batch = ChunkedBatch(Refs.db);
 
         // Clear any previous draft (or unscored real draw — the guard above
@@ -1396,6 +1702,7 @@ class CompetitionRepository {
 
         for (final p in kept) {
           final ref = refByPlannedIndex[p.matchIndex]!;
+          final placement = placements[p.matchIndex];
           final fixture = Fixture(
             id: ref.id,
             orgId: orgId,
@@ -1416,8 +1723,9 @@ class CompetitionRepository {
             round: p.round,
             matchIndex: p.matchIndex,
             roundLabel: p.roundLabel,
-            venue: competition.venue,
-            scheduledAt: competition.startDate,
+            venue: placement?.court.venueName ?? competition.venue,
+            courtId: placement?.court.courtId,
+            scheduledAt: placement?.window.start ?? competition.startDate,
             tournamentId: competition.tournamentId,
             scoringPluginKey: competition.scoringPluginKey,
             sportId: competition.sportId,
@@ -1462,6 +1770,49 @@ class CompetitionRepository {
     } while (n >= 0);
     return label;
   }
+
+  /// Converts every draft fixture into a real, published fixture and sets the
+  /// competition status to [CompetitionStatus.scheduled].
+  ///
+  /// This is the one-tap "Lock & Publish" action an organizer triggers when
+  /// the draft timetable looks right and they want participants to see it.
+  /// Until this runs, draft fixtures are invisible to everyone outside the
+  /// organizer team.
+  Future<void> publishDraftSchedule({
+    required String orgId,
+    required String compId,
+  }) =>
+      guard(() async {
+        final snap = await Refs.fixtures(orgId, compId).get();
+        final drafts = snap.docs
+            .map(Fixture.fromDoc)
+            .where((f) => f.isDraft)
+            .toList();
+
+        if (drafts.isEmpty) {
+          throw const ValidationException(
+            'There is no draft schedule to publish.',
+          );
+        }
+
+        final batch = ChunkedBatch(Refs.db);
+        for (final f in drafts) {
+          batch.update(
+            Refs.fixtures(orgId, compId).doc(f.id),
+            {'isDraft': false},
+          );
+        }
+        // Flip the competition into the "scheduled" state so public feeds,
+        // notifications, and the club portal all pick it up.
+        batch.update(Refs.competition(orgId, compId), {
+          'status': CompetitionStatus.scheduled.name,
+          'fixtureCount': drafts.length,
+        });
+
+        unawaited(batch.commitAll().catchError((Object error) {
+          _writeFailures.add(_translateWriteFailure(error));
+        }));
+      });
 
   /// Counts how much of a draw actually reached the server.
   ///
@@ -1908,11 +2259,34 @@ class CompetitionRepository {
     final start = competition.startDate;
 
     // Without courts or a start date there is nothing to lay out against, so
-    // every fixture keeps the competition's own start time — the old
-    // behaviour, which is the honest answer when the organizer has not told
-    // us how many courts they have.
-    if (!cfg.hasCourts || start == null) {
-      return (startAt: {}, courtId: {}, problems: const []);
+    // every fixture keeps the competition's own start time.
+    //
+    // Falling back is right; falling back SILENTLY was not. `problems` was
+    // returned empty here, so the draw sheet reported a schedule generated
+    // without complaint and the organizer got a draw where every match began
+    // at the same minute on no court — indistinguishable, on screen, from one
+    // the solver had thought about. The two reasons are separated because the
+    // fix differs: one is a venue, the other is a date.
+    if (start == null) {
+      return (
+        startAt: {},
+        courtId: {},
+        problems: const [
+          'No start date, so no match could be given a time. Set the '
+              'competition dates and generate the draw again.',
+        ],
+      );
+    }
+    if (!cfg.hasCourts) {
+      return (
+        startAt: {},
+        courtId: {},
+        problems: const [
+          'No courts, so every match is listed at the competition start time '
+              'and none has a court. Add a venue with courts — or type court '
+              'names in the draw setup — and generate again.',
+        ],
+      );
     }
 
     // Court names come from real venue documents when the organizer picked
@@ -1926,8 +2300,20 @@ class CompetitionRepository {
             for (final v in venueCourts) v,
           ]
         : cfg.courts;
+    // Venues were named but none of them yielded a usable court — every one
+    // archived, or every court marked unavailable. Distinct from "no courts
+    // configured" above and worth saying so: the organizer did the setup, and
+    // what they need to hear is that the setup no longer resolves to anything.
     if (courtNames.isEmpty) {
-      return (startAt: {}, courtId: {}, problems: const []);
+      return (
+        startAt: {},
+        courtId: {},
+        problems: const [
+          'The selected venues have no usable courts, so no match could be '
+              'given a court or a time. Mark a court available, or pick a '
+              'different venue.',
+        ],
+      );
     }
 
     final venues = [

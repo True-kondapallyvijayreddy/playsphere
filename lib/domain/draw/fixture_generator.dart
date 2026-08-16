@@ -3,6 +3,7 @@ import 'dart:math';
 import '../../core/models/competition.dart';
 import '../../core/models/draw_slot.dart';
 import '../../core/models/enums.dart';
+import 'group_bounds.dart';
 
 export '../../core/models/draw_slot.dart' show Bracket, QualifierSource;
 
@@ -239,14 +240,41 @@ class FixtureGenerator {
 
     /// How the field is arranged into the bracket. See [DrawMethod].
     DrawMethod method = DrawMethod.ranked,
+
+    /// Split the field into groups regardless of format. See
+    /// [DrawConfig.useGroups] — a round robin becomes pools, a knockout gains
+    /// a group stage in front of it.
+    bool useGroups = false,
   }) {
     final active = entrants.where((e) => !e.withdrawn).toList();
     if (active.length < 2) return const [];
 
     return _assignSlotFills(switch (format) {
+      // Pools: a round robin per group, no knockout. The organizer asked for
+      // groups, and a league is what a group plays.
+      CompetitionFormat.roundRobin ||
+      CompetitionFormat.leagueTable
+          when useGroups =>
+        _groupPools(
+          active,
+          shuffleSeed,
+          groupSize: groupSize,
+          numGroups: numGroups,
+          doubleRoundRobin: doubleRoundRobin,
+        ),
       CompetitionFormat.roundRobin ||
       CompetitionFormat.leagueTable =>
         _roundRobinFixtures(active, doubleLegged: doubleRoundRobin),
+      // A knockout with groups in front of it IS groups+knockout; routing
+      // here rather than duplicating the builder is what keeps the two from
+      // drifting into two different brackets.
+      CompetitionFormat.knockout when useGroups => _groupThenKnockout(
+          active,
+          shuffleSeed,
+          groupSize: groupSize,
+          numGroups: numGroups,
+          qualifiersPerGroup: qualifiersPerGroup,
+        ),
       CompetitionFormat.knockout => _knockout(active, shuffleSeed, method),
       CompetitionFormat.doubleElimination => _doubleElimination(
           active,
@@ -967,56 +995,25 @@ class FixtureGenerator {
 
     final seeded = _seedOrShuffle(entrants, shuffleSeed);
 
-    // Matches the suggestion `DrawSetupSheet` shows an organizer who never
-    // touches the group-count stepper — roughly ten entrants a group is a
-    // sensible pool size, and the two defaults disagreeing would mean the
-    // sheet promised a shape the generator did not actually produce.
-    var groups = numGroups ??
-        (groupSize != null
-            ? (seeded.length / groupSize).ceil()
-            : max(1, (seeded.length / 10).ceil()));
-    // Every group needs at least 2 entrants to play a match, and at least
-    // `qualifiersPerGroup` so the knockout phase has someone to seed.
-    final maxGroups = max(1, seeded.length ~/ max(2, qualifiersPerGroup));
-    groups = groups.clamp(1, maxGroups);
+    // Both the requested count and the fallback go through [GroupBounds], the
+    // same rule `DrawSetupSheet` offers, so the sheet cannot promise a shape
+    // the generator does not produce. They disagreed before: the sheet
+    // suggested one group per ten entrants and so did this, which meant a
+    // 40-entrant draw was silently dealt into groups of ten — past the point
+    // where a group stage costs more matches than the knockout it feeds.
+    //
+    // A caller naming `groupSize` is naming a shape directly, so that is
+    // honoured first and then bounded; everything else is left to the rule.
+    final groups = GroupBounds.resolve(
+      entrants: seeded.length,
+      requested: numGroups ??
+          (groupSize != null ? (seeded.length / groupSize).ceil() : null),
+      qualifiersPerGroup: qualifiersPerGroup,
+    );
 
-    final buckets = List.generate(groups, (_) => <Entrant>[]);
-    // Snake draft: fills group 0..G-1 left to right, then G-1..0 right to
-    // left, and so on — the standard way to give every group a comparable
-    // overall strength instead of stacking the top seeds into one group.
-    var idx = 0;
-    var row = 0;
-    while (idx < seeded.length) {
-      final order = row.isEven
-          ? List<int>.generate(groups, (i) => i)
-          : List<int>.generate(groups, (i) => groups - 1 - i);
-      for (final g in order) {
-        if (idx >= seeded.length) break;
-        buckets[g].add(seeded[idx]);
-        idx++;
-      }
-      row++;
-    }
-
-    final groupIds = List.generate(groups, (i) => String.fromCharCode(65 + i));
-    final fixtures = <PlannedFixture>[];
-
-    for (var g = 0; g < groups; g++) {
-      final groupFixtures = _roundRobin(buckets[g]);
-      final start = fixtures.length;
-      for (var i = 0; i < groupFixtures.length; i++) {
-        final f = groupFixtures[i];
-        fixtures.add(PlannedFixture(
-          round: f.round,
-          matchIndex: start + i,
-          roundLabel: 'Group ${groupIds[g]} · ${f.roundLabel}',
-          entrantA: f.entrantA,
-          entrantB: f.entrantB,
-          bracket: Bracket.group,
-          groupId: groupIds[g],
-        ));
-      }
-    }
+    final buckets = _snakeDraft(seeded, groups);
+    final groupIds = _groupIds(groups);
+    final fixtures = _groupRoundRobins(buckets, groupIds);
 
     final qualifierOrder = <QualifierSource>[
       for (var pos = 1; pos <= qualifiersPerGroup; pos++)
@@ -1047,6 +1044,96 @@ class FixtureGenerator {
     }
 
     return fixtures;
+  }
+
+  /// Deals [seeded] into [groups] buckets by snake draft.
+  ///
+  /// Fills group 0..G-1 left to right, then G-1..0 right to left, and so on —
+  /// the standard way to give every group a comparable overall strength
+  /// instead of stacking the top seeds into one.
+  List<List<Entrant>> _snakeDraft(List<Entrant> seeded, int groups) {
+    final buckets = List.generate(groups, (_) => <Entrant>[]);
+    var idx = 0;
+    var row = 0;
+    while (idx < seeded.length) {
+      final order = row.isEven
+          ? List<int>.generate(groups, (i) => i)
+          : List<int>.generate(groups, (i) => groups - 1 - i);
+      for (final g in order) {
+        if (idx >= seeded.length) break;
+        buckets[g].add(seeded[idx]);
+        idx++;
+      }
+      row++;
+    }
+    return buckets;
+  }
+
+  List<String> _groupIds(int groups) =>
+      List.generate(groups, (i) => String.fromCharCode(65 + i));
+
+  /// A full round robin inside each group, labelled and tagged with its
+  /// group so a standings table can be built per group.
+  List<PlannedFixture> _groupRoundRobins(
+    List<List<Entrant>> buckets,
+    List<String> groupIds, {
+    bool doubleLegged = false,
+  }) {
+    final fixtures = <PlannedFixture>[];
+    for (var g = 0; g < buckets.length; g++) {
+      final groupFixtures =
+          _roundRobinFixtures(buckets[g], doubleLegged: doubleLegged);
+      final start = fixtures.length;
+      for (var i = 0; i < groupFixtures.length; i++) {
+        final f = groupFixtures[i];
+        fixtures.add(PlannedFixture(
+          round: f.round,
+          matchIndex: start + i,
+          roundLabel: 'Group ${groupIds[g]} · ${f.roundLabel}',
+          entrantA: f.entrantA,
+          entrantB: f.entrantB,
+          bracket: Bracket.group,
+          groupId: groupIds[g],
+        ));
+      }
+    }
+    return fixtures;
+  }
+
+  /// Pools: the field split into groups, each playing its own round robin,
+  /// and no knockout afterwards.
+  ///
+  /// The shape an organizer means by "groups" far more often than the
+  /// textbook does. Thirty players in one round robin is 435 matches and
+  /// nobody runs it; six groups of five is 60, finishes in a day, and gives
+  /// every entrant four guaranteed games rather than one. It was
+  /// unreachable before — groups were welded to Groups+Knockout, so asking
+  /// for pools meant accepting a knockout stage you did not want, or a
+  /// single round robin you could not fit.
+  List<PlannedFixture> _groupPools(
+    List<Entrant> entrants,
+    int? shuffleSeed, {
+    int? groupSize,
+    int? numGroups,
+    bool doubleRoundRobin = false,
+  }) {
+    if (entrants.length < 4) {
+      return _roundRobinFixtures(entrants, doubleLegged: doubleRoundRobin);
+    }
+    final seeded = _seedOrShuffle(entrants, shuffleSeed);
+    final groups = GroupBounds.resolve(
+      entrants: seeded.length,
+      requested: numGroups ??
+          (groupSize != null ? (seeded.length / groupSize).ceil() : null),
+      // No knockout to feed, so the only floor on group size is the one that
+      // makes a group a group.
+      qualifiersPerGroup: 1,
+    );
+    return _groupRoundRobins(
+      _snakeDraft(seeded, groups),
+      _groupIds(groups),
+      doubleLegged: doubleRoundRobin,
+    );
   }
 
   // ---------------------------------------------------------------------

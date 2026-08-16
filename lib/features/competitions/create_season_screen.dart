@@ -11,6 +11,7 @@ import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import 'widgets/bulk_category_selector_sheet.dart';
 
 /// One configured entry in a season: a sport, played in one arrangement
 /// (singles, doubles, 11-a-side...), for one age/gender category.
@@ -142,25 +143,44 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
     });
   }
 
-  Future<void> _addCategory() async {
-    final draft = await showModalBottomSheet<_CategoryDraft>(
+  Future<void> _addCategory({String? sportId}) async {
+    final drafts = await showModalBottomSheet<List<CategoryDraftItem>>(
       context: context,
       isScrollControlled: true,
-      builder: (_) => _AddCategorySheet(cutOff: _startDate),
+      builder: (_) => BulkCategorySelectorSheet(
+        initialSportId: sportId,
+        cutOff: _startDate,
+      ),
     );
-    if (draft == null) return;
-    if (_categories.any(draft.clashesWith)) {
-      if (mounted) {
+    if (drafts == null || drafts.isEmpty) return;
+
+    int addedCount = 0;
+    for (final draft in drafts) {
+      if (_categories.any((c) =>
+          c.sportId == draft.sportId &&
+          c.sideFormat.id == draft.sideFormat.id &&
+          c.category.label == draft.category.label)) {
+        continue;
+      }
+      _categories.add(
+        _CategoryDraft(
+          sportId: draft.sportId,
+          sideFormat: draft.sideFormat,
+          category: draft.category,
+        ),
+      );
+      addedCount++;
+    }
+
+    if (mounted) {
+      setState(() {});
+      if (addedCount < drafts.length) {
         showError(
           context,
-          '${draft.sport.name} · ${draft.sideFormat.name} · '
-          '${draft.category.label} is already in this season.',
+          'Added $addedCount categories (${drafts.length - addedCount} were already in the list)',
         );
       }
-      draft.dispose();
-      return;
     }
-    setState(() => _categories.add(draft));
   }
 
   void _removeCategory(_CategoryDraft draft) {
@@ -185,9 +205,6 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
       showError(context, 'Pick a start date.');
       return;
     }
-    // Defence in depth alongside the date pickers' own bounds: the pickers
-    // stop these being chosen, this stops them being submitted if the device
-    // clock moved on while the form sat open.
     if (start.isBefore(_earliestStart)) {
       showError(context, 'Start date must be at least tomorrow.');
       return;
@@ -205,15 +222,13 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
       final tournaments = ref.read(tournamentRepositoryProvider);
       final competitions = ref.read(competitionRepositoryProvider);
 
-      // The season container first: every event created below carries its id,
-      // and an event pointing at a season that does not exist yet would be a
-      // dangling reference for however long the writes take.
+      // The season container is automatically created OPEN for entries
       final seasonId = await tournaments.createTournament(
         Tournament(
           id: '',
           orgId: widget.orgId,
           name: _name.text.trim(),
-          status: TournamentStatus.draft,
+          status: TournamentStatus.entriesOpen,
           startDate: start,
           endDate: end ?? start,
           eventCount: _categories.length,
@@ -223,9 +238,6 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
 
       for (final draft in _categories) {
         final sport = draft.sport;
-        // Only worth saying in the name when the sport actually has more
-        // than one arrangement — cricket does not need "(11 a side)"
-        // appended to every event when that is the only option it has.
         final showsArrangement = sport.sideFormats.length > 1;
         await competitions.createCompetition(
           Competition(
@@ -241,12 +253,9 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
             archetype: sport.archetype,
             entrantType: sport.defaultEntrantType,
             format: draft.format,
-            status: CompetitionStatus.draft,
+            status: CompetitionStatus.registrationOpen,
             category: draft.category,
             scoringPluginKey: sport.pluginKey,
-            // The arrangement's own rule tweaks — doubles' serve rotation,
-            // a smaller side's player count — layered over the sport's
-            // default preset. See [Competition.effectiveScoringConfig].
             scoringConfig: draft.sideFormat.configOverrides,
             venue: _venue.text.trim().isEmpty ? null : _venue.text.trim(),
             startDate: start,
@@ -259,10 +268,6 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
         );
       }
 
-      // The sports above were created already attached, which is the one path
-      // that bypasses `addEvent` and its increment. Without this the season
-      // reports no events, and the rule that refuses to delete a tournament
-      // with events in it stops protecting the ones it has.
       tournaments.noteEventsCreated(
         orgId: widget.orgId,
         tournamentId: seasonId,
@@ -270,8 +275,6 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
       );
 
       if (mounted) {
-        // Replace: the season exists now, and a back press should reach the
-        // club rather than a form that would create a second copy.
         context.pushReplacement(Routes.tournament(widget.orgId, seasonId));
       }
     } catch (e) {
@@ -351,18 +354,42 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
                           style: theme.textTheme.titleMedium,
                         ),
                       ),
-                      TextButton.icon(
-                        onPressed: _addCategory,
-                        icon: const Icon(Icons.add),
-                        label: const Text('Add'),
+                      FilledButton.tonalIcon(
+                        onPressed: () => _addCategory(),
+                        icon: const Icon(Icons.add, size: 18),
+                        label: const Text('Add Categories (+)'),
                       ),
                     ],
                   ),
+                  const SizedBox(height: 4),
                   Text(
-                    'Each one becomes its own draw with its own entry list — '
-                    'add Badminton Singles and Badminton Doubles separately '
-                    'if this season runs both.',
+                    'Pick any sport and choose multiple arrangements, age bands, and equipment all at once.',
                     style: theme.textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 12),
+                  // Quick sport shortcuts with '+' buttons
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: [
+                        for (final sport in SportCatalog.all.take(8))
+                          Padding(
+                            padding: const EdgeInsets.only(right: 8),
+                            child: ActionChip(
+                              avatar: Text(sport.icon),
+                              label: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(sport.name),
+                                  const SizedBox(width: 4),
+                                  const Icon(Icons.add_circle_outline, size: 16),
+                                ],
+                              ),
+                              onPressed: () => _addCategory(sportId: sport.id),
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
                   const SizedBox(height: 12),
 

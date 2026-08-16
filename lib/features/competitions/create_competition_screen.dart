@@ -183,7 +183,7 @@ class _CreateCompetitionScreenState
               archetype: _sport.archetype,
               entrantType: _sport.defaultEntrantType,
               format: _format,
-              status: CompetitionStatus.draft,
+              status: CompetitionStatus.registrationOpen,
               category: _category,
               scoringPluginKey: _sport.pluginKey,
               venue: _venue.text.trim().isEmpty ? null : _venue.text.trim(),

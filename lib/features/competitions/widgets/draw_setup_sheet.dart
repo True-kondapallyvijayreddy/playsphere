@@ -4,6 +4,7 @@ import '../../../core/models/competition.dart';
 import '../../../core/models/draw_config.dart';
 import '../../../core/models/enums.dart';
 import '../../../core/models/venue.dart';
+import '../../../domain/draw/group_bounds.dart';
 
 /// Asks the organizer how the draw should be shaped and laid out, immediately
 /// before it is generated.
@@ -72,8 +73,29 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
     super.dispose();
   }
 
-  bool get _isGroups =>
+  /// Formats that can carry a group stage at all.
+  ///
+  /// Swiss pairs by standing each round and double elimination already gives
+  /// everyone a second life, so neither has a group phase to add. Everything
+  /// else does.
+  bool get _canUseGroups =>
+      widget.competition.format == CompetitionFormat.groupThenKnockout ||
+      widget.competition.format == CompetitionFormat.knockout ||
+      widget.competition.format == CompetitionFormat.roundRobin ||
+      widget.competition.format == CompetitionFormat.leagueTable;
+
+  /// Groups+Knockout says it in the format; every other format asks.
+  bool get _groupsAreImplied =>
       widget.competition.format == CompetitionFormat.groupThenKnockout;
+
+  bool get _isGroups => _groupsAreImplied || (_canUseGroups && _draw.useGroups);
+
+  /// Whether the group stage feeds a knockout, which is what decides if
+  /// "qualifiers per group" is a real question.
+  bool get _groupsFeedKnockout =>
+      _isGroups &&
+      widget.competition.format != CompetitionFormat.roundRobin &&
+      widget.competition.format != CompetitionFormat.leagueTable;
 
   bool get _isDoubleElim =>
       widget.competition.format == CompetitionFormat.doubleElimination;
@@ -82,22 +104,24 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
       widget.competition.format == CompetitionFormat.roundRobin ||
       widget.competition.format == CompetitionFormat.leagueTable;
 
+  /// Group sizing, delegated to [GroupBounds] so the rule the generator
+  /// obeys and the rule the stepper offers are the same rule.
+  int get _minGroups => GroupBounds.minGroups(widget.entrantCount);
+
+  int get _maxGroups => GroupBounds.maxGroups(
+        widget.entrantCount,
+        // Nothing to qualify into in a pool format, so group size is bounded
+        // only by what makes a group a group.
+        qualifiersPerGroup: _groupsFeedKnockout ? _draw.qualifiersPerGroup : 1,
+      );
+
   /// The group count the generator will actually use, so the summary line
   /// below cannot promise something different from what gets drawn.
-  ///
-  /// Defaults toward roughly ten entrants a group rather than four — a
-  /// sensible pool size for a group stage — but this is only the number the
-  /// stepper starts on; the organizer can move it to anything the qualifier
-  /// floor below allows.
-  int get _effectiveGroups {
-    final n = widget.entrantCount;
-    final requested = _draw.numGroups ?? (n / 10).ceil();
-    final maxGroups = (n ~/ (_draw.qualifiersPerGroup < 2
-            ? 2
-            : _draw.qualifiersPerGroup))
-        .clamp(1, n);
-    return requested.clamp(1, maxGroups < 1 ? 1 : maxGroups);
-  }
+  int get _effectiveGroups => GroupBounds.resolve(
+        entrants: widget.entrantCount,
+        requested: _draw.numGroups,
+        qualifiersPerGroup: _groupsFeedKnockout ? _draw.qualifiersPerGroup : 1,
+      );
 
   /// A fresh draw number when the organizer has not fixed one, so a
   /// supervised draw is genuinely drawn rather than repeating yesterday's.
@@ -136,27 +160,50 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
             ),
             const SizedBox(height: 20),
 
+            if (_canUseGroups && !_groupsAreImplied)
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Split into groups'),
+                subtitle: Text(
+                  widget.competition.format == CompetitionFormat.knockout
+                      ? 'A group stage first, with the top of each group '
+                          'going through to the knockout.'
+                      : 'Pools — everyone plays everyone in their own group '
+                          'instead of one table of ${widget.entrantCount}.',
+                ),
+                value: _draw.useGroups,
+                onChanged: (v) => setState(
+                  () => _draw = _draw.copyWith(useGroups: v),
+                ),
+              ),
+
             if (_isGroups) ...[
               const _SectionLabel('Groups'),
               _Stepper(
                 label: 'Number of groups',
-                value: _draw.numGroups ?? _effectiveGroups,
-                min: 1,
-                max: widget.entrantCount ~/ 2 == 0
-                    ? 1
-                    : widget.entrantCount ~/ 2,
+                // Bounded so the organizer cannot choose a group size the
+                // draw is not allowed to have, rather than accepting the
+                // number and quietly generating something else.
+                value: _effectiveGroups,
+                min: _minGroups,
+                max: _maxGroups,
                 onChanged: (v) =>
                     setState(() => _draw = _draw.copyWith(numGroups: v)),
               ),
-              _Stepper(
-                label: 'Qualifiers from each group',
-                value: _draw.qualifiersPerGroup,
-                min: 1,
-                max: 4,
-                onChanged: (v) => setState(
-                  () => _draw = _draw.copyWith(qualifiersPerGroup: v),
+              if (_groupsFeedKnockout)
+                _Stepper(
+                  label: 'Qualifiers from each group',
+                  value: _draw.qualifiersPerGroup,
+                  min: 1,
+                  max: 4,
+                  onChanged: (v) => setState(() {
+                    // Raising the qualifier count can shrink [_maxGroups] below
+                    // the chosen group count, so the choice is re-clamped here
+                    // instead of being left invalid until the next rebuild.
+                    _draw = _draw.copyWith(qualifiersPerGroup: v);
+                    _draw = _draw.copyWith(numGroups: _effectiveGroups);
+                  }),
                 ),
-              ),
               Padding(
                 padding: const EdgeInsets.only(top: 4, bottom: 16),
                 child: Text(
@@ -220,8 +267,8 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
               ),
               value: _draw.method == 'federation',
               onChanged: (v) => setState(
-                () => _draw =
-                    _draw.copyWith(method: v ? 'federation' : 'ranked'),
+                () =>
+                    _draw = _draw.copyWith(method: v ? 'federation' : 'ranked'),
               ),
             ),
             if (_draw.method == 'federation')
@@ -341,10 +388,13 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
                 const Spacer(),
                 FilledButton(
                   onPressed: () => Navigator.of(context).pop((
-                    draw: _draw.method == 'federation' &&
-                            _draw.shuffleSeed == null
-                        ? _draw.copyWith(shuffleSeed: _suggestedSeed)
-                        : _draw,
+                    // The group count is clamped on the way out as well as in
+                    // the stepper: a competition saved under the old bounds
+                    // carries a `numGroups` the stepper only ever displayed
+                    // clamped, and handing that stored value to the generator
+                    // would draw the groups the organizer was shown they
+                    // could not have.
+                    draw: _drawToSubmit,
                     schedule: _schedule.copyWith(
                       courts: _venueIds.isEmpty ? _parsedCourts : const [],
                       venueIds: _venueIds.toList(),
@@ -360,11 +410,30 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
     );
   }
 
+  /// [_draw] with every derived bound applied, ready for the generator.
+  DrawConfig get _drawToSubmit {
+    var out = _draw;
+    if (_isGroups) out = out.copyWith(numGroups: _effectiveGroups);
+    if (out.method == 'federation' && out.shuffleSeed == null) {
+      out = out.copyWith(shuffleSeed: _suggestedSeed);
+    }
+    return out;
+  }
+
   String _groupSummary() {
     final groups = _effectiveGroups;
     final qualifiers = groups * _draw.qualifiersPerGroup;
-    final perGroup = (widget.entrantCount / groups).floor();
-    return '$groups groups of about $perGroup, '
+    final smallest = GroupBounds.smallestGroupSize(widget.entrantCount, groups);
+    final largest = GroupBounds.largestGroupSize(widget.entrantCount, groups);
+    // "About four" hid the uneven split that an organizer has to explain to
+    // whoever drew the group of five.
+    final size = smallest == largest ? '$smallest' : '$smallest–$largest';
+    // Pools have no knockout to promise anybody into, and saying "8 into the
+    // knockout stage" under a format that has none is the summary lying.
+    if (!_groupsFeedKnockout) {
+      return '$groups groups of $size, each playing its own table.';
+    }
+    return '$groups groups of $size, '
         '$qualifiers into the knockout stage.';
   }
 
@@ -374,8 +443,8 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
       return 'Without courts, every match is scheduled at the competition '
           'start time and players have no idea when they are on.';
     }
-    final perHour = 60 ~/ (_schedule.matchMinutes + _schedule.changeoverMinutes)
-        .clamp(1, 240);
+    final perHour = 60 ~/
+        (_schedule.matchMinutes + _schedule.changeoverMinutes).clamp(1, 240);
     final hours = _schedule.dayEndHour - _schedule.dayStartHour;
     final capacity = perHour * hours * courts.length;
     return '${courts.length} courts · about $perHour matches per court per '

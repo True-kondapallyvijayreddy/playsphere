@@ -63,6 +63,39 @@ class StandingsCalculator {
         e.id: _Row(entrantId: e.id, displayName: e.displayName),
     };
 
+    // A DRAFT fixture may name an entrant that has no [Entrant] document,
+    // because `generateDraftSchedule` lays a bracket out against placeholders
+    // — "Team A", "Team B" — before registration has produced anybody real.
+    // Without a row each, a draft schedule's table is empty and the preview it
+    // exists to give is blank.
+    //
+    // Restricted to drafts, and that restriction is the whole subtlety. On a
+    // PLAYED fixture an entrant id absent from the list means the opposite
+    // thing: stale data — an entrant deleted, or a fixture carried over from a
+    // reshaped draw — and inventing a row for it puts a competitor in the
+    // table who is not in the competition. Synthesizing unconditionally made
+    // `standings_test.dart`'s "a fixture naming an unknown entrant is ignored,
+    // not crashed on" return a two-row table for a one-entrant event.
+    //
+    // `isDraft` is the right signal rather than a proxy for one: it is already
+    // "what the rest of the app reads to leave placeholders out of anything it
+    // counts" (see `CompetitionRepository.generateDraftSchedule`).
+    for (final f in fixtures) {
+      if (!f.isDraft) continue;
+      if (f.entrantAId.isNotEmpty && !rows.containsKey(f.entrantAId)) {
+        rows[f.entrantAId] = _Row(
+          entrantId: f.entrantAId,
+          displayName: f.entrantAName.isNotEmpty ? f.entrantAName : f.entrantAId,
+        );
+      }
+      if (f.entrantBId.isNotEmpty && !rows.containsKey(f.entrantBId)) {
+        rows[f.entrantBId] = _Row(
+          entrantId: f.entrantBId,
+          displayName: f.entrantBName.isNotEmpty ? f.entrantBName : f.entrantBId,
+        );
+      }
+    }
+
     // Head-to-head results, keyed "winner|loser", plus the drawn pairs.
     final headToHead = <String, int>{};
     // Which opponents each entrant has faced, for Buchholz and
@@ -451,15 +484,35 @@ class StandingsCalculator {
 
     for (final entry in byGroup.entries) {
       final ids = <String>{};
+      final names = <String, String>{};
+      // Only a draft group may invent its members, for the same reason the
+      // whole-competition table above may: a placeholder group has no real
+      // entrants yet, while a played group naming somebody unknown is stale.
+      final placeholders = <String>{};
       for (final f in entry.value) {
-        if (f.entrantAId.isNotEmpty) ids.add(f.entrantAId);
-        if (f.entrantBId.isNotEmpty) ids.add(f.entrantBId);
+        if (f.entrantAId.isNotEmpty) {
+          ids.add(f.entrantAId);
+          names[f.entrantAId] = f.entrantAName;
+          if (f.isDraft) placeholders.add(f.entrantAId);
+        }
+        if (f.entrantBId.isNotEmpty) {
+          ids.add(f.entrantBId);
+          names[f.entrantBId] = f.entrantBName;
+          if (f.isDraft) placeholders.add(f.entrantBId);
+        }
       }
       tables[entry.key] = compute(
         competition: competition,
         entrants: [
           for (final id in ids)
-            if (byId[id] != null) byId[id]!,
+            if (byId[id] != null)
+              byId[id]!
+            else if (placeholders.contains(id))
+              Entrant(
+                id: id,
+                displayName: names[id]?.isNotEmpty == true ? names[id]! : id,
+                entrantType: competition.entrantType,
+              ),
         ],
         fixtures: entry.value,
       );

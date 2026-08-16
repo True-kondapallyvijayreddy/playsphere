@@ -103,6 +103,8 @@ class Tournament {
     this.matchMinutesDefault = 30,
     this.changeoverMinutes = 5,
     this.restGapMinutes = 20,
+    this.isScheduleLocked = false,
+    this.scheduleReleasedAt,
     this.createdBy,
     this.createdAt,
   });
@@ -113,6 +115,26 @@ class Tournament {
   final TournamentStatus status;
   final TournamentGrade grade;
   final String? description;
+
+  /// Whether the timetable has been published to participants.
+  ///
+  /// `TournamentRepository.lockSchedule` wrote this field from the day it was
+  /// added and nothing ever read it back, so the app could not tell a
+  /// published season from a draft one: the "Lock & publish" button stayed
+  /// live after publishing and a second press re-notified everybody, and no
+  /// screen could say when the schedule had been released.
+  ///
+  /// It is the participant-facing half of `Fixture.isDraft` — that flag hides
+  /// individual matches, this one records that the organizer has committed to
+  /// the whole timetable. They move together, in the same batch.
+  final bool isScheduleLocked;
+
+  /// When it was published. Null until it is.
+  ///
+  /// Kept separate from [isScheduleLocked] rather than inferred from it being
+  /// non-null, because a season locked before this field existed has the flag
+  /// and no date, and "published, date unknown" is the truth there.
+  final DateTime? scheduleReleasedAt;
 
   /// The venues this tournament runs across. Ids into `orgs/{orgId}/venues`,
   /// not names — see [Venue] for why the difference matters.
@@ -179,6 +201,8 @@ class Tournament {
       matchMinutesDefault: Fs.integer(d['matchMinutesDefault'], 30),
       changeoverMinutes: Fs.integer(d['changeoverMinutes'], 5),
       restGapMinutes: Fs.integer(d['restGapMinutes'], 20),
+      isScheduleLocked: Fs.boolean(d['isScheduleLocked']),
+      scheduleReleasedAt: Fs.dateOrNull(d['scheduleReleasedAt']),
       createdBy: Fs.strOrNull(d['createdBy']),
       createdAt: Fs.dateOrNull(d['createdAt']),
     );
@@ -238,6 +262,8 @@ class Tournament {
     int? matchMinutesDefault,
     int? changeoverMinutes,
     int? restGapMinutes,
+    bool? isScheduleLocked,
+    DateTime? scheduleReleasedAt,
   }) =>
       Tournament(
         id: id,
@@ -256,6 +282,8 @@ class Tournament {
         matchMinutesDefault: matchMinutesDefault ?? this.matchMinutesDefault,
         changeoverMinutes: changeoverMinutes ?? this.changeoverMinutes,
         restGapMinutes: restGapMinutes ?? this.restGapMinutes,
+        isScheduleLocked: isScheduleLocked ?? this.isScheduleLocked,
+        scheduleReleasedAt: scheduleReleasedAt ?? this.scheduleReleasedAt,
         createdBy: createdBy,
         createdAt: createdAt,
       );

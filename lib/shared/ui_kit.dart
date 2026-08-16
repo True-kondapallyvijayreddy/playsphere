@@ -594,3 +594,325 @@ String psHumanizeCounter(String key) {
   if (spaced.isEmpty) return key;
   return spaced[0].toUpperCase() + spaced.substring(1).toLowerCase();
 }
+
+/// One secondary action, as offered by [PsActionBar] and [PsOverflowMenu].
+///
+/// Carries its own destructiveness rather than leaving the caller to colour
+/// the entry, because "Cancel event" is red on the competition screen and was
+/// grey on the tournament one — the same action, two weights, on two screens
+/// an organizer moves between in a single sitting.
+class PsAction {
+  const PsAction({
+    required this.label,
+    required this.icon,
+    required this.onSelected,
+    this.destructive = false,
+  });
+
+  final String label;
+  final IconData icon;
+  final VoidCallback onSelected;
+
+  /// Painted in the error colour and sorted last. Reserved for the ones that
+  /// end something — cancelling an event, removing a member.
+  final bool destructive;
+}
+
+/// The `⋮` menu that secondary actions collapse into.
+///
+/// The screens this replaces laid every action out at once: five icon buttons
+/// beside a tournament's name, four buttons wrapped under a competition's.
+/// Nothing was hidden and nothing was findable — an organizer scanning for
+/// "Venues" read five unlabelled glyphs, and the title they were actually
+/// looking at had been squeezed to a third of the width to make room.
+///
+/// A menu is not fewer taps for the action it holds; it is fewer things to
+/// read on every visit that is not about that action, which is most of them.
+/// So the rule the screens follow is: whatever a person came to this screen
+/// to do stays on the surface, and everything they came for once a season
+/// goes in here.
+class PsOverflowMenu extends StatelessWidget {
+  const PsOverflowMenu({
+    super.key,
+    required this.actions,
+    this.tooltip = 'More actions',
+  });
+
+  final List<PsAction> actions;
+  final String tooltip;
+
+  @override
+  Widget build(BuildContext context) {
+    final visible = [
+      ...actions.where((a) => !a.destructive),
+      ...actions.where((a) => a.destructive),
+    ];
+    if (visible.isEmpty) return const SizedBox.shrink();
+
+    final error = Theme.of(context).colorScheme.error;
+    return PopupMenuButton<PsAction>(
+      tooltip: tooltip,
+      icon: const Icon(Icons.more_vert, color: Ps.muted),
+      // Matches the cards it sits on rather than Material's 4.
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(Ps.radiusSm),
+      ),
+      // The callback runs after the menu route pops, so a handler that opens
+      // a sheet or a dialog is not fighting the menu's own dismissal for the
+      // navigator.
+      onSelected: (a) => a.onSelected(),
+      itemBuilder: (context) => [
+        for (final a in visible)
+          PopupMenuItem<PsAction>(
+            value: a,
+            height: 44,
+            child: Row(
+              children: [
+                Icon(
+                  a.icon,
+                  size: 18,
+                  color: a.destructive ? error : Ps.muted,
+                ),
+                const SizedBox(width: 12),
+                Text(
+                  a.label,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color: a.destructive ? error : Ps.ink,
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// The one action a screen is currently asking for, with the rest behind a
+/// `⋮`.
+///
+/// Deliberately takes a single primary. Every screen using this has a
+/// lifecycle — a competition is open for entries, or closed, or drawn, or
+/// running — and at each point exactly one action moves it forward. The old
+/// cards paid for a paragraph explaining which of four buttons that was; a
+/// button labelled `Close entries` sitting alone says it without the
+/// paragraph.
+class PsActionBar extends StatelessWidget {
+  const PsActionBar({
+    super.key,
+    this.primaryLabel,
+    this.onPrimary,
+    this.actions = const [],
+    this.padding = const EdgeInsets.all(12),
+  });
+
+  /// Null when the lifecycle has nothing left to advance — a completed event.
+  /// The bar still renders for the sake of [actions].
+  final String? primaryLabel;
+  final VoidCallback? onPrimary;
+  final List<PsAction> actions;
+  final EdgeInsets padding;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = primaryLabel;
+    if (label == null && actions.isEmpty) return const SizedBox.shrink();
+
+    return PsCard(
+      padding: padding,
+      child: Row(
+        children: [
+          if (label != null)
+            Expanded(child: PsPrimaryButton(label: label, onPressed: onPrimary))
+          else
+            // Keeps the `⋮` hard against the right edge when there is no
+            // primary to push it there.
+            const Spacer(),
+          if (actions.isNotEmpty) ...[
+            const SizedBox(width: 4),
+            PsOverflowMenu(actions: actions),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// The facts about a thing, on one line, separated by dots — `Cricket · Under
+/// 16 · Knockout · Registration open`.
+///
+/// Replaces the `Wrap` of Material [Chip]s these headers used. A chip is a
+/// control: it has a fill, a border, a 32pt height and eight points of
+/// padding either side, and four of them wrap onto two rows and read as four
+/// buttons that do not respond to being tapped. The same four facts set as
+/// one muted line take a third of the height and stop competing with the
+/// action that IS a button.
+class PsMetaRow extends StatelessWidget {
+  const PsMetaRow({
+    super.key,
+    required this.items,
+    this.style,
+  });
+
+  /// Nulls and blanks are dropped, so callers can inline conditionals without
+  /// building the list up first — most of these facts are optional.
+  final List<String?> items;
+  final TextStyle? style;
+
+  @override
+  Widget build(BuildContext context) {
+    final parts = [
+      for (final i in items)
+        if (i != null && i.trim().isNotEmpty) i.trim(),
+    ];
+    if (parts.isEmpty) return const SizedBox.shrink();
+
+    return Text(
+      parts.join('  ·  '),
+      style: style ??
+          const TextStyle(fontSize: 13, color: Ps.muted, height: 1.35),
+    );
+  }
+}
+
+/// A compact destination: an icon over a label, sized for a grid.
+///
+/// The module menus this replaces were lists of full-width cards, each with a
+/// title and a sentence underneath explaining it. Eighteen of those is four
+/// screens of scrolling to reach the eighteenth, and the sentences are read
+/// once ever — nobody re-reads "Official jerseys and merchandise" on their
+/// fortieth visit to the club store. Dropping them and going to a grid puts
+/// the whole menu on one screen, so every destination is one tap with no
+/// scroll instead of one tap after a hunt.
+class PsNavTile extends StatelessWidget {
+  const PsNavTile({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.tint,
+    this.badgeCount,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  /// The icon's colour and, at low opacity, its rounded backing square.
+  /// Defaults to the brand green; a section passes its own so the grid reads
+  /// as grouped without needing headings between the rows.
+  final Color? tint;
+
+  /// Rendered as a count on the icon when non-null and positive.
+  final int? badgeCount;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = tint ?? Ps.primary;
+    final count = badgeCount ?? 0;
+
+    final glyph = Container(
+      width: 44,
+      height: 44,
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(Ps.radiusSm),
+      ),
+      child: Icon(icon, size: 22, color: color),
+    );
+
+    return Semantics(
+      button: true,
+      label: count > 0 ? '$label, $count waiting' : label,
+      excludeSemantics: true,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(Ps.radius),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              count > 0 ? Badge.count(count: count, child: glyph) : glyph,
+              const SizedBox(height: 8),
+              Text(
+                label,
+                textAlign: TextAlign.center,
+                // Two lines, because "Inter-club challenges" does not fit on
+                // one at this width and truncating it to "Inter-club…" loses
+                // the half that says what it is.
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 12,
+                  height: 1.25,
+                  fontWeight: FontWeight.w600,
+                  color: Ps.ink,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A single-line row that opens something else — the shortcut strips at the
+/// bottom of the tournament screen.
+///
+/// [ListTile] with a `subtitle` is what these were, and the subtitles were
+/// all explanation: "For everyone who played — champion down to
+/// participation, from the results themselves" above a row already labelled
+/// `Certificates`. At 72pt tall each, three of them are a screenful that says
+/// three words' worth.
+class PsLinkTile extends StatelessWidget {
+  const PsLinkTile({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.trailingText,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  /// A count or status set against the right edge, before the chevron.
+  final String? trailingText;
+
+  @override
+  Widget build(BuildContext context) {
+    return PsCard(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      onTap: onTap,
+      child: Row(
+        children: [
+          Icon(icon, size: 20, color: Ps.muted),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              label,
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: Ps.ink,
+              ),
+            ),
+          ),
+          if (trailingText != null) ...[
+            Text(
+              trailingText!,
+              style: const TextStyle(fontSize: 13, color: Ps.muted),
+            ),
+            const SizedBox(width: 6),
+          ],
+          const Icon(Icons.chevron_right, size: 18, color: Ps.faint),
+        ],
+      ),
+    );
+  }
+}

@@ -13,6 +13,7 @@ import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/ui_kit.dart';
+import 'match_setup.dart';
 
 /// The hub a match opens into, whatever it came from.
 ///
@@ -803,8 +804,6 @@ class _StartAction extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final scoringPath =
-        Routes.scoring(fixture.orgId, fixture.compId, fixture.id);
     final watchPath = Routes.watch(fixture.orgId, fixture.compId, fixture.id);
 
     if (fixture.status.isResulted) {
@@ -824,7 +823,7 @@ class _StartAction extends ConsumerWidget {
             label: fixture.isLiveAt(DateTime.now())
                 ? 'Continue scoring'
                 : 'Start Match',
-            onPressed: () => context.push(scoringPath),
+            onPressed: () => _handleStartMatch(context, ref),
           )
         else
           PsSecondaryButton(
@@ -850,6 +849,191 @@ class _StartAction extends ConsumerWidget {
                 ),
           ),
         ],
+        if (canManage &&
+            fixture.status == FixtureStatus.scheduled &&
+            !fixture.isDraft) ...[
+          const SizedBox(height: 10),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.flag_outlined, size: 18),
+            label: const Text('Award Walkover / Forfeit'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Theme.of(context).colorScheme.error,
+              side: BorderSide(
+                color: Theme.of(context).colorScheme.error.withValues(alpha: 0.5),
+              ),
+            ),
+            onPressed: () => _showWalkoverDialog(context, ref),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Future<void> _handleStartMatch(BuildContext context, WidgetRef ref) async {
+    final scoringPath =
+        Routes.scoring(fixture.orgId, fixture.compId, fixture.id);
+
+    // If the match is already live or has recorded actions, go straight to scoring
+    if (fixture.lastSeq > 0 ||
+        (fixture.tossWonByEntrantId != null &&
+            fixture.tossWonByEntrantId!.isNotEmpty)) {
+      context.push(scoringPath);
+      return;
+    }
+
+    // Intercept with dedicated Pre-Match Toss Flow (CricHeroes / IPL standard)
+    final tossDone = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => TossDialog(fixture: fixture),
+    );
+
+    if (tossDone == true && context.mounted) {
+      context.push(scoringPath);
+    }
+  }
+
+  Future<void> _showWalkoverDialog(BuildContext context, WidgetRef ref) async {
+    final result = await showDialog<
+        ({String? winnerId, String note, bool isAbandoned})>(
+      context: context,
+      builder: (ctx) => _WalkoverDialog(fixture: fixture),
+    );
+    if (result == null || !context.mounted) return;
+
+    try {
+      if (result.isAbandoned) {
+        await ref.read(scoringServiceProvider).setFixtureOutcome(
+              fixture: fixture,
+              status: FixtureStatus.abandoned,
+              resultType: MatchResultType.abandoned,
+              note: result.note,
+            );
+      } else {
+        await ref.read(scoringServiceProvider).setFixtureOutcome(
+              fixture: fixture,
+              status: FixtureStatus.walkover,
+              resultType: MatchResultType.walkover,
+              winnerEntrantId: result.winnerId,
+              note: result.note,
+            );
+      }
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              result.isAbandoned
+                  ? 'Match marked as abandoned.'
+                  : 'Walkover awarded. Standings & bracket updated!',
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) showError(context, e);
+    }
+  }
+}
+
+/// Dialog letting organizers resolve a no-show / forfeit cleanly on match day.
+class _WalkoverDialog extends StatefulWidget {
+  const _WalkoverDialog({required this.fixture});
+  final Fixture fixture;
+
+  @override
+  State<_WalkoverDialog> createState() => _WalkoverDialogState();
+}
+
+class _WalkoverDialogState extends State<_WalkoverDialog> {
+  String? _selectedWinnerId;
+  bool _isAbandoned = false;
+  final _noteController = TextEditingController(text: 'Opponent no-show');
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedWinnerId = widget.fixture.entrantAId;
+  }
+
+  @override
+  void dispose() {
+    _noteController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final f = widget.fixture;
+    return AlertDialog(
+      title: const Text('Award Walkover / Forfeit'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Select the winning side if an opponent was absent, or mark as abandoned:',
+              style: TextStyle(fontSize: 13),
+            ),
+            const SizedBox(height: 12),
+            RadioListTile<String?>(
+              title: Text('Win: ${f.entrantAName}'),
+              subtitle: Text('Opponent ${f.entrantBName} did not show'),
+              value: f.entrantAId,
+              groupValue: _isAbandoned ? null : _selectedWinnerId,
+              onChanged: (val) => setState(() {
+                _isAbandoned = false;
+                _selectedWinnerId = val;
+              }),
+            ),
+            RadioListTile<String?>(
+              title: Text('Win: ${f.entrantBName}'),
+              subtitle: Text('Opponent ${f.entrantAName} did not show'),
+              value: f.entrantBId,
+              groupValue: _isAbandoned ? null : _selectedWinnerId,
+              onChanged: (val) => setState(() {
+                _isAbandoned = false;
+                _selectedWinnerId = val;
+              }),
+            ),
+            RadioListTile<bool>(
+              title: const Text('Abandoned / No Contest'),
+              subtitle: const Text('Both sides absent or match called off'),
+              value: true,
+              groupValue: _isAbandoned,
+              onChanged: (val) => setState(() {
+                _isAbandoned = true;
+                _selectedWinnerId = null;
+              }),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _noteController,
+              decoration: const InputDecoration(
+                labelText: 'Reason / Notes',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(
+            context,
+            (
+              winnerId: _selectedWinnerId,
+              note: _noteController.text.trim(),
+              isAbandoned: _isAbandoned,
+            ),
+          ),
+          child: const Text('Confirm Result'),
+        ),
       ],
     );
   }

@@ -16,6 +16,7 @@ import 'firestore_codec.dart';
 /// who is challenging it is most of what a tournament referee does.
 class DrawConfig {
   const DrawConfig({
+    this.useGroups = false,
     this.numGroups,
     this.groupSize,
     this.qualifiersPerGroup = 2,
@@ -26,7 +27,24 @@ class DrawConfig {
     this.seedFromRatings = false,
   });
 
-  /// Groups+knockout: how many groups. Takes priority over [groupSize].
+  /// Split the field into groups, whatever the format.
+  ///
+  /// Groups used to be welded to [CompetitionFormat.groupThenKnockout], which
+  /// made "put them in pools" a decision about the *knockout* stage. An
+  /// organizer with thirty entrants who wants six groups of five and no
+  /// knockout had nowhere to say so, and one round robin of thirty is 435
+  /// matches nobody will play. With this set:
+  ///
+  /// - a round robin or league becomes **pools** — a round robin inside each
+  ///   group, standings per group, no knockout;
+  /// - a knockout gains a group stage in front of it, exactly as
+  ///   Groups+Knockout has always done.
+  ///
+  /// Implied (and therefore ignored) for [CompetitionFormat.groupThenKnockout],
+  /// which is the same thing said in the format.
+  final bool useGroups;
+
+  /// How many groups. Takes priority over [groupSize].
   final int? numGroups;
 
   /// Groups+knockout: entrants per group. Used only when [numGroups] is null.
@@ -67,6 +85,7 @@ class DrawConfig {
   static DrawConfig fromMap(Map<String, dynamic>? m) {
     if (m == null) return const DrawConfig();
     return DrawConfig(
+      useGroups: Fs.boolean(m['useGroups']),
       numGroups: Fs.intOrNull(m['numGroups']),
       groupSize: Fs.intOrNull(m['groupSize']),
       qualifiersPerGroup: Fs.integer(m['qualifiersPerGroup'], 2),
@@ -82,6 +101,7 @@ class DrawConfig {
   }
 
   Map<String, Object?> toMap() => {
+        'useGroups': useGroups,
         'numGroups': numGroups,
         'groupSize': groupSize,
         'qualifiersPerGroup': qualifiersPerGroup,
@@ -93,6 +113,7 @@ class DrawConfig {
       };
 
   DrawConfig copyWith({
+    bool? useGroups,
     int? numGroups,
     int? groupSize,
     int? qualifiersPerGroup,
@@ -103,6 +124,7 @@ class DrawConfig {
     bool? seedFromRatings,
   }) =>
       DrawConfig(
+        useGroups: useGroups ?? this.useGroups,
         numGroups: numGroups ?? this.numGroups,
         groupSize: groupSize ?? this.groupSize,
         qualifiersPerGroup: qualifiersPerGroup ?? this.qualifiersPerGroup,

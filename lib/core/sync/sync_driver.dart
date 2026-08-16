@@ -43,20 +43,15 @@ class SyncDriver with WidgetsBindingObserver {
   SyncDriver({
     required Future<void> Function() reconcile,
     required Future<int> Function() pendingCount,
-    this.retryInterval = const Duration(minutes: 2),
+    this.retryInterval = const Duration(seconds: 3),
   })  : _reconcile = reconcile,
         _pendingCount = pendingCount;
 
   final Future<void> Function() _reconcile;
   final Future<int> Function() _pendingCount;
 
-  /// How often to retry while something is queued.
-  ///
-  /// Two minutes rather than seconds: every attempt that fails costs a
-  /// network round trip and a `SharedPreferences` rewrite, and the entries
-  /// have their own per-entry backoff underneath this. Two minutes is well
-  /// inside "immediately" as a user experiences it and nowhere near often
-  /// enough to matter to a battery.
+  /// High-frequency retry interval while actions are queued for instant,
+  /// 0-lag point broadcast (CricHeroes / IPL real-time experience).
   final Duration retryInterval;
 
   Timer? _timer;

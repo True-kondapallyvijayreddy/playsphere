@@ -1,6 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:share_plus/share_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -15,11 +13,16 @@ import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../domain/tournament/tournament_overview.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/ui_kit.dart';
 import '../../shared/live_dot.dart';
 import 'tournaments_screen.dart' show TournamentEditor;
 import 'widgets/invite_clubs_sheet.dart';
 import 'widgets/leaderboard_cards.dart';
 import 'widgets/running_late_card.dart';
+import 'widgets/share_season_sheet.dart';
+import 'widgets/venue_selector_dialog.dart';
+import 'tournament_schedule_screen.dart';
+import 'widgets/graphical_schedule_view.dart';
 
 /// One tournament at a glance: how far through it is, what is on court right
 /// now, what is next, every event with its table, and who has won what.
@@ -90,17 +93,53 @@ class TournamentDetailScreen extends ConsumerWidget {
                       overview: overview.valueOrNull,
                     ),
                     const SizedBox(height: 16),
+                    // Graphical Schedule & Timetable View
+                    GraphicalScheduleView(
+                      tournament: tournament,
+                      events:
+                          ref.watch(tournamentEventsProvider(key)).valueOrNull ??
+                              const [],
+                      fixtures: ref
+                              .watch(tournamentFixturesProvider(key))
+                              .valueOrNull ??
+                          const [],
+                      canManage: canManage,
+                      onOpenFullPage: () =>
+                          context.push(Routes.tournamentSchedule(orgId, tournamentId)),
+                      onSetUpWholeSeason: (timings) => setUpWholeSeason(
+                        context: context,
+                        ref: ref,
+                        orgId: orgId,
+                        tournamentId: tournamentId,
+                        timings: timings,
+                      ),
+                      onRegenerateDraft: (timings) =>
+                          regenerateTournamentSchedule(
+                        context: context,
+                        ref: ref,
+                        orgId: orgId,
+                        tournamentId: tournamentId,
+                        timings: timings,
+                      ),
+                      onLockSchedule: () => lockTournamentSchedule(
+                        context: context,
+                        ref: ref,
+                        orgId: orgId,
+                        tournamentId: tournamentId,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    // The sentence under this used to say "Build the
+                    // umpiring panel and assign it across the bracket, before
+                    // match day". The row is labelled `Officials` and leads to
+                    // a screen headed `Officials`; the sentence was a third
+                    // telling, and it doubled the row's height to do it.
                     if (canManage)
-                      Card(
-                        margin: const EdgeInsets.only(bottom: 16),
-                        child: ListTile(
-                          leading: const Icon(Icons.sports_outlined),
-                          title: const Text('Officials'),
-                          subtitle: const Text(
-                            'Build the umpiring panel and assign it across '
-                            'the bracket, before match day',
-                          ),
-                          trailing: const Icon(Icons.chevron_right),
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 16),
+                        child: PsLinkTile(
+                          icon: Icons.sports_outlined,
+                          label: 'Officials',
                           onTap: () => context.push(
                             Routes.tournamentOfficials(orgId, tournamentId),
                           ),
@@ -159,36 +198,21 @@ class TournamentDetailScreen extends ConsumerWidget {
                     if ((overview.valueOrNull?.completedEvents ?? 0) > 0) ...[
                       Padding(
                         padding: const EdgeInsets.only(top: 12),
-                        child: Card(
-                          child: ListTile(
-                            leading:
-                                const Icon(Icons.workspace_premium_outlined),
-                            title: const Text('Certificates'),
-                            subtitle: const Text(
-                              'For everyone who played — champion down to '
-                              'participation, from the results themselves',
-                            ),
-                            trailing: const Icon(Icons.chevron_right),
-                            onTap: () => context.push(
-                              Routes.certificates(orgId, tournamentId),
-                            ),
+                        child: PsLinkTile(
+                          icon: Icons.workspace_premium_outlined,
+                          label: 'Certificates',
+                          onTap: () => context.push(
+                            Routes.certificates(orgId, tournamentId),
                           ),
                         ),
                       ),
                       Padding(
                         padding: const EdgeInsets.only(top: 8),
-                        child: Card(
-                          child: ListTile(
-                            leading: const Icon(Icons.photo_library_outlined),
-                            title: const Text('Season memories'),
-                            subtitle: const Text(
-                              'Every photo and clip from every match of '
-                              'this season, in one book',
-                            ),
-                            trailing: const Icon(Icons.chevron_right),
-                            onTap: () => context.push(
-                              Routes.seasonMemories(orgId, tournamentId),
-                            ),
+                        child: PsLinkTile(
+                          icon: Icons.photo_library_outlined,
+                          label: 'Season memories',
+                          onTap: () => context.push(
+                            Routes.seasonMemories(orgId, tournamentId),
                           ),
                         ),
                       ),
@@ -227,114 +251,112 @@ class _Header extends ConsumerWidget {
     final courtCount =
         named.fold<int>(0, (sum, v) => sum + v.capacity);
 
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child:
-                      Text(t.name, style: theme.textTheme.headlineSmall),
+    return PsCard(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(
+                child: Text(
+                  t.name,
+                  style: const TextStyle(
+                    fontSize: 19,
+                    fontWeight: FontWeight.w700,
+                    color: Ps.ink,
+                    height: 1.2,
+                  ),
                 ),
-                IconButton(
-                  icon: const Icon(Icons.ios_share),
-                  tooltip: 'Share the public link',
-                  onPressed: () => _sharePublicLink(context, orgId, t.id),
-                ),
-                if (canManage)
-                  IconButton(
-                    icon: const Icon(Icons.groups_outlined),
-                    tooltip: 'Invite other clubs',
-                    onPressed: () => showModalBottomSheet<void>(
-                      context: context,
-                      isScrollControlled: true,
-                      showDragHandle: true,
-                      builder: (_) =>
-                          InviteClubsSheet(tournament: t),
-                    ),
-                  ),
-                if (canManage)
-                  IconButton(
-                    icon: const Icon(Icons.edit_outlined),
-                    tooltip: 'Edit',
-                    onPressed: () => showModalBottomSheet<void>(
-                      context: context,
-                      isScrollControlled: true,
-                      showDragHandle: true,
-                      builder: (_) =>
-                          TournamentEditor(orgId: orgId, existing: t),
-                    ),
-                  ),
-              ],
-            ),
-            if (t.description != null) ...[
-              const SizedBox(height: 4),
-              Text(t.description!, style: theme.textTheme.bodyMedium),
-            ],
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                Chip(label: Text(t.grade.label)),
-                Chip(label: Text(t.status.label)),
-                Chip(
-                  avatar: const Icon(Icons.event_outlined, size: 16),
-                  label: Text(_dateRange(t)),
-                ),
-                if (courtCount > 0)
-                  Chip(
-                    avatar: const Icon(Icons.grid_view_outlined, size: 16),
-                    label: Text('$courtCount courts'),
-                  ),
-              ],
-            ),
-            if (named.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Icon(Icons.place_outlined, size: 16),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      named.map((v) => v.name).join(' · '),
-                      style: theme.textTheme.bodySmall,
-                    ),
-                  ),
-                ],
               ),
+              // Share stays on the surface and the management tools go into
+              // the menu. Not an arbitrary split: sharing the public link is
+              // what everyone on this screen does, including the members who
+              // cannot manage anything, while venues, invitations, editing
+              // and the timetable are each touched once or twice in a
+              // tournament's life. Five unlabelled glyphs had been squeezing
+              // the tournament's own name into a third of the header.
+              IconButton(
+                icon: const Icon(Icons.share_outlined),
+                tooltip: 'Share the public link',
+                onPressed: () => showModalBottomSheet<void>(
+                  context: context,
+                  isScrollControlled: true,
+                  showDragHandle: true,
+                  builder: (_) => ShareSeasonSheet(tournament: t),
+                ),
+              ),
+              if (canManage)
+                PsOverflowMenu(
+                  actions: [
+                    PsAction(
+                      label: 'Schedule',
+                      icon: Icons.calendar_view_week_outlined,
+                      // Was a second "generate now" button that re-solved the
+                      // timetable without asking anything. Two buttons that
+                      // schedule the same tournament, one of which skips the
+                      // timings dialog, is how an organizer loses a changeover
+                      // they had just set. Scheduling has one door.
+                      onSelected: () =>
+                          context.push(Routes.tournamentSchedule(orgId, t.id)),
+                    ),
+                    PsAction(
+                      label: 'Venues & courts',
+                      icon: Icons.stadium_outlined,
+                      onSelected: () => showDialog<void>(
+                        context: context,
+                        builder: (_) => VenueSelectorDialog(tournament: t),
+                      ),
+                    ),
+                    PsAction(
+                      label: 'Invite clubs',
+                      icon: Icons.groups_outlined,
+                      onSelected: () => showModalBottomSheet<void>(
+                        context: context,
+                        isScrollControlled: true,
+                        showDragHandle: true,
+                        builder: (_) => InviteClubsSheet(tournament: t),
+                      ),
+                    ),
+                    PsAction(
+                      label: 'Edit',
+                      icon: Icons.edit_outlined,
+                      onSelected: () => showModalBottomSheet<void>(
+                        context: context,
+                        isScrollControlled: true,
+                        showDragHandle: true,
+                        builder: (_) =>
+                            TournamentEditor(orgId: orgId, existing: t),
+                      ),
+                    ),
+                  ],
+                ),
             ],
+          ),
+          const SizedBox(height: 2),
+          // Four chips and a venue row became one line. The dates and the
+          // court count are facts about the tournament, not controls, and
+          // they were drawn as pills that look pressable and are not.
+          PsMetaRow(
+            items: [
+              t.grade.label,
+              t.status.label,
+              _dateRange(t),
+              if (courtCount > 0) '$courtCount courts',
+              if (named.isNotEmpty) named.map((v) => v.name).join(', '),
+            ],
+          ),
+          if (t.description != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              t.description!,
+              style: theme.textTheme.bodyMedium,
+            ),
           ],
-        ),
+        ],
       ),
     );
-  }
-
-  /// One link that shows the whole tournament to anybody, signed in or not.
-  /// This is what replaces posting results to a Telegram channel.
-  static Future<void> _sharePublicLink(
-    BuildContext context,
-    String orgId,
-    String tournamentId,
-  ) async {
-    final messenger = ScaffoldMessenger.of(context);
-    final url = Routes.publicTournamentUrl(orgId, tournamentId);
-    try {
-      await SharePlus.instance.share(
-        ShareParams(text: 'Follow the tournament live: $url'),
-      );
-    } catch (_) {
-      await Clipboard.setData(ClipboardData(text: url));
-      messenger
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          const SnackBar(content: Text('Tournament link copied.')),
-        );
-    }
   }
 
   static String _dateRange(Tournament t) {
@@ -644,7 +666,12 @@ class _Events extends ConsumerWidget {
               ),
             )
           else
-            for (final e in events) _EventTile(orgId: orgId, summary: e),
+            for (final e in events)
+              _EventTile(
+                orgId: orgId,
+                summary: e,
+                canManage: canManage,
+              ),
         ],
       ),
     );
@@ -808,12 +835,14 @@ class _AttachEventsSheetState extends ConsumerState<_AttachEventsSheet> {
                             border: OutlineInputBorder(),
                           ),
                           items: [
-                            for (final f
-                                in SportCatalog.byId(sportId).competitionFormats)
+                            for (final f in SportCatalog.byId(sportId)
+                                .competitionFormats)
                               DropdownMenuItem(value: f, child: Text(f.label)),
                           ],
                           onChanged: (f) {
-                            if (f != null) setState(() => _newSports[sportId] = f);
+                            if (f != null) {
+                              setState(() => _newSports[sportId] = f);
+                            }
                           },
                         ),
                       ),
@@ -822,10 +851,10 @@ class _AttachEventsSheetState extends ConsumerState<_AttachEventsSheet> {
                 ),
             ],
 
-            const SizedBox(height: 16),
+            const SizedBox(height: 24),
             Row(
+              mainAxisAlignment: MainAxisAlignment.end,
               children: [
-                const Spacer(),
                 TextButton(
                   onPressed: () => Navigator.of(context).pop(),
                   child: const Text('Cancel'),
@@ -883,7 +912,7 @@ class _AttachEventsSheetState extends ConsumerState<_AttachEventsSheet> {
               archetype: sport.archetype,
               entrantType: sport.defaultEntrantType,
               format: entry.value,
-              status: CompetitionStatus.draft,
+              status: CompetitionStatus.registrationOpen,
               category: CompetitionCategory.presets(
                 cutOff: tournament?.startDate,
               ).first,
@@ -914,10 +943,37 @@ class _AttachEventsSheetState extends ConsumerState<_AttachEventsSheet> {
 }
 
 class _EventTile extends ConsumerWidget {
-  const _EventTile({required this.orgId, required this.summary});
+  const _EventTile({
+    required this.orgId,
+    required this.summary,
+    required this.canManage,
+  });
 
   final String orgId;
   final EventSummary summary;
+  final bool canManage;
+
+  Future<void> _openEditDialog(BuildContext context, WidgetRef ref, Competition c) async {
+    final updated = await showDialog<Competition>(
+      context: context,
+      builder: (_) => _EditEventDialog(competition: c),
+    );
+    if (updated != null) {
+      try {
+        await ref.read(competitionRepositoryProvider).updateCompetition(updated);
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Event updated successfully!'),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+      } catch (e) {
+        if (context.mounted) showError(context, e);
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -940,6 +996,13 @@ class _EventTile extends ConsumerWidget {
             : summary.live > 0
                 ? Icon(Icons.circle, size: 12, color: theme.colorScheme.error)
                 : const Icon(Icons.schedule_outlined),
+        trailing: canManage
+            ? IconButton(
+                icon: const Icon(Icons.edit_outlined, size: 20),
+                tooltip: 'Edit Event Details',
+                onPressed: () => _openEditDialog(context, ref, c),
+              )
+            : null,
         children: [
           if (showsTable)
             _EventTable(orgId: orgId, competition: c)
@@ -955,14 +1018,23 @@ class _EventTile extends ConsumerWidget {
             ),
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton.icon(
-                onPressed: () =>
-                    context.push(Routes.competition(orgId, c.id)),
-                icon: const Icon(Icons.open_in_new, size: 18),
-                label: const Text('Open the event'),
-              ),
+            child: Row(
+              children: [
+                if (canManage) ...[
+                  OutlinedButton.icon(
+                    onPressed: () => _openEditDialog(context, ref, c),
+                    icon: const Icon(Icons.edit_outlined, size: 16),
+                    label: const Text('Edit Details'),
+                  ),
+                  const SizedBox(width: 8),
+                ],
+                FilledButton.tonalIcon(
+                  onPressed: () =>
+                      context.push(Routes.competition(orgId, c.id)),
+                  icon: const Icon(Icons.open_in_new, size: 16),
+                  label: const Text('Open Event & Draws'),
+                ),
+              ],
             ),
           ),
         ],
@@ -976,6 +1048,205 @@ class _EventTile extends ConsumerWidget {
     CompetitionFormat.swiss,
     CompetitionFormat.groupThenKnockout,
   };
+}
+
+class _EditEventDialog extends StatefulWidget {
+  const _EditEventDialog({required this.competition});
+  final Competition competition;
+
+  @override
+  State<_EditEventDialog> createState() => _EditEventDialogState();
+}
+
+class _EditEventDialogState extends State<_EditEventDialog> {
+  late final TextEditingController _name;
+  late final TextEditingController _venue;
+  late final TextEditingController _maxEntrants;
+  late CompetitionFormat _format;
+  late CompetitionStatus _status;
+  late CompetitionCategory _category;
+
+  @override
+  void initState() {
+    super.initState();
+    _name = TextEditingController(text: widget.competition.name);
+    _venue = TextEditingController(text: widget.competition.venue ?? '');
+    _maxEntrants = TextEditingController(
+      text: widget.competition.maxEntrants?.toString() ?? '',
+    );
+    _format = widget.competition.format;
+    _status = widget.competition.status;
+    _category = widget.competition.category;
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _venue.dispose();
+    _maxEntrants.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final sport = SportCatalog.byId(widget.competition.sportId);
+    final presets =
+        CompetitionCategory.presets(cutOff: widget.competition.startDate);
+
+    return Dialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 500),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.edit_outlined),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Edit Category / Event',
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close),
+                      onPressed: () => Navigator.of(context).pop(),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                TextFormField(
+                  controller: _name,
+                  decoration: const InputDecoration(
+                    labelText: 'Event Name',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<CompetitionFormat>(
+                  value: _format,
+                  decoration: const InputDecoration(
+                    labelText: 'Format',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: [
+                    for (final f in sport.competitionFormats)
+                      DropdownMenuItem(value: f, child: Text(f.label)),
+                  ],
+                  onChanged: (v) {
+                    if (v != null) setState(() => _format = v);
+                  },
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  value: _category.label,
+                  decoration: const InputDecoration(
+                    labelText: 'Category (Age / Gender)',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: [
+                    for (final cat in presets)
+                      DropdownMenuItem(
+                          value: cat.label, child: Text(cat.label)),
+                  ],
+                  onChanged: (label) {
+                    if (label != null) {
+                      setState(() {
+                        _category =
+                            presets.firstWhere((c) => c.label == label);
+                      });
+                    }
+                  },
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<CompetitionStatus>(
+                  value: _status,
+                  decoration: const InputDecoration(
+                    labelText: 'Registration Status',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: [
+                    for (final s in CompetitionStatus.values)
+                      DropdownMenuItem(value: s, child: Text(s.label)),
+                  ],
+                  onChanged: (v) {
+                    if (v != null) setState(() => _status = v);
+                  },
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      flex: 3,
+                      child: TextFormField(
+                        controller: _venue,
+                        decoration: const InputDecoration(
+                          labelText: 'Venue (optional)',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      flex: 2,
+                      child: TextFormField(
+                        controller: _maxEntrants,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'Max Entries',
+                          hintText: 'Any',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: const Text('Cancel'),
+                    ),
+                    const SizedBox(width: 8),
+                    FilledButton(
+                      onPressed: () {
+                        final trimmedName = _name.text.trim();
+                        if (trimmedName.isEmpty) return;
+                        final cap = int.tryParse(_maxEntrants.text.trim());
+                        final updated = widget.competition.copyWith(
+                          name: trimmedName,
+                          format: _format,
+                          status: _status,
+                          category: _category,
+                          venue: _venue.text.trim().isEmpty
+                              ? null
+                              : _venue.text.trim(),
+                          maxEntrants: cap,
+                        );
+                        Navigator.of(context).pop(updated);
+                      },
+                      child: const Text('Save Changes'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 /// The points table for one event, inline.
@@ -1002,6 +1273,8 @@ class _EventTable extends ConsumerWidget {
         children: [
           for (final id in ids)
             _Table(
+              orgId: orgId,
+              compId: competition.id,
               caption: 'Group $id',
               rows: groups[id]!,
               qualifiers: competition.drawConfig.qualifiersPerGroup,
@@ -1013,17 +1286,27 @@ class _EventTable extends ConsumerWidget {
     final table = ref.watch(standingsProvider(key)).valueOrNull ??
         const <Standing>[];
     if (table.isEmpty) return const SizedBox.shrink();
-    return _Table(caption: null, rows: table, qualifiers: 0);
+    return _Table(
+      orgId: orgId,
+      compId: competition.id,
+      caption: null,
+      rows: table,
+      qualifiers: 0,
+    );
   }
 }
 
 class _Table extends StatelessWidget {
   const _Table({
+    required this.orgId,
+    required this.compId,
     required this.caption,
     required this.rows,
     required this.qualifiers,
   });
 
+  final String orgId;
+  final String compId;
   final String? caption;
   final List<Standing> rows;
   final int qualifiers;
@@ -1074,59 +1357,81 @@ class _Table extends StatelessWidget {
           ),
           const Divider(height: 12),
           for (var i = 0; i < rows.length; i++) ...[
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 3),
-              child: Row(
-                children: [
-                  SizedBox(
-                    width: 22,
-                    child: Text(
-                      '${i + 1}',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: qualifiers > 0 && i < qualifiers
-                            ? theme.colorScheme.primary
-                            : theme.colorScheme.onSurfaceVariant,
-                        fontWeight: qualifiers > 0 && i < qualifiers
-                            ? FontWeight.bold
-                            : FontWeight.normal,
+            InkWell(
+              borderRadius: BorderRadius.circular(6),
+              onTap: () => context.push(
+                Routes.entrant(orgId, compId, rows[i].entrantId),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 20,
+                      child: Text(
+                        '${i + 1}',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: qualifiers > 0 && i < qualifiers
+                              ? theme.colorScheme.primary
+                              : theme.colorScheme.onSurfaceVariant,
+                          fontWeight: qualifiers > 0 && i < qualifiers
+                              ? FontWeight.bold
+                              : FontWeight.normal,
+                        ),
                       ),
                     ),
-                  ),
-                  Expanded(
-                    child: Text(
-                      rows[i].displayName,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.bodyMedium,
+                    Expanded(
+                      child: Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              rows[i].displayName,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                color: theme.colorScheme.primary,
+                                decoration: TextDecoration.underline,
+                                decorationStyle: TextDecorationStyle.dotted,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          Icon(
+                            Icons.chevron_right,
+                            size: 14,
+                            color: theme.hintColor,
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                  SizedBox(
-                    width: 26,
-                    child: Text('${rows[i].played}',
-                        textAlign: TextAlign.end,
-                        style: theme.textTheme.bodySmall),
-                  ),
-                  SizedBox(
-                    width: 26,
-                    child: Text('${rows[i].won}',
-                        textAlign: TextAlign.end,
-                        style: theme.textTheme.bodySmall),
-                  ),
-                  SizedBox(
-                    width: 26,
-                    child: Text('${rows[i].lost}',
-                        textAlign: TextAlign.end,
-                        style: theme.textTheme.bodySmall),
-                  ),
-                  SizedBox(
-                    width: 32,
-                    child: Text(
-                      '${rows[i].points}',
-                      textAlign: TextAlign.end,
-                      style: theme.textTheme.bodyMedium
-                          ?.copyWith(fontWeight: FontWeight.bold),
+                    SizedBox(
+                      width: 26,
+                      child: Text('${rows[i].played}',
+                          textAlign: TextAlign.end,
+                          style: theme.textTheme.bodySmall),
                     ),
-                  ),
-                ],
+                    SizedBox(
+                      width: 26,
+                      child: Text('${rows[i].won}',
+                          textAlign: TextAlign.end,
+                          style: theme.textTheme.bodySmall),
+                    ),
+                    SizedBox(
+                      width: 26,
+                      child: Text('${rows[i].lost}',
+                          textAlign: TextAlign.end,
+                          style: theme.textTheme.bodySmall),
+                    ),
+                    SizedBox(
+                      width: 32,
+                      child: Text(
+                        '${rows[i].points}',
+                        textAlign: TextAlign.end,
+                        style: theme.textTheme.bodyMedium
+                            ?.copyWith(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
             if (qualifiers > 0 &&

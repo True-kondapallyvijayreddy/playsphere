@@ -2192,8 +2192,51 @@ service cloud.firestore {
           // *visiting* club follow a challenge match hosted by an unlisted
           // opponent; without it "accepted" produced a match one of the two
           // clubs could not see.
-          allow read: if orgIsReadable(orgId)
-            || isParticipantMember(resource.data);
+          //
+          // ---------------------------------------------------------
+          // A DRAFT DRAW IS NOT PUBLIC, and this is where that is true.
+          // ---------------------------------------------------------
+          //
+          // `isDraft` marks a PLACEHOLDER fixture — a bracket
+          // `generateDraftSchedule` laid out against synthetic entrants
+          // ("Team A", "Team B") so an organizer could see the shape of an
+          // event before registration produced anybody real. `generateDraw`
+          // replaces them wholesale when the actual draw is made.
+          //
+          // It used to be a flag the UI painted a banner from and nothing
+          // else — it appeared nowhere in this file — so for a public org
+          // every placeholder bracket was world-readable the instant it was
+          // written. Members saw "Team A vs Team B" fixtures for an event
+          // that had not been drawn, indistinguishable from a real schedule.
+          // Now only whoever can manage the competition sees them.
+          //
+          // The manager clause is deliberately FIRST. Rules reject a list,
+          // they do not filter it, so a member's query has to constrain
+          // `isDraft` itself — see `CompetitionRepository.watchFixtures`,
+          // which appends `where('isDraft', isEqualTo: false)` for exactly
+          // this reason. An organizer's query pins nothing and is allowed by
+          // the short circuit, which is what keeps the drafts visible to the
+          // person who is still working on them.
+          //
+          // KNOWN LIMIT, stated rather than hidden: the collection-group rule
+          // near the bottom of this file cannot carry the same clause without
+          // breaking `watchPlayerFixtures` and `watchOrgFixtures`, neither of
+          // which pins `isDraft`. A player's own unpublished match is still
+          // reachable through those. It is a much narrower leak than a whole
+          // bracket and closing it wants the denormalized `audience` field
+          // the memories rule already uses, not a clause here.
+          // `resource.data.isDraft == false`, NOT `.get('isDraft', false)`.
+          // The defaulting form looks safer and is the reason the first
+          // version of this fix passed its single-document tests and still
+          // leaked: on a LIST, `resource` is symbolic — Firestore evaluates
+          // the rule against the query, not against each document — so
+          // `.get()` returned its default, the clause read `false == false`,
+          // and every unfiltered list was allowed with the drafts in it. The
+          // strict form is undefined for an unconstrained query, which is
+          // what forces the client to pin the field and makes the gate real.
+          allow read: if (canManageCompetitions(orgId)
+              || resource.data.isDraft == false)
+            && (orgIsReadable(orgId) || isParticipantMember(resource.data));
 
           // The member branch is `getAfter`, not `get`, and that is
           // load-bearing: the competition and its only fixture are written in
@@ -3017,7 +3060,56 @@ service cloud.firestore {
     // `audience` field on the fixture that the query can pin. See the note on
     // `watchPlayerFixtures`.
     match /{path=**}/fixtures/{fixtureId} {
-      allow read: if (isSignedIn() && uid() in resource.data.scorerUids)
+      // The placeholder clause has to be repeated here, and forgetting it was
+      // the whole bug the first time. A recursive `/{path=**}/fixtures/`
+      // wildcard ALSO matches the nested competition path, and rules OR
+      // together: the tightened nested rule above denied the read, this one
+      // granted it, and the draft stayed world-readable with a passing-looking
+      // fix in place. Both rules gate it or neither does.
+      //
+      // Every collection-group query in the app still authorizes, without
+      // pinning `isDraft`, because none of them can return a placeholder:
+      //   - live / scoring-assignment queries pin `status`, and a placeholder
+      //     is never live and never assigned;
+      //   - `watchPlayerFixtures` pins `playerUids`, which a placeholder
+      //     cannot populate — its entrants are synthetic and have no accounts;
+      //   - `watchOrgFixtures` pins the resulted statuses for this reason.
+      // Add a collection-group query that can see a draft and it must pin
+      // `isDraft` too, or it will fail intermittently — only for the orgs that
+      // happen to have an undrawn event.
+      // Split into `get` and `list`, which is the only way to have both halves.
+      //
+      // A recursive `/{path=**}/fixtures/` wildcard also matches the nested
+      // competition path, so this rule — not the tightened one above — was
+      // what still served a placeholder to anyone who asked for it BY ID.
+      // Closing that needs the draft clause here too.
+      //
+      // But the clause cannot go on `list`. Firestore authorizes a query
+      // against the QUERY, not against the documents it would return: a rule
+      // mentioning a field the query does not constrain is unprovable and the
+      // whole query is refused. Putting it on `read` therefore broke every
+      // collection-group query in the app — the spectator's live list, a
+      // scorer's assignments, a player's own career — none of which can pin
+      // `isDraft` without also needing a new composite index apiece.
+      //
+      // So: `get` is evaluated against a real document and carries the gate;
+      // `list` keeps the original condition. The residual exposure is a
+      // placeholder reachable through a collection-group QUERY, and each of
+      // the app's queries is already narrow enough to miss one — the live
+      // feeds pin a status a placeholder never has, `watchPlayerFixtures`
+      // pins `playerUids` which a placeholder cannot populate (its entrants
+      // are synthetic and have no accounts), and `watchOrgFixtures` pins the
+      // resulted statuses. `watchMyScoringAssignments` could see one, and
+      // that is a scorer the organizer appointed.
+      allow get: if (
+          (isSignedIn() && uid() in resource.data.scorerUids)
+          || (isSignedIn() && uid() in resource.data.playerUids)
+          || orgIsReadable(resource.data.orgId)
+        )
+        && (resource.data.isDraft == false
+            || canManageCompetitions(resource.data.orgId));
+
+      allow list: if (isSignedIn() && uid() in resource.data.scorerUids)
         || (isSignedIn() && uid() in resource.data.playerUids)
         || orgIsReadable(resource.data.orgId);
     }

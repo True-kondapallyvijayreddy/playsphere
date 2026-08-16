@@ -11,13 +11,19 @@ class SectionHeader extends StatelessWidget {
     super.key,
     required this.icon,
     required this.title,
-    required this.subtitle,
+    this.subtitle,
     this.trailing,
   });
 
   final IconData icon;
   final String title;
-  final String subtitle;
+
+  /// Optional, and increasingly absent. A heading reading `Your clubs` with
+  /// `Open for entries, scheduled, or being played` under it is naming the
+  /// same list twice; the second naming was there to justify the block to a
+  /// first-time visitor and is read by nobody thereafter. Sections that carry
+  /// a genuinely non-obvious qualifier keep it.
+  final String? subtitle;
   final Widget? trailing;
 
   @override
@@ -33,14 +39,16 @@ class SectionHeader extends StatelessWidget {
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
                 Text(title, style: theme.textTheme.titleMedium),
-                Text(
-                  subtitle,
-                  style: theme.textTheme.bodySmall,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
+                if (subtitle != null)
+                  Text(
+                    subtitle!,
+                    style: theme.textTheme.bodySmall,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
               ],
             ),
           ),
@@ -51,19 +59,25 @@ class SectionHeader extends StatelessWidget {
   }
 }
 
-/// An empty state that explains itself rather than showing a blank panel.
+/// An empty state, with a way out of it.
 class QuietCard extends StatelessWidget {
   const QuietCard({
     super.key,
     required this.icon,
     required this.title,
-    required this.message,
+    this.message,
     this.action,
   });
 
   final IconData icon;
   final String title;
-  final String message;
+
+  /// Optional. Worth writing when it tells the reader something the title
+  /// cannot — why the list is empty, or what fills it. Not worth writing when
+  /// it narrates the button underneath it, which is what most of these were
+  /// doing: "Create one — pick a sport, set the age category, and open
+  /// entries" above a button reading `Create an event`.
+  final String? message;
   final Widget? action;
 
   @override
@@ -85,8 +99,10 @@ class QuietCard extends StatelessWidget {
                 ),
               ],
             ),
-            const SizedBox(height: 8),
-            Text(message, style: theme.textTheme.bodySmall),
+            if (message != null) ...[
+              const SizedBox(height: 8),
+              Text(message!, style: theme.textTheme.bodySmall),
+            ],
             if (action != null) ...[
               const SizedBox(height: 14),
               action!,

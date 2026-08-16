@@ -10,6 +10,7 @@ import 'package:playsphere/core/permissions/capability.dart';
 import 'package:playsphere/core/providers.dart';
 import 'package:playsphere/domain/event_type.dart';
 import 'package:playsphere/features/competitions/choose_event_type_screen.dart';
+import 'package:playsphere/shared/ui_kit.dart';
 
 /// Feature #8 — event creation must ask the event TYPE first, and change
 /// what it asks for based on the answer.
@@ -100,7 +101,7 @@ void main() {
   }
 
   group('the type is asked first', () {
-    testWidgets('all four types are offered with an explanation each',
+    testWidgets('all four types are offered with a tagline each',
         (tester) async {
       await pump(tester);
 
@@ -145,14 +146,19 @@ void main() {
       );
     });
 
-    /// Both Tournament and Season carry a "Quick create", so a bare
-    /// `find.text` matches two. Scoped to the card the button sits in.
+    /// Both Tournament and Season carry a "Quick create", so a bare finder
+    /// matches two. Scoped to the card the button sits in.
+    ///
+    /// By tooltip, not by text: the shortcut is a trailing icon button rather
+    /// than a labelled row of its own, so that offering it costs the card no
+    /// height. The tooltip is what a screen reader announces and what a long
+    /// press shows, so it is also the thing worth asserting on.
     Finder quickCreateIn(String typeLabel) => find.descendant(
           of: find.ancestor(
             of: find.text(typeLabel),
-            matching: find.byType(Card),
+            matching: find.byType(PsCard),
           ),
-          matching: find.text('Quick create'),
+          matching: find.byTooltip('Quick create'),
         );
 
     testWidgets('Quick create still reaches the one-page tournament form',

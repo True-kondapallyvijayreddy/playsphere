@@ -8,6 +8,7 @@ import 'package:go_router/go_router.dart';
 import '../../features/venues/venues_screen.dart';
 import '../../features/rankings/rankings_screen.dart';
 import '../../features/tournaments/certificates_screen.dart';
+import '../../features/tournaments/tournament_schedule_screen.dart';
 import '../../features/tournaments/officials_screen.dart';
 import '../../features/tournaments/season_memory_book_screen.dart';
 import '../../features/tournaments/public_tournament_screen.dart';
@@ -155,6 +156,9 @@ class Routes {
 
   static String certificates(String orgId, String tournamentId) =>
       '/org/$orgId/tournaments/$tournamentId/certificates';
+
+  static String tournamentSchedule(String orgId, String tournamentId) =>
+      '/org/$orgId/tournaments/$tournamentId/schedule';
 
   static String tournamentOfficials(String orgId, String tournamentId) =>
       '/org/$orgId/tournaments/$tournamentId/officials';
@@ -867,6 +871,13 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                   tournamentId: state.pathParameters['tournamentId']!,
                 ),
                 routes: [
+                  GoRoute(
+                    path: 'schedule',
+                    builder: (_, state) => TournamentScheduleScreen(
+                      orgId: state.pathParameters['orgId']!,
+                      tournamentId: state.pathParameters['tournamentId']!,
+                    ),
+                  ),
                   GoRoute(
                     path: 'certificates',
                     builder: (_, state) => CertificatesScreen(

@@ -1337,11 +1337,23 @@ final entrantsProvider =
       .watchEntrants(key.orgId, key.compId);
 });
 
+/// Every match in one competition, draft matches included only for whoever
+/// may manage it.
+///
+/// The capability is read here rather than passed in by each screen because
+/// it changes the query, not just the rendering: `firestore.rules` hides a
+/// draft fixture from everyone else, and Firestore denies a list it cannot
+/// authorize rather than trimming it. A screen that guessed would not show a
+/// member too much — it would show them an error where their fixtures should
+/// be.
 final fixturesProvider =
     StreamProvider.family<List<Fixture>, CompRef>((ref, key) {
+  final canManage = ref
+      .watch(myCapabilitiesProvider(key.orgId))
+      .contains(Capability.manageCompetitions);
   return ref
       .watch(competitionRepositoryProvider)
-      .watchFixtures(key.orgId, key.compId);
+      .watchFixtures(key.orgId, key.compId, canManage: canManage);
 });
 
 final fixtureProvider =

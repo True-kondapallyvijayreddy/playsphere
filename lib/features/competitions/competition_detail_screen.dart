@@ -14,11 +14,13 @@ import '../../domain/draw/seeding.dart';
 import '../../domain/standings/standings_calculator.dart';
 import '../../domain/standings/tiebreak.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/ui_kit.dart';
 import 'widgets/cancel_event_sheet.dart';
 import 'widgets/competition_rule_editor.dart';
 import 'widgets/draw_setup_sheet.dart';
 import 'widgets/group_entry_sheet.dart';
 import 'widgets/move_match_sheet.dart';
+import 'widgets/team_builder_sheet.dart';
 import '../tournaments/widgets/running_late_card.dart';
 import 'widgets/squad_call_card.dart';
 import 'widgets/start_early_sheet.dart';
@@ -141,6 +143,14 @@ class CompetitionDetailScreen extends ConsumerWidget {
   }
 }
 
+/// The event's name and its four facts.
+///
+/// The facts were four Material [Chip]s in a [Wrap]. Four chips do not fit
+/// one phone line, so the header opened with a name and then two rows of
+/// pill-shaped things that look pressable and are not — 96pt of header before
+/// any of the screen's actual content. As one muted dot-separated line they
+/// take 18pt and read faster, because a sentence is read faster than four
+/// boxes are scanned.
 class _Header extends StatelessWidget {
   const _Header({required this.competition});
   final Competition competition;
@@ -148,39 +158,34 @@ class _Header extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = competition;
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(c.name, style: Theme.of(context).textTheme.headlineSmall),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                Chip(label: Text(c.sportName)),
-                Chip(label: Text(c.category.label)),
-                Chip(label: Text(c.format.label)),
-                // Derived, not stored: nothing writes the status field when a
-                // registration deadline passes, so a closed event went on
-                // advertising "Registration Open" (Bug #6).
-                Chip(label: Text(c.displayStatus().label)),
-              ],
+    return PsCard(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            c.name,
+            style: const TextStyle(
+              fontSize: 19,
+              fontWeight: FontWeight.w700,
+              color: Ps.ink,
+              height: 1.2,
             ),
-            if (c.venue != null) ...[
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  const Icon(Icons.place_outlined, size: 16),
-                  const SizedBox(width: 6),
-                  Text(c.venue!),
-                ],
-              ),
+          ),
+          const SizedBox(height: 6),
+          PsMetaRow(
+            items: [
+              c.sportName,
+              c.category.label,
+              c.format.label,
+              // Derived, not stored: nothing writes the status field when a
+              // registration deadline passes, so a closed event went on
+              // advertising "Registration Open" (Bug #6).
+              c.displayStatus().label,
+              c.venue,
             ],
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -207,10 +212,9 @@ class _OrganizerActions extends ConsumerWidget {
       }
     }
 
-    final (label, description, onPressed) = switch (c.status) {
+    final (label, onPressed) = switch (c.status) {
       CompetitionStatus.draft => (
           'Open entries',
-          'Players in this organization will be able to enter.',
           () => run(() => repo.setStatus(
                 orgId: c.orgId,
                 compId: c.id,
@@ -219,8 +223,6 @@ class _OrganizerActions extends ConsumerWidget {
         ),
       CompetitionStatus.registrationOpen => (
           'Close entries',
-          'Freezes the field so you can make the draw. Approve everyone you '
-              'want in first.',
           () => run(() async {
                 final count = await repo.lockFieldAndCreateEntrants(
                   orgId: c.orgId,
@@ -234,9 +236,7 @@ class _OrganizerActions extends ConsumerWidget {
               }),
         ),
       CompetitionStatus.registrationClosed => (
-          'Set up and generate the draw',
-          'Choose groups, courts and match length, then create every fixture '
-              'for a ${c.format.label.toLowerCase()}.',
+          'Make the draw',
           () => run(() async {
                 // The organizer's choices are collected BEFORE generating,
                 // because the draw's shape and its timetable are both fixed
@@ -274,7 +274,14 @@ class _OrganizerActions extends ConsumerWidget {
                       // "38 matches created" was the whole message, even when
                       // six of them had nowhere to be played. The scheduler
                       // knew; nothing asked it.
-                      '${made.hasScheduleProblems ? ' ${made.scheduleProblems.length} could not be given a court.' : ''}',
+                      //
+                      // Counted as problems, not as matches: a draw with no
+                      // courts configured at all reports ONE problem covering
+                      // every match, and the old wording turned that into
+                      // "1 could not be given a court" — a reassuring
+                      // undercount of a schedule where nothing was placed.
+                      // The dialog below says what actually happened.
+                      '${made.hasScheduleProblems ? ' Tap for ${made.scheduleProblems.length} scheduling ${made.scheduleProblems.length == 1 ? 'problem' : 'problems'}.' : ''}',
                     ),
                   ),
                 );
@@ -300,7 +307,6 @@ class _OrganizerActions extends ConsumerWidget {
         ),
       CompetitionStatus.scheduled => (
           'Start the event',
-          'Marks the competition as in progress.',
           () => run(() => repo.setStatus(
                 orgId: c.orgId,
                 compId: c.id,
@@ -309,38 +315,46 @@ class _OrganizerActions extends ConsumerWidget {
         ),
       CompetitionStatus.inProgress => (
           'Finish the event',
-          'Closes the competition. Results become final.',
           () => run(() => repo.setStatus(
                 orgId: c.orgId,
                 compId: c.id,
                 status: CompetitionStatus.completed,
               )),
         ),
-      _ => ('', '', null),
+      _ => ('', null),
     };
 
     // A cancelled event still has a card, and it is the most important one it
     // will ever show: the reason. Entrants arriving from the push land here.
     if (c.isCancelled) {
-      return Card(
-        color: Theme.of(context).colorScheme.errorContainer,
-        child: Padding(
-          padding: const EdgeInsets.all(16),
+      final error = Theme.of(context).colorScheme.error;
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 4),
+        child: PsCard(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          color: Theme.of(context).colorScheme.errorContainer,
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Icon(Icons.event_busy_outlined),
-              const SizedBox(width: 12),
+              Icon(Icons.event_busy_outlined, size: 20, color: error),
+              const SizedBox(width: 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      'This event was cancelled',
-                      style: Theme.of(context).textTheme.titleSmall,
+                    const Text(
+                      'Cancelled',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: Ps.ink,
+                      ),
                     ),
-                    const SizedBox(height: 4),
-                    Text(c.cancelReason ?? 'No reason was given.'),
+                    if (c.cancelReason != null)
+                      Text(
+                        c.cancelReason!,
+                        style: const TextStyle(fontSize: 13, color: Ps.ink),
+                      ),
                   ],
                 ),
               ),
@@ -356,50 +370,38 @@ class _OrganizerActions extends ConsumerWidget {
 
     if (onPressed == null && !canStillCancel) return const SizedBox.shrink();
 
-    return Card(
-      color: Theme.of(context).colorScheme.secondaryContainer,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (onPressed != null) ...[
-              Text(description),
-              const SizedBox(height: 12),
-            ],
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                if (onPressed != null)
-                  FilledButton(onPressed: onPressed, child: Text(label)),
-                OutlinedButton.icon(
-                  onPressed: () => CompetitionRuleEditor.show(
-                    context,
-                    competition: c,
-                  ),
-                  icon: const Icon(Icons.settings_outlined, size: 18),
-                  label: const Text('Rules'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: () => EventNoteSheet.show(context, competition: c),
-                  icon: const Icon(Icons.campaign_outlined, size: 18),
-                  label: const Text('Send a note'),
-                ),
-                if (canStillCancel)
-                  TextButton.icon(
-                    onPressed: () =>
-                        CancelEventSheet.show(context, competition: c),
-                    icon: const Icon(Icons.event_busy_outlined, size: 18),
-                    label: const Text('Cancel event'),
-                    style: TextButton.styleFrom(
-                      foregroundColor: Theme.of(context).colorScheme.error,
-                    ),
-                  ),
-              ],
+    // One button and a `⋮`, where there were four controls and a paragraph
+    // telling the organizer which to press. The paragraph is gone because the
+    // button it explained is now the only one: `Close entries` needs no
+    // sentence saying that closing entries freezes the field. Rules, notes
+    // and cancellation moved into the menu — an organizer edits the rules once
+    // per event and cancels one event in fifty, and both were taking permanent
+    // space beside the action they take every time they open this screen.
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: PsActionBar(
+        primaryLabel: onPressed == null ? null : label,
+        onPrimary: onPressed,
+        actions: [
+          PsAction(
+            label: 'Rules',
+            icon: Icons.settings_outlined,
+            onSelected: () =>
+                CompetitionRuleEditor.show(context, competition: c),
+          ),
+          PsAction(
+            label: 'Send a note',
+            icon: Icons.campaign_outlined,
+            onSelected: () => EventNoteSheet.show(context, competition: c),
+          ),
+          if (canStillCancel)
+            PsAction(
+              label: 'Cancel event',
+              icon: Icons.event_busy_outlined,
+              destructive: true,
+              onSelected: () => CancelEventSheet.show(context, competition: c),
             ),
-          ],
-        ),
+        ],
       ),
     );
   }
@@ -420,6 +422,29 @@ class _DraftScheduleCard extends ConsumerWidget {
         ref.watch(fixturesProvider(CompRef(c.orgId, c.id))).valueOrNull ??
             const <Fixture>[];
     final hasDraft = fixtures.any((f) => f.isDraft);
+    final rawEntrants = ref
+            .watch(entrantsProvider(CompRef(c.orgId, c.id)))
+            .valueOrNull ??
+        const <Entrant>[];
+    final rawRegistrations = ref
+            .watch(registrationsProvider(CompRef(c.orgId, c.id)))
+            .valueOrNull ??
+        const <Registration>[];
+
+    final registered = [
+      for (final e in rawEntrants)
+        if (!e.withdrawn) e,
+      if (rawEntrants.isEmpty)
+        for (final r in rawRegistrations)
+          if (r.status == RegistrationStatus.confirmed ||
+              r.status == RegistrationStatus.pending)
+            Entrant(
+              id: r.uid,
+              displayName: r.displayName.isNotEmpty ? r.displayName : 'Player',
+              entrantType: c.entrantType,
+              uid: r.uid,
+            ),
+    ];
 
     return Card(
       margin: const EdgeInsets.only(bottom: 16),
@@ -434,23 +459,41 @@ class _DraftScheduleCard extends ConsumerWidget {
             ),
             const SizedBox(height: 6),
             Text(
-              hasDraft
-                  ? 'Placeholder teams stand in for real entrants until '
-                      'registration closes. Edit the venue, time and '
-                      'official on any match below — regenerating replaces '
-                      'every placeholder match with a fresh set.'
-                  : 'See the shape of a ${c.format.label.toLowerCase()} — '
-                      'rounds, groups, quarters and semis — and start lining '
-                      'up venues, times and officials before anyone has '
-                      'registered.',
+              registered.isNotEmpty
+                  ? '${registered.length} ${registered.length == 1 ? "entry" : "entries"} '
+                      'so far. They are placed into the draw by name and the '
+                      'rest of the field is left as open slots, so the '
+                      'timetable can be built now and filled in as more '
+                      'people register.'
+                  : hasDraft
+                      ? 'Placeholder teams stand in for real entrants until '
+                          'registration closes. Edit the venue, time and '
+                          'official on any match below — regenerating replaces '
+                          'every placeholder match with a fresh set.'
+                      : 'See the shape of a ${c.format.label.toLowerCase()} — '
+                          'rounds, groups, quarters and semis — and start '
+                          'lining up venues, times and officials before '
+                          'anyone has registered.',
               style: Theme.of(context).textTheme.bodySmall,
             ),
             const SizedBox(height: 12),
-            OutlinedButton.icon(
-              onPressed: () => _open(context, ref),
-              icon: const Icon(Icons.auto_awesome_motion_outlined),
-              label:
-                  Text(hasDraft ? 'Regenerate the draft' : 'Create a schedule'),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () => _open(context, ref, registered),
+                  icon: const Icon(Icons.auto_awesome_motion_outlined),
+                  label: Text(
+                      hasDraft ? 'Regenerate the draft' : 'Create a schedule'),
+                ),
+                if (hasDraft)
+                  FilledButton.icon(
+                    onPressed: () => _publish(context, ref),
+                    icon: const Icon(Icons.lock_clock_outlined),
+                    label: const Text('Lock & Publish Schedule'),
+                  ),
+              ],
             ),
           ],
         ),
@@ -458,9 +501,16 @@ class _DraftScheduleCard extends ConsumerWidget {
     );
   }
 
-  Future<void> _open(BuildContext context, WidgetRef ref) async {
-    final plan =
-        await _DraftScheduleSheet.show(context, competition: competition);
+  Future<void> _open(
+    BuildContext context,
+    WidgetRef ref,
+    List<Entrant> registered,
+  ) async {
+    final plan = await _DraftScheduleSheet.show(
+      context,
+      competition: competition,
+      registeredCount: registered.length,
+    );
     if (plan == null) return;
     try {
       final outcome =
@@ -468,13 +518,61 @@ class _DraftScheduleCard extends ConsumerWidget {
                 competition: competition,
                 teamCount: plan.teamCount,
                 teamsPerGroup: plan.teamsPerGroup,
+                seedWith: registered,
               );
       if (context.mounted) {
+        final open = plan.teamCount - registered.length;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              '${outcome.written} placeholder matches created below — edit '
-              'any of them freely.',
+              registered.isEmpty
+                  ? '${outcome.written} placeholder matches created below — '
+                      'edit any of them freely.'
+                  : '${outcome.written} matches created — '
+                      '${registered.length} entered'
+                      '${open > 0 ? ', $open slots still open' : ''}.',
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) showError(context, e);
+    }
+  }
+
+  Future<void> _publish(BuildContext context, WidgetRef ref) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Lock & Publish Schedule?'),
+        content: const Text(
+          'This will publish the official match schedule with assigned courts '
+          'and timeslots. It will become visible to all participants and visiting clubs.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Publish Schedule'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+
+    try {
+      await ref.read(competitionRepositoryProvider).publishDraftSchedule(
+            orgId: competition.orgId,
+            compId: competition.id,
+          );
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Schedule locked and published! Official fixtures are now live.',
             ),
           ),
         );
@@ -490,19 +588,31 @@ class _DraftScheduleCard extends ConsumerWidget {
 /// (venue, time, court, officials) is set afterwards, per match, once the
 /// organizer can see the actual bracket rather than guessing at it blind.
 class _DraftScheduleSheet extends StatefulWidget {
-  const _DraftScheduleSheet({required this.competition});
+  const _DraftScheduleSheet({
+    required this.competition,
+    required this.registeredCount,
+  });
 
   final Competition competition;
+
+  /// How many have actually entered. The field can never be planned smaller
+  /// than this — a bracket that does not hold everyone who registered is not
+  /// a schedule, it is a mistake waiting to be found on the day.
+  final int registeredCount;
 
   static Future<({int teamCount, int? teamsPerGroup})?> show(
     BuildContext context, {
     required Competition competition,
+    int registeredCount = 0,
   }) =>
       showModalBottomSheet<({int teamCount, int? teamsPerGroup})>(
         context: context,
         isScrollControlled: true,
         showDragHandle: true,
-        builder: (_) => _DraftScheduleSheet(competition: competition),
+        builder: (_) => _DraftScheduleSheet(
+          competition: competition,
+          registeredCount: registeredCount,
+        ),
       );
 
   @override
@@ -510,11 +620,19 @@ class _DraftScheduleSheet extends StatefulWidget {
 }
 
 class _DraftScheduleSheetState extends State<_DraftScheduleSheet> {
+  /// Never below the number already entered, so nobody is drawn out of their
+  /// own event by a stepper.
+  int get _minTeams {
+    final floor = widget.registeredCount < 2 ? 2 : widget.registeredCount;
+    return floor > 64 ? 64 : floor;
+  }
+
   // The registration limit set when the event was created, when there is
   // one — an organizer who already said "32 teams" should not be asked
   // again. Otherwise a small, typical field, easy to change with the
   // stepper below.
-  late int _teamCount = (widget.competition.maxEntrants ?? 8).clamp(2, 64);
+  late int _teamCount =
+      (widget.competition.maxEntrants ?? 8).clamp(_minTeams, 64);
   int _teamsPerGroup = 4;
 
   bool get _isGroups =>
@@ -539,8 +657,12 @@ class _DraftScheduleSheetState extends State<_DraftScheduleSheet> {
             Text('Plan a schedule', style: theme.textTheme.titleLarge),
             const SizedBox(height: 4),
             Text(
-              '${widget.competition.format.label} · placeholder teams '
-              'stand in until real entries close',
+              widget.registeredCount > 0
+                  ? '${widget.competition.format.label} · '
+                      '${widget.registeredCount} already entered, the rest of '
+                      'the field left as open slots'
+                  : '${widget.competition.format.label} · placeholder teams '
+                      'stand in until real entries close',
               style: theme.textTheme.bodySmall
                   ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
             ),
@@ -548,10 +670,22 @@ class _DraftScheduleSheetState extends State<_DraftScheduleSheet> {
             _CountStepper(
               label: 'Teams to plan for',
               value: _teamCount,
-              min: 2,
+              min: _minTeams,
               max: 64,
               onChanged: (v) => setState(() => _teamCount = v),
             ),
+            if (widget.registeredCount > 0)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  _teamCount > widget.registeredCount
+                      ? '${widget.registeredCount} entered · '
+                          '${_teamCount - widget.registeredCount} open slots'
+                      : 'Every place taken — no open slots',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                ),
+              ),
             if (_isGroups) ...[
               const SizedBox(height: 4),
               _CountStepper(
@@ -653,16 +787,24 @@ class _Entries extends ConsumerWidget {
     final enteringAsGuest =
         c.openToNonMembers && me != null && membership?.isActive != true;
 
-    Future<void> enter() async {
+    Future<void> executeRegistration({
+      String? houseName,
+      String? partnerName,
+      bool isSoloDoubles = false,
+      String? teamName,
+    }) async {
       if (me == null) return;
       try {
-        // The repository decides the real outcome inside a transaction
-        // against fresh counts, and returns it. Reporting *that* rather than
-        // a generic "submitted" is the difference between a player knowing
-        // they are playing on Sunday and a player assuming it.
         final outcome = await ref
             .read(competitionRepositoryProvider)
-            .register(competition: c, user: me);
+            .register(
+              competition: c,
+              user: me,
+              houseName: houseName,
+              partnerName: partnerName,
+              isSoloDoubles: isSoloDoubles,
+              teamName: teamName,
+            );
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text(switch (outcome) {
@@ -680,6 +822,140 @@ class _Entries extends ConsumerWidget {
       } catch (e) {
         if (context.mounted) showError(context, e);
       }
+    }
+
+    Future<void> enter() async {
+      if (me == null) return;
+
+      // School House selection
+      if (c.teamEntryMode == TeamEntryMode.houseBatch) {
+        final houses = c.presetHouses.isNotEmpty
+            ? c.presetHouses
+            : ['Red House', 'Blue House', 'Green House', 'Yellow House'];
+        String selectedHouse = houses.first;
+
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => StatefulBuilder(
+            builder: (ctx, setDialogState) => AlertDialog(
+              title: const Row(
+                children: [
+                  Icon(Icons.school_outlined),
+                  SizedBox(width: 8),
+                  Text('Select Your House'),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Which house or section are you representing?'),
+                  const SizedBox(height: 12),
+                  for (final h in houses)
+                    RadioListTile<String>(
+                      dense: true,
+                      title: Text(h),
+                      value: h,
+                      groupValue: selectedHouse,
+                      onChanged: (v) {
+                        if (v != null) {
+                          setDialogState(() => selectedHouse = v);
+                        }
+                      },
+                    ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.of(ctx).pop(true),
+                  child: const Text('Confirm Entry'),
+                ),
+              ],
+            ),
+          ),
+        );
+
+        if (confirmed == true) {
+          await executeRegistration(houseName: selectedHouse);
+        }
+        return;
+      }
+
+      // Doubles Partner selection
+      if (c.teamEntryMode == TeamEntryMode.doubles) {
+        bool hasPartner = true;
+        final partnerCtrl = TextEditingController();
+
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => StatefulBuilder(
+            builder: (ctx, setDialogState) => AlertDialog(
+              title: const Row(
+                children: [
+                  Icon(Icons.people_outline),
+                  SizedBox(width: 8),
+                  Text('Doubles Entry'),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SegmentedButton<bool>(
+                    segments: const [
+                      ButtonSegment(value: true, label: Text('Have Partner')),
+                      ButtonSegment(value: false, label: Text('Need Partner (Solo)')),
+                    ],
+                    selected: {hasPartner},
+                    onSelectionChanged: (s) =>
+                        setDialogState(() => hasPartner = s.first),
+                  ),
+                  const SizedBox(height: 16),
+                  if (hasPartner)
+                    TextField(
+                      controller: partnerCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Partner Name',
+                        hintText: 'Enter partner full name',
+                        border: OutlineInputBorder(),
+                      ),
+                    )
+                  else
+                    const Text(
+                      'You will join the solo pool and be paired automatically before the draw.',
+                      style: TextStyle(fontSize: 13, fontStyle: FontStyle.italic),
+                    ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.of(ctx).pop(true),
+                  child: const Text('Enter Doubles'),
+                ),
+              ],
+            ),
+          ),
+        );
+
+        if (confirmed == true) {
+          await executeRegistration(
+            partnerName: hasPartner ? partnerCtrl.text.trim() : null,
+            isSoloDoubles: !hasPartner,
+          );
+        }
+        return;
+      }
+
+      // Standard 1-tap entry
+      await executeRegistration();
     }
 
     // What the button will actually do, said before it is pressed.
@@ -720,6 +996,19 @@ class _Entries extends ConsumerWidget {
                 Text('Entries (${regs.length})',
                     style: Theme.of(context).textTheme.titleMedium),
                 const Spacer(),
+                if (canManage && regs.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: OutlinedButton.icon(
+                      onPressed: () => TeamBuilderSheet.show(
+                        context,
+                        competition: c,
+                        registrations: regs,
+                      ),
+                      icon: const Icon(Icons.auto_awesome, size: 16),
+                      label: const Text('Team Builder & Draft'),
+                    ),
+                  ),
                 if (myReg != null)
                   Chip(
                     label: Text(
@@ -738,16 +1027,18 @@ class _Entries extends ConsumerWidget {
                             eligibility?.isEligible == true ? enter : null,
                         child: Text(actionLabel),
                       ),
-                      OutlinedButton.icon(
-                        onPressed: eligibility?.isEligible == true
-                            ? () => GroupEntrySheet.show(
-                                  context,
-                                  competition: c,
-                                )
-                            : null,
-                        icon: const Icon(Icons.groups_outlined, size: 16),
-                        label: const Text('Enter as a group'),
-                      ),
+                      if (c.teamEntryMode == TeamEntryMode.preformedTeam ||
+                          c.entrantType == EntrantType.team)
+                        OutlinedButton.icon(
+                          onPressed: eligibility?.isEligible == true
+                              ? () => GroupEntrySheet.show(
+                                    context,
+                                    competition: c,
+                                  )
+                              : null,
+                          icon: const Icon(Icons.groups_outlined, size: 16),
+                          label: const Text('Enter Team / Group'),
+                        ),
                     ],
                   ),
               ],
@@ -1531,10 +1822,25 @@ class _AssignScorersDialogState extends ConsumerState<_AssignScorersDialog> {
         child: membersAsync.hasError
             ? AsyncErrorStrip(value: membersAsync, what: 'the member list')
             : eligible.isEmpty
-            ? const Text(
-                'Nobody in this organization holds the scoring role yet. '
-                'Give someone the Judge / Scorer role on the Members screen '
-                'first.',
+            // Was three sentences ending in "…on the Members screen first",
+            // which left the organizer to dismiss this, find the drawer and
+            // hunt for that screen. The fix it describes is one tap, so it is
+            // a button.
+            ? Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Nobody here holds the scorer role yet.'),
+                  const SizedBox(height: 12),
+                  PsSecondaryButton(
+                    label: 'Open members',
+                    icon: Icons.people_alt_outlined,
+                    onPressed: () {
+                      Navigator.of(context).pop();
+                      context.push(Routes.members(widget.fixture.orgId));
+                    },
+                  ),
+                ],
               )
             : ListView(
                 shrinkWrap: true,
@@ -1610,9 +1916,14 @@ class _Fixtures extends ConsumerWidget {
       return AsyncErrorStrip(value: fixturesAsync, what: 'the match list');
     }
 
-    if (fixtures.isEmpty) {
+    final visibleFixtures =
+        canManage ? fixtures : fixtures.where((f) => !f.isDraft).toList();
+
+    if (visibleFixtures.isEmpty) {
       return Text(
-        'No matches yet — generate the draw once entries are closed.',
+        fixtures.any((f) => f.isDraft)
+            ? 'Schedule is being prepared by the organizers and will be published once entries close.'
+            : 'No matches yet — generate the draw once entries are closed.',
         style: Theme.of(context).textTheme.bodySmall,
       );
     }

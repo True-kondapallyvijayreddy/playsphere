@@ -195,6 +195,8 @@ class Competition {
     this.openToNonMembers = false,
     this.entryFeeRupees = 0,
     this.teamSize,
+    this.teamEntryMode = TeamEntryMode.individual,
+    this.presetHouses = const [],
     this.rulesNote,
     this.confirmedCount = 0,
     this.waitlistCount = 0,
@@ -224,6 +226,8 @@ class Competition {
   final String sportName;
   final CompetitionArchetype archetype;
   final EntrantType entrantType;
+  final TeamEntryMode teamEntryMode;
+  final List<String> presetHouses;
   final CompetitionFormat format;
   final CompetitionStatus status;
   final CompetitionCategory category;
@@ -443,12 +447,113 @@ class Competition {
         drawConfig: drawConfig ?? this.drawConfig,
         scheduleConfig: scheduleConfig ?? this.scheduleConfig,
         scoringConfig: scoringConfig ?? this.scoringConfig,
+        teamEntryMode: teamEntryMode,
+        presetHouses: presetHouses,
         cancelReason: cancelReason,
         cancelledAt: cancelledAt,
         cancelledBy: cancelledBy,
         participantOrgIds: participantOrgIds,
         createdBy: createdBy,
         createdAt: createdAt,
+      );
+
+  Competition copyWith({
+    String? id,
+    String? orgId,
+    String? name,
+    String? sportId,
+    String? sportName,
+    CompetitionArchetype? archetype,
+    EntrantType? entrantType,
+    TeamEntryMode? teamEntryMode,
+    List<String>? presetHouses,
+    CompetitionFormat? format,
+    CompetitionStatus? status,
+    CompetitionCategory? category,
+    String? scoringPluginKey,
+    String? description,
+    String? venue,
+    DateTime? startDate,
+    DateTime? endDate,
+    DateTime? registrationClosesAt,
+    int? maxEntrants,
+    int? entrantCount,
+    int? fixtureCount,
+    ParticipationModel? participationModel,
+    int? preselectedSlots,
+    bool? waitlistEnabled,
+    bool? openToNonMembers,
+    int? entryFeeRupees,
+    int? teamSize,
+    String? rulesNote,
+    int? confirmedCount,
+    int? waitlistCount,
+    VerificationTier? verificationTier,
+    int? rulesetVersion,
+    int? pointsForWin,
+    int? pointsForDraw,
+    int? pointsForLoss,
+    List<String>? tiebreakChain,
+    String? tournamentId,
+    MatchPointsModel? matchPointsModel,
+    DrawConfig? drawConfig,
+    ScheduleConfig? scheduleConfig,
+    Map<String, dynamic>? scoringConfig,
+    String? cancelReason,
+    DateTime? cancelledAt,
+    String? cancelledBy,
+    List<String>? participantOrgIds,
+    String? createdBy,
+    DateTime? createdAt,
+  }) =>
+      Competition(
+        id: id ?? this.id,
+        orgId: orgId ?? this.orgId,
+        name: name ?? this.name,
+        sportId: sportId ?? this.sportId,
+        sportName: sportName ?? this.sportName,
+        archetype: archetype ?? this.archetype,
+        entrantType: entrantType ?? this.entrantType,
+        teamEntryMode: teamEntryMode ?? this.teamEntryMode,
+        presetHouses: presetHouses ?? this.presetHouses,
+        format: format ?? this.format,
+        status: status ?? this.status,
+        category: category ?? this.category,
+        scoringPluginKey: scoringPluginKey ?? this.scoringPluginKey,
+        description: description ?? this.description,
+        venue: venue ?? this.venue,
+        startDate: startDate ?? this.startDate,
+        endDate: endDate ?? this.endDate,
+        registrationClosesAt: registrationClosesAt ?? this.registrationClosesAt,
+        maxEntrants: maxEntrants ?? this.maxEntrants,
+        entrantCount: entrantCount ?? this.entrantCount,
+        fixtureCount: fixtureCount ?? this.fixtureCount,
+        participationModel: participationModel ?? this.participationModel,
+        preselectedSlots: preselectedSlots ?? this.preselectedSlots,
+        waitlistEnabled: waitlistEnabled ?? this.waitlistEnabled,
+        openToNonMembers: openToNonMembers ?? this.openToNonMembers,
+        entryFeeRupees: entryFeeRupees ?? this.entryFeeRupees,
+        teamSize: teamSize ?? this.teamSize,
+        rulesNote: rulesNote ?? this.rulesNote,
+        confirmedCount: confirmedCount ?? this.confirmedCount,
+        waitlistCount: waitlistCount ?? this.waitlistCount,
+        verificationTier: verificationTier ?? this.verificationTier,
+        rulesetVersion: rulesetVersion ?? this.rulesetVersion,
+        pointsForWin: pointsForWin ?? this.pointsForWin,
+        pointsForDraw: pointsForDraw ?? this.pointsForDraw,
+        pointsForLoss: pointsForLoss ?? this.pointsForLoss,
+        tiebreakChain: tiebreakChain ?? this.tiebreakChain,
+        tournamentId: tournamentId ?? this.tournamentId,
+        matchPointsModel: matchPointsModel ?? this.matchPointsModel,
+        drawConfig: drawConfig ?? this.drawConfig,
+        scheduleConfig: scheduleConfig ?? this.scheduleConfig,
+        scoringConfig: scoringConfig ?? this.scoringConfig,
+        cancelReason: cancelReason ?? this.cancelReason,
+        cancelledAt: cancelledAt ?? this.cancelledAt,
+        cancelledBy: cancelledBy ?? this.cancelledBy,
+        participantOrgIds: participantOrgIds ?? this.participantOrgIds,
+        createdBy: createdBy ?? this.createdBy,
+        createdAt: createdAt ?? this.createdAt,
       );
 
   /// Why this event was called off, in the organizer's own words.
@@ -644,6 +749,8 @@ class Competition {
       openToNonMembers: Fs.boolean(d['openToNonMembers']),
       entryFeeRupees: Fs.integer(d['entryFeeRupees']),
       teamSize: d['teamSize'] == null ? null : Fs.integer(d['teamSize']),
+      teamEntryMode: TeamEntryMode.fromWire(Fs.strOrNull(d['teamEntryMode'])),
+      presetHouses: d['presetHouses'] is List ? Fs.strList(d['presetHouses']) : const [],
       rulesNote: Fs.strOrNull(d['rulesNote']),
       confirmedCount: Fs.integer(d['confirmedCount']),
       waitlistCount: Fs.integer(d['waitlistCount']),
@@ -690,18 +797,9 @@ class Competition {
         'sportName': sportName,
         'archetype': archetype.wire,
         'entrantType': entrantType.wire,
+        'teamEntryMode': teamEntryMode.wire,
+        'presetHouses': presetHouses,
         'format': format.wire,
-        // An ordinary competition always starts as a draft, so the organizer
-        // configures it before anyone can enter. A challenge match has nothing
-        // left to configure — both clubs already agreed the sport, the slot and
-        // the venue when the challenge was accepted — so it is created ready to
-        // play. `firestore.rules` permits exactly these two starting states.
-        //
-        // A single match is the third case. It has no field to assemble and
-        // no draw to make — both sides were named on the way in — so it opens
-        // already in progress and the scoring pad is reachable on the next
-        // tap. Sitting it in `draft` would reintroduce exactly the ceremony
-        // the format exists to remove.
         'status': switch (true) {
           _ when isInterClub => CompetitionStatus.scheduled.wire,
           _ when format.isSingleMatch => CompetitionStatus.inProgress.wire,
@@ -724,10 +822,6 @@ class Competition {
         'entryFeeRupees': entryFeeRupees,
         'teamSize': teamSize,
         'rulesNote': rulesNote,
-        // Both counters start at zero and are only ever moved by the
-        // registration transaction. Seeding them here rather than letting
-        // them be absent is what allows `firestore.rules` to compare against
-        // `resource.data.confirmedCount` without a null check on every path.
         'confirmedCount': 0,
         'waitlistCount': 0,
         'verificationTier': verificationTier.wire,
@@ -755,15 +849,12 @@ class Competition {
         'endDate': Fs.ts(endDate),
         'registrationClosesAt': Fs.ts(registrationClosesAt),
         'maxEntrants': maxEntrants,
-        // `participationModel` and `preselectedSlots` are deliberately absent:
-        // they define what tapping Register meant to everyone who has already
-        // tapped it, and changing that retroactively would silently move
-        // people between the team and the queue. The organizer picks them
-        // once, at creation.
         'waitlistEnabled': waitlistEnabled,
         'openToNonMembers': openToNonMembers,
         'entryFeeRupees': entryFeeRupees,
         'teamSize': teamSize,
+        'teamEntryMode': teamEntryMode.wire,
+        'presetHouses': presetHouses,
         'rulesNote': rulesNote,
         'category': category.toMap(),
         'pointsForWin': pointsForWin,
@@ -794,6 +885,10 @@ class Registration {
     required this.status,
     this.photoUrl,
     this.teamName,
+    this.houseName,
+    this.partnerUid,
+    this.partnerName,
+    this.isSoloDoubles = false,
     this.eligibilityNote,
     this.decidedBy,
     this.createdAt,
@@ -806,19 +901,16 @@ class Registration {
   final RegistrationStatus status;
   final String? photoUrl;
   final String? teamName;
+  final String? houseName;
+  final String? partnerUid;
+  final String? partnerName;
+  final bool isSoloDoubles;
 
   /// Place in the queue, 1-based, for a waitlisted entrant.
-  ///
-  /// Stored rather than derived from creation order because it is the thing
-  /// the entrant is actually told ("you are 2nd reserve"), and a number that
-  /// changes every time someone else's document happens to sort differently
-  /// is not a promise anyone can rely on.
   final int? waitlistPosition;
 
   /// True when an organizer put this entrant in the field directly rather
   /// than the entrant registering — the preselected 8 of a hybrid event.
-  /// Shown in the entrant list so the open registrants can see which slots
-  /// were ever really available.
   final bool preselected;
 
   /// Recorded when an organizer overrode a failed eligibility check, so the
@@ -836,6 +928,10 @@ class Registration {
       status: RegistrationStatus.fromWire(Fs.str(d['status'])),
       photoUrl: Fs.strOrNull(d['photoUrl']),
       teamName: Fs.strOrNull(d['teamName']),
+      houseName: Fs.strOrNull(d['houseName']),
+      partnerUid: Fs.strOrNull(d['partnerUid']),
+      partnerName: Fs.strOrNull(d['partnerName']),
+      isSoloDoubles: Fs.boolean(d['isSoloDoubles']),
       eligibilityNote: Fs.strOrNull(d['eligibilityNote']),
       decidedBy: Fs.strOrNull(d['decidedBy']),
       createdAt: Fs.dateOrNull(d['createdAt']),
@@ -845,23 +941,24 @@ class Registration {
     );
   }
 
-  /// The registration document as first written.
-  ///
-  /// [status] is passed in rather than fixed at `pending` because the outcome
-  /// is decided by the event's [ParticipationModel] against its live counts,
-  /// inside the transaction that also moves those counts. `firestore.rules`
-  /// re-checks every combination this can produce — a client cannot confirm
-  /// itself into an approval event by calling this with the wrong argument.
   Map<String, Object?> toCreate({
     RegistrationStatus status = RegistrationStatus.pending,
     int? waitlistPosition,
     bool preselected = false,
+    String? houseName,
+    String? partnerUid,
+    String? partnerName,
+    bool isSoloDoubles = false,
   }) =>
       {
         'uid': uid,
         'displayName': displayName,
         'photoUrl': photoUrl,
         'teamName': teamName,
+        'houseName': houseName ?? this.houseName,
+        'partnerUid': partnerUid ?? this.partnerUid,
+        'partnerName': partnerName ?? this.partnerName,
+        'isSoloDoubles': isSoloDoubles || this.isSoloDoubles,
         'status': status.wire,
         'waitlistPosition': waitlistPosition,
         'preselected': preselected,

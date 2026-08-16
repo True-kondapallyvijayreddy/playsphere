@@ -449,8 +449,12 @@ class _TossDialogState extends ConsumerState<TossDialog> {
       ),
       actions: [
         TextButton(
-          onPressed: _busy ? null : () => Navigator.pop(context),
+          onPressed: _busy ? null : () => Navigator.pop(context, false),
           child: const Text('Cancel'),
+        ),
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.pop(context, true),
+          child: const Text('Skip toss'),
         ),
         FilledButton(
           onPressed: _busy || _winnerId == null
@@ -470,7 +474,7 @@ class _TossDialogState extends ConsumerState<TossDialog> {
                           decidesBatting: TossOptions.decidesBatting(f.sport),
                           scoringConfig: f.scoringConfig,
                         );
-                    if (context.mounted) Navigator.pop(context);
+                    if (context.mounted) Navigator.pop(context, true);
                   } catch (e) {
                     if (context.mounted) {
                       setState(() => _busy = false);
@@ -478,7 +482,7 @@ class _TossDialogState extends ConsumerState<TossDialog> {
                     }
                   }
                 },
-          child: Text(_busy ? 'Saving…' : 'Record toss'),
+          child: Text(_busy ? 'Saving…' : 'Record toss & Start'),
         ),
       ],
     );

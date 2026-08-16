@@ -6,33 +6,43 @@ import 'package:intl/intl.dart';
 import '../../core/models/competition.dart';
 import '../../core/models/enums.dart';
 import '../../core/models/tournament.dart';
+import '../../core/models/venue.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/ui_kit.dart';
 import '../../shared/wizard.dart';
+import '../tournaments/widgets/venue_selector_dialog.dart'
+    show showQuickAddVenueDialog;
+import 'widgets/bulk_category_selector_sheet.dart';
 
-/// One sport in a season, in one arrangement.
-///
-/// A thinner cousin of `CreateSeasonScreen`'s `_CategoryDraft`. That screen
-/// lets an organizer add the same sport twice under different age bands,
-/// because a school sports week genuinely runs Badminton Singles Boys U-14
-/// and Badminton Doubles Open as two separate draws. This flow deliberately
-/// does not: a guided path that opens with "you may add the same sport more
-/// than once" is a guided path nobody finishes. Someone who needs that runs
-/// the one-page form, which is still one tap away.
+/// One sport category in a season, in a specific arrangement and age/gender band.
 class _SeasonSport {
-  _SeasonSport(this.sportId)
-      : sideFormat = SportCatalog.byId(sportId).defaultSideFormat,
-        format = SportCatalog.byId(sportId).competitionFormats.first,
-        maxEntrants = 16;
+  _SeasonSport({
+    required this.sportId,
+    SideFormat? sideFormat,
+    CompetitionCategory? category,
+    CompetitionFormat? format,
+  })  : sideFormat = sideFormat ?? SportCatalog.byId(sportId).defaultSideFormat,
+        category = category ?? CompetitionCategory.presets().first,
+        format = format ?? SportCatalog.byId(sportId).competitionFormats.first;
 
   final String sportId;
   SideFormat sideFormat;
+  CompetitionCategory category;
   CompetitionFormat format;
-  int maxEntrants;
+  int maxEntrants = 16;
 
   SportSpec get sport => SportCatalog.byId(sportId);
+
+  String get displayName {
+    final hasArrangement = sport.sideFormats.length > 1;
+    final catLabel = category.isOpen ? '' : ' · ${category.label}';
+    if (hasArrangement) {
+      return '${sport.name} (${sideFormat.name})$catLabel';
+    }
+    return '${sport.name}$catLabel';
+  }
 }
 
 /// A multi-sport season, created one step at a time.
@@ -46,10 +56,12 @@ class _SeasonSport {
 /// The reference flow has eight steps, two of which the data model cannot
 /// honestly support yet:
 ///
-/// - **Venues & Locations** offers several venues with photographs, each
-///   assigned to particular sports. A [Competition] carries a single `venue`
-///   string and no photograph, so this asks for one venue for the season.
-///   Per-sport venues would be a schema change, not a screen.
+/// - **Venues & Locations** offers photographs per venue and assigns each
+///   venue to particular sports. Venues themselves are here — the season
+///   picks any number of them, and the scheduler spreads matches across every
+///   court they hold — but a [Competition] carries a single `venue` string, so
+///   pinning one *sport* to one *ground* would be a schema change, not a
+///   screen. The photographs are part of the same gap.
 /// - **Logo and banner upload** needs Firebase Storage, which is not
 ///   configured on this project. The controls are present and say so rather
 ///   than failing on tap.
@@ -69,6 +81,15 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
   final _venue = TextEditingController();
 
   final List<_SeasonSport> _sports = [];
+
+  /// Venues the season runs across, as ids into `orgs/{orgId}/venues`.
+  ///
+  /// This is what makes the schedule generatable. `generateSchedule` resolves
+  /// courts from these documents and refuses outright when there are none, so
+  /// a season created without them produced a tournament whose only
+  /// scheduling button failed — the organizer had to find a different screen
+  /// to fix something they were never told was missing.
+  final Set<String> _venueIds = {};
 
   DateTime? _startDate;
   DateTime? _endDate;
@@ -110,6 +131,49 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
       ? ParticipationModel.approval
       : ParticipationModel.open;
 
+  Future<void> _addCategoriesForSport({String? sportId}) async {
+    final drafts = await showModalBottomSheet<List<CategoryDraftItem>>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => BulkCategorySelectorSheet(
+        initialSportId: sportId,
+        cutOff: _startDate,
+      ),
+    );
+    if (drafts == null || drafts.isEmpty) return;
+
+    int addedCount = 0;
+    for (final draft in drafts) {
+      if (_sports.any((s) =>
+          s.sportId == draft.sportId &&
+          s.sideFormat.id == draft.sideFormat.id &&
+          s.category.label == draft.category.label)) {
+        continue;
+      }
+      _sports.add(
+        _SeasonSport(
+          sportId: draft.sportId,
+          sideFormat: draft.sideFormat,
+          category: draft.category,
+          format: draft.format,
+        ),
+      );
+      addedCount++;
+    }
+
+    if (mounted) {
+      setState(() {});
+      if (addedCount > 0) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Added $addedCount categories to season!'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
+  }
+
   Future<void> _submit() async {
     final uid = ref.read(currentUidProvider);
     final start = _startDate;
@@ -132,6 +196,7 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
           status: TournamentStatus.draft,
           startDate: start,
           endDate: end,
+          venueIds: _venueIds.toList(),
           eventCount: _sports.length,
           createdBy: uid,
         ),
@@ -139,28 +204,32 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
 
       for (final entry in _sports) {
         final sport = entry.sport;
-        // Worth naming the arrangement only when the sport has more than one
-        // — cricket does not need "(11 a side)" appended when that is its
-        // only option.
         final showsArrangement = sport.sideFormats.length > 1;
+        final catSuffix =
+            entry.category.isOpen ? '' : ' — ${entry.category.label}';
+        final compName = showsArrangement
+            ? '${_name.text.trim()} — ${sport.name} (${entry.sideFormat.name})$catSuffix'
+            : '${_name.text.trim()} — ${sport.name}$catSuffix';
+
         await competitions.createCompetition(
           Competition(
             id: '',
             orgId: widget.orgId,
             tournamentId: seasonId,
-            name: showsArrangement
-                ? '${_name.text.trim()} — ${sport.name} '
-                    '(${entry.sideFormat.name})'
-                : '${_name.text.trim()} — ${sport.name}',
+            name: compName,
             sportId: sport.id,
             sportName: sport.name,
             archetype: sport.archetype,
             entrantType: sport.defaultEntrantType,
             format: entry.format,
-            status: CompetitionStatus.draft,
-            category: CompetitionCategory.presets().first,
+            status: CompetitionStatus.registrationOpen,
+            category: entry.category,
             scoringPluginKey: sport.pluginKey,
             scoringConfig: entry.sideFormat.configOverrides,
+            teamEntryMode: sport.defaultEntrantType == EntrantType.individual
+                ? TeamEntryMode.individual
+                : (_externalEntries ? TeamEntryMode.preformedTeam : TeamEntryMode.houseBatch),
+            presetHouses: const ['Red House', 'Blue House', 'Green House', 'Yellow House'],
             venue: _venue.text.trim().isEmpty ? null : _venue.text.trim(),
             startDate: start,
             maxEntrants: entry.maxEntrants,
@@ -204,16 +273,13 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
         ),
         WizardStep(
           title: 'Select Sports',
-          subtitle: 'Choose the sports this season runs',
-          // A season with no sports is a container with nothing in it — the
-          // one-page form rejects this on submit, and blocking here means it
-          // is never reachable.
+          subtitle: 'Choose the sports and categories this season runs',
           canAdvance: () => _sports.isNotEmpty,
           builder: _sportsStep,
         ),
         WizardStep(
           title: 'Competition Structure',
-          subtitle: 'Set the draw shape and entry limit for each sport',
+          subtitle: 'Set the draw shape and entry limit for each category',
           builder: _structureStep,
         ),
         WizardStep(
@@ -277,99 +343,188 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
   }
 
   Widget _sportsStep(BuildContext context) {
-    return PsCard(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Column(
-        children: [
-          for (final spec in SportCatalog.versusSports)
-            _SportCheckRow(
-              spec: spec,
-              selected: _sports.any((s) => s.sportId == spec.id),
-              onChanged: (on) => setState(() {
-                if (on) {
-                  _sports.add(_SeasonSport(spec.id));
-                } else {
-                  _sports.removeWhere((s) => s.sportId == spec.id);
-                }
-              }),
-            ),
-        ],
-      ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        PsCard(
+          child: Row(
+            children: [
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Multi-Category Matrix',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: Ps.ink,
+                      ),
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      'Add multiple arrangements (Singles/Doubles) & Age groups per sport at once.',
+                      style: TextStyle(fontSize: 12, color: Ps.muted),
+                    ),
+                  ],
+                ),
+              ),
+              FilledButton.tonalIcon(
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('Add Categories (+)'),
+                onPressed: () => _addCategoriesForSport(),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        PsCard(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Column(
+            children: [
+              for (final spec in SportCatalog.versusSports)
+                _SportCheckRow(
+                  spec: spec,
+                  selected: _sports.any((s) => s.sportId == spec.id),
+                  categoryCount:
+                      _sports.where((s) => s.sportId == spec.id).length,
+                  onChanged: (on) => setState(() {
+                    if (on) {
+                      _sports.add(_SeasonSport(sportId: spec.id));
+                    } else {
+                      _sports.removeWhere((s) => s.sportId == spec.id);
+                    }
+                  }),
+                  onAddCustomCategories: () =>
+                      _addCategoriesForSport(sportId: spec.id),
+                ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
   Widget _structureStep(BuildContext context) {
+    final presets = CompetitionCategory.presets(cutOff: _startDate);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        for (final entry in _sports) ...[
-          PsCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Row(
-                  children: [
-                    SportBadge(sportId: entry.sportId, size: 34),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        entry.sport.name,
-                        style: const TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w700,
-                          color: Ps.ink,
+        for (int i = 0; i < _sports.length; i++) ...[
+          Builder(builder: (context) {
+            final entry = _sports[i];
+            return PsCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      SportBadge(sportId: entry.sportId, size: 34),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              entry.displayName,
+                              style: const TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700,
+                                color: Ps.ink,
+                              ),
+                            ),
+                            Text(
+                              entry.sport.name,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: Ps.muted,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
+                      IconButton(
+                        icon:
+                            const Icon(Icons.close, size: 20, color: Ps.muted),
+                        tooltip: 'Remove category',
+                        onPressed: () => setState(() => _sports.removeAt(i)),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  if (entry.sport.sideFormats.length > 1)
+                    WizardField(
+                      label: 'Arrangement',
+                      child: _dropdown<String>(
+                        value: entry.sideFormat.id,
+                        items: [
+                          for (final f in entry.sport.sideFormats)
+                            DropdownMenuItem(value: f.id, child: Text(f.name)),
+                        ],
+                        onChanged: (v) => setState(() {
+                          entry.sideFormat = entry.sport.sideFormats
+                              .firstWhere((f) => f.id == v);
+                        }),
+                      ),
                     ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                if (entry.sport.sideFormats.length > 1)
                   WizardField(
-                    label: 'Arrangement',
+                    label: 'Category (Age / Gender)',
                     child: _dropdown<String>(
-                      value: entry.sideFormat.id,
+                      value: entry.category.label,
                       items: [
-                        for (final f in entry.sport.sideFormats)
-                          DropdownMenuItem(value: f.id, child: Text(f.name)),
+                        for (final cat in presets)
+                          DropdownMenuItem(
+                              value: cat.label, child: Text(cat.label)),
                       ],
-                      onChanged: (v) => setState(() {
-                        entry.sideFormat = entry.sport.sideFormats
-                            .firstWhere((f) => f.id == v);
+                      onChanged: (label) => setState(() {
+                        if (label != null) {
+                          entry.category =
+                              presets.firstWhere((c) => c.label == label);
+                        }
                       }),
                     ),
                   ),
-                WizardField(
-                  label: 'Format',
-                  child: _dropdown<CompetitionFormat>(
-                    value: entry.format,
-                    items: [
-                      for (final f in entry.sport.competitionFormats)
-                        DropdownMenuItem(value: f, child: Text(f.label)),
-                    ],
-                    onChanged: (v) =>
-                        setState(() => entry.format = v ?? entry.format),
+                  WizardField(
+                    label: 'Format',
+                    child: _dropdown<CompetitionFormat>(
+                      value: entry.format,
+                      items: [
+                        for (final f in entry.sport.competitionFormats)
+                          DropdownMenuItem(value: f, child: Text(f.label)),
+                      ],
+                      onChanged: (v) =>
+                          setState(() => entry.format = v ?? entry.format),
+                    ),
                   ),
-                ),
-                WizardField(
-                  label: entry.sport.defaultEntrantType == EntrantType.team
-                      ? 'Maximum teams'
-                      : 'Maximum entries',
-                  child: _dropdown<int>(
-                    value: entry.maxEntrants,
-                    items: [
-                      for (final n in const [4, 8, 16, 32, 64, 128])
-                        DropdownMenuItem(value: n, child: Text('$n')),
-                    ],
-                    onChanged: (v) =>
-                        setState(() => entry.maxEntrants = v ?? 16),
+                  WizardField(
+                    label: entry.sport.defaultEntrantType == EntrantType.team
+                        ? 'Maximum teams'
+                        : 'Maximum entries',
+                    child: _dropdown<int>(
+                      value: entry.maxEntrants,
+                      items: [
+                        for (final n in const [4, 8, 16, 32, 64, 128])
+                          DropdownMenuItem(value: n, child: Text('$n')),
+                      ],
+                      onChanged: (v) =>
+                          setState(() => entry.maxEntrants = v ?? 16),
+                    ),
                   ),
-                ),
-              ],
-            ),
-          ),
+                ],
+              ),
+            );
+          }),
           const SizedBox(height: 12),
         ],
+        OutlinedButton.icon(
+          onPressed: () => _addCategoriesForSport(),
+          icon: const Icon(Icons.add_circle_outline, size: 18),
+          label: const Text('Add More Sport Categories (+)'),
+          style: OutlinedButton.styleFrom(
+            padding: const EdgeInsets.symmetric(vertical: 14),
+          ),
+        ),
       ],
     );
   }
@@ -409,7 +564,7 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
                 ),
               ),
               WizardField(
-                label: 'Venue',
+                label: 'Venue shown on each event',
                 child: TextField(
                   controller: _venue,
                   decoration: _input('Green Field Ground'),
@@ -418,17 +573,131 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
             ],
           ),
         ),
-        const SizedBox(height: 10),
-        const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 4),
-          child: Text(
-            'One venue for the season. Assigning a different ground to each '
-            'sport is not supported yet — an event carries a single venue.',
-            style: TextStyle(fontSize: 12, color: Ps.muted, height: 1.4),
-          ),
-        ),
+        const SizedBox(height: 12),
+        _venuePicker(context),
       ],
     );
+  }
+
+  /// Grounds and their courts, which is what the timetable is actually built
+  /// out of.
+  ///
+  /// Separate from the free-text field above on purpose: that string is the
+  /// line printed on an event ("Green Field Ground"), while these are real
+  /// [Venue] documents whose courts the scheduler allocates. Conflating them
+  /// is what left seasons unschedulable — a name is not a court.
+  Widget _venuePicker(BuildContext context) {
+    final venuesAsync = ref.watch(venuesProvider(widget.orgId));
+
+    return PsCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text(
+            'Grounds & Courts',
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w700,
+              color: Ps.ink,
+            ),
+          ),
+          const SizedBox(height: 2),
+          const Text(
+            'Pick every ground this season may use. Matches are spread across '
+            'their courts when the schedule is generated.',
+            style: TextStyle(fontSize: 12, color: Ps.muted, height: 1.4),
+          ),
+          const SizedBox(height: 12),
+          venuesAsync.when(
+            loading: () => const Padding(
+              padding: EdgeInsets.symmetric(vertical: 12),
+              child: Center(
+                child: SizedBox(
+                  height: 20,
+                  width: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+            ),
+            error: (e, _) => Text(
+              'Could not load your venues: $e',
+              style: const TextStyle(fontSize: 12, color: Ps.muted),
+            ),
+            data: (venues) {
+              final usable = [
+                for (final v in venues)
+                  if (!v.isArchived) v,
+              ];
+              if (usable.isEmpty) {
+                return const Text(
+                  'No grounds saved yet. Add one below — a season with no '
+                  'courts cannot be scheduled.',
+                  style: TextStyle(fontSize: 12, color: Ps.muted, height: 1.4),
+                );
+              }
+              return Column(
+                children: [
+                  for (final v in usable)
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      controlAffinity: ListTileControlAffinity.leading,
+                      value: _venueIds.contains(v.id),
+                      title: Text(
+                        v.name,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: Ps.ink,
+                        ),
+                      ),
+                      subtitle: Text(
+                        '${v.usableCourts.length} usable '
+                        '${v.usableCourts.length == 1 ? "court" : "courts"}'
+                        '${v.address == null ? "" : " · ${v.address}"}',
+                        style: const TextStyle(fontSize: 12, color: Ps.muted),
+                      ),
+                      onChanged: (on) => setState(() {
+                        if (on ?? false) {
+                          _venueIds.add(v.id);
+                        } else {
+                          _venueIds.remove(v.id);
+                        }
+                      }),
+                    ),
+                ],
+              );
+            },
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: _addVenue,
+            icon: const Icon(Icons.add_location_alt_outlined, size: 18),
+            label: const Text('Add a ground & its courts'),
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Saves a new ground and ticks it, so adding one is a single action rather
+  /// than an add followed by a select the organizer has to remember.
+  Future<void> _addVenue() async {
+    final draft = await showQuickAddVenueDialog(context, orgId: widget.orgId);
+    if (draft == null || !mounted) return;
+    try {
+      final id = await ref.read(tournamentRepositoryProvider).createVenue(draft);
+      if (!mounted) return;
+      setState(() => _venueIds.add(id));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not save that ground: $e')),
+      );
+    }
   }
 
   Widget _settingsStep(BuildContext context) {
@@ -582,6 +851,15 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
                     : _venue.text.trim(),
               ),
               WizardReviewRow(
+                label: 'Grounds for scheduling',
+                // Surfaced on the review step because it is the one omission
+                // that does not announce itself until the organizer tries to
+                // build a timetable and is told there are no courts.
+                value: _venueIds.isEmpty
+                    ? 'None — the schedule cannot be generated'
+                    : '${_venueIds.length} selected',
+              ),
+              WizardReviewRow(
                 label: 'Entries',
                 value: _externalEntries
                     ? 'Open to other clubs, by approval'
@@ -659,7 +937,7 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
         focusedBorder: _border(Ps.primary),
       );
 
-  static OutlineInputBorder _border(Color color) => OutlineInputBorder(
+  OutlineInputBorder _border(Color color) => OutlineInputBorder(
         borderRadius: BorderRadius.circular(Ps.radiusSm),
         borderSide: BorderSide(color: color),
       );
@@ -681,17 +959,21 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
   }
 }
 
-/// A sport with a checkbox, as the Select Sports step is built from.
+/// A sport with a checkbox and + quick category selector button.
 class _SportCheckRow extends StatelessWidget {
   const _SportCheckRow({
     required this.spec,
     required this.selected,
     required this.onChanged,
+    this.categoryCount = 0,
+    this.onAddCustomCategories,
   });
 
   final SportSpec spec;
   final bool selected;
   final ValueChanged<bool> onChanged;
+  final int categoryCount;
+  final VoidCallback? onAddCustomCategories;
 
   @override
   Widget build(BuildContext context) {
@@ -710,15 +992,36 @@ class _SportCheckRow extends StatelessWidget {
             SportBadge(sportId: spec.id, size: 30),
             const SizedBox(width: 12),
             Expanded(
-              child: Text(
-                spec.name,
-                style: const TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
-                  color: Ps.ink,
-                ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    spec.name,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: Ps.ink,
+                    ),
+                  ),
+                  if (categoryCount > 1)
+                    Text(
+                      '$categoryCount categories selected',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Ps.primary,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                ],
               ),
             ),
+            if (onAddCustomCategories != null)
+              IconButton.filledTonal(
+                icon: const Icon(Icons.add, size: 18),
+                tooltip: 'Add Singles / Doubles / Age categories for ${spec.name}',
+                visualDensity: VisualDensity.compact,
+                onPressed: onAddCustomCategories,
+              ),
           ],
         ),
       ),

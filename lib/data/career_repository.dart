@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../core/firebase/firestore_refs.dart';
+import '../core/models/enums.dart';
 import '../core/models/fixture.dart';
 import '../core/models/firestore_codec.dart';
 import '../domain/career/career_stats.dart';
@@ -77,6 +78,23 @@ class CareerRepository {
   Stream<List<Fixture>> watchOrgFixtures(String orgId, {int limit = 300}) {
     return Refs.allFixturesQuery
         .where('orgId', isEqualTo: orgId)
+        // Narrowed to matches that finished, which `ClubSportStats
+        // .forFixtures` was already the only consumer of — it skips anything
+        // failing `countsTowardsRecords` on the very first line — so this
+        // changes no number on any screen.
+        //
+        // It is also what authorizes the query. `firestore.rules` hides a
+        // placeholder fixture from everyone who cannot manage the competition,
+        // and Firestore fails a list containing one rather than trimming it,
+        // so an org with a single undrawn event would have broken its own club
+        // stats page. Pinning `status` excludes placeholders structurally —
+        // they are `scheduled` — where pinning `isDraft` would have dropped
+        // every fixture written before that field existed, an equality filter
+        // matching no document that lacks the field.
+        .where('status', whereIn: [
+          FixtureStatus.completed.wire,
+          FixtureStatus.walkover.wire,
+        ])
         .limit(limit)
         .snapshots()
         .map((snap) => snap.docs.map(Fixture.fromDoc).toList());

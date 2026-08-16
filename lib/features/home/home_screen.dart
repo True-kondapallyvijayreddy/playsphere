@@ -252,56 +252,69 @@ class HomeScreen extends ConsumerWidget {
                       // what they actually play — wrong far more often than
                       // right, and a decoration, not information. The text
                       // and the button carry the card on their own.
-                      Card(
-                        elevation: 0,
-                        color: theme.colorScheme.primaryContainer,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(18, 16, 14, 16),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
+                      // The whole card is the target, not just the button on
+                      // its right. The tagline underneath — "Score a casual
+                      // match or tournament game in seconds" — is gone for the
+                      // same reason: `Play Match Now` beside a play glyph
+                      // already says it, and the sentence was the only thing
+                      // making the card tall enough to look like it needed a
+                      // separate button to act on.
+                      Builder(
+                        builder: (context) {
+                          void start() {
+                            final pId = ref.read(primaryOrgIdProvider);
+                            if (pId != null) {
+                              context.push(Routes.quickMatch(pId));
+                            } else if (activeClubs.isNotEmpty) {
+                              context.push(
+                                Routes.quickMatch(activeClubs.first.orgId),
+                              );
+                            } else {
+                              context.push(Routes.orgs);
+                            }
+                          }
+
+                          return Material(
+                            color: theme.colorScheme.primaryContainer,
+                            borderRadius: BorderRadius.circular(12),
+                            child: InkWell(
+                              onTap: start,
+                              borderRadius: BorderRadius.circular(12),
+                              child: Padding(
+                                padding:
+                                    const EdgeInsets.fromLTRB(18, 16, 16, 16),
+                                child: Row(
                                   children: [
-                                    Text(
-                                      'Play Match Now',
-                                      style: theme.textTheme.titleMedium?.copyWith(
-                                        fontWeight: FontWeight.w800,
-                                        color: theme.colorScheme.onPrimaryContainer,
+                                    Icon(
+                                      Icons.play_circle_fill,
+                                      size: 26,
+                                      color: theme
+                                          .colorScheme.onPrimaryContainer,
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Text(
+                                        'Play Match Now',
+                                        style: theme.textTheme.titleMedium
+                                            ?.copyWith(
+                                          fontWeight: FontWeight.w800,
+                                          color: theme
+                                              .colorScheme.onPrimaryContainer,
+                                        ),
                                       ),
                                     ),
-                                    const SizedBox(height: 2),
-                                    Text(
-                                      'Score a casual match or tournament game in seconds',
-                                      style: theme.textTheme.bodySmall?.copyWith(
-                                        color: theme.colorScheme.onPrimaryContainer
-                                            .withValues(alpha: 0.8),
-                                      ),
+                                    Icon(
+                                      Icons.chevron_right,
+                                      size: 20,
+                                      color: theme
+                                          .colorScheme.onPrimaryContainer,
                                     ),
                                   ],
                                 ),
                               ),
-                              const SizedBox(width: 12),
-                              FilledButton.icon(
-                                onPressed: () {
-                                  final pId = ref.read(primaryOrgIdProvider);
-                                  if (pId != null) {
-                                    context.push(Routes.quickMatch(pId));
-                                  } else if (activeClubs.isNotEmpty) {
-                                    context.push(Routes.quickMatch(activeClubs.first.orgId));
-                                  } else {
-                                    context.push(Routes.orgs);
-                                  }
-                                },
-                                icon: const Icon(Icons.play_arrow, size: 18),
-                                label: const Text('Start'),
-                              ),
-                            ],
-                          ),
-                        ),
+                            ),
+                          );
+                        },
                       ),
                       const SizedBox(height: 16),
 

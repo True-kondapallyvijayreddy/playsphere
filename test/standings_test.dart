@@ -38,6 +38,26 @@ void main() {
           Entrant(id: n, displayName: n, entrantType: EntrantType.team),
       ];
 
+  /// A PLACEHOLDER match, as `generateDraftSchedule` writes them: a bracket
+  /// laid out against synthetic entrants before anybody has registered.
+  ///
+  /// Built directly rather than by `played(...).copyWith(isDraft: true)`,
+  /// because `Fixture.copyWith` deliberately refuses to carry `isDraft` — no
+  /// ordinary write path may launder a placeholder into a real match, which
+  /// is exactly the invariant these two tests rest on.
+  Fixture placeholder(String home, String away) => Fixture(
+        id: '$home-$away-draft',
+        orgId: 'o1',
+        compId: 'c1',
+        entrantAId: home,
+        entrantBId: away,
+        entrantAName: home,
+        entrantBName: away,
+        status: FixtureStatus.scheduled,
+        scoringPluginKey: 'goal_based',
+        isDraft: true,
+      );
+
   /// A finished match. [a] and [b] are goals, used both to decide the winner
   /// and to exercise score difference.
   Fixture played(String home, String away, int a, int b) {
@@ -238,6 +258,45 @@ void main() {
       );
       expect(table.length, 1);
       expect(table.first.played, 0);
+    });
+
+    test('a DRAFT fixture may name entrants that do not exist yet', () {
+      // The other side of the rule above, and the reason it has to be stated
+      // as a pair. `generateDraftSchedule` lays a bracket out against
+      // placeholders before registration has produced anybody, so a draft
+      // table has to invent its rows or the preview is blank — while a played
+      // fixture naming a stranger stays ignored, because there the same shape
+      // means stale data rather than a placeholder.
+      final table = calc.compute(
+        competition: competition(),
+        entrants: const [],
+        fixtures: [
+          placeholder('Team A', 'Team B'),
+        ],
+      );
+      expect(table.length, 2);
+      expect(
+        table.map((r) => r.displayName).toSet(),
+        {'Team A', 'Team B'},
+      );
+    });
+
+    test('a played fixture does not resurrect an entrant a draft invented', () {
+      // Mixed input: the placeholder is only carried by the draft fixture, so
+      // the stranger on the completed one must still be dropped.
+      final table = calc.compute(
+        competition: competition(),
+        entrants: entrants(['Alpha']),
+        fixtures: [
+          played('Alpha', 'Withdrawn', 1, 0),
+          placeholder('Team A', 'Team B'),
+        ],
+      );
+      expect(
+        table.map((r) => r.entrantId).toSet(),
+        {'Alpha', 'Team A', 'Team B'},
+        reason: '"Withdrawn" is on a played fixture and is not an entrant',
+      );
     });
   });
 }

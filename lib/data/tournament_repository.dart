@@ -17,8 +17,10 @@ import '../core/models/tournament_invite.dart';
 import '../core/models/tournament_official.dart';
 import '../core/models/venue.dart';
 import '../domain/draw/officials_roster.dart';
+import '../domain/draw/schedule_guarantees.dart';
 import '../domain/draw/schedule_shift.dart';
 import '../domain/draw/tournament_scheduler.dart';
+import 'competition_repository.dart';
 import 'org_repository.dart' show guard;
 
 /// Venues, tournaments, and the one operation that needs both: laying out
@@ -143,6 +145,271 @@ class TournamentRepository {
         () => Refs.tournament(tournament.orgId, tournament.id)
             .update(tournament.toUpdate()),
       );
+
+  /// Updates the list of assigned venue IDs for this tournament.
+  Future<void> updateTournamentVenues({
+    required String orgId,
+    required String tournamentId,
+    required List<String> venueIds,
+  }) =>
+      guard(() => Refs.tournament(orgId, tournamentId).update({
+            'venueIds': venueIds,
+            'updatedAt': FieldValue.serverTimestamp(),
+          }));
+
+  /// Locks the tournament schedule and releases it to participants.
+  ///
+  /// ## Why this refuses rather than publishing everything it finds
+  ///
+  /// `Fixture.isDraft` does NOT mean "a real draw not yet announced" — it
+  /// means a PLACEHOLDER, a bracket `generateDraftSchedule` laid out against
+  /// synthetic entrants ("Team A", "Team B") so an organizer could see the
+  /// shape of an event before registration produced anybody. `generateDraw`
+  /// replaces them: it deletes every fixture in the event and writes the real
+  /// draw in their place, which is why `Fixture.copyWith` refuses to carry
+  /// `isDraft` at all.
+  ///
+  /// So a draft fixture surviving to this point is not something to publish —
+  /// it is an event whose real draw was never generated. Clearing the flag
+  /// would announce "Team A vs Team B, Court 3, 9:00" to every registered
+  /// player. Naming the events and stopping is the only correct answer, and
+  /// it is the check that turns "I thought I'd done that one" into a message
+  /// instead of a Sunday morning.
+  Future<void> lockSchedule({
+    required String orgId,
+    required String tournamentId,
+  }) =>
+      guard(() async {
+        final eventsSnap = await Refs.competitions(orgId)
+            .where('tournamentId', isEqualTo: tournamentId)
+            .get();
+
+        // Read every event before writing anything, so a season that cannot
+        // legally publish has not already half-published itself.
+        final placeholderEvents = <String>[];
+        var fixtureCount = 0;
+        for (final doc in eventsSnap.docs) {
+          final fixtureSnap = await Refs.fixtures(orgId, doc.id).get();
+          fixtureCount += fixtureSnap.docs.length;
+          final hasPlaceholder =
+              fixtureSnap.docs.map(Fixture.fromDoc).any((f) => f.isDraft);
+          if (hasPlaceholder) {
+            placeholderEvents.add(Competition.fromDoc(doc).name);
+          }
+        }
+
+        if (fixtureCount == 0) {
+          throw const ValidationException(
+            'There are no matches to publish yet. Generate the draws first.',
+          );
+        }
+
+        if (placeholderEvents.isNotEmpty) {
+          throw ValidationException(
+            'These events still have a placeholder draw, not a real one: '
+            '${placeholderEvents.join(', ')}. Generate the draw for each '
+            'before publishing, or their entrants go out as "Team A".',
+          );
+        }
+
+        final batch = ChunkedBatch(Refs.db);
+        batch.update(Refs.tournament(orgId, tournamentId), {
+          'status': TournamentStatus.scheduled.wire,
+          'isScheduleLocked': true,
+          'scheduleReleasedAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+
+        for (final doc in eventsSnap.docs) {
+          batch.update(doc.reference, {
+            'status': CompetitionStatus.scheduled.wire,
+            'updatedAt': FieldValue.serverTimestamp(),
+          });
+        }
+
+        // Last, so a batch that fails part way through has not told anybody
+        // to go and look at a schedule that was never published.
+        final notifRef = Refs.notifications(orgId).doc();
+        batch.set(notifRef, {
+          'type': 'tournament_schedule_released',
+          'tournamentId': tournamentId,
+          'orgId': orgId,
+          'title': 'Tournament Schedule Released',
+          'body': 'The match schedule has been officially locked and published. Check your match timings and court details!',
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+
+        // Awaited, unlike the draw paths: an organizer pressing "publish" is
+        // entitled to know it landed, and the notification has already gone.
+        await batch.commitAll();
+      });
+
+  /// Regenerates the tournament schedule draft with non-overlapping timings
+  /// across available courts and rest intervals.
+  ///
+  /// The timing arguments are the organizer's answers to "how long is a match
+  /// and how much time do we need between them", and they are **persisted on
+  /// the tournament before the solve runs**, not merely passed through. Until
+  /// they were, the dialog that asks collected all three into local variables
+  /// and then called a zero-argument callback, so [generateSchedule] re-read
+  /// the stored defaults and every answer was silently discarded — the
+  /// organizer set a 15-minute changeover, watched a schedule appear, and got
+  /// the 5-minute one.
+  ///
+  /// Persisting also makes the answer stick: the next regeneration, the
+  /// per-day shift and the "running late" path all read the same fields, so
+  /// the tournament keeps its turnaround rather than reverting to the default
+  /// the moment anything else touches the timetable.
+  Future<TournamentScheduleReport> regenerateDraftSchedule({
+    required String orgId,
+    required String tournamentId,
+    int? matchMinutes,
+    int? changeoverMinutes,
+    int? restGapMinutes,
+  }) =>
+      guard(() async {
+        final overrides = <String, Object?>{
+          if (matchMinutes != null) 'matchMinutesDefault': matchMinutes,
+          if (changeoverMinutes != null) 'changeoverMinutes': changeoverMinutes,
+          if (restGapMinutes != null) 'restGapMinutes': restGapMinutes,
+        };
+        if (overrides.isNotEmpty) {
+          // Awaited, unlike most writes here: `generateSchedule` re-reads the
+          // tournament document on its first line, so a fire-and-forget write
+          // would race the read it is meant to inform.
+          await Refs.tournament(orgId, tournamentId).update({
+            ...overrides,
+            'updatedAt': FieldValue.serverTimestamp(),
+          });
+        }
+        return generateSchedule(
+          orgId: orgId,
+          tournamentId: tournamentId,
+          matchMinutesOverride: matchMinutes,
+        );
+      });
+
+  /// Draws every event, then lays the whole season out on one timetable.
+  ///
+  /// The operation the product exists to provide. An organizer running a
+  /// fifteen-event meet had to open each event, generate its draw, come back,
+  /// and only then ask for a schedule — fifteen trips through a bottom sheet
+  /// before anything could be scheduled at all, and no way to tell part-way
+  /// through which events were done. Everything below already existed; what
+  /// did not was a single call that runs them in the right order.
+  ///
+  /// Order matters and is the whole point: draws first, because
+  /// [generateSchedule] can only place fixtures that exist, and one schedule
+  /// pass afterwards over *all* of them, because clash-freedom is a property
+  /// of the whole season at once. Scheduling each event as it is drawn would
+  /// give every event a conflict-free timetable of its own and still put a
+  /// player on two courts at eleven — which is precisely the failure a
+  /// multi-category season produces and a per-event scheduler cannot see.
+  ///
+  /// Events already holding a scored match are left exactly as they are. A
+  /// season half-played is the case where regenerating is destructive, and
+  /// the honest response is to skip and say so rather than to refuse the
+  /// whole run because one event has started.
+  Future<SeasonSetupReport> setUpWholeSeason({
+    required String orgId,
+    required String tournamentId,
+    required String byUid,
+    int? matchMinutes,
+    int? changeoverMinutes,
+    int? restGapMinutes,
+  }) =>
+      guard(() async {
+        final tDoc = await Refs.tournament(orgId, tournamentId).get();
+        if (!tDoc.exists) {
+          throw const NotFoundException('That tournament no longer exists.');
+        }
+        final tournament = Tournament.fromDoc(tDoc);
+        if (tournament.startDate == null) {
+          throw const ValidationException(
+            'Set the season dates before laying out a schedule.',
+          );
+        }
+        if (tournament.venueIds.isEmpty) {
+          throw const ValidationException(
+            'This season has no grounds yet. Add a venue with at least one '
+            'court — the schedule is built out of courts.',
+          );
+        }
+
+        final eventSnap = await Refs.competitions(orgId)
+            .where('tournamentId', isEqualTo: tournamentId)
+            .get();
+        final events = eventSnap.docs.map(Competition.fromDoc).toList();
+        if (events.isEmpty) {
+          throw const ValidationException('This season has no events yet.');
+        }
+
+        const comps = CompetitionRepository();
+        final drawn = <String>[];
+        final skipped = <String>[];
+
+        for (final event in events) {
+          // Anything already scored is somebody's afternoon. Leave it.
+          final fixtureSnap = await Refs.fixtures(orgId, event.id).get();
+          final fixtures = fixtureSnap.docs.map(Fixture.fromDoc).toList();
+          if (fixtures.any((f) => f.lastSeq > 0 || f.hasResult)) {
+            skipped.add('${event.name}: already being played');
+            continue;
+          }
+          // A real draw already stands. Redrawing it would move people who
+          // have been told where they are.
+          if (fixtures.any((f) => !f.isDraft)) {
+            drawn.add(event.name);
+            continue;
+          }
+
+          final entrantSnap = await Refs.entrants(orgId, event.id).get();
+          final entrants = [
+            for (final doc in entrantSnap.docs)
+              if (!Entrant.fromDoc(doc).withdrawn) Entrant.fromDoc(doc),
+          ];
+
+          if (entrants.length < 2) {
+            skipped.add(
+              '${event.name}: ${entrants.length} entered, needs at least 2',
+            );
+            continue;
+          }
+
+          try {
+            await comps.generateDraw(
+              competition: event,
+              entrants: entrants,
+              defaultScorerUids: [byUid],
+            );
+            drawn.add(event.name);
+          } on AppException catch (e) {
+            // One event's draw failing is not the season's failure. Record it
+            // and carry on, so fourteen events still get a timetable.
+            skipped.add('${event.name}: ${e.message}');
+          }
+        }
+
+        if (drawn.isEmpty) {
+          throw ValidationException(
+            'No event could be drawn. ${skipped.join('; ')}',
+          );
+        }
+
+        final schedule = await regenerateDraftSchedule(
+          orgId: orgId,
+          tournamentId: tournamentId,
+          matchMinutes: matchMinutes,
+          changeoverMinutes: changeoverMinutes,
+          restGapMinutes: restGapMinutes,
+        );
+
+        return SeasonSetupReport(
+          eventsDrawn: drawn.length,
+          eventsSkipped: skipped,
+          schedule: schedule,
+        );
+      });
 
   /// Attaches an existing competition to a tournament, and keeps the
   /// denormalized event count in step.
@@ -549,6 +816,15 @@ class TournamentRepository {
   Future<TournamentScheduleReport> generateSchedule({
     required String orgId,
     required String tournamentId,
+
+    /// Replaces every event's own `matchMinutes` for this solve.
+    ///
+    /// Per-event match length is the right default — a U-13 singles and a
+    /// men's doubles final are not the same match — so this stays null on
+    /// every automatic path. It is set only when the organizer answered the
+    /// tournament-wide timing dialog, where naming one duration for the whole
+    /// meet is precisely what they were asked for.
+    int? matchMinutesOverride,
   }) =>
       guard(() async {
         final tDoc = await Refs.tournament(orgId, tournamentId).get();
@@ -642,7 +918,8 @@ class TournamentRepository {
               // Younger age groups first, so children are not kept at a
               // venue until the evening waiting on a senior draw.
               priority: _priorityFor(event),
-              matchMinutes: event.scheduleConfig.matchMinutes,
+              matchMinutes:
+                  matchMinutesOverride ?? event.scheduleConfig.matchMinutes,
             ));
             fixturesByKey['${event.id}#${f.matchIndex}'] = f;
           }
@@ -662,13 +939,35 @@ class TournamentRepository {
           slotMinutes: tournament.slotMinutes,
         );
 
+        final minRest = Duration(minutes: tournament.restGapMinutes);
         final schedule = const TournamentScheduler().schedule(
           matches: matches,
           courts: courts,
           slots: slots,
-          minRestBetweenMatches:
-              Duration(minutes: tournament.restGapMinutes),
+          minRestBetweenMatches: minRest,
         );
+
+        // The promises, checked rather than asserted in a comment. A clash
+        // that reaches an organizer is discovered at the venue by the person
+        // standing on the wrong court, so the schedule is verified before it
+        // is written and a violation refuses the write outright.
+        //
+        // Refusing is the right response even though it means no schedule:
+        // the previous timetable is still intact and still correct, whereas a
+        // published one with a double-booking in it has already been read,
+        // shared and acted on by the time anybody notices.
+        final violations = ScheduleGuarantees.verify(
+          matches: matches,
+          schedule: schedule,
+          minRestBetweenMatches: minRest,
+        );
+        if (violations.isNotEmpty) {
+          throw ValidationException(
+            'The schedule was rejected because it broke a guarantee, so '
+            'nothing was changed. ${violations.take(3).join('; ')}'
+            '${violations.length > 3 ? ' (+${violations.length - 3} more)' : ''}',
+          );
+        }
 
         // ---- Write it back. ----
         final batch = ChunkedBatch(Refs.db);
@@ -807,4 +1106,24 @@ class TournamentScheduleReport {
   final List<String> problems;
 
   bool get isComplete => unscheduled == 0;
+}
+
+/// What one press of "set up the whole season" actually did.
+class SeasonSetupReport {
+  const SeasonSetupReport({
+    required this.eventsDrawn,
+    required this.eventsSkipped,
+    required this.schedule,
+  });
+
+  final int eventsDrawn;
+
+  /// Events left alone, each with the reason — "Under-13 Singles: 1 entered,
+  /// needs at least 2". Surfaced in full rather than counted, because the
+  /// organizer's next action depends on which event and why.
+  final List<String> eventsSkipped;
+
+  final TournamentScheduleReport schedule;
+
+  bool get isClean => eventsSkipped.isEmpty && schedule.isComplete;
 }

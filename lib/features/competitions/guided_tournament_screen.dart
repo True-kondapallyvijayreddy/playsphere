@@ -46,6 +46,8 @@ class _GuidedTournamentScreenState
   late CompetitionCategory _category = CompetitionCategory.presets().first;
   CompetitionFormat _format = CompetitionFormat.groupThenKnockout;
   ParticipationModel _participation = ParticipationModel.open;
+  TeamEntryMode _teamEntryMode = TeamEntryMode.preformedTeam;
+  final List<String> _presetHouses = ['Red House', 'Blue House', 'Green House', 'Yellow House'];
 
   DateTime? _startDate;
   DateTime? _endDate;
@@ -113,16 +115,17 @@ class _GuidedTournamentScreenState
                   archetype: _sport.archetype,
                   entrantType: _sport.defaultEntrantType,
                   format: _format,
-                  status: CompetitionStatus.draft,
+                  status: CompetitionStatus.registrationOpen,
                   category: _category,
                   scoringPluginKey: _sport.pluginKey,
+                  teamEntryMode: _sport.defaultEntrantType == EntrantType.individual
+                      ? TeamEntryMode.individual
+                      : _teamEntryMode,
+                  presetHouses: _presetHouses,
                   venue:
                       _venue.text.trim().isEmpty ? null : _venue.text.trim(),
                   startDate: _startsAt,
                   maxEntrants: _maxEntrants,
-                  // The toggle is phrased as "Approval required", which is the
-                  // organizer's word for it; the model's word is a
-                  // participation model, and approval is one of three.
                   participationModel: _approvalRequired
                       ? ParticipationModel.approval
                       : _participation,
@@ -227,12 +230,57 @@ class _GuidedTournamentScreenState
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (isTeamSport) ...[
+          PsCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  'Team Formation & Registration Model',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: Ps.ink,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                _ParticipationChoice(
+                  label: 'Pre-formed Club / Team (Pro Leagues)',
+                  help: 'Captains or managers submit a team name & full squad roster',
+                  selected: _teamEntryMode == TeamEntryMode.preformedTeam,
+                  onTap: () => setState(
+                    () => _teamEntryMode = TeamEntryMode.preformedTeam,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                _ParticipationChoice(
+                  label: 'School Houses / Class Batches',
+                  help: 'Students register individually by selecting their House (Red, Blue, Green, Yellow)',
+                  selected: _teamEntryMode == TeamEntryMode.houseBatch,
+                  onTap: () => setState(
+                    () => _teamEntryMode = TeamEntryMode.houseBatch,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                _ParticipationChoice(
+                  label: 'Player Pool & Organizer Draft',
+                  help: 'Players register solo into a pool, and organizer uses 1-click Auto-Draft',
+                  selected: _teamEntryMode == TeamEntryMode.playerPool,
+                  onTap: () => setState(
+                    () => _teamEntryMode = TeamEntryMode.playerPool,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
         PsCard(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               const Text(
-                'Participation Type',
+                'Participation Access',
                 style: TextStyle(
                   fontSize: 12.5,
                   fontWeight: FontWeight.w600,

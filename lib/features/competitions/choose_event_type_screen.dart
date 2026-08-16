@@ -6,6 +6,7 @@ import '../../core/layout/responsive.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/event_type.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/ui_kit.dart';
 
 /// Step one of creating anything: what kind of event is this?
 ///
@@ -15,9 +16,13 @@ import '../../shared/app_scaffold.dart';
 /// for a registration limit and a waitlist it would never use, and a
 /// challenge had no route through this screen at all.
 ///
-/// The screen deliberately shows all four with a sentence each rather than a
-/// dropdown. The choice decides the shape of everything that follows and
-/// cannot be changed afterwards, so it is worth a screen.
+/// All four are shown at once rather than behind a dropdown: the choice
+/// decides the shape of everything that follows and cannot be changed
+/// afterwards, so it is worth a screen. What it is NOT worth is a paragraph
+/// each — the screen used to open with a sentence about how to use it and
+/// then give every type three more, which is four hundred words in front of a
+/// decision an organizer makes in a second and has usually already made
+/// before opening the app.
 class ChooseEventTypeScreen extends ConsumerWidget {
   const ChooseEventTypeScreen({super.key, required this.orgId});
 
@@ -25,27 +30,17 @@ class ChooseEventTypeScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-
     return AppScaffold(
       orgId: orgId,
       title: 'New event',
-      subtitle: 'What are you setting up?',
       body: ListView(
-        padding: const EdgeInsets.only(bottom: 32),
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
         children: [
           ContentBounds(
             maxWidth: 640,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const SizedBox(height: 8),
-                Text(
-                  'Each type asks for different things, so pick this first '
-                  'and you will only be asked what actually applies.',
-                  style: theme.textTheme.bodyMedium,
-                ),
-                const SizedBox(height: 16),
                 for (final type in EventType.values)
                   _TypeCard(
                     type: type,
@@ -118,66 +113,71 @@ class _TypeCard extends StatelessWidget {
   final EventType type;
   final VoidCallback onTap;
 
-  /// An alternative route into the same event type, shown as a text button
-  /// under the description. Absent for types that have only one.
+  /// An alternative route into the same event type. Rendered as a small
+  /// trailing button rather than a line of its own, so the shortcut for
+  /// somebody who already knows what they want costs the row no height.
   final String? secondaryLabel;
   final VoidCallback? onSecondary;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final secondary = onSecondary;
 
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: PsCard(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
         onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(type.icon, size: 28, color: theme.colorScheme.primary),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(type.label, style: theme.textTheme.titleMedium),
-                    const SizedBox(height: 2),
-                    Text(
-                      type.tagline,
-                      style: theme.textTheme.labelMedium
-                          ?.copyWith(color: theme.colorScheme.primary),
+        child: Row(
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: Ps.primary.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(Ps.radiusSm),
+              ),
+              child: Icon(type.icon, size: 20, color: Ps.primary),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    type.label,
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: Ps.ink,
                     ),
-                    const SizedBox(height: 8),
-                    Text(type.description, style: theme.textTheme.bodySmall),
-                    if (secondaryLabel != null && onSecondary != null) ...[
-                      const SizedBox(height: 4),
-                      // Aligned left under the description and visually
-                      // quieter than the card itself: it is the shortcut for
-                      // somebody who already knows what they want, not a
-                      // choice a first-time organizer has to weigh.
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: TextButton(
-                          onPressed: onSecondary,
-                          style: TextButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(vertical: 4),
-                            minimumSize: Size.zero,
-                            tapTargetSize:
-                                MaterialTapTargetSize.shrinkWrap,
-                          ),
-                          child: Text(secondaryLabel!),
-                        ),
-                      ),
-                    ],
-                  ],
+                  ),
+                  const SizedBox(height: 2),
+                  // The tagline stays and the paragraph goes. "Several
+                  // sports, one calendar" is the distinction between the four
+                  // types; the paragraph underneath it was restating that at
+                  // length and then listing what the next screen will ask,
+                  // which the next screen is about to do anyway.
+                  Text(
+                    type.tagline,
+                    style: const TextStyle(fontSize: 12.5, color: Ps.muted),
+                  ),
+                ],
+              ),
+            ),
+            if (secondaryLabel != null && secondary != null)
+              Tooltip(
+                message: secondaryLabel!,
+                child: IconButton(
+                  onPressed: secondary,
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.bolt_outlined, size: 20),
+                  color: Ps.primary,
                 ),
               ),
-              Icon(Icons.chevron_right, color: theme.hintColor),
-            ],
-          ),
+            const Icon(Icons.chevron_right, size: 18, color: Ps.faint),
+          ],
         ),
       ),
     );

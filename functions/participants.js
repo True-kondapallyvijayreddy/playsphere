@@ -98,6 +98,7 @@ export async function backfillParticipants({ dryRun = false } = {}) {
   let updated = 0;
   let entrantUidsWritten = 0;
   let playerUidsRepaired = 0;
+  let isDraftWritten = 0;
 
   // Entrants are read per competition rather than as one collection-group
   // sweep, because a fixture has to be matched to the entrants of ITS OWN
@@ -148,6 +149,26 @@ export async function backfillParticipants({ dryRun = false } = {}) {
       entrantUidsWritten += 1;
     }
 
+    // `isDraft` on every fixture that predates the field.
+    //
+    // Folded into this sweep rather than given its own because it is the same
+    // collection-group scan over the same documents, and running two of them
+    // over every historical match costs twice for no benefit.
+    //
+    // It is not cosmetic. `firestore.rules` gates a fixture on
+    // `resource.data.isDraft == false`, a STRICT comparison — the defaulting
+    // form is vacuously true when Firestore evaluates a list against a query
+    // rather than a document, which is exactly how the first version of that
+    // rule passed its tests and still served drafts. Strict means a document
+    // missing the field is denied to everyone who cannot manage the
+    // competition, so a match written before the field existed becomes
+    // invisible until this runs. `false` is always right for them: `isDraft`
+    // marks placeholders, and placeholders are younger than the flag.
+    if (fixture.isDraft === undefined) {
+      update.isDraft = false;
+      isDraftWritten += 1;
+    }
+
     // Additions only, and via arrayUnion rather than a computed list.
     //
     // A line-up that was edited and a player who was later removed are the
@@ -180,13 +201,15 @@ export async function backfillParticipants({ dryRun = false } = {}) {
   logger.info(
     `participants backfill: scanned ${scanned}, ` +
       `${dryRun ? 'would update' : 'updated'} ${updated} ` +
-      `(${entrantUidsWritten} entrant uids, ${playerUidsRepaired} playerUids)`,
+      `(${entrantUidsWritten} entrant uids, ${playerUidsRepaired} playerUids, ` +
+      `${isDraftWritten} isDraft)`,
   );
   return {
     scanned,
     updated,
     entrantUidsWritten,
     playerUidsRepaired,
+    isDraftWritten,
     dryRun,
   };
 }

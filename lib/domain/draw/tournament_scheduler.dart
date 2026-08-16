@@ -281,8 +281,30 @@ class TournamentScheduler {
   /// Deterministic, so regenerating a schedule produces the same one and an
   /// organizer can be told why a match moved.
   List<SchedulableMatch> _ordered(List<SchedulableMatch> matches) {
+    // Priority is applied per DRAW, not per match, and that is a correctness
+    // requirement rather than a preference.
+    //
+    // `roundBarrier` below records one "everything so far has finished by"
+    // time per draw, which is only sound if that draw's rounds are visited in
+    // ascending order. Sorting on each match's own priority breaks exactly
+    // that: give round 3 a lower priority number than round 2 and round 3 is
+    // placed first, against a barrier that has only seen round 1 — a
+    // semi-final scheduled before the quarter-final feeding it, which is the
+    // one thing the barrier exists to prevent.
+    //
+    // Every production caller already sets priority from the event
+    // (`_priorityFor`), so collapsing to the draw's minimum changes nothing
+    // there and closes the hole for any caller that does not. Found by the
+    // randomised season in `schedule_guarantees_test.dart`, not by reading.
+    final drawPriority = <String, int>{};
+    for (final m in matches) {
+      final seen = drawPriority[m.compId];
+      if (seen == null || m.priority < seen) drawPriority[m.compId] = m.priority;
+    }
+    int priorityOf(SchedulableMatch m) => drawPriority[m.compId] ?? m.priority;
+
     return [...matches]..sort((a, b) {
-        final byPriority = a.priority.compareTo(b.priority);
+        final byPriority = priorityOf(a).compareTo(priorityOf(b));
         if (byPriority != 0) return byPriority;
         // Group stages before knockouts: a knockout cannot start until the
         // groups feeding it are done, and both number their rounds from 1.

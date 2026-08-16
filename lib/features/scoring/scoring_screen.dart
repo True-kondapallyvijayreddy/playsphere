@@ -344,8 +344,6 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
             return EmptyState(
               icon: Icons.groups_outlined,
               title: 'Set the line-ups first',
-              message: 'Scoring records who did what, so both sides need '
-                  'their players before the first ball.',
               action: FilledButton.icon(
                 onPressed: () => showDialog<void>(
                   context: context,
@@ -661,9 +659,6 @@ class _MatchDayActions extends ConsumerWidget {
                   : '$tossName won the toss and chose to '
                       '${fixture.tossDecision ?? ""}',
             ),
-            subtitle: toss == null
-                ? const Text('Decides which side starts')
-                : null,
             trailing: const Icon(Icons.chevron_right),
             onTap: () => showDialog<void>(
               context: context,
@@ -734,11 +729,14 @@ class _AdminActions extends ConsumerWidget {
     final a = fixture.entrantAName;
     final b = fixture.entrantBName;
 
+    // Collapsed by default and staying that way: these are the outcomes a
+    // scorer needs perhaps once a season, and the per-option hints inside are
+    // NOT trimmed — "awards the points; moves no rating" is the difference
+    // between two outcomes that look identical on the card, and a scorer
+    // picking between them is making a decision the hint is the only source
+    // for. Explanation that changes what someone chooses is not decoration.
     return ExpansionTile(
       title: const Text('Match did not play normally'),
-      subtitle: const Text(
-        'Walkover, retirement, disqualification, abandonment or dispute',
-      ),
       children: [
         _OutcomeGroup(
           icon: Icons.directions_walk,

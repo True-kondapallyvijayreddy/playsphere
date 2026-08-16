@@ -164,13 +164,21 @@ void main() {
       await tester.pumpWidget(harness());
       await tester.pumpAndSettle();
 
+      // Share is the one action everyone on this screen takes, so it stays
+      // on the surface. The management actions moved behind the header's `⋮`
+      // — five unlabelled glyphs beside the tournament's name were squeezing
+      // the name itself into a third of the header.
+      expect(find.byTooltip('Share the public link'), findsOneWidget);
+
+      await tester.tap(find.byTooltip('More actions'));
+      await tester.pumpAndSettle();
+
       expect(
-        find.byTooltip('Invite other clubs'),
+        find.text('Invite clubs'),
         findsOneWidget,
         reason: 'the public link broadcasts; this is how named clubs are asked',
       );
-      expect(find.byTooltip('Edit'), findsOneWidget);
-      expect(find.byTooltip('Share the public link'), findsOneWidget);
+      expect(find.text('Edit'), findsOneWidget);
     });
   });
 }

@@ -141,6 +141,87 @@ enum EntrantType {
       );
 }
 
+/// How teams/squads are assembled from players.
+enum FormationMode {
+  /// Direct 1-tap single player entry.
+  individual('individual', 'Individual'),
+
+  /// Captain or leader creates a squad and invites members with an accept/decline handshake.
+  captainAssembled('captain_assembled', 'Captain-Led Squad'),
+
+  /// Players register into a solo pool, and the organizer balances/drafts squads.
+  organizerDraft('organizer_draft', 'Player Pool & Draft'),
+
+  /// Players self-assign to a pre-defined organization bucket (School House / Section).
+  bucketAssigned('bucket_assigned', 'House / Batch Bucket');
+
+  const FormationMode(this.wire, this.label);
+  final String wire;
+  final String label;
+
+  static FormationMode fromWire(String? w) {
+    if (w == null) return FormationMode.individual;
+    return FormationMode.values.firstWhere(
+      (e) => e.wire == w,
+      orElse: () => FormationMode.individual,
+    );
+  }
+}
+
+/// Strategy for handling leftover players when dividing a pool into teams.
+enum RemainderStrategy {
+  /// Distribute remaining players across teams making some squads 1 player larger.
+  distributeEvenly('distribute_evenly', 'Distribute across squads'),
+
+  /// Place leftover players as named reserves / bench on squads.
+  assignAsReserves('assign_as_reserves', 'Assign as reserves'),
+
+  /// Place leftover players into the priority waitlist.
+  overflowWaitlist('overflow_waitlist', 'Place on waitlist');
+
+  const RemainderStrategy(this.wire, this.label);
+  final String wire;
+  final String label;
+}
+
+/// How participants form or enter teams for a competition or season event.
+enum TeamEntryMode {
+  /// Direct 1-tap single player entry (Chess, Singles, Athletics).
+  individual('individual', 'Individual Entry'),
+
+  /// Doubles / Pairs (Badminton/Tennis Doubles) with partner invite or solo pool.
+  doubles('doubles', 'Doubles / Pairs'),
+
+  /// Pre-formed teams with a Captain/Manager and roster (Pro clubs, external leagues).
+  preformedTeam('preformed_team', 'Pre-formed Club / Team'),
+
+  /// School Houses or Class Batches (Red, Blue, Green, Yellow / 8A, 8B).
+  houseBatch('house_batch', 'School Houses / Batches'),
+
+  /// Solo student/member registration into a player pool, followed by organizer draft/auto-balance.
+  playerPool('player_pool', 'Player Pool & Draft');
+
+  const TeamEntryMode(this.wire, this.label);
+  final String wire;
+  final String label;
+
+  static TeamEntryMode fromWire(String? w) {
+    if (w == null) return TeamEntryMode.individual;
+    return TeamEntryMode.values.firstWhere(
+      (e) => e.wire == w,
+      orElse: () => TeamEntryMode.individual,
+    );
+  }
+
+  FormationMode get formationMode => switch (this) {
+        TeamEntryMode.individual => FormationMode.individual,
+        TeamEntryMode.doubles => FormationMode.captainAssembled,
+        TeamEntryMode.preformedTeam => FormationMode.captainAssembled,
+        TeamEntryMode.houseBatch => FormationMode.bucketAssigned,
+        TeamEntryMode.playerPool => FormationMode.organizerDraft,
+      };
+}
+
 /// What kind of team a `Team` document is.
 ///
 /// ## Why `independent` is not just `clubId == null`

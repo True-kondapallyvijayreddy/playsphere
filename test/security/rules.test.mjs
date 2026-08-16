@@ -81,9 +81,13 @@ const organization = (ownerUid, visibility) => ({
 });
 
 /** A fixture document as the draw generator writes it. */
-const fixture = (orgId, compId, scorerUids, status = 'live') => ({
+const fixture = (orgId, compId, scorerUids, status = 'live', isDraft = false) => ({
   orgId,
   compId,
+  // Every fixture the app writes carries this — `Fixture.toCreate()` always
+  // emits it — so the tests write it too. A draft is an unpublished draw the
+  // organizer is still moving around.
+  isDraft,
   entrantAId: 'entrant_a',
   entrantBId: 'entrant_b',
   entrantAName: 'Alice',
@@ -619,6 +623,136 @@ describe('P0-2: fixtures collection-group queries', () => {
           where('status', '==', 'live'),
         ),
       ),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A draft draw is internal until it is published
+// ---------------------------------------------------------------------------
+//
+// `isDraft` marks a PLACEHOLDER draw — the bracket `generateDraftSchedule`
+// lays out against synthetic entrants before registration has produced anybody
+// real. It drove a banner in the UI but appeared nowhere in firestore.rules,
+// so for a PUBLIC org those placeholders were world-readable the moment they
+// were written: members saw "Team A vs Team B" for an undrawn event, with
+// nothing to distinguish it from a real schedule.
+//
+// Rules reject a list rather than filtering it, so these tests pin down BOTH
+// halves of the contract — the manager's unfiltered query must still work, and
+// the member's must carry `where('isDraft', '==', false)`, which is exactly
+// what `CompetitionRepository.watchFixtures` sends.
+describe('placeholder (draft) fixtures are visible only to organizers', () => {
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER),
+        membership(OWNER, PUBLIC_ORG, 'owner'),
+      );
+      // One real match and one placeholder, in the same competition — the
+      // state an organizer is in halfway through laying out a season.
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'published'),
+        fixture(PUBLIC_ORG, 'comp1', [SCORER], 'scheduled', false),
+      );
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'draft'),
+        fixture(PUBLIC_ORG, 'comp1', [SCORER], 'scheduled', true),
+      );
+    });
+  });
+
+  const fixturesOf = (db) =>
+    collection(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures');
+
+  it('refuses an outsider reading a single draft fixture', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      getDoc(doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'draft')),
+    );
+  });
+
+  it('still lets that outsider read the published one', async () => {
+    // The gate must be about the draft flag and nothing else — a public org's
+    // real schedule stays readable without an account, which is the whole
+    // spectator story.
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertSucceeds(
+      getDoc(doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'published')),
+    );
+  });
+
+  it('refuses an unfiltered list from someone who cannot manage the competition', async () => {
+    // The load-bearing negative, and the one an earlier version of this fix
+    // silently failed: rules do not filter a list, so a query that does not
+    // pin `isDraft` must be refused outright rather than quietly trimmed.
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(getDocs(query(fixturesOf(db))));
+  });
+
+  it('lets that same person list the published fixtures when the query pins isDraft', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    const snap = await assertSucceeds(
+      getDocs(query(fixturesOf(db), where('isDraft', '==', false))),
+    );
+    assert.equal(snap.size, 1);
+    assert.equal(snap.docs[0].id, 'published');
+  });
+
+  it('lets an organizer list everything, drafts included', async () => {
+    // The other half: if this ever fails, the organizer has lost sight of the
+    // draw they are in the middle of editing, which is a worse bug than the
+    // leak this block closes.
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    const snap = await assertSucceeds(getDocs(query(fixturesOf(db))));
+    assert.equal(snap.size, 2);
+  });
+
+  it('lets an organizer read one draft fixture directly', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      getDoc(doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'draft')),
+    );
+  });
+
+  it('DENIES a fixture missing isDraft entirely — the backfill is required', async () => {
+    // Documents the cost of the strict comparison honestly rather than
+    // papering over it. `resource.data.isDraft == false` cannot be satisfied
+    // by a document that has no such field, so a match written before the
+    // flag existed is invisible to non-organizers until it is backfilled.
+    //
+    // The defaulting form `.get('isDraft', false)` would let these through —
+    // and would also reopen the leak this whole block exists to close, since
+    // it reads as `false == false` for every unconstrained list. Backfilling
+    // is the resolution: `backfillParticipants` in functions/participants.js
+    // writes `isDraft: false` on every fixture that predates the field.
+    await seed(async (db) => {
+      const legacy = fixture(PUBLIC_ORG, 'comp1', [SCORER], 'completed');
+      delete legacy.isDraft;
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'legacy'),
+        legacy,
+      );
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      getDoc(doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'legacy')),
+    );
+  });
+
+  it('reads that same fixture once the backfill has written isDraft: false', async () => {
+    // The other half: the backfill genuinely resolves it, so the deny above
+    // is a migration step and not a permanent hole in the back catalogue.
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'backfilled'),
+        fixture(PUBLIC_ORG, 'comp1', [SCORER], 'completed', false),
+      );
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertSucceeds(
+      getDoc(doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'backfilled')),
     );
   });
 });

@@ -62,11 +62,9 @@ class MyEventsScreen extends ConsumerWidget {
                   QuietCard(
                     icon: Icons.calendar_month_outlined,
                     title: 'No events on right now',
-                    message: organizingOrgId == null
-                        ? 'When your club opens entries for something, it '
-                            'shows up here.'
-                        : 'Create one — pick a sport, set the age category, '
-                            'and open entries.',
+                    // No message: the title already says the list is empty,
+                    // and the organizer gets the button rather than a sentence
+                    // describing the form behind it.
                     action: organizingOrgId == null
                         ? null
                         : FilledButton.icon(
@@ -81,7 +79,6 @@ class MyEventsScreen extends ConsumerWidget {
                   const SectionHeader(
                     icon: Icons.emoji_events_outlined,
                     title: 'Your clubs',
-                    subtitle: 'Open for entries, scheduled, or being played',
                   ),
                   for (final item in feed)
                     switch (item) {

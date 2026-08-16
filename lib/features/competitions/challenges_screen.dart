@@ -570,12 +570,6 @@ class _CounterOfferDialogState extends State<_CounterOfferDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(
-              'The dates you propose replace the ones offered. '
-              '${widget.challenge.fromOrgName} then accepts or declines.',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-            const SizedBox(height: 14),
             if (_slots.isEmpty)
               Text(
                 'No dates proposed yet.',
@@ -868,12 +862,6 @@ class _IssueChallengeDialogState
                     : '${_legs.length} contests in this challenge',
                 style: Theme.of(context).textTheme.labelLarge,
               ),
-              const SizedBox(height: 2),
-              Text(
-                'Pick as many as you like — they are agreed together and '
-                'played as one fixture list.',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
               const SizedBox(height: 8),
               // One row per sport, one chip per arrangement. Doing it this way
               // rather than sport-then-a-second-step is what lets a club put
@@ -1016,12 +1004,6 @@ class _IssueChallengeDialogState
                   'Propose one or more dates',
                   style: Theme.of(context).textTheme.labelLarge,
                 ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                'Offering a choice is what stops a challenge dying in a '
-                'WhatsApp thread.',
-                style: Theme.of(context).textTheme.bodySmall,
               ),
               const SizedBox(height: 8),
               Wrap(

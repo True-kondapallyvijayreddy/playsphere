@@ -198,14 +198,14 @@ function notification({ id, type, title, body, route, params = {} }) {
  * a draft and telling a club about a draft its organizer is still writing
  * would be worse than saying nothing.
  */
-export const onEventOpened = onDocumentUpdated(
+export const onEventOpened = onDocumentWritten(
   'orgs/{orgId}/competitions/{compId}',
   async (event) => {
-    const before = event.data?.before.data();
-    const after = event.data?.after.data();
-    if (!before || !after) return;
-    if (before.status === after.status) return;
+    const before = event.data?.before?.data();
+    const after = event.data?.after?.data();
+    if (!after) return;
     if (after.status !== 'registration_open') return;
+    if (before && before.status === after.status) return;
 
     const { orgId, compId } = event.params;
     const uids = await activeMemberUids(orgId);
