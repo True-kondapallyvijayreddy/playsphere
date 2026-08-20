@@ -1,3 +1,4 @@
+import '../../../core/models/fixture.dart' show MatchEvent;
 import '../player_stats.dart';
 import '../scoring_plugin.dart';
 import 'cricket_scorecard.dart';
@@ -64,6 +65,15 @@ class CricketPlugin extends ScoringPlugin {
   static const _runOutAssists = 'runOutAssists';
 
   int _ballsPerOver(ScoringContext ctx) => ctx.intConfig('ballsPerOver', 6);
+
+  /// How many deliveries the strip remembers.
+  ///
+  /// Seven overs of a six-ball format, which is comfortably more than the
+  /// "last ten balls" a pad shows and leaves room for the wides and no-balls
+  /// that make an over longer than its name. The cost of a larger number is
+  /// paid by every spectator's device on every ball, because the timeline
+  /// rides on the fixture document that all of them are listening to.
+  static const _timelineCap = 42;
   int _overs(ScoringContext ctx) => ctx.intConfig('oversPerInnings', 20);
   int _wicketsAllowed(ScoringContext ctx) =>
       ctx.intConfig('playersPerTeam', 11) - 1;
@@ -155,6 +165,19 @@ class CricketPlugin extends ScoringPlugin {
         'batting': <String, dynamic>{},
         'bowling': <String, dynamic>{},
         'fow': <Map<String, dynamic>>[],
+        // Ball by ball, oldest first — what the pad's recent-deliveries strip
+        // is drawn from, and the only record of "what have the last six balls
+        // been" that survives a reopened app.
+        //
+        // On the projection rather than derived from the event log at read
+        // time, because the pad renders the projection and nothing else: a
+        // strip fed from the log would need a fetch per repaint on a device
+        // chosen for its camera rather than its signal, and would be empty
+        // for the whole of the first frame after every tap.
+        //
+        // Bounded — see [_timelineCap]. An innings is a few hundred balls and
+        // the fixture document is read by every spectator watching.
+        'timeline': <Map<String, dynamic>>[],
         // Runs conceded by the current bowler in the over in progress, used
         // only to decide whether it was a maiden.
         'overRuns': 0,
@@ -258,6 +281,7 @@ class CricketPlugin extends ScoringPlugin {
     final batting = Map<String, dynamic>.from(cur['batting'] as Map? ?? {});
     final bowling = Map<String, dynamic>.from(cur['bowling'] as Map? ?? {});
     final fow = copyList(cur['fow']);
+    final timeline = copyList(cur['timeline']);
     final freeHit = state['freeHit'] == true;
     final perOver = _ballsPerOver(ctx);
 
@@ -559,6 +583,15 @@ class CricketPlugin extends ScoringPlugin {
     batting[striker] = bat;
     bowling[bowler] = bowl;
 
+    // The delivery, as the strip will draw it. Recorded here rather than in
+    // each `case` above because what a ball WAS is only settled once the
+    // wicket branch has had its say: a run-out off a no-ball is both, and the
+    // strip has to show the dismissal.
+    timeline.add(_chip(action, ctx, wicketFell: wicketFell));
+    if (timeline.length > _timelineCap) {
+      timeline.removeRange(0, timeline.length - _timelineCap);
+    }
+
     if (wicketFell) {
       fow.add({
         'n': i(cur['wickets']),
@@ -583,6 +616,9 @@ class CricketPlugin extends ScoringPlugin {
     // End of over: strike rotates, the bowler must change, and a maiden is
     // recorded if nothing at all was conceded.
     if (legalDelivery && i(cur['legalBalls']) % perOver == 0) {
+      // What turns a row of numbers into overs. A scorer, a captain and a
+      // commentator all think in overs, never in "the last nine deliveries".
+      timeline.last['over'] = true;
       if (i(cur['overRuns']) == 0) {
         bowl['maidens'] = i(bowl['maidens']) + 1;
         bowling[bowler] = bowl;
@@ -608,7 +644,8 @@ class CricketPlugin extends ScoringPlugin {
       ..['extras'] = extras
       ..['batting'] = batting
       ..['bowling'] = bowling
-      ..['fow'] = fow;
+      ..['fow'] = fow
+      ..['timeline'] = timeline;
     innings[idx] = cur;
 
     var next = mutate(state, (s) {
@@ -920,6 +957,158 @@ class CricketPlugin extends ScoringPlugin {
     ];
   }
 
+  /// One delivery, reduced to what a strip of them needs: what to print, and
+  /// what kind of thing it was. See [BallChip].
+  ///
+  /// A wicket prints as a wicket whatever else the ball was — a run-out off a
+  /// no-ball is, to everybody watching, the ball somebody got out on.
+  Map<String, dynamic> _chip(
+    ScoreAction action,
+    ScoringContext ctx, {
+    required bool wicketFell,
+  }) {
+    if (wicketFell) return {'l': 'W', 'k': 'wicket'};
+    final runs = (action.payload['runs'] as num?)?.toInt() ?? 0;
+    return switch (action.type) {
+      'wide' => {'l': runs == 0 ? 'Wd' : 'Wd+$runs', 'k': 'extra'},
+      'no_ball' => {'l': runs == 0 ? 'Nb' : 'Nb+$runs', 'k': 'extra'},
+      'bye' => {'l': '${runs == 0 ? 1 : runs}B', 'k': 'extra'},
+      'leg_bye' => {'l': '${runs == 0 ? 1 : runs}Lb', 'k': 'extra'},
+      // Runs off the bat. A dot is drawn as a dot, not as a nought, because
+      // that is the mark a scorer's eye counts down a scorebook column.
+      _ when runs == 0 => {'l': '•', 'k': 'dot'},
+      _ when runs == _boundaryFour(ctx) => {'l': '4', 'k': 'four'},
+      _ when runs == _boundarySix(ctx) => {'l': '6', 'k': 'six'},
+      _ => {'l': '$runs', 'k': 'runs'},
+    };
+  }
+
+  static BallKind _kindFromWire(Object? wire) => switch (wire) {
+        'dot' => BallKind.dot,
+        'four' => BallKind.boundary,
+        'six' => BallKind.maximum,
+        'wicket' => BallKind.wicket,
+        'extra' => BallKind.extra,
+        _ => BallKind.runs,
+      };
+
+  /// A rate, to one decimal, or an em dash.
+  ///
+  /// Zero is the wrong answer for "no balls faced yet": a batter on 0 off 0 is
+  /// not striking at 0.0, they have not struck at all, and a pad that prints
+  /// 0.0 tells a captain their opener is failing before the first ball is
+  /// bowled.
+  static String _rate(num numerator, num denominator) =>
+      denominator <= 0 ? '—' : (numerator / denominator).toStringAsFixed(1);
+
+  @override
+  PadLayout get padLayout => PadLayout.crease;
+
+  @override
+  CreaseBoard? creaseBoard(Map<String, dynamic> state, ScoringContext ctx) {
+    final cur = _current(state);
+    final idx = (state['inningsIndex'] as num?)?.toInt() ?? 0;
+    final perOver = _ballsPerOver(ctx);
+    final isSuperOver = state['superOver'] == true && idx >= 2;
+    final effectiveOvers = isSuperOver ? 1 : _overs(ctx);
+
+    final runs = (cur['runs'] as num?)?.toInt() ?? 0;
+    final wickets = (cur['wickets'] as num?)?.toInt() ?? 0;
+    final legalBalls = (cur['legalBalls'] as num?)?.toInt() ?? 0;
+
+    final extrasMap = cur['extras'] as Map? ?? const {};
+    var extras = 0;
+    for (final v in extrasMap.values) {
+      extras += (v as num?)?.toInt() ?? 0;
+    }
+
+    final batting = cur['batting'] as Map? ?? const {};
+    CreaseBatter? batter(Object? id, {required bool onStrike}) {
+      if (id is! String) return null;
+      final b = batting[id] as Map? ?? const {};
+      int f(String k) => (b[k] as num?)?.toInt() ?? 0;
+      final faced = f('balls');
+      return CreaseBatter(
+        name: ctx.playerName(id, 'Batter'),
+        runs: f('runs'),
+        balls: faced,
+        fours: f('fours'),
+        sixes: f('sixes'),
+        strikeRate: _rate(f('runs') * 100, faced),
+        onStrike: onStrike,
+      );
+    }
+
+    final bowlerId = cur['bowler'];
+    final bowlingMap = cur['bowling'] as Map? ?? const {};
+    CreaseBowler? bowler;
+    if (bowlerId is String) {
+      final b = bowlingMap[bowlerId] as Map? ?? const {};
+      int f(String k) => (b[k] as num?)?.toInt() ?? 0;
+      final bowled = f('balls');
+      bowler = CreaseBowler(
+        name: ctx.playerName(bowlerId, 'Bowler'),
+        overs: _oversText(bowled, ctx),
+        maidens: f('maidens'),
+        runs: f('runs'),
+        wickets: f('wickets'),
+        // Per OVER, not per ball — the one place the six has to be divided
+        // back out, and the reason this is computed here and not in the pad.
+        economy: _rate(f('runs') * perOver, bowled),
+      );
+    }
+
+    // The chase, when there is one. Even innings bat first and odd ones
+    // chase — the pattern holds through a Super Over, where the chasing
+    // innings is index 3.
+    final target = (state['target'] as num?)?.toInt();
+    String? chaseLine;
+    String? chaseNeed;
+    if (target != null && idx.isOdd && state['complete'] != true) {
+      final ballsLeft = effectiveOvers * perOver - legalBalls;
+      final needed = target - runs;
+      chaseLine =
+          'Target $target  ·  Req ${_rate(needed * perOver, ballsLeft)}';
+      chaseNeed = needed <= 0
+          ? 'Target passed'
+          : 'Need $needed run${needed == 1 ? '' : 's'} off $ballsLeft '
+              'ball${ballsLeft == 1 ? '' : 's'}';
+    }
+
+    return CreaseBoard(
+      battingTeam: ctx.nameFor(Side.fromWire(cur['battingSide'] as String?)),
+      inningsLabel: isSuperOver
+          ? 'Super Over'
+          : (idx == 0 ? '1st Innings' : '2nd Innings'),
+      score: '$runs-$wickets',
+      overs: _oversText(legalBalls, ctx),
+      oversOf: '$effectiveOvers',
+      extras: extras,
+      runRate: _rate(runs * perOver, legalBalls),
+      chaseLine: chaseLine,
+      chaseNeed: chaseNeed,
+      batters: [
+        if (batter(cur['striker'], onStrike: true) case final b?) b,
+        if (batter(cur['nonStriker'], onStrike: false) case final b?) b,
+      ],
+      bowler: bowler,
+      timeline: [
+        for (final entry in copyList(cur['timeline']))
+          BallChip(
+            label: entry['l'] as String? ?? '?',
+            kind: _kindFromWire(entry['k']),
+            endsOver: entry['over'] == true,
+          ),
+      ],
+      notes: [
+        if (isSuperOver) 'SUPER OVER',
+        if (state['freeHit'] == true) 'FREE HIT',
+        if (cur['striker'] == null) 'NEW BATTER',
+        if (cur['bowler'] == null && cur['nonStriker'] != null) 'NEW BOWLER',
+      ],
+    );
+  }
+
   String _oversText(int legalBalls, ScoringContext ctx) {
     final per = _ballsPerOver(ctx);
     return '${legalBalls ~/ per}.${legalBalls % per}';
@@ -944,6 +1133,44 @@ class CricketPlugin extends ScoringPlugin {
           inn['battingSide'] == 'a' ? ctx.entrantAName : ctx.entrantBName;
       return '$side $runs/$wkts (${_oversText(balls, ctx)})';
     }).join('  ·  ');
+  }
+
+  /// Cricket's own words for its own events.
+  ///
+  /// This switch used to live in `spectator_screen.dart`, which is a screen
+  /// that serves thirteen sports and knew the vocabulary of exactly one: every
+  /// badminton match's commentary read `point` forty times in a column because
+  /// the screen had no cricket-shaped word for it and no way to ask. The sport
+  /// owns its vocabulary — see [MatchEventLine].
+  @override
+  MatchEventLine? describeEvent(MatchEvent event, ScoringContext ctx) {
+    final side = Side.fromWire(event.payload['side'] as String?);
+    final batter = event.payload['playerId'] as String?;
+    final who = batter == null ? null : ctx.playerName(batter);
+
+    final text = switch (event.type) {
+      'runs' => switch ((event.payload['runs'] as num?)?.toInt() ?? 0) {
+          0 => 'Dot ball',
+          4 => 'FOUR',
+          6 => 'SIX',
+          final r => '$r run${r == 1 ? '' : 's'}',
+        },
+      'wicket' => 'WICKET',
+      'wide' => 'Wide',
+      'no_ball' => 'No ball — free hit',
+      'bye' => 'Bye',
+      'leg_bye' => 'Leg bye',
+      _ => null,
+    };
+    if (text == null) return super.describeEvent(event, ctx);
+
+    return MatchEventLine(
+      text: who == null ? text : '$text · $who',
+      side: side,
+      // A wicket is the break in a cricket timeline the way a set is in a
+      // rally one: it is what a reader scrolls to find.
+      isMilestone: event.type == 'wicket',
+    );
   }
 
   @override
@@ -1185,134 +1412,148 @@ class CricketPlugin extends ScoringPlugin {
       const ScoreControlGroup(
         title: 'Extras',
         controls: [
-          // The full extras ladder. Wides run +0..+4 and no-balls +0..+6
-          // because those are the values that actually occur: a no-ball can be
-          // hit for six, and an overthrow off one makes five. The gaps that
-          // used to be here (no Wd+3, no NB+2/3/5) were not rare cases the
-          // scorer could round off — each one is a run that has to go
-          // somewhere, so a scorer meeting one had to record a different
-          // delivery and the bowler's figures were wrong from that ball on.
+          // Four buttons, not twenty.
+          //
+          // The full ladder is still here and still complete — wides run
+          // +0..+4 and no-balls +0..+6, because those are the values that
+          // actually occur and each one is a run that has to go somewhere.
+          // What changed is where they sit. Flat, they were twenty tiles of
+          // identical weight and the plain wide, which is the overwhelming
+          // majority of every innings ever scored, took the same search as
+          // Wd+3. So the common delivery is the button and the graded ones
+          // are behind it — see [ScoreControl.variants], and `CreasePad` for
+          // the `+` tile that opens them.
           ScoreControl(
             action: 'wide',
-            label: 'Wide',
+            label: 'WD',
             shortcut: 'd',
             tooltip: '1 penalty run.',
-          ),
-          ScoreControl(
-            action: 'wide',
-            label: 'Wd+1',
-            payload: {'runs': 1},
-            tooltip: '1 wide + 1 run taken.',
-          ),
-          ScoreControl(
-            action: 'wide',
-            label: 'Wd+2',
-            payload: {'runs': 2},
-            tooltip: '1 wide + 2 runs taken.',
-          ),
-          ScoreControl(
-            action: 'wide',
-            label: 'Wd+3',
-            payload: {'runs': 3},
-            tooltip: '1 wide + 3 runs taken.',
-          ),
-          ScoreControl(
-            action: 'wide',
-            label: 'Wd+4',
-            payload: {'runs': 4},
-            tooltip: '1 wide + 4 boundary runs.',
+            variants: [
+              ScoreControl(
+                action: 'wide',
+                label: 'Wd+1',
+                payload: {'runs': 1},
+                tooltip: '1 wide + 1 run taken.',
+              ),
+              ScoreControl(
+                action: 'wide',
+                label: 'Wd+2',
+                payload: {'runs': 2},
+                tooltip: '1 wide + 2 runs taken.',
+              ),
+              ScoreControl(
+                action: 'wide',
+                label: 'Wd+3',
+                payload: {'runs': 3},
+                tooltip: '1 wide + 3 runs taken.',
+              ),
+              ScoreControl(
+                action: 'wide',
+                label: 'Wd+4',
+                payload: {'runs': 4},
+                tooltip: '1 wide + 4 boundary runs.',
+              ),
+            ],
           ),
           ScoreControl(
             action: 'no_ball',
-            label: 'No ball',
+            label: 'NB',
             shortcut: 'n',
             tooltip: '1 penalty run + free hit next ball.',
-          ),
-          ScoreControl(
-            action: 'no_ball',
-            label: 'NB+1',
-            payload: {'runs': 1},
-            tooltip: '1 no ball + 1 run off bat.',
-          ),
-          ScoreControl(
-            action: 'no_ball',
-            label: 'NB+2',
-            payload: {'runs': 2},
-            tooltip: '1 no ball + 2 runs off bat.',
-          ),
-          ScoreControl(
-            action: 'no_ball',
-            label: 'NB+3',
-            payload: {'runs': 3},
-            tooltip: '1 no ball + 3 runs off bat.',
-          ),
-          ScoreControl(
-            action: 'no_ball',
-            label: 'NB+4',
-            payload: {'runs': 4},
-            tooltip: '1 no ball + 4 runs off bat.',
-          ),
-          ScoreControl(
-            action: 'no_ball',
-            label: 'NB+5',
-            payload: {'runs': 5},
-            tooltip: '1 no ball + 5 runs off bat (overthrow).',
-          ),
-          ScoreControl(
-            action: 'no_ball',
-            label: 'NB+6',
-            payload: {'runs': 6},
-            tooltip: '1 no ball + 6 runs off bat.',
+            variants: [
+              ScoreControl(
+                action: 'no_ball',
+                label: 'NB+1',
+                payload: {'runs': 1},
+                tooltip: '1 no ball + 1 run off bat.',
+              ),
+              ScoreControl(
+                action: 'no_ball',
+                label: 'NB+2',
+                payload: {'runs': 2},
+                tooltip: '1 no ball + 2 runs off bat.',
+              ),
+              ScoreControl(
+                action: 'no_ball',
+                label: 'NB+3',
+                payload: {'runs': 3},
+                tooltip: '1 no ball + 3 runs off bat.',
+              ),
+              ScoreControl(
+                action: 'no_ball',
+                label: 'NB+4',
+                payload: {'runs': 4},
+                tooltip: '1 no ball + 4 runs off bat.',
+              ),
+              ScoreControl(
+                action: 'no_ball',
+                label: 'NB+5',
+                payload: {'runs': 5},
+                tooltip: '1 no ball + 5 runs off bat (overthrow).',
+              ),
+              ScoreControl(
+                action: 'no_ball',
+                label: 'NB+6',
+                payload: {'runs': 6},
+                tooltip: '1 no ball + 6 runs off bat.',
+              ),
+            ],
           ),
           ScoreControl(
             action: 'bye',
-            label: 'Bye 1',
+            label: 'BYE',
             payload: {'runs': 1},
             style: ControlStyle.subtle,
             shortcut: 'b',
-          ),
-          ScoreControl(
-            action: 'bye',
-            label: 'Bye 2',
-            payload: {'runs': 2},
-            style: ControlStyle.subtle,
-          ),
-          ScoreControl(
-            action: 'bye',
-            label: 'Bye 3',
-            payload: {'runs': 3},
-            style: ControlStyle.subtle,
-          ),
-          ScoreControl(
-            action: 'bye',
-            label: 'Bye 4',
-            payload: {'runs': 4},
-            style: ControlStyle.subtle,
+            tooltip: '1 bye — the batter did not touch it.',
+            variants: [
+              ScoreControl(
+                action: 'bye',
+                label: 'Bye 2',
+                payload: {'runs': 2},
+                style: ControlStyle.subtle,
+              ),
+              ScoreControl(
+                action: 'bye',
+                label: 'Bye 3',
+                payload: {'runs': 3},
+                style: ControlStyle.subtle,
+              ),
+              ScoreControl(
+                action: 'bye',
+                label: 'Bye 4',
+                payload: {'runs': 4},
+                style: ControlStyle.subtle,
+              ),
+            ],
           ),
           ScoreControl(
             action: 'leg_bye',
-            label: 'Leg bye 1',
+            label: 'LB',
             payload: {'runs': 1},
             style: ControlStyle.subtle,
             shortcut: 'g',
-          ),
-          ScoreControl(
-            action: 'leg_bye',
-            label: 'Leg bye 2',
-            payload: {'runs': 2},
-            style: ControlStyle.subtle,
-          ),
-          ScoreControl(
-            action: 'leg_bye',
-            label: 'Leg bye 3',
-            payload: {'runs': 3},
-            style: ControlStyle.subtle,
-          ),
-          ScoreControl(
-            action: 'leg_bye',
-            label: 'Leg bye 4',
-            payload: {'runs': 4},
-            style: ControlStyle.subtle,
+            tooltip: '1 leg bye — off the body, not the bat.',
+            variants: [
+              ScoreControl(
+                action: 'leg_bye',
+                label: 'Leg bye 2',
+                payload: {'runs': 2},
+                style: ControlStyle.subtle,
+              ),
+              ScoreControl(
+                action: 'leg_bye',
+                label: 'Leg bye 3',
+                payload: {'runs': 3},
+                style: ControlStyle.subtle,
+              ),
+              ScoreControl(
+                action: 'leg_bye',
+                label: 'Leg bye 4',
+                payload: {'runs': 4},
+                style: ControlStyle.subtle,
+              ),
+            ],
           ),
         ],
       ),

@@ -194,14 +194,19 @@ class ScoringService {
     );
   }
 
+  /// [source] exists for the replay path, which must never read the local
+  /// cache: the cache contains this device's own unacknowledged writes, so a
+  /// cached log would report a queued action as confirmed and the queue would
+  /// drop the only durable record of it. See [_replayFixtureGroup].
   Future<List<MatchEvent>> fetchAllEvents(
     String orgId,
     String compId,
-    String fixtureId,
-  ) async {
+    String fixtureId, {
+    Source source = Source.serverAndCache,
+  }) async {
     final snap = await Refs.matchEvents(orgId, compId, fixtureId)
         .orderBy('seq')
-        .get();
+        .get(GetOptions(source: source));
     return snap.docs.map(MatchEvent.fromDoc).toList();
   }
 
@@ -286,12 +291,38 @@ class ScoringService {
   ///
   /// Returns the updated fixture so the pad can render immediately; the
   /// Firestore listener will deliver the same state moments later.
-  Future<Fixture> submit({
+  /// Returns SYNCHRONOUSLY. There is no `await` between the scorer's tap and
+  /// the number changing on their own screen.
+  ///
+  /// ## The bug this shape exists for
+  ///
+  /// This used to be `Future<Fixture>` and the pad awaited it. Nothing on the
+  /// network was awaited even then — the commit was already fire-and-forget —
+  /// but `_enqueue` was, and that is a `SharedPreferences` read, a re-encode
+  /// of the WHOLE queue, and a disk write through a platform channel, on
+  /// every single tap. The queue only shrinks when the server acknowledges an
+  /// event, so during a match played out of signal it grows monotonically and
+  /// that per-tap cost grows with it: the pad got slower the longer the match
+  /// went on. Meanwhile the pad disabled every button behind `_busy` until
+  /// the future returned, so the cost was not just latency — it was a dead
+  /// pad, and taps made during it were swallowed entirely.
+  ///
+  /// Everything on this path that a scorer must wait for is pure computation:
+  /// validate the action against the current projection, fold it in, build
+  /// the batch. That is microseconds. The durable enqueue and the commit are
+  /// chained behind it and run on their own time — in that order, so the
+  /// "record it before the write leaves" guarantee below is unchanged.
+  ///
+  /// The caller gets the new projection back immediately and is expected to
+  /// RENDER IT, rather than waiting for the fixture listener to echo it. See
+  /// `_ScoringScreenState._local`.
+  Fixture submit({
     required Fixture fixture,
     required ScoreAction action,
     required ScoringContext context,
     required String byUid,
-  }) async {
+  }) {
+    _assertHoldsPen(fixture, byUid);
     final plugin = ScoringRegistry.resolve(fixture.scoringPluginKey);
 
     // Validate against the current projection first. A rejected action never
@@ -369,11 +400,10 @@ class ScoringService {
     // bracket exactly the same way one scored live does.
     _maybeAdvanceWinner(batch, fixture, outcome, updated.winnerEntrantId);
 
-    // Record the action in our durable queue BEFORE the write leaves, so a
-    // process kill between the local write and the server acknowledgement
-    // cannot lose a delivery. `reconcileQueue` drops entries the server has
-    // since confirmed.
-    await _enqueue(fixture, action, byUid, nextSeq, clientEventId);
+    // This device has now spoken for sequence [nextSeq] on this fixture, and
+    // the replay path must not write a projection that predates it. See
+    // [_localHead].
+    _noteLocalHead(fixture, nextSeq);
 
     // NOT a rating write, and no longer a rating READ either.
     //
@@ -402,8 +432,20 @@ class ScoringService {
     // The local write has already applied, so the scorer's own listener
     // shows the new score at once and the SDK flushes to the server on
     // reconnect. Failures arrive asynchronously on [writeFailures].
+    // Record the action in our durable queue BEFORE the write leaves, so a
+    // process kill between the local write and the server acknowledgement
+    // cannot lose a delivery. `reconcileQueue` drops entries the server has
+    // since confirmed.
+    //
+    // Chained rather than awaited. The ordering guarantee is exactly the one
+    // it always was — the queue entry is on disk before `commit()` is called
+    // — but the scorer is no longer standing in the queue behind it. The few
+    // milliseconds this delays the local Firestore write cost nothing now
+    // that the pad renders the projection returned above instead of waiting
+    // for the snapshot to come back.
     unawaited(
-      batch.commit()
+      _enqueue(fixture, action, byUid, nextSeq, clientEventId)
+          .then<void>((_) => batch.commit())
           .then<void>((_) {
             _dequeue(clientEventId);
             if (outcome.isComplete) _maybeResolveQualifiers(fixture);
@@ -412,6 +454,155 @@ class ScoringService {
     );
 
     return updated;
+  }
+
+  /// Records the result the engine has ALREADY decided, on a fixture that is
+  /// still marked live.
+  ///
+  /// ## The gap this closes
+  ///
+  /// [submit] writes `status: completed` in the same batch as the event that
+  /// decided the match, so the ordinary path never needs this. But the stored
+  /// fixture and its own projection can come apart, and when they did, the pad
+  /// had no way back:
+  ///
+  ///  * Upholding a protest returns a finished fixture to `live` and does not
+  ///    touch `scoreState` (see `CompetitionRepository.decideProtest`), so the
+  ///    engine still says the match is over while every list in the app says
+  ///    it is in progress.
+  ///  * A completing batch the server refused — the pen had changed hands, a
+  ///    rule said no — leaves exactly the same disagreement behind, and it
+  ///    arrives on [writeFailures] long after the pad has moved on.
+  ///
+  /// In both cases the pad went silent from both ends at once: the engine is
+  /// finished so it offers no scoring controls, and the finish bar only draws
+  /// while a match is UNfinished. A scorer was left looking at a decided match
+  /// with no buttons on it, unable to record the result, while the fixture sat
+  /// Live for everybody else. This is the button that ends it.
+  ///
+  /// Appends an event rather than writing the status by itself, for the reason
+  /// spelled out at length in [setFixtureOutcome]: `firestore.rules` admits a
+  /// scorer's fixture write only when it advances `lastSeq`, so a status-only
+  /// update by an umpire who is not also an organizer applies locally and is
+  /// refused seconds later. The engines skip an unrecognised type when they
+  /// replay a log ([ScoringPlugin.rebuild]), so the projection is untouched by
+  /// it and a rebuild still reproduces the same score.
+  /// Returns the projection to render immediately, exactly as [submit] does,
+  /// so the pad flips to "finished" on the tap rather than on the round trip.
+  Fixture finalizeMatch({
+    required Fixture fixture,
+    required ScoringContext context,
+    required String byUid,
+  }) {
+    _assertHoldsPen(fixture, byUid);
+    if (fixture.status == FixtureStatus.completed) return fixture;
+
+    final plugin = ScoringRegistry.resolve(fixture.scoringPluginKey);
+    final outcome = plugin.outcome(fixture.scoreState, context);
+    // Only ever a confirmation of the engine's own verdict. Ending a match the
+    // engine has NOT decided is a different act with different consequences —
+    // a retirement, a walkover, an abandonment — and belongs to the outcome
+    // sheet, which records why.
+    if (!outcome.isComplete) {
+      throw const ValidationException(
+        'This match is not over yet. Score it to its end, or record a '
+        'walkover, a retirement or an abandonment under "Match did not play '
+        'normally".',
+      );
+    }
+
+    final nextSeq = fixture.lastSeq + 1;
+    final clientEventId = _clientEventId();
+    final winnerEntrantId = _entrantIdForSide(fixture, outcome.winnerSide);
+    final updated = fixture.copyWith(
+      lastSeq: nextSeq,
+      summary: plugin.summary(fixture.scoreState, context),
+      status: FixtureStatus.completed,
+      winnerEntrantId: winnerEntrantId,
+      // A drawn match completes with no winner, and the fixture may be
+      // carrying a stale one from before it was reopened.
+      clearWinner: winnerEntrantId == null,
+      isDraw: outcome.isDraw,
+    );
+
+    final batch = Refs.db.batch();
+    batch.set(
+      Refs.matchEvents(fixture.orgId, fixture.compId, fixture.id)
+          .doc(MatchEvent.docId(nextSeq)),
+      MatchEvent(
+        seq: nextSeq,
+        type: 'outcome',
+        payload: {
+          'resultType': MatchResultType.normal.wire,
+          if (winnerEntrantId != null) 'winnerEntrantId': winnerEntrantId,
+        },
+        byUid: byUid,
+        clientEventId: clientEventId,
+      ).toCreate(),
+    );
+    batch.update(
+      Refs.fixture(fixture.orgId, fixture.compId, fixture.id),
+      {
+        'lastSeq': updated.lastSeq,
+        // Deliberately NOT `scoreState`. Nothing about the score changed and
+        // rewriting it here would put this method in competition with the
+        // replay pass over the one field a scorer cannot afford to lose.
+        'summary': updated.summary,
+        'status': FixtureStatus.completed.wire,
+        'resultType': MatchResultType.normal.wire,
+        'winnerEntrantId': winnerEntrantId,
+        'isDraw': outcome.isDraw,
+        'completedAt': FieldValue.serverTimestamp(),
+        'lastEventAt': FieldValue.serverTimestamp(),
+        'mvp': _awardFor(updated)?.toMap(),
+      },
+    );
+    // Same batch as the result, for the reason given at the [submit] call
+    // site: a bracket must never be left with a decided semi-final and a final
+    // that still reads "To be decided".
+    _maybeAdvanceWinner(batch, fixture, outcome, winnerEntrantId);
+    _noteLocalHead(fixture, nextSeq);
+
+    // Fire-and-forget, like every other write on the scoring path — awaiting
+    // it on a ground with no signal never returns. See the long note in
+    // [submit]; failures arrive on [writeFailures].
+    unawaited(
+      batch
+          .commit()
+          .then<void>((_) => _maybeResolveQualifiers(fixture))
+          .catchError((Object error) => _report(_translateWriteFailure(error))),
+    );
+
+    return updated;
+  }
+
+  /// The highest sequence number THIS device has committed per fixture.
+  ///
+  /// ## The bug this exists for
+  ///
+  /// [_replayFixtureGroup] rebuilds a fixture's projection from the server's
+  /// confirmed log plus whatever is still in the local queue, and writes the
+  /// result back over `scoreState`/`lastSeq`. It reads that queue once, at
+  /// the top of the pass. A tap made while the pass is in flight is therefore
+  /// invisible to it — so the projection it writes is the score MINUS the
+  /// scorer's most recent actions, and it lands a second or two after they
+  /// made them. On the pad that reads as the score jumping backwards on its
+  /// own; on a spectator's screen it reads as runs being un-scored.
+  ///
+  /// Passes used to run every three seconds during active scoring (and once
+  /// more after every single tap), so the window this race needs was open
+  /// essentially all the time.
+  ///
+  /// In-memory on purpose. It is a guard against *this process* racing
+  /// itself, and a restart cannot race a pass that no longer exists. Anything
+  /// durable would also have to be correct after an uninstall, which is what
+  /// the `SharedPreferences` queue is already for.
+  final Map<String, int> _localHead = <String, int>{};
+
+  void _noteLocalHead(Fixture fixture, int seq) {
+    final key = '${fixture.orgId}/${fixture.compId}/${fixture.id}';
+    final current = _localHead[key] ?? 0;
+    if (seq > current) _localHead[key] = seq;
   }
 
   /// Fires the exact same qualifier-fill `CompetitionRepository
@@ -448,11 +639,41 @@ class ScoringService {
       return const ValidationException('That score could not be saved.');
     }
     return switch (error.code) {
-      // Either another scorer took this sequence number, or our projection
-      // was behind and the monotonic-sequence rule rejected the write. Both
-      // resolve the same way: the fixture listener delivers the winning
-      // state and the pad re-renders from it.
-      'already-exists' || 'permission-denied' => const ConflictException(),
+      // Another scorer took this sequence number. The document id IS the
+      // sequence number, so `create` losing the race is the concurrency
+      // guard doing its job: the fixture listener delivers the winning state
+      // and the pad re-renders from it.
+      'already-exists' => const ConflictException(),
+      // Deliberately NOT a conflict any more, and deliberately not phrased
+      // as a device problem either.
+      //
+      // It used to say "this device is not the one scoring this match", which
+      // named the one thing the server never checks: `firestore.rules` does
+      // not look at a device id at all, on purpose, because a device id is a
+      // string the client chose (see `holdsPen` in that file). So the message
+      // asserted a cause it could not know, and when the real cause was
+      // something else entirely — a rules deploy lagging the app, or the
+      // 1,000-expression evaluation budget running out mid-statement — it
+      // sent the scorer looking for a second device that did not exist.
+      //
+      // What IS knowable here is only that the server refused the write. The
+      // wording now says that and lists the causes that are actually
+      // reachable, rather than picking one and stating it as fact.
+      //
+      // These two were folded together, and the cost of that was a scorer on
+      // a single device being told "Score updated from another device" every
+      // few seconds with no other device anywhere near them. A rules
+      // rejection is not a race — it means this account may not write this
+      // match right now (the pen is somebody else's, the match is finished,
+      // the assignment never landed) — and it does not resolve itself by
+      // waiting, which is precisely what the conflict path tells the scorer
+      // to do. Reporting it as what it is also stops the retry loop from
+      // re-announcing the same non-event on every tick.
+      'permission-denied' => const PermissionDeniedException(
+          'That action was not saved — this account cannot write to this '
+          'match right now. Someone else may be holding the pen, or the '
+          'match may have been finished or reassigned.',
+        ),
       'unavailable' || 'deadline-exceeded' => const NetworkException(),
       _ => ValidationException(error.message ?? 'That score could not be saved.'),
     };
@@ -615,6 +836,7 @@ class ScoringService {
     int? reversesSeq,
     String? note,
   }) async {
+    _assertHoldsPen(fixture, byUid);
     final plugin = ScoringRegistry.resolve(fixture.scoringPluginKey);
 
     final events = await fetchAllEvents(
@@ -687,9 +909,16 @@ class ScoringService {
         'status': updated.status.wire,
         'winnerEntrantId': updated.winnerEntrantId,
         'isDraw': updated.isDraw,
+        // Recomputed, not carried. Undoing a restart is how "continue the
+        // previous score" is spelled, and the field that offers that button
+        // has to stop being set the moment it is taken — otherwise the pad
+        // keeps offering to continue a score it has already continued.
+        'lastRestartSeq': _liveRestartSeq(log),
+        'lastEventAt': FieldValue.serverTimestamp(),
       },
     );
 
+    _noteLocalHead(fixture, nextSeq);
     await _enqueue(fixture, action, byUid, nextSeq, clientEventId);
 
     unawaited(
@@ -717,6 +946,125 @@ class ScoringService {
       if (!withdrawn.contains(e.seq)) return e.seq;
     }
     return null;
+  }
+
+  /// The restart the match is currently running from, if any.
+  ///
+  /// Shares [ScoringPlugin.resolveWithdrawn] with the rebuild rather than
+  /// re-deciding what counts as withdrawn, so "the pad offers to continue the
+  /// old score" and "the rebuild would actually produce it" can never
+  /// disagree.
+  static int? _liveRestartSeq(List<LoggedAction> log) {
+    final sorted = [...log]..sort((x, y) => x.seq.compareTo(y.seq));
+    final withdrawn = ScoringPlugin.resolveWithdrawn(sorted);
+    for (final e in sorted.reversed) {
+      if (e.action.type != ScoringPlugin.restartActionType) continue;
+      if (withdrawn.contains(e.seq)) continue;
+      return e.seq;
+    }
+    return null;
+  }
+
+  /// Starts the match again from nothing, keeping every event that came
+  /// before it.
+  ///
+  /// The reset is an appended marker, not a wipe — see
+  /// [ScoringPlugin.restartActionType] for why, and for how
+  /// "continue the previous score" is then just an ordinary undo of this
+  /// event. Callers offer that as [continuePreviousScore].
+  ///
+  /// Reachable while a match is completed as well as live, because the
+  /// commonest restart of all is a match that finished on the wrong pad.
+  Future<Fixture> restartMatch({
+    required Fixture fixture,
+    required ScoringContext context,
+    required String byUid,
+    String? note,
+  }) async {
+    _assertHoldsPen(fixture, byUid);
+    final plugin = ScoringRegistry.resolve(fixture.scoringPluginKey);
+    final nextSeq = fixture.lastSeq + 1;
+    final clientEventId = _clientEventId();
+    const action = ScoreAction(type: ScoringPlugin.restartActionType);
+    final fresh = plugin.initialState(context);
+
+    final updated = fixture.copyWith(
+      scoreState: fresh,
+      lastSeq: nextSeq,
+      summary: plugin.summary(fresh, context),
+      status: FixtureStatus.live,
+      clearWinner: true,
+      isDraw: false,
+      lastRestartSeq: nextSeq,
+    );
+
+    final batch = Refs.db.batch();
+    batch.set(
+      Refs.matchEvents(fixture.orgId, fixture.compId, fixture.id)
+          .doc(MatchEvent.docId(nextSeq)),
+      MatchEvent(
+        seq: nextSeq,
+        type: ScoringPlugin.restartActionType,
+        payload: action.toEventPayload(),
+        byUid: byUid,
+        clientEventId: clientEventId,
+        note: note,
+      ).toCreate(),
+    );
+    batch.update(
+      Refs.fixture(fixture.orgId, fixture.compId, fixture.id),
+      {
+        'scoreState': updated.scoreState,
+        'lastSeq': updated.lastSeq,
+        'summary': updated.summary,
+        'status': updated.status.wire,
+        // A restarted match has no winner and no result. Written explicitly
+        // rather than left alone: a restart most often follows a match that
+        // was finished by mistake, so these are exactly the fields that are
+        // dirty when it is tapped.
+        'winnerEntrantId': null,
+        'isDraw': false,
+        'completedAt': null,
+        'mvp': null,
+        'lastRestartSeq': nextSeq,
+        'lastEventAt': FieldValue.serverTimestamp(),
+      },
+    );
+
+    _noteLocalHead(fixture, nextSeq);
+    await _enqueue(fixture, action, byUid, nextSeq, clientEventId);
+    unawaited(
+      batch.commit()
+          .then((_) => _dequeue(clientEventId))
+          .catchError((Object error) => _report(_translateWriteFailure(error))),
+    );
+
+    return updated;
+  }
+
+  /// Takes back a restart, restoring the score exactly as it stood.
+  ///
+  /// Nothing was deleted by the restart, so this is a plain undo of the
+  /// marker event and the projection rebuilds itself from the log.
+  Future<Fixture> continuePreviousScore({
+    required Fixture fixture,
+    required ScoringContext context,
+    required String byUid,
+  }) {
+    final target = fixture.lastRestartSeq;
+    if (target == null) {
+      throw const ValidationException(
+        'This match has not been restarted, so there is no earlier score to '
+        'continue.',
+      );
+    }
+    return undo(
+      fixture: fixture,
+      context: context,
+      byUid: byUid,
+      reversesSeq: target,
+      note: 'Restart withdrawn — previous score continued',
+    );
   }
 
   /// Compares two projections for equality, tolerating the numeric widening
@@ -752,6 +1100,7 @@ class ScoringService {
     String? winnerEntrantId,
     String? note,
     MatchResultType? resultType,
+    String? byUid,
   }) async {
     if (status.acceptsScoring) {
       throw const ValidationException(
@@ -764,29 +1113,130 @@ class ScoringService {
           FixtureStatus.abandoned => MatchResultType.abandoned,
           _ => MatchResultType.normal,
         };
-    await Refs.fixture(fixture.orgId, fixture.compId, fixture.id).update({
-      'status': status.wire,
-      'resultType': type.wire,
-      'winnerEntrantId': winnerEntrantId,
-      'isDraw': false,
-      // Stored as a stable token, never as a translated phrase.
-      //
-      // This field is persisted and read back by every client, so writing
-      // "Walkover" here would freeze one scorer's language onto the document
-      // and show it to a Telugu spectator in English forever. The UI
-      // translates the token at render time — see `FixtureStatus` and the
-      // `result*` keys in lib/l10n.
-      'summary': switch (status) {
-        FixtureStatus.walkover ||
-        FixtureStatus.abandoned ||
-        FixtureStatus.disputed =>
-          status.wire,
-        _ => fixture.summary,
-      },
-      'resultNote': note,
-      'completedAt': FieldValue.serverTimestamp(),
-    });
+    // Deliberately NOT awaited, for the same reason as every other write on
+    // this path — see the long note in [submit].
+    //
+    // This one is the official's decision: a walkover, an abandonment, a
+    // disqualification. Awaiting it meant the dialog sat on its spinner until
+    // the SERVER answered, and with offline persistence on, off signal that is
+    // never. An umpire awarding a walkover at a ground with no bars watched
+    // the button spin, gave up, and backed out — and because the local write
+    // had in fact already applied, the decision was recorded on their own
+    // device and looked to them like it had failed. That is the "the official
+    // awarded it and nothing happened" report.
+    //
+    // Firestore has the mutation the instant this returns and flushes it on
+    // reconnect; every listener on every device sees it as soon as it lands.
+    // A rejection arrives on [writeFailures] rather than by throwing.
+    // A retirement or a disqualification goes into the EVENT LOG, not just
+    // onto the fixture, and that is what makes it work for the person who
+    // actually declares one.
+    //
+    // ## The bug
+    //
+    // This used to be a bare field update. `firestore.rules` admits a fixture
+    // write through exactly two doors: an organizer (branch a), or the
+    // assigned scorer advancing the score (branch b) — and branch (b) opens
+    // on `request.resource.data.lastSeq > resource.data.lastSeq`, because
+    // that test is pure and false for every write that is not a score. A
+    // status-only update moves no sequence number, so it matched neither
+    // door. An umpire holding the pen who was not also an org admin pressed
+    // "Retired — A wins", the local cache applied it, the screen showed it,
+    // and the server refused it seconds later: the match went back to Live on
+    // its own and the retirement was gone. Organizers never saw it, because
+    // branch (a) let THEM through — which is the worst way for a bug to
+    // present, since the people who could reproduce it were the people
+    // nobody believed.
+    //
+    // Recording it as an event fixes it at the root rather than by widening
+    // the rules: the write now carries a sequence number, so it is a scoring
+    // write in the sense branch (b) already means, and the match log gains
+    // the retirement in the same order everything else happened in. The
+    // engines ignore the event when they replay a log — an unknown type is
+    // skipped, see [ScoringPlugin.rebuild] — so the projection is unchanged
+    // and the outcome lives where it belongs, on the fixture.
+    //
+    // Only for the outcomes a scorer may declare. A walkover, an abandonment
+    // and a dispute stay plain updates, because those are the organizer's
+    // call and the rules deliberately do not admit a scorer for them.
+    final logged = status == FixtureStatus.completed && byUid != null;
+    final nextSeq = fixture.lastSeq + 1;
+    if (logged) {
+      unawaited(
+        Refs.matchEvents(fixture.orgId, fixture.compId, fixture.id)
+            .doc(MatchEvent.docId(nextSeq))
+            .set(MatchEvent(
+              seq: nextSeq,
+              type: 'outcome',
+              payload: {
+                'resultType': type.wire,
+                if (winnerEntrantId != null) 'winnerEntrantId': winnerEntrantId,
+              },
+              byUid: byUid,
+              clientEventId: _clientEventId(),
+              note: note,
+            ).toCreate())
+            .catchError((Object error) {
+          _report(_translateWriteFailure(error));
+        }),
+      );
+      _noteLocalHead(fixture, nextSeq);
+    }
+
+    unawaited(
+      Refs.fixture(fixture.orgId, fixture.compId, fixture.id).update({
+        if (logged) 'lastSeq': nextSeq,
+        'status': status.wire,
+        'resultType': type.wire,
+        'winnerEntrantId': winnerEntrantId,
+        'isDraw': false,
+        // Stored as a stable token, never as a translated phrase.
+        //
+        // This field is persisted and read back by every client, so writing
+        // "Walkover" here would freeze one scorer's language onto the document
+        // and show it to a Telugu spectator in English forever. The UI
+        // translates the token at render time — see `FixtureStatus` and the
+        // `result*` keys in lib/l10n.
+        'summary': switch (status) {
+          FixtureStatus.walkover ||
+          FixtureStatus.abandoned ||
+          FixtureStatus.disputed =>
+            status.wire,
+          _ => fixture.summary,
+        },
+        'resultNote': note,
+        'completedAt': FieldValue.serverTimestamp(),
+      }).catchError((Object error) {
+        _report(_translateWriteFailure(error));
+      }),
+    );
     if (status.isResulted) _maybeResolveQualifiers(fixture);
+  }
+
+  /// Refuses a write from anybody but the current pen holder.
+  ///
+  /// `firestore.rules` enforces the same thing, and this does not exist
+  /// because the rule might fail — it exists because of WHERE the rule's
+  /// answer arrives. A scoring write is deliberately not awaited (see
+  /// [submit]), so a rejection comes back seconds later, after the local
+  /// cache has already applied the action and the pad has already drawn it.
+  /// The scorer sees the point land and then jump back off the board, with a
+  /// message about permissions attached to a tap they made ten seconds ago.
+  ///
+  /// Refusing locally makes it instant and specific instead: the action never
+  /// enters the queue, the projection never moves, and the pad says why on
+  /// the frame the button was pressed.
+  ///
+  /// A fixture with no pen is unrestricted here — the older role-based gates
+  /// still apply — so nothing that predates exclusive control changes
+  /// behaviour.
+  void _assertHoldsPen(Fixture fixture, String byUid) {
+    if (!fixture.penIsHeld) return;
+    if (fixture.penHeldBy(byUid)) return;
+    throw const ValidationException(
+      'Someone else has scoring control of this match. An admin can move it '
+      'back to you.',
+    );
   }
 
   // --- Offline queue ----------------------------------------------------
@@ -933,11 +1383,40 @@ class ScoringService {
       stillPending.addAll(await _replayFixtureGroup(byFixture[key]!));
     }
 
+    // Re-read before writing, and keep anything that arrived while this pass
+    // was in flight.
+    //
+    // ## The bug this exists for
+    //
+    // The queue was read once at the top of this method and then overwritten
+    // here with a list derived entirely from that snapshot. A pass involves
+    // two server reads and a batch commit per fixture, so it is open for
+    // hundreds of milliseconds at best and the full `passTimeout` at worst —
+    // and every scoring action taken inside that window was appended to the
+    // stored queue by [_enqueue] and then silently erased by this line.
+    //
+    // Those actions were not merely un-replayed, they were un-recorded: the
+    // durable queue is the ONLY surviving record of an offline action once
+    // Firestore's own cache is gone, which is the single disaster it exists
+    // for. A scorer tapping steadily through a match in a dead spot was
+    // losing the entries fastest at exactly the moment the queue was longest
+    // and the passes were slowest.
+    final seen = {
+      for (final e in [...parsed, ...poisoned]) e.clientEventId,
+    };
+    final latest = store.getStringList(_queueKey) ?? const [];
+    final arrivedDuringPass = <String>[
+      for (final line in latest)
+        if (SyncQueueEntry.tryParse(line) case final e?)
+          if (!seen.contains(e.clientEventId)) line,
+    ];
+
     final finalQueue = <String>[
       ...unparsable,
       ...stillPending.map((e) => e.toJsonString()),
       ...plan.deferred.map((e) => e.toJsonString()),
       ...plan.overflow.map((e) => e.toJsonString()),
+      ...arrivedDuringPass,
     ];
     await store.setStringList(_queueKey, finalQueue);
     unawaited(_notifyPendingCountChanged());
@@ -960,17 +1439,30 @@ class ScoringService {
   ) async {
     final first = group.first;
     try {
+      // Server-only, deliberately, and the same for the event log below.
+      //
+      // A default `.get()` falls back to the local cache when the device is
+      // offline and returns happily — including this device's own pending
+      // writes. Replay then compared a queued action against a log that
+      // already "contained" it, concluded the server had it, and deleted the
+      // queue entry. The durable queue exists precisely for the case where
+      // that cache is later lost, so confirming from the cache made it a
+      // record of nothing.
+      //
+      // Off signal this read throws `unavailable` instead, which is the
+      // honest answer — there is nothing to reconcile against — and is
+      // handled below as a deferral rather than a failure.
       final fixtureDoc = await Refs.fixture(
         first.orgId,
         first.compId,
         first.fixtureId,
-      ).get();
+      ).get(const GetOptions(source: Source.server));
       if (!fixtureDoc.exists) {
-        // Most likely still offline — this read itself would have thrown if
-        // there were truly no connection, so an absent-but-reachable
-        // fixture more likely means the match was deleted server-side.
-        // Either way there is nothing to replay onto right now; back off
-        // and let the next reconnect re-evaluate rather than guessing.
+        // The read came from the server, so this is not ambiguous any more:
+        // the match is genuinely gone. There is nothing to replay onto, and
+        // nothing that will make it come back, so these entries walk up the
+        // backoff and are eventually evicted as poison — which is the correct
+        // end for an action whose match no longer exists.
         return group.map(_bumpForRetry).toList();
       }
       final fixture = Fixture.fromDoc(fixtureDoc);
@@ -982,6 +1474,7 @@ class ScoringService {
         first.orgId,
         first.compId,
         first.fixtureId,
+        source: Source.server,
       );
       final confirmedIdBySeq = {
         for (final e in serverEvents) e.seq: e.clientEventId,
@@ -1000,6 +1493,26 @@ class ScoringService {
         return const [];
       }
 
+      if (!fixture.status.acceptsScoring) {
+        // The match is over on the server and these actions never reached it.
+        //
+        // Retrying is pointless and not neutral: the security rules only
+        // accept a scoring write onto a `scheduled` or `live` fixture, so
+        // every future attempt is refused for exactly the reason this one
+        // was. Left alone, they walk the backoff for twenty minutes and are
+        // then discarded anyway — with the pending count stuck on screen the
+        // whole time, which is what the scorer in the bug report was looking
+        // at: twenty-six actions "waiting to sync" on a match that had been
+        // finished for an hour.
+        //
+        // So they are discarded now, and the scorer is told once, plainly.
+        // This is the honest message: the actions are gone, the match needs
+        // a correction, and no amount of waiting was ever going to change
+        // that.
+        _reportTerminalOnce(fixture.id, stillUnconfirmed.length);
+        return const [];
+      }
+
       final plugin = ScoringRegistry.resolve(fixture.scoringPluginKey);
       final context = fixture.scoringContext();
 
@@ -1014,22 +1527,55 @@ class ScoringService {
       final maxSeq =
           stillUnconfirmed.map((e) => e.seq).reduce((a, b) => a > b ? a : b);
 
+      // Never write a projection this device has already scored past.
+      //
+      // `stillUnconfirmed` came from a queue snapshot taken at the top of
+      // `reconcileQueue`, before the two server reads above. If the scorer
+      // has tapped since then, `rebuilt` is the score without those taps and
+      // `maxSeq` is behind where this device actually is — committing it
+      // would roll the live score backwards on the pad and on every
+      // spectator's screen. See [_localHead].
+      //
+      // Deferred rather than dropped, and without burning a retry attempt:
+      // nothing is wrong with these entries, they are just being replayed
+      // from a stale reading. The next pass re-snapshots the queue, finds the
+      // newer taps in it, and rebuilds a projection that includes them.
+      final head = _localHead['${first.orgId}/${first.compId}/${first.fixtureId}'];
+      if (head != null && maxSeq < head) {
+        return group.map(_deferForNetwork).toList();
+      }
+
       if (maxSeq <= fixture.lastSeq) {
-        // The server's sequence has already moved past what we are trying
-        // to deliver, yet the clientEventId at that seq did not match ours
-        // above — so this is not "still offline", it is a genuine conflict:
-        // some other write legitimately owns that sequence slot now (a
-        // second device scoring the same locked match, most plausibly).
-        // Writing anyway would fail the security rules' monotonic-sequence
-        // check regardless, so this is treated the same as any other
-        // rejection: back off and report it rather than spinning on it.
-        _report(const ConflictException());
-        return stillUnconfirmed.map(_bumpForRetry).toList();
+        // The server's sequence has already moved past what we are trying to
+        // deliver, and the clientEventId sitting in that slot is not ours —
+        // some other write legitimately owns it now.
+        //
+        // Dropped, not retried. Retrying was the honest-looking choice and
+        // the wrong one: the monotonic-sequence rule will refuse this write
+        // on every future attempt for exactly the same reason it would refuse
+        // it now, so the entries could only ever walk up the backoff and be
+        // discarded as "poison" several minutes later — with an alarming
+        // message about a manual correction — after re-announcing a conflict
+        // on every tick in between. That loop is what a scorer sees as a
+        // permanently stuck pending count and a snackbar every few seconds.
+        //
+        // Nothing is lost by dropping them: the slot is filled, the log is
+        // authoritative, and the projection on screen already reflects the
+        // events that won.
+        _reportSupersededOnce(fixture.id);
+        return const [];
       }
 
       final winnerEntrantId = outcome.isComplete
           ? _entrantIdForSide(fixture, outcome.winnerSide)
           : null;
+
+      // A result an official wrote by hand, on a match whose projection never
+      // reached a finish: a retirement, a walkover, an abandonment. The whole
+      // block below recomputes the result from the event log, and none of
+      // those decisions are IN the event log — so every field they own has to
+      // be carried across untouched rather than recomputed into nothing.
+      final byDecision = !outcome.isComplete && !fixture.status.acceptsScoring;
 
       final batch = Refs.db.batch();
       for (final e in stillUnconfirmed) {
@@ -1051,12 +1597,32 @@ class ScoringService {
         {
           'scoreState': rebuilt,
           'lastSeq': maxSeq,
-          'summary': plugin.summary(rebuilt, context),
+          'summary':
+              byDecision ? fixture.summary : plugin.summary(rebuilt, context),
+          // A match the engine has not finished is LIVE — unless somebody
+          // has already ended it by hand.
+          //
+          // Replay recomputes the status from the projection, and a
+          // retirement, a walkover or an abandonment is not in the
+          // projection: it is an official's decision written straight onto
+          // the fixture. Writing `live` unconditionally here took a match an
+          // umpire had retired an hour earlier and put it back on the board
+          // as in progress, the first time a queued event from that match
+          // reached the server. The result did not come back — it was simply
+          // overwritten by a pass that had no idea it existed.
           'status': outcome.isComplete
               ? FixtureStatus.completed.wire
-              : FixtureStatus.live.wire,
-          'winnerEntrantId': winnerEntrantId,
-          'isDraw': outcome.isDraw,
+              : (fixture.status.acceptsScoring
+                  ? FixtureStatus.live.wire
+                  : fixture.status.wire),
+          'winnerEntrantId':
+              byDecision ? fixture.winnerEntrantId : winnerEntrantId,
+          'isDraw': byDecision ? fixture.isDraw : outcome.isDraw,
+          // Same derivation as the live path, so a restart (or the undo of
+          // one) that only reaches the server on reconnect leaves the
+          // "continue the previous score" offer in the same state it would
+          // have been in had it been written live.
+          'lastRestartSeq': _liveRestartSeq(combinedLog),
           if (fixture.lastSeq == 0) 'startedAt': FieldValue.serverTimestamp(),
           if (outcome.isComplete)
             'completedAt': FieldValue.serverTimestamp(),
@@ -1080,18 +1646,94 @@ class ScoringService {
       );
       _maybeAdvanceWinner(batch, fixture, outcome, winnerEntrantId);
 
-      await batch.commit();
+      // Bounded, because an awaited Firestore commit does not settle until
+      // the server acknowledges it and the connection can drop between the
+      // reads above and this line. An unbounded await here is what used to
+      // wedge the whole sync driver for the life of the process — see
+      // `SyncDriver.passTimeout`.
+      //
+      // The commit is NOT cancelled by the timeout; Firestore keeps it in its
+      // own durable queue and flushes it on reconnect. Timing out only means
+      // "we did not see the acknowledgement", so the entries stay queued and
+      // the next pass — which reads the server log — either finds them landed
+      // and drops them, or sends them again. Re-sending is safe: the event
+      // document id is its sequence number, so a second delivery of the same
+      // action is a no-op rather than a duplicate.
+      await batch.commit().timeout(_commitTimeout);
 
       // No rating call here either — see the note at the [submit] call site.
       // Settlement is `onMatchSettled`'s, and it fires off the same status
       // transition this batch just wrote, so a match completed offline settles
       // on reconnect exactly like one completed live.
       return const [];
+    } on TimeoutException {
+      // Not a failure and not the entry's fault. Deferred without counting an
+      // attempt, so a long spell out of signal cannot walk an honest action
+      // up to the poison threshold and get it discarded.
+      return group.map(_deferForNetwork).toList();
     } catch (e) {
-      _report(_translateWriteFailure(e));
+      final error = _translateWriteFailure(e);
+      if (error is NetworkException) {
+        // "Still offline" is the expected state on a ground, not something to
+        // interrupt the scorer about, and it must not burn a retry attempt.
+        return group.map(_deferForNetwork).toList();
+      }
+      _reportReplayFailureOnce(first.fixtureId, error);
       return group.map(_bumpForRetry).toList();
     }
   }
+
+  /// Fixtures whose replay failure has already been surfaced this session.
+  final Set<String> _replayFailureReported = <String>{};
+
+  /// Reports a failed replay at most once per fixture.
+  ///
+  /// The driver retries every few seconds while anything is queued, and the
+  /// failures worth reporting here — a rules rejection, a bad payload — are
+  /// by nature the ones that will fail again on every single one of those
+  /// ticks. Reporting each attempt turned one problem into a snackbar every
+  /// three seconds for the rest of the session, which is how a recoverable
+  /// condition ends up looking like the app is broken. The entry is still
+  /// retried, still backs off, and is still evicted as poison if it never
+  /// succeeds — that eviction has its own, deliberately loud, message.
+  void _reportReplayFailureOnce(String fixtureId, AppException error) {
+    if (!_replayFailureReported.add(fixtureId)) return;
+    _report(error);
+  }
+
+  /// Fixtures whose "the match had already ended" notice has been given.
+  final Set<String> _terminalReported = <String>{};
+
+  void _reportTerminalOnce(String fixtureId, int count) {
+    if (!_terminalReported.add(fixtureId)) return;
+    if (_failures.isClosed) return;
+    _failures.add(
+      ValidationException(
+        count == 1
+            ? 'One scoring action could not be saved because the match had '
+                'already been finished. Reopen the match if it needs '
+                'correcting.'
+            : '$count scoring actions could not be saved because the match '
+                'had already been finished. Reopen the match if it needs '
+                'correcting.',
+      ),
+    );
+  }
+
+  /// Fixtures already told about, so a queue holding twenty superseded
+  /// actions for one match produces one notice rather than twenty.
+  final Set<String> _supersededReported = <String>{};
+
+  void _reportSupersededOnce(String fixtureId) {
+    if (!_supersededReported.add(fixtureId)) return;
+    if (!_resyncs.isClosed) _resyncs.add(null);
+  }
+
+  /// How long a replay waits for the server to acknowledge a batch before
+  /// giving the sync driver its thread back. Long enough to ride out a slow
+  /// 2G handshake, short enough that a scorer's next action is not stuck
+  /// behind it.
+  static const _commitTimeout = Duration(seconds: 10);
 
   SyncQueueEntry _bumpForRetry(SyncQueueEntry e) {
     final attempts = e.attempts + 1;
@@ -1100,6 +1742,23 @@ class ScoringService {
       nextAttemptAt: DateTime.now().add(SyncBackoff.delayFor(attempts)),
     );
   }
+
+  /// Holds an entry back briefly because the network was not there — as
+  /// distinct from [_bumpForRetry], which records a real failed attempt.
+  ///
+  /// The distinction is the whole point of `SyncBackoff`'s attempt cap: it is
+  /// how a permanently-broken entry is told apart from a device that has been
+  /// in a dead spot all afternoon. Counting "no signal" as a failed attempt
+  /// collapsed the two, and eight ticks of a 3-second retry timer — under a
+  /// minute out of signal — was enough to have a real scoring action
+  /// discarded as poison.
+  ///
+  /// The short, flat delay is deliberate. There is nothing to back off from
+  /// when there is no connection to overload, and the next pass costs one
+  /// cheap read that fails fast.
+  SyncQueueEntry _deferForNetwork(SyncQueueEntry e) => e.copyWith(
+        nextAttemptAt: DateTime.now().add(const Duration(seconds: 5)),
+      );
 
   // --- Helpers ----------------------------------------------------------
 
