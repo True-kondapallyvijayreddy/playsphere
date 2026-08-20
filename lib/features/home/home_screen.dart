@@ -18,6 +18,7 @@ import '../../shared/confirm_exit.dart';
 import '../../shared/live_dot.dart';
 import '../../shared/promo_banner.dart';
 import '../../shared/section_header.dart';
+import '../community/widgets/match_rsvp_section.dart';
 import '../../shared/ui_kit.dart';
 import '../scoring/widgets/live_score_card.dart';
 import 'event_feed.dart';
@@ -123,6 +124,23 @@ class HomeScreen extends ConsumerWidget {
                         liveCount: live.length,
                       ),
                       const SizedBox(height: 14),
+
+                      // Directly under the banner, above everything else on
+                      // the dashboard — including the live ticker.
+                      //
+                      // Position is the feature here. Every other section
+                      // reports something that has already happened or is
+                      // happening without you; this one is a question
+                      // addressed to this person that expires. A member who
+                      // scrolls past it on Friday has not delayed a decision,
+                      // they have missed Sunday's game — which is precisely
+                      // the failure the WhatsApp poll it replaces does not
+                      // have, because a phone puts that at the top by itself.
+                      //
+                      // Draws nothing at all for a member whose clubs do not
+                      // use it, so the cost of the position is zero for
+                      // everybody it does not serve. See [MatchRsvpSection].
+                      const MatchRsvpSection(),
 
                       // Points at the talent search rather than at a global
                       // one. There is no index behind "matches, teams,

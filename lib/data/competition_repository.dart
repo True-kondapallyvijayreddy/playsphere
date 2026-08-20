@@ -7,8 +7,10 @@ import '../core/firebase/chunked_batch.dart';
 import '../core/firebase/firestore_refs.dart';
 import '../core/models/app_user.dart';
 import '../core/models/competition.dart';
+import '../core/models/organization.dart';
 import '../core/models/dispute.dart';
 import '../core/models/enums.dart';
+import '../core/models/firestore_codec.dart';
 import '../core/models/fixture.dart';
 import '../core/models/group_entry.dart';
 import '../core/models/match_player.dart';
@@ -21,8 +23,10 @@ import '../domain/draw/match_scheduler.dart';
 import '../domain/draw/tournament_scheduler.dart';
 import '../domain/draw/schedule_shift.dart';
 import '../domain/draw/seeding.dart';
+import '../domain/draw/swiss_pairing.dart';
 import '../domain/rating/glicko2.dart';
 import '../domain/tournament/entrant_promoter.dart';
+import '../domain/tournament/house_roster.dart';
 import '../domain/tournament/team_partitioner.dart';
 import 'rating_service.dart';
 import '../domain/standings/standings_calculator.dart';
@@ -286,6 +290,104 @@ class CompetitionRepository {
           'cancelReason': text,
           'cancelledBy': byUid,
           'cancelledAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      });
+
+  /// Puts one event on hold, reversibly.
+  ///
+  /// The event-level twin of `TournamentRepository.suspendTournament`, and it
+  /// exists for the case that one does not cover: a season where the kho-kho
+  /// ground is gone but the badminton is fine. Pausing the season would stop
+  /// four sports to stop one.
+  ///
+  /// [reason] is required for the reason [cancelCompetition] documents.
+  Future<void> suspendCompetition({
+    required String orgId,
+    required String compId,
+    required String reason,
+    required String byUid,
+  }) =>
+      guard(() async {
+        final text = reason.trim();
+        if (text.isEmpty) {
+          throw const ValidationException(
+            'Give a reason. Everyone who entered will see it, and an event '
+            'that stops without one reads as a fault in the app.',
+          );
+        }
+        if (text.length > 500) {
+          throw const ValidationException(
+            'Keep the reason under 500 characters.',
+          );
+        }
+
+        final snap = await Refs.competition(orgId, compId).get();
+        if (!snap.exists) throw const NotFoundException('That event is gone.');
+        final existing = Competition.fromDoc(snap);
+        if (existing.isSuspended) {
+          throw const ValidationException('This event is already on hold.');
+        }
+        if (existing.status == CompetitionStatus.cancelled) {
+          throw const ValidationException(
+            'This event was cancelled. Pausing it now would change nothing.',
+          );
+        }
+        if (existing.status == CompetitionStatus.completed) {
+          throw const ValidationException(
+            'This event has been played. There is nothing left to pause.',
+          );
+        }
+
+        await Refs.competition(orgId, compId).update({
+          'isSuspended': true,
+          'suspendReason': text,
+          'suspendedBy': byUid,
+          'suspendedAt': FieldValue.serverTimestamp(),
+          // False even when the season above is itself suspended: this was
+          // the organizer's own decision about this event, and resuming the
+          // season must not undo it. See `Competition.suspendedBySeason`.
+          'suspendedBySeason': false,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      });
+
+  /// Brings one paused event back.
+  ///
+  /// Refuses when the season above it is what paused it — resuming a single
+  /// event under a suspended season would put one draw back on a calendar the
+  /// rest of the season has vacated, and entries would open for a competition
+  /// whose courts are not booked. Resume the season instead, and this comes
+  /// back with it.
+  ///
+  /// The check is on `suspendedBySeason` from the freshly-read document rather
+  /// than on anything the caller passes, because the caller is usually the
+  /// event page, which holds a `Competition` and no `Tournament` at all.
+  Future<void> resumeCompetition({
+    required String orgId,
+    required String compId,
+    required String byUid,
+  }) =>
+      guard(() async {
+        final snap = await Refs.competition(orgId, compId).get();
+        if (!snap.exists) throw const NotFoundException('That event is gone.');
+        final existing = Competition.fromDoc(snap);
+        if (!existing.isSuspended) {
+          throw const ValidationException('This event is not on hold.');
+        }
+        if (existing.suspendedBySeason) {
+          throw const ValidationException(
+            'The season this event belongs to is on hold. Resume the season '
+            'and this event comes back with it.',
+          );
+        }
+
+        await Refs.competition(orgId, compId).update({
+          'isSuspended': false,
+          'suspendReason': null,
+          'suspendedBy': null,
+          'suspendedAt': null,
+          'suspendedBySeason': false,
           'updatedAt': FieldValue.serverTimestamp(),
         });
       });
@@ -654,6 +756,13 @@ class CompetitionRepository {
     String? teamName,
   }) =>
       guard(() async {
+        if (competition.isSuspended) {
+          throw ValidationException(
+            'This event is on hold'
+            '${competition.suspendReason == null ? '' : ' — ${competition.suspendReason}'}'
+            '. Entries reopen when the organizer resumes it.',
+          );
+        }
         if (!competition.registrationIsOpen) {
           throw const ValidationException(
             'Entries are closed for this competition.',
@@ -1112,6 +1221,62 @@ class CompetitionRepository {
         return finalEntrantCount;
       });
 
+  /// Writes an entrant list straight onto a competition, bypassing
+  /// registration entirely.
+  ///
+  /// ## Why this exists next to `lockFieldAndCreateEntrants`
+  ///
+  /// That one is the tournament path: people register, an organizer closes
+  /// entries, and `EntrantPromoter` turns confirmed registrations into
+  /// entrants with all the waitlist and squad rules that implies. It is
+  /// correct and it is not what a Sunday club needs.
+  ///
+  /// A match availability call has already done the asking. Ten people said
+  /// they were free; there is no registration to close, no waitlist to
+  /// promote, and no approval to wait for — the field is simply those ten.
+  /// Routing that through the registration machinery would mean writing ten
+  /// registrations in order to immediately read them back and delete them.
+  ///
+  /// Refuses once fixtures exist, for the same reason
+  /// [replaceEntrantsWithSquads] does: a fixture stores the entrant ids it is
+  /// between, so replacing entrants underneath a draw leaves matches pointing
+  /// at nothing.
+  Future<void> seedEntrants({
+    required String orgId,
+    required String compId,
+    required List<Entrant> entrants,
+  }) =>
+      guard(() async {
+        if (entrants.isEmpty) {
+          throw const ValidationException(
+            'A competition needs at least one entrant.',
+          );
+        }
+        final fixtures = await Refs.fixtures(orgId, compId).limit(1).get();
+        if (fixtures.docs.isNotEmpty) {
+          throw const ValidationException(
+            'This event already has matches. Clear the draw before changing '
+            'who is in it.',
+          );
+        }
+
+        final batch = Refs.db.batch();
+        for (final entrant in entrants) {
+          batch.set(Refs.entrants(orgId, compId).doc(entrant.id), entrant.toMap());
+        }
+        batch.update(Refs.competition(orgId, compId), {
+          'entrantCount': entrants.length,
+          'status': CompetitionStatus.registrationClosed.wire,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+        // Awaited, unlike the scoring path. Nobody is standing at a crease
+        // waiting for this — an organizer is watching a spinner on a setup
+        // screen, and the very next thing that happens is a draw generated
+        // FROM these entrants. Firing and forgetting would race the draw
+        // against the field it is drawn from.
+        await batch.commit();
+      });
+
   /// Forms custom squads or drafts from the solo player pool.
   ///
   /// Replaces the entrant list wholesale, which is why it refuses to run once
@@ -1186,7 +1351,221 @@ class CompetitionRepository {
         return teams.length;
       });
 
+  // --- Houses and groups -------------------------------------------------
+
+  /// Saves the organizer's house/group list, carrying the students already
+  /// registered under the old names across with it.
+  ///
+  /// ## Why this is not `updateCompetition` with a new `presetHouses`
+  ///
+  /// A registration records the house a student PICKED, by name — see
+  /// [Registration.houseName]. Nothing links it back to a house id, because
+  /// there is no house id: the list on the competition is a list of strings.
+  /// So writing a corrected list on its own quietly strands everyone who
+  /// entered under the old spelling. Thirty students who chose "Red Hosue"
+  /// stay attached to "Red Hosue" while the competition now offers "Red
+  /// House", and the team builder drops all thirty into the unassigned pool
+  /// with no indication of why.
+  ///
+  /// [plan] carries the rename map the editor derived from what the organizer
+  /// actually edited, and this replays it over the registrations in the same
+  /// write as the competition update. A rename therefore moves people; only a
+  /// deletion loses them, which is what a deletion means.
+  ///
+  /// Deleted houses are deliberately NOT reassigned. Picking a house for
+  /// somebody is the organizer's call at the team builder, with the names in
+  /// front of them — not something to guess here.
+  ///
+  /// Not awaited, for the reason the rest of this file is not: with offline
+  /// persistence on, a commit's future does not complete until the server
+  /// acknowledges, and an organizer fixing house names in a school hall with
+  /// no signal must not be left watching a spinner. Failures surface on
+  /// [writeFailures].
+  Future<void> saveHouses({
+    required String orgId,
+    required String compId,
+    required HouseRosterPlan plan,
+    TeamEntryMode? entryMode,
+  }) =>
+      guard(() async {
+        if (!plan.isValid) {
+          throw ValidationException(plan.error!);
+        }
+
+        final batch = ChunkedBatch(Refs.db);
+
+        if (plan.renames.isNotEmpty) {
+          // One query per renamed house rather than a full scan of the
+          // registrations: a rename touches one house's students, and an
+          // event with a thousand entries should not be read in full because
+          // somebody fixed a typo.
+          for (final entry in plan.renames.entries) {
+            final affected = await Refs.registrations(orgId, compId)
+                .where('houseName', isEqualTo: entry.key)
+                .get();
+            for (final doc in affected.docs) {
+              batch.update(doc.reference, {'houseName': entry.value});
+            }
+          }
+        }
+
+        batch.update(Refs.competition(orgId, compId), {
+          'presetHouses': plan.names,
+          if (entryMode != null) 'teamEntryMode': entryMode.wire,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+
+        unawaited(batch.commitAll().catchError((Object error) {
+          _writeFailures.add(_translateWriteFailure(error));
+        }));
+      });
+
+  /// How many confirmed entries sit in each house right now, including the
+  /// ones whose house is no longer on the list.
+  ///
+  /// The editor shows this beside every row because the number is what makes
+  /// a deletion a real decision: "Remove Red House" and "Remove Red House and
+  /// its 30 students" are different taps, and the organizer can only tell
+  /// which one they are making if the count is on screen.
+  static Map<String, int> houseCounts(List<Registration> registrations) {
+    final counts = <String, int>{};
+    for (final r in registrations) {
+      if (r.status != RegistrationStatus.confirmed) continue;
+      final h = r.houseName;
+      if (h == null || h.isEmpty) continue;
+      counts[h] = (counts[h] ?? 0) + 1;
+    }
+    return counts;
+  }
+
+  /// What auto-placing the field into houses would do, without doing it.
+  ///
+  /// Preview and apply are two calls on purpose. Placing three hundred
+  /// students is not a tap an organizer should make blind, and the number that
+  /// decides whether they make it — how many the club's roster actually knows
+  /// enough about — is only knowable by doing the whole calculation. So the
+  /// calculation runs first and the write happens only if they say yes.
+  ///
+  /// [members] is the hosting club's roster. An entrant who is not in it is an
+  /// outsider — an open event's guest from another club — and is reported
+  /// rather than placed: this club's houses are not facts about other clubs'
+  /// players. See [HouseAssigner].
+  static HousePlacementPreview previewHousePlacement({
+    required List<Registration> registrations,
+    required List<Membership> members,
+    required List<String> houses,
+  }) {
+    final byUid = {for (final m in members) m.uid: m};
+    final onList = {for (final h in houses) h.trim().toLowerCase()};
+
+    final placements = <String, String>{};
+    final unplaced = <String>[];
+    final outsiders = <String>[];
+    final alreadyPlaced = <String>[];
+
+    for (final r in registrations) {
+      if (r.status != RegistrationStatus.confirmed) continue;
+
+      // A house the organizer put them in by hand, or one they picked
+      // themselves at registration, is a decision already made. Bulk actions
+      // do not overrule decisions.
+      final current = r.houseName?.trim();
+      if (current != null &&
+          current.isNotEmpty &&
+          onList.contains(current.toLowerCase())) {
+        alreadyPlaced.add(r.displayName);
+        continue;
+      }
+
+      final member = byUid[r.uid];
+      if (member == null) {
+        outsiders.add(r.displayName);
+        continue;
+      }
+
+      final house = HouseAssigner.assign(member.grouping, houses);
+      if (house == null) {
+        unplaced.add(r.displayName);
+      } else {
+        placements[r.uid] = house;
+      }
+    }
+
+    return HousePlacementPreview(
+      placements: placements,
+      unplaced: unplaced,
+      outsiders: outsiders,
+      alreadyPlaced: alreadyPlaced,
+    );
+  }
+
+  /// Writes the placements a [previewHousePlacement] worked out.
+  ///
+  /// Chunked, because a school's field is routinely larger than a Firestore
+  /// batch, and not awaited for the reason every other bulk write here is not
+  /// — see [saveHouses].
+  Future<int> applyHousePlacement({
+    required String orgId,
+    required String compId,
+    required HousePlacementPreview preview,
+  }) =>
+      guard(() async {
+        if (preview.placements.isEmpty) return 0;
+
+        final batch = ChunkedBatch(Refs.db);
+        for (final e in preview.placements.entries) {
+          batch.update(
+            Refs.registration(orgId, compId, e.key),
+            {'houseName': e.value},
+          );
+        }
+
+        unawaited(batch.commitAll().catchError((Object error) {
+          _writeFailures.add(_translateWriteFailure(error));
+        }));
+        return preview.placements.length;
+      });
+
   // --- Draw -------------------------------------------------------------
+
+  /// One Glicko-2 rating per entrant, whatever shape the entrant is.
+  ///
+  /// An individual resolves to their own rating for this sport. A TEAM
+  /// resolves to its members' ratings combined by [combineTeamRating] — until
+  /// that existed this method's predecessor simply skipped every team, which
+  /// meant a club league, a school tournament and any other team event fell
+  /// through to the generator's `Random(42)` fallback no matter how much was
+  /// known about the players in it.
+  ///
+  /// Reads are issued per member and are cheap: a rating document is a handful
+  /// of numbers, Firestore serves them from cache once warm, and this runs
+  /// once per draw rather than once per match.
+  Future<Map<String, Rating>> _ratingsForEntrants({
+    required List<Entrant> entrants,
+    required String sportId,
+  }) async {
+    const service = RatingService();
+    final ratings = <String, Rating>{};
+
+    for (final e in entrants) {
+      if (e.withdrawn) continue;
+
+      final solo = e.soloUid;
+      if (solo != null) {
+        ratings[e.id] = await service.getRating(solo, sportId);
+        continue;
+      }
+
+      if (e.memberUids.isEmpty) continue;
+      final members = <Rating>[
+        for (final uid in e.memberUids) await service.getRating(uid, sportId),
+      ];
+      final combined = combineTeamRating(members);
+      if (combined != null) ratings[e.id] = combined;
+    }
+
+    return ratings;
+  }
 
   /// Generates and persists the fixture list.
   ///
@@ -1213,7 +1592,24 @@ class CompetitionRepository {
   Future<DrawOutcome> generateDraw({
     required Competition competition,
     required List<Entrant> entrants,
-    required List<String> defaultScorerUids,
+
+    /// Who holds the pen on every fixture the draw writes.
+    ///
+    /// Almost always EMPTY, and that is the considered default rather than an
+    /// oversight. It used to be the organizer who pressed "Make the draw",
+    /// stamped onto all thirty-eight matches — which reads as an assignment
+    /// and is not one: nobody stands at four courts at once. The roster it
+    /// produced was a lie the whole event then had to work around, and it hid
+    /// the real question ("who is actually scoring court 3 at 11:40?") behind
+    /// a name that was already there.
+    ///
+    /// An unassigned match is not an unscorable one. An organizer may score
+    /// any match in their own club — `firestore.rules` branch (a) and
+    /// `ScoringScreen` both allow it, and opening the pad puts their name on
+    /// that one match. Officials and scorers are then named per match, after
+    /// the draw, when the organizer knows who turned up. See
+    /// `UmpireRepository.assignScorer` and the Match Center officials card.
+    List<String> defaultScorerUids = const [],
   }) =>
       guard(() async {
         final orgId = competition.orgId;
@@ -1268,15 +1664,10 @@ class CompetitionRepository {
         var field = entrants;
         List<SeedVerdict> seeding = const [];
         if (draw.seedFromRatings) {
-          final ratings = <String, Rating>{};
-          for (final e in entrants) {
-            final uid = e.uid;
-            if (uid == null || e.withdrawn) continue;
-            ratings[e.id] = await const RatingService().getRating(
-              uid,
-              competition.sportId,
-            );
-          }
+          final ratings = await _ratingsForEntrants(
+            entrants: entrants,
+            sportId: competition.sportId,
+          );
           final result = const SeedingPolicy()
               .assign(entrants: entrants, ratings: ratings);
           seeding = result.verdicts;
@@ -1391,6 +1782,17 @@ class CompetitionRepository {
             // later, from `_maybeAdvanceWinner` and `promoteGroupQualifiers`.
             entrantAUid: p.entrantA?.soloUid,
             entrantBUid: p.entrantB?.soloUid,
+            // Auto-populate lineups from registered entrants so the scoring
+            // screen does not block with "Set the line-ups first" when the
+            // players are already known. For solo entrants this is the player
+            // themselves; team lineups are filled at match-start from the
+            // entrant's member list (names require a read we avoid here).
+            lineupA: p.entrantA?.soloUid != null
+                ? [MatchPlayer(id: p.entrantA!.soloUid!, name: p.entrantA!.displayName, uid: p.entrantA!.soloUid)]
+                : const [],
+            lineupB: p.entrantB?.soloUid != null
+                ? [MatchPlayer(id: p.entrantB!.soloUid!, name: p.entrantB!.displayName, uid: p.entrantB!.soloUid)]
+                : const [],
             status: FixtureStatus.scheduled,
             sourceType: competition.matchSource,
             sourceId: competition.matchSourceId,
@@ -1475,6 +1877,318 @@ class CompetitionRepository {
         );
       });
 
+  /// Pairs and writes the next Swiss round from the results of the one just
+  /// finished.
+  ///
+  /// ## The bug this exists for
+  ///
+  /// Swiss is a selectable format, and `generateDraw` produced exactly one
+  /// round of it — `FixtureGenerator._swissFirstRound`, which is all that can
+  /// be drawn up front because rounds two onward pair by standing and there
+  /// are no standings before a ball is bowled. `SwissPairing.nextSwissRound`
+  /// was written to build those rounds, was covered by four tests, and was
+  /// called from nowhere in `lib/`. So an organizer who picked Swiss got one
+  /// round of fixtures and no way to produce a second: the event dead-ended
+  /// with the field half-ranked and the app offering no button that would
+  /// move it forward.
+  ///
+  /// ## Why this is additive, and [generateDraw] is not
+  ///
+  /// `generateDraw` clears the previous draw before writing, because
+  /// regenerating a bracket means replacing it. That is exactly wrong here —
+  /// every earlier round holds played results, and those results are the only
+  /// input this pairing has. Nothing is deleted; the new round is appended
+  /// with `matchIndex` continuing past the highest already written, so ids
+  /// stay unique across the whole event.
+  Future<SwissRoundOutcome> generateNextSwissRound({
+    required Competition competition,
+    required List<Entrant> entrants,
+    List<String> defaultScorerUids = const [],
+  }) =>
+      guard(() async {
+        final orgId = competition.orgId;
+        final compId = competition.id;
+
+        if (competition.format != CompetitionFormat.swiss) {
+          throw const ValidationException(
+            'Only a Swiss event pairs a new round from the last one.',
+          );
+        }
+
+        // A withdrawal mid-event removes that entrant from every later
+        // round, which is the whole reason pairing is done per round rather
+        // than drawn up front.
+        final active = [for (final e in entrants) if (!e.withdrawn) e];
+        if (active.length < 2) {
+          throw const ValidationException(
+            'Not enough entrants left to pair another round.',
+          );
+        }
+
+        final all = (await Refs.fixtures(orgId, compId).get())
+            .docs
+            .map(Fixture.fromDoc)
+            .toList();
+        if (all.isEmpty) {
+          throw const ValidationException(
+            'Make the draw first — there is no round one to pair from.',
+          );
+        }
+
+        final currentRound =
+            all.fold<int>(1, (hi, f) => f.round > hi ? f.round : hi);
+
+        const swiss = SwissPairing();
+        final totalRounds = swiss.recommendedRoundCount(
+          active.length,
+          override: competition.drawConfig.swissRounds,
+        );
+        if (currentRound >= totalRounds) {
+          throw ValidationException(
+            'This event runs $totalRounds ${totalRounds == 1 ? 'round' : 'rounds'} '
+            'and round $currentRound was the last one.',
+          );
+        }
+
+        // Pairing by standing is only meaningful once the standings are
+        // final. Pairing off a half-played round would seed the next one from
+        // a table that changes an hour later — and the fixtures would already
+        // have been written by then.
+        final pending = all
+            .where((f) => f.round == currentRound && !f.hasResult)
+            .length;
+        if (pending > 0) {
+          throw ValidationException(
+            '$pending ${pending == 1 ? 'match' : 'matches'} in round '
+            '$currentRound still ${pending == 1 ? 'needs' : 'need'} a result. '
+            'Finish the round before pairing the next one.',
+          );
+        }
+
+        // Scores come from the competition's own points model, via the same
+        // calculator that renders the standings table — so the order this
+        // pairs by is the order the organizer is looking at on screen, not a
+        // second opinion computed a different way.
+        final table = const StandingsCalculator().compute(
+          competition: competition,
+          entrants: active,
+          fixtures: all,
+        );
+        final pointsById = {
+          for (final row in table) row.entrantId: row.points.toDouble(),
+        };
+
+        // Who has already sat a round out. Derived from the fixtures rather
+        // than stored — see [SwissPairing.byeRecipients] for why.
+        final entrantIdsByRound = <int, Set<String>>{};
+        for (var r = 1; r <= currentRound; r++) {
+          entrantIdsByRound[r] = {
+            for (final f in all.where((f) => f.round == r)) ...[
+              if (f.entrantAId.isNotEmpty) f.entrantAId,
+              if (f.entrantBId.isNotEmpty) f.entrantBId,
+            ],
+          };
+        }
+        final byeReceivers = swiss.byeRecipients(
+          activeEntrantIds: [for (final e in active) e.id],
+          entrantIdsByRound: entrantIdsByRound,
+        );
+
+        final playedPairs = <EntrantPair>{
+          for (final f in all)
+            if (f.entrantAId.isNotEmpty && f.entrantBId.isNotEmpty)
+              EntrantPair(f.entrantAId, f.entrantBId),
+        };
+
+        final nextRound = currentRound + 1;
+        final planned = swiss.nextSwissRound(
+          standings: [
+            for (final e in active)
+              SwissStanding(
+                entrant: e,
+                score: pointsById[e.id] ?? 0,
+                hadBye: byeReceivers.contains(e.id),
+              ),
+          ],
+          playedPairs: playedPairs,
+          round: nextRound,
+          shuffleSeed: competition.drawConfig.shuffleSeed,
+        );
+
+        // The bye is in `planned` but is not a match, so it never reaches the
+        // database — same rule the first round is written under.
+        final kept = [for (final p in planned) if (p.isPlayable) p];
+        if (kept.isEmpty) {
+          throw const ValidationException(
+            'Nothing left to pair — every remaining entrant has played '
+            'everyone else.',
+          );
+        }
+
+        final sport = SportCatalog.byId(competition.sportId);
+        final effectiveConfig =
+            competition.effectiveScoringConfig(sport.config);
+
+        final venueCourtNames = <String>[];
+        for (final venueId in competition.scheduleConfig.venueIds) {
+          final vDoc = await Refs.venue(orgId, venueId).get();
+          if (!vDoc.exists) continue;
+          final venue = venue_model.Venue.fromDoc(vDoc);
+          if (venue.isArchived) continue;
+          for (final court in venue.usableCourts) {
+            venueCourtNames.add(court.name);
+          }
+        }
+
+        // `_planSchedule` lays a round out from the competition's own start
+        // date, which is correct for a draw made before the event and wrong
+        // for a round paired during it — round four would be timetabled for
+        // the morning of day one, in the past. So the shape it produces is
+        // kept (court allocation, spacing, rest gaps) and the whole block is
+        // shifted to begin after the last match already on the books.
+        final timetable = _planSchedule(kept, competition, venueCourtNames);
+        final shift = _swissRoundOffset(
+          planned: timetable.startAt.values,
+          previous: all,
+          competition: competition,
+        );
+
+        final offset =
+            all.fold<int>(-1, (hi, f) => f.matchIndex > hi ? f.matchIndex : hi) +
+                1;
+
+        final batch = ChunkedBatch(Refs.db);
+        final drawId = UuidV7.generate();
+
+        for (final p in kept) {
+          final ref = Refs.fixtures(orgId, compId).doc();
+          final startAt = timetable.startAt[p.matchIndex];
+          final fixture = Fixture(
+            id: ref.id,
+            orgId: orgId,
+            compId: compId,
+            entrantAId: p.entrantA?.id ?? '',
+            entrantBId: p.entrantB?.id ?? '',
+            entrantAName: p.entrantA?.displayName ?? 'To be decided',
+            entrantBName: p.entrantB?.displayName ?? 'To be decided',
+            entrantAUid: p.entrantA?.soloUid,
+            entrantBUid: p.entrantB?.soloUid,
+            lineupA: p.entrantA?.soloUid != null
+                ? [
+                    MatchPlayer(
+                      id: p.entrantA!.soloUid!,
+                      name: p.entrantA!.displayName,
+                      uid: p.entrantA!.soloUid,
+                    )
+                  ]
+                : const [],
+            lineupB: p.entrantB?.soloUid != null
+                ? [
+                    MatchPlayer(
+                      id: p.entrantB!.soloUid!,
+                      name: p.entrantB!.displayName,
+                      uid: p.entrantB!.soloUid,
+                    )
+                  ]
+                : const [],
+            status: FixtureStatus.scheduled,
+            sourceType: competition.matchSource,
+            sourceId: competition.matchSourceId,
+            round: p.round,
+            // Continues past every index already written, so the ids stay
+            // unique across rounds rather than colliding with round one's.
+            matchIndex: offset + p.matchIndex,
+            roundLabel: p.roundLabel,
+            venue: competition.venue,
+            scheduledAt: startAt == null
+                ? competition.startDate
+                : startAt.add(shift),
+            courtId: timetable.courtId[p.matchIndex],
+            tournamentId: competition.tournamentId,
+            scorerUids: defaultScorerUids,
+            scoringPluginKey: competition.scoringPluginKey,
+            sportId: competition.sportId,
+            rulesetVersion: competition.rulesetVersion,
+            scoringConfig: effectiveConfig,
+            scoreState: ScoringRegistry.resolve(competition.scoringPluginKey)
+                .initialState(_contextFor(p, effectiveConfig)),
+            // Swiss has no bracket wiring: nobody advances anywhere, every
+            // entrant simply plays again next round.
+          );
+          batch.set(ref, fixture.toCreate());
+        }
+
+        batch.update(Refs.competition(orgId, compId), {
+          'fixtureCount': all.length + kept.length,
+          'drawId': drawId,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+
+        // Not awaited, for the same reason every match-day write here is not:
+        // the local cache already holds all of it, and awaiting would hang
+        // until a server answered. A rejection surfaces on [writeFailures].
+        unawaited(batch.commitAll().catchError((Object error) {
+          _writeFailures.add(_translateWriteFailure(error));
+        }));
+
+        return SwissRoundOutcome(
+          round: nextRound,
+          totalRounds: totalRounds,
+          written: kept.length,
+          byeEntrantName: _swissByeName(planned),
+          scheduleProblems: timetable.problems,
+        );
+      });
+
+  /// How far to push a freshly paired Swiss round so it starts after the
+  /// matches already on the books rather than at the competition's own start
+  /// date.
+  ///
+  /// Returns [Duration.zero] when there is nothing to move — no planned
+  /// times, or a previous round that somehow finishes after the new one is
+  /// already timetabled for, in which case the layout is left alone rather
+  /// than dragged backwards.
+  Duration _swissRoundOffset({
+    required Iterable<DateTime> planned,
+    required List<Fixture> previous,
+    required Competition competition,
+  }) {
+    if (planned.isEmpty) return Duration.zero;
+
+    final firstPlanned = planned.reduce((a, b) => a.isBefore(b) ? a : b);
+
+    DateTime? lastExisting;
+    for (final f in previous) {
+      final at = f.scheduledAt;
+      if (at == null) continue;
+      if (lastExisting == null || at.isAfter(lastExisting)) lastExisting = at;
+    }
+    if (lastExisting == null) return Duration.zero;
+
+    final cfg = competition.scheduleConfig;
+    final resumeAt = lastExisting.add(
+      Duration(minutes: cfg.matchMinutes + cfg.changeoverMinutes),
+    );
+    if (!resumeAt.isAfter(firstPlanned)) return Duration.zero;
+    return resumeAt.difference(firstPlanned);
+  }
+
+  /// The entrant sitting this Swiss round out, if the field is odd.
+  ///
+  /// Read off the planned round rather than recomputed, so the name reported
+  /// to the organizer is the one the pairing actually chose.
+  String? _swissByeName(List<PlannedFixture> planned) {
+    for (final p in planned) {
+      if (p.entrantA != null && p.entrantB == null) {
+        return p.entrantA!.displayName;
+      }
+      if (p.entrantB != null && p.entrantA == null) {
+        return p.entrantB!.displayName;
+      }
+    }
+    return null;
+  }
+
   /// Generates a draft schedule against placeholder teams — "Team A", "Team
   /// B", … — before real entrants exist, so an organizer can lay out rounds,
   /// pick venues and times, and line up officials ahead of registration
@@ -1500,7 +2214,85 @@ class CompetitionRepository {
   /// reason: on the ordinary path this only ever runs before real entrants
   /// exist, so there should be nothing to protect, but a competition an
   /// organizer somehow scored by hand must still not be silently wiped.
-  Future<DrawOutcome> generateDraftSchedule({
+   /// The identities a draft match must not double-book.
+  ///
+  /// Real accounts where there are any — a person entered in three events is
+  /// the clash the tournament scheduler exists to catch, and only a uid can
+  /// see that across draws. A team entered by typing a name into the
+  /// registration form has no accounts behind it at all, and for that case the
+  /// entrant ids stand in: they cannot catch a player turning out for two
+  /// clubs, but they do stop one team being put on two courts at once, which
+  /// is the failure an organizer notices from across the hall.
+  ///
+  /// Never empty, which matters more than what is in it: the scheduler treats
+  /// a match with no identities as one it cannot safely place, so an empty set
+  /// is the difference between a timetable and a list of matches with no times
+  /// on them.
+  static Set<String> _clashKeysFor(PlannedFixture p) {
+    final uids = <String>{
+      if (p.entrantA?.soloUid case final uid?) uid,
+      if (p.entrantB?.soloUid case final uid?) uid,
+      ...?p.entrantA?.memberUids,
+      ...?p.entrantB?.memberUids,
+    };
+    if (uids.isNotEmpty) return uids;
+    return <String>{
+      if (p.entrantA?.id case final id?) id,
+      if (p.entrantB?.id case final id?) id,
+    };
+  }
+
+  /// Re-orders a field into the order the entries arrived in.
+  ///
+  /// The timestamp lives on the REGISTRATION, not on the entrant document the
+  /// registration was turned into, so this reads the registrations and sorts
+  /// by them. Matched on the entrant's own id first and its uid second, which
+  /// covers both shapes the two collections take: `lockFieldAndCreateEntrants`
+  /// keys an individual's entrant document by their uid, while a team entrant
+  /// carries its own id and the uid of nobody.
+  ///
+  /// Anyone with no registration to date keeps their existing relative order
+  /// and sits BEHIND everyone who has one. That is the honest reading of an
+  /// organizer's direct pick or a document written before the field was
+  /// timestamped: it is not evidence of having entered first.
+  Future<List<Entrant>> _inRegistrationOrder(
+    String orgId,
+    String compId,
+    List<Entrant> entrants,
+  ) async {
+    if (entrants.length < 2) return entrants;
+
+    final snap = await Refs.registrations(orgId, compId).get();
+    final enteredAt = <String, DateTime>{};
+    for (final doc in snap.docs) {
+      final at = Fs.dateOrNull(doc.data()['createdAt']);
+      if (at != null) enteredAt[doc.id] = at;
+    }
+    if (enteredAt.isEmpty) return entrants;
+
+    DateTime? whenFor(Entrant e) =>
+        enteredAt[e.id] ?? (e.uid == null ? null : enteredAt[e.uid!]);
+
+    final indexed = [
+      for (var i = 0; i < entrants.length; i++) (index: i, entrant: entrants[i]),
+    ]..sort((a, b) {
+        final ta = whenFor(a.entrant);
+        final tb = whenFor(b.entrant);
+        if (ta != null && tb != null) {
+          final byTime = ta.compareTo(tb);
+          if (byTime != 0) return byTime;
+        } else if (ta != null) {
+          return -1;
+        } else if (tb != null) {
+          return 1;
+        }
+        return a.index.compareTo(b.index);
+      });
+
+    return [for (final e in indexed) e.entrant];
+  }
+
+ Future<DrawOutcome> generateDraftSchedule({
     required Competition competition,
     required int teamCount,
     int? teamsPerGroup,
@@ -1563,15 +2355,72 @@ class CompetitionRepository {
             ];
           }
         }
+        // ── Who is in, and in what order ──────────────────────────────
+        //
+        // FIRST COME, FIRST IN. When more people have entered than the
+        // organizer planned a bracket for, the ones who entered first take the
+        // places. That is what a club does at the gate and it is the only rule
+        // an organizer can defend to the eleventh team without an argument:
+        // the alternative — whoever Firestore happened to return first — is
+        // arbitrary and looks like favouritism.
+        //
+        // Entrant documents carry no timestamp of their own, so the order
+        // comes from the REGISTRATIONS they were created from. Anyone without
+        // a registration to date (an organizer's direct pick, a legacy
+        // document) keeps their existing relative position, after the dated
+        // ones rather than ahead of them.
+        real = await _inRegistrationOrder(orgId, compId, real);
+
         // A field already larger than the plan is not an error — the
         // organizer asked for a smaller bracket than the entry list, and the
         // extra entrants simply do not fit in it. Taking the first
         // [teamCount] keeps the draw the size that was asked for.
-        final seeded = real.length > teamCount ? real.sublist(0, teamCount) : real;
+        final entered = real.length > teamCount ? real.sublist(0, teamCount) : real;
+
+        // ── Where each of them sits in the bracket ────────────────────
+        //
+        // Registration order decides WHO is in. It must not decide who plays
+        // whom: seeding the field by the minute people happened to sign up is
+        // how the two strongest sides meet in round one and the final is
+        // played at ten in the morning.
+        //
+        // So the entered field is ordered by the rating the product already
+        // computes — Glicko-2, combined across a team's members by
+        // `combineTeamRating` — and everyone it cannot speak for keeps
+        // registration order behind them. Open slots go last, which puts them
+        // at the bottom of a bracket where they behave exactly like the byes
+        // they are.
+        //
+        // The order is then written onto `Entrant.seed` for every position,
+        // because that is the only channel `FixtureGenerator` reads: left
+        // unseeded it falls back to `Random(42)` and scatters the real
+        // entrants in among the open slots.
+        final ratings = await _ratingsForEntrants(
+          entrants: entered,
+          sportId: competition.sportId,
+        );
+        final verdicts =
+            const SeedingPolicy().assign(entrants: entered, ratings: ratings);
+        final seedByEntrant = verdicts.seedsByEntrant;
+
+        final byRating = [
+          for (var i = 0; i < entered.length; i++) (index: i, entrant: entered[i]),
+        ]..sort((a, b) {
+            final sa = seedByEntrant[a.entrant.id];
+            final sb = seedByEntrant[b.entrant.id];
+            if (sa != null && sb != null) return sa.compareTo(sb);
+            // A rated player ahead of an unrated one — not because they are
+            // better, but because a seed is a position the bracket protects
+            // and an unknown cannot be given one.
+            if (sa != null) return -1;
+            if (sb != null) return 1;
+            return a.index.compareTo(b.index);
+          });
 
         final placeholders = <Entrant>[
-          ...seeded,
-          for (var i = seeded.length; i < teamCount; i++)
+          for (var i = 0; i < byRating.length; i++)
+            byRating[i].entrant.withSeed(i + 1),
+          for (var i = entered.length; i < teamCount; i++)
             Entrant(
               id: 'draft_$i',
               // Two vocabularies, because they answer different questions. A
@@ -1579,12 +2428,17 @@ class CompetitionRepository {
               // reads as one. A draw with ten real names in it has gaps, and
               // a gap wants to be called a gap — "Open slot 11" next to ten
               // people, not another "Team K" competing with them for the eye.
-              displayName: seeded.isEmpty
+              displayName: entered.isEmpty
                   ? 'Team ${_draftTeamLabel(i)}'
                   : 'Open slot ${i + 1}',
               entrantType: competition.entrantType,
+              seed: i + 1,
             ),
         ];
+
+        /// Whether a planned side is somebody real, as opposed to an open slot
+        /// the organizer is still waiting to fill.
+        final enteredIds = {for (final e in entered) e.id};
 
         final planned = const FixtureGenerator().generate(
           format: competition.format,
@@ -1659,19 +2513,42 @@ class CompetitionRepository {
             slotMinutes: sc.slotMinutes,
           );
 
+          // ONLY the matches that can actually be played get a court and a
+          // time, and that is the point of a draft rather than a limitation
+          // of it.
+          //
+          // A match against "Open slot 7" is not a fixture, it is a gap with a
+          // shape. Giving it 9:40 on court 2 books a court nobody will use,
+          // pushes a match between two teams who ARE entered into the
+          // afternoon, and prints a programme with half its lines undated in
+          // the wrong half. Real-versus-real first is what an organizer does
+          // with a whiteboard: put down the games you can run, leave the rest
+          // as slots to fill as people enter.
+          //
+          // The remaining matches are simply left without a placement. They
+          // are not reported as scheduling problems because they are not
+          // problems — [generateDraftSchedule] returns no `scheduleProblems`
+          // for this reason, unlike [generateDraw], where an unplaced match is
+          // a real one with nowhere to go.
           final schedulable = <SchedulableMatch>[
             for (final p in kept)
-              SchedulableMatch(
-                compId: compId,
-                matchIndex: p.matchIndex,
-                round: p.round,
-                playerUids: <String>{
-                  if (p.entrantA?.soloUid != null) p.entrantA!.soloUid!,
-                  if (p.entrantB?.soloUid != null) p.entrantB!.soloUid!,
-                },
-                isGroupStage: p.groupId != null,
-                matchMinutes: sc.matchMinutes,
-              ),
+              if (enteredIds.contains(p.entrantA?.id) &&
+                  enteredIds.contains(p.entrantB?.id))
+                SchedulableMatch(
+                  compId: compId,
+                  matchIndex: p.matchIndex,
+                  round: p.round,
+                  // Member uids as well as the solo one. A team entrant has no
+                  // `soloUid` at all, so keyed on that alone every match in a
+                  // club league, a school tournament or any other team event
+                  // arrived at the scheduler with nobody in it — and a match
+                  // with no players is one the scheduler refuses to place,
+                  // which is why a team draft schedule came back with no
+                  // courts and no times on any of it.
+                  playerUids: _clashKeysFor(p),
+                  isGroupStage: p.groupId != null,
+                  matchMinutes: sc.matchMinutes,
+                ),
           ];
 
           final result = const TournamentScheduler().schedule(
@@ -2476,7 +3353,20 @@ class CompetitionRepository {
         final batch = Refs.db.batch();
         batch.update(
           Refs.fixture(request.orgId, request.compId, request.fixtureId),
-          {'scorerUids': FieldValue.arrayUnion([request.uid])},
+          {
+            'scorerUids': FieldValue.arrayUnion([request.uid]),
+            // Approving "let me score this" hands over control, not just
+            // eligibility. Granting the second without the first was the old
+            // behaviour and it read as a yes that did nothing: the person was
+            // added to a list, the pad still belonged to whoever had it, and
+            // the only visible result of the approval was that nothing
+            // changed. See `Fixture.activeScorerUid`.
+            'activeScorerUid': request.uid,
+            // The new holder claims their own device when they open the pad.
+            'activeScorerDeviceId': null,
+            'penGrantedByUid': decidedByUid,
+            'penGrantedAt': FieldValue.serverTimestamp(),
+          },
         );
         batch.update(
           Refs.scoringRequest(
@@ -3218,6 +4108,150 @@ class CompetitionRepository {
         await batch.commit();
       });
 
+  /// Swaps who is playing one match — the organizer's override on the DRAW,
+  /// as [rescheduleFixture] is their override on the timetable.
+  ///
+  /// ## Why this has to exist
+  ///
+  /// A draw is made days before it is played, and the ground decides
+  /// otherwise: a side arrives four players short, a college bus does not
+  /// turn up, two teams agree to swap so one can travel home, a walkover
+  /// leaves an opponent with nobody. Until this existed the only ways out
+  /// were to regenerate the entire draw — which is refused once anything has
+  /// been scored, and throws away every court, time and official already
+  /// assigned — or to play the match under the wrong two names and let the
+  /// standings inherit the lie.
+  ///
+  /// ## What it refuses, and why those are not arbitrary
+  ///
+  ///  - **A match that has started or been played.** At `lastSeq > 0` the
+  ///    entrant names are no longer a plan, they are the record of who was
+  ///    on the field for every event in the log, and the ratings and career
+  ///    stats settled from it hang off exactly these two ids. Changing them
+  ///    afterwards does not fix a mistake, it reassigns a performance to
+  ///    somebody who was not there. That case is a dispute
+  ///    ([raiseDispute]), which is reviewed, not a silent edit.
+  ///  - **A challenge between two clubs.** Its entrant ids ARE the two club
+  ///    ids and `participantOrgIds` mirrors them; `firestore.rules` freezes
+  ///    that mirror on every update, so a swap here would be denied by the
+  ///    server anyway. A different opponent is a different challenge.
+  ///
+  /// Everything belonging to the side that left goes with it: its team sheet,
+  /// its squad call and its lock. Keeping them would hand the incoming side a
+  /// line-up of players who are not theirs — and `playerUids` is what the
+  /// rules consult before letting a scorer settle ratings onto a profile, so
+  /// a stale name there is not cosmetic.
+  ///
+  /// The swap is recorded on the fixture rather than applied invisibly. An
+  /// organizer who changes a quarter-final's opponent will be asked why, and
+  /// "the record says so" is the only answer that ends the conversation.
+  Future<void> changeOpponent({
+    required Fixture fixture,
+    required String side,
+    required Entrant entrant,
+    required String byUid,
+    String? reason,
+  }) =>
+      guard(() async {
+        if (side != 'a' && side != 'b') {
+          throw const ValidationException('A match has two sides, a and b.');
+        }
+        if (fixture.lastSeq > 0 || fixture.hasResult) {
+          throw const ValidationException(
+            'This match has already been played. Raise a dispute to have the '
+            'result reviewed — the two sides on a played match are part of '
+            'its record.',
+          );
+        }
+        if (fixture.participantOrgIds != null) {
+          throw const ValidationException(
+            'This is a challenge between two clubs, so the two clubs are the '
+            'match. Cancel it and challenge the other club instead.',
+          );
+        }
+        if (entrant.withdrawn) {
+          throw const ValidationException(
+            'That entrant has withdrawn from this event.',
+          );
+        }
+
+        final isA = side == 'a';
+
+        // `firestore.rules` (`lockedSquadsRespected`) freezes a locked side's
+        // line-up AND its lock together, and only the club that locked it may
+        // reopen it. So this is not a client-side nicety standing in for a
+        // server check — the write would be refused, and a sentence here is
+        // better than a permission error at the ground.
+        if (isA ? fixture.squadLockedA : fixture.squadLockedB) {
+          throw const ValidationException(
+            'That side has locked its squad. Reopen it before changing who is '
+            'playing.',
+          );
+        }
+
+        final opposingId = isA ? fixture.entrantBId : fixture.entrantAId;
+        if (entrant.id == opposingId) {
+          throw const ValidationException(
+            'A side cannot play itself.',
+          );
+        }
+
+        final outgoingId = isA ? fixture.entrantAId : fixture.entrantBId;
+        final outgoingName = isA ? fixture.entrantAName : fixture.entrantBName;
+
+        // Recomputed from the side that STAYS plus whoever the incoming
+        // entrant is. Same reasoning as `setSideLineup`: this list is the
+        // settlement gate, and rebuilding it from one side alone would strip
+        // the opponent out of their own match.
+        final keptLineup = isA ? fixture.lineupB : fixture.lineupA;
+        final keptSoloUid = isA ? fixture.entrantBUid : fixture.entrantAUid;
+        final playerUids = <String>{
+          for (final p in keptLineup) ...[if (p.uid != null) p.uid!],
+          if (keptSoloUid != null && keptSoloUid.isNotEmpty) keptSoloUid,
+          if (entrant.soloUid case final uid?) uid,
+        }.toList();
+
+        final update = <String, Object?>{
+          isA ? 'entrantAId' : 'entrantBId': entrant.id,
+          isA ? 'entrantAName' : 'entrantBName': entrant.displayName,
+          isA ? 'entrantAUid' : 'entrantBUid': entrant.soloUid,
+          isA ? 'lineupA' : 'lineupB': const <Object?>[],
+          isA ? 'squadCallA' : 'squadCallB': const SquadCall().toMap(),
+          isA ? 'squadLockedA' : 'squadLockedB': false,
+          'playerUids': playerUids,
+          'opponentChanges': FieldValue.arrayUnion([
+            {
+              'side': side,
+              'fromId': outgoingId,
+              'fromName': outgoingName,
+              'toId': entrant.id,
+              'toName': entrant.displayName,
+              'byUid': byUid,
+              // Not `serverTimestamp()`: Firestore refuses a sentinel inside
+              // an array element. The clock is the organizer's phone, which
+              // is what every other match-day timestamp on this document is
+              // written from anyway.
+              'at': Timestamp.fromDate(DateTime.now()),
+              if (reason != null && reason.trim().isNotEmpty)
+                'reason': reason.trim(),
+            },
+          ]),
+          'updatedAt': FieldValue.serverTimestamp(),
+        };
+
+        // Not awaited — the same offline reasoning as every other match-day
+        // write in this file. An organizer standing on a ground with no
+        // signal gets the new name at once, and a failure surfaces on
+        // [writeFailures].
+        unawaited(
+          Refs.fixture(fixture.orgId, fixture.compId, fixture.id)
+              .update(update)
+              .catchError((Object error) {
+            _writeFailures.add(_translateWriteFailure(error));
+          }),
+        );
+      });
+
   /// Moves one match. The organizer's override on everything the scheduler
   /// decided — a court that flooded, two players who asked to swap, a
   /// referee's call. [courtId] is here because a schedule that can move a
@@ -3349,6 +4383,48 @@ class CompetitionRepository {
 /// from "703 matches planned, an unknown number written, and the batch may
 /// have been rejected on the way". The organizer is shown a number that was
 /// true at the moment it was produced; these fields are what make it true.
+/// What one press of "pair the next Swiss round" produced.
+///
+/// Separate from [DrawOutcome] because the two answer different questions. A
+/// draw reports on a whole bracket built at once — how much of it was
+/// padding, what got seeded. A Swiss round reports on one round appended to
+/// an event already underway, where the things an organizer needs to hear are
+/// which round this is, how many are left, and who is sitting out.
+class SwissRoundOutcome {
+  const SwissRoundOutcome({
+    required this.round,
+    required this.totalRounds,
+    required this.written,
+    this.byeEntrantName,
+    this.scheduleProblems = const [],
+  });
+
+  /// The round just created — 2 for the first press, and so on.
+  final int round;
+
+  /// How many rounds this event runs in total, so the organizer can be told
+  /// "round 3 of 5" rather than left to guess when it ends.
+  final int totalRounds;
+
+  /// Matches written. Excludes the bye, which is not a match.
+  final int written;
+
+  /// Who sits this round out, on an odd field. Null when the field is even.
+  ///
+  /// Surfaced deliberately: the bye is the one thing about a Swiss round that
+  /// is not visible on the fixture list, because it is the absence of a
+  /// fixture. An organizer who is not told will be asked by the player.
+  final String? byeEntrantName;
+
+  /// Matches the scheduler could not place on a real court at a real time.
+  final List<String> scheduleProblems;
+
+  bool get hasScheduleProblems => scheduleProblems.isNotEmpty;
+
+  /// Whether this was the last round the event will run.
+  bool get isFinalRound => round >= totalRounds;
+}
+
 class DrawOutcome {
   const DrawOutcome({
     required this.planned,

@@ -1462,3 +1462,134 @@ export const onSponsorPledgeStatusChanged = onDocumentUpdated(
     }
   },
 );
+
+/**
+ * A club asking who is free, and a member finding out they have promised to be
+ * in two places at once.
+ *
+ * Both live in one trigger because both are the same document changing: a
+ * match availability call is an announcement carrying a `match` block and a
+ * poll, and the votes ARE the poll. Splitting them would mean two functions
+ * fighting over the same write.
+ */
+export const onMatchRsvp = onDocumentWritten(
+  'orgs/{orgId}/announcements/{announcementId}',
+  async (event) => {
+    const before = event.data?.before?.data();
+    const after = event.data?.after?.data();
+    if (!after) return;
+
+    // Only match calls. An ordinary club notice or an ordinary poll passes
+    // through here too and must fall straight out.
+    const match = after.match;
+    if (!match || typeof match !== 'object' || !match.matchDate) return;
+
+    const { orgId, announcementId } = event.params;
+    const kickOff = match.matchDate.toDate
+      ? match.matchDate.toDate()
+      : new Date(match.matchDate);
+
+    // --- The call itself -----------------------------------------------
+    //
+    // On creation only. An organizer fixing a typo in the venue must not
+    // re-notify the whole club, and every vote is an update to this same
+    // document — without this test the club would be pushed once per answer.
+    if (!before) {
+      const members = await activeMemberUids(orgId);
+      const recipients = members.filter((u) => u !== after.authorUid);
+      await sendToUsers(recipients, notification({
+        id: `match_rsvp_${announcementId}`,
+        type: 'match_rsvp',
+        title: after.title || 'Match on',
+        body: `${formatKickOff(kickOff)}`
+          + `${match.venue ? ` at ${match.venue}` : ''}`
+          + ' — are you in?',
+        route: '/home',
+        params: { orgId },
+      }));
+      return;
+    }
+
+    // --- Clashes --------------------------------------------------------
+    //
+    // Fired for whoever just said yes, and only for them. Recomputing every
+    // member's diary on every vote would be a full scan of the club's notice
+    // board per tap; the person who changed their answer is the only one
+    // whose diary can have changed.
+    const newYesUids = newlyConfirmed(before, after);
+    if (newYesUids.length === 0) return;
+
+    const others = await db.collection('orgs').doc(orgId)
+      .collection('announcements').get();
+
+    for (const uid of newYesUids) {
+      const clashes = [];
+      others.forEach((doc) => {
+        if (doc.id === announcementId) return;
+        const other = doc.data();
+        const otherMatch = other.match;
+        if (!otherMatch?.matchDate) return;
+        if (other.poll?.votes?.[uid] !== RSVP_YES) return;
+        const when = otherMatch.matchDate.toDate
+          ? otherMatch.matchDate.toDate()
+          : new Date(otherMatch.matchDate);
+        if (Math.abs(when.getTime() - kickOff.getTime()) < CLASH_WINDOW_MS) {
+          clashes.push(other.title || 'another match');
+        }
+      });
+
+      if (clashes.length === 0) continue;
+
+      await sendToUsers([uid], notification({
+        id: `match_clash_${announcementId}_${uid}`,
+        type: 'match_clash',
+        title: 'You are booked twice',
+        body: `"${after.title || 'This match'}" clashes with `
+          + `${clashes.length === 1 ? `"${clashes[0]}"` : `${clashes.length} other matches`}`
+          + '. Both clubs are counting on you.',
+        route: '/home',
+        params: { orgId },
+      }));
+    }
+  },
+);
+
+/**
+ * Index of the "In" option, and the window two kick-offs must fall inside to
+ * count as a clash.
+ *
+ * Both are WIRE FORMAT shared with the app: the index is a position in
+ * `Poll.options` that is written into every vote, and the window is
+ * `kClashWindow` in lib/features/home/home_providers.dart. If either moves,
+ * both have to move together — a client that warns about a clash the server
+ * does not notice, or the reverse, is worse than neither.
+ */
+const RSVP_YES = 0;
+const CLASH_WINDOW_MS = 3 * 60 * 60 * 1000;
+
+/** Members who have just said yes, and were not saying yes before. */
+function newlyConfirmed(before, after) {
+  const was = before?.poll?.votes ?? {};
+  const now = after?.poll?.votes ?? {};
+  return Object.keys(now).filter(
+    (uid) => now[uid] === RSVP_YES && was[uid] !== RSVP_YES,
+  );
+}
+
+/**
+ * "Sun, 6:00 pm" — enough to know whether you are free without opening the app.
+ *
+ * Rendered in IST, not the server's clock. Functions run in UTC, so
+ * `getHours()` on a 6pm Hyderabad kick-off returns 12 and the club is told
+ * their evening game is at lunchtime. Same timezone every other date in this
+ * file is formatted in.
+ */
+function formatKickOff(when) {
+  return when.toLocaleString('en-IN', {
+    weekday: 'short',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+    timeZone: 'Asia/Kolkata',
+  });
+}

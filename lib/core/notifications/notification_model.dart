@@ -49,7 +49,25 @@ enum NotificationType {
   sponsorPledgeReceived('sponsor_pledge_received', isCritical: false),
 
   /// The listing owner has accepted or declined this sponsor's offer.
-  sponsorPledgeResolved('sponsor_pledge_resolved', isCritical: false);
+  sponsorPledgeResolved('sponsor_pledge_resolved', isCritical: false),
+
+  /// A club has asked who is free for a match.
+  ///
+  /// Critical, and for the same reason [tournamentAnnounced] is: it is the
+  /// invitation itself and it expires. A member who does not see it until
+  /// Monday did not miss a notification, they missed the game — which is
+  /// exactly what the WhatsApp poll this replaces gets right by default,
+  /// because a phone puts a group message in front of you.
+  matchRsvp('match_rsvp', isCritical: true),
+
+  /// This person has said they are In for two matches at the same hour.
+  ///
+  /// Critical despite being about their own past answers. Two captains are
+  /// both writing them onto a team sheet, and the longer it takes to find
+  /// out, the more expensive it is for whichever club they let down — a
+  /// withdrawal on Friday is an inconvenience, one on Sunday morning is a
+  /// forfeited match.
+  matchClash('match_clash', isCritical: true);
 
   const NotificationType(this.wire, {required this.isCritical});
 

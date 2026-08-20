@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/async_combine.dart';
 import '../../core/models/challenge.dart';
+import '../../core/models/announcement.dart';
 import '../../core/models/competition.dart';
 import '../../core/models/enums.dart';
 import '../../core/models/fixture.dart';
@@ -281,3 +282,133 @@ final waitingOnYouCountProvider = Provider<int>((ref) {
       unreadActivity;
 });
 
+
+
+// --- Match availability calls ------------------------------------------------
+
+/// One club's live match calls. Members only — see [myMatchRsvpsProvider].
+final matchRsvpsProvider =
+    StreamProvider.family<List<Announcement>, String>((ref, orgId) {
+  return ref.watch(communityRepositoryProvider).watchMatchRsvps(orgId);
+});
+
+/// The discussion under one match call.
+///
+/// A record rather than two positional args so the family key compares by
+/// value — a positional tuple of two strings would work, but a named record
+/// reads at the call site, which is where the mistake of swapping an orgId
+/// and an announcementId would otherwise be invisible.
+///
+/// Only ever watched while the thread is expanded. Subscribing on behalf of
+/// every collapsed card in the feed would open one listener per club match
+/// for a thread nobody has opened.
+final matchCommentsProvider = StreamProvider.family<List<MatchChatMessage>,
+    ({String orgId, String announcementId})>((ref, key) {
+  return ref.watch(communityRepositoryProvider).watchMatchComments(
+        orgId: key.orgId,
+        announcementId: key.announcementId,
+      );
+});
+
+/// Every live match call across the clubs this person actually belongs to,
+/// newest first.
+///
+/// ## Why membership and not the feed list
+///
+/// Every other list on this screen is built from [myFeedOrgIdsProvider], which
+/// includes clubs the person merely FOLLOWS — right for a public notice about
+/// a tournament, wrong for this. "Who is free on Sunday" is addressed to a
+/// squad, and answering it commits you to turning up. Showing it to a follower
+/// invites a stranger to a club's internal game and puts a name on the team
+/// sheet that the organizer never expected; it is also the honest reading of
+/// the request that these are for members.
+///
+/// So this is [myActiveOrgIdsProvider] — active membership, nothing else. No
+/// capability gate: unlike a challenge or a join request, a match call is
+/// aimed at the ordinary member, and they are exactly who must see it.
+final myMatchRsvpsProvider =
+    Provider<AsyncValue<List<Announcement>>>((ref) {
+  final orgIds = ref.watch(myActiveOrgIdsProvider);
+  if (orgIds.isEmpty) return const AsyncValue.data([]);
+  final combined = combineAsyncAll([
+    for (final id in orgIds) ref.watch(matchRsvpsProvider(id)),
+  ]);
+  return combined.whenData((all) {
+    // Soonest kick-off first, NOT newest posted first.
+    //
+    // The two disagree exactly when they matter most: an organizer posting on
+    // Friday about next month's fixture would otherwise bury the call for
+    // tomorrow morning that went up on Tuesday. What a member needs at the top
+    // is the match they have to answer first.
+    final sorted = [...all]..sort((a, b) {
+      final x = a.match?.matchDate;
+      final y = b.match?.matchDate;
+      if (x == null || y == null) return 0;
+      return x.compareTo(y);
+    });
+    return sorted;
+  });
+});
+
+/// A match this person has said they are In for, that overlaps another.
+///
+/// ## What counts as a clash
+///
+/// Two calls whose kick-offs are within [kClashWindow] of each other. Not an
+/// exact-time comparison: club matches are called for "6pm" and last two
+/// hours, and a person who has promised to be at one ground at 6 and another
+/// at 7 has a problem that an equality test would never notice.
+///
+/// Only ever between two YESES. A maybe is not a promise, and warning somebody
+/// off a match they have not committed to is how a useful alert becomes one
+/// people learn to dismiss.
+const Duration kClashWindow = Duration(hours: 3);
+
+/// Whether [candidate] would clash with something [uid] has already said yes
+/// to, given every call they can see.
+///
+/// Pure and synchronous so the card, the vote-time dialog and the test all ask
+/// the same question of the same function.
+List<Announcement> clashesFor({
+  required Announcement candidate,
+  required Iterable<Announcement> against,
+  required String uid,
+}) {
+  final when = candidate.match?.matchDate;
+  if (when == null) return const [];
+  return [
+    for (final other in against)
+      if (other.id != candidate.id &&
+          other.poll?.voteOf(uid) == Rsvp.yes &&
+          other.match != null &&
+          _overlaps(when, other.match!.matchDate))
+        other,
+  ];
+}
+
+bool _overlaps(DateTime a, DateTime b) =>
+    a.difference(b).abs() < kClashWindow;
+
+/// The clashes among the calls this person has ALREADY accepted — two yeses at
+/// the same hour, however they got there.
+///
+/// Separate from [clashesFor] because it answers a different question. That
+/// one is asked before a vote ("would this clash?"); this one is asked by the
+/// feed afterwards ("does anything I have agreed to clash?"), and has to keep
+/// reporting a clash that was created by the OTHER organizer moving their
+/// fixture on top of one this person had already accepted.
+final myRsvpClashesProvider = Provider<Map<String, List<Announcement>>>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  final calls = ref.watch(myMatchRsvpsProvider).valueOrNull ?? const [];
+  if (uid == null) return const {};
+  final mine = [
+    for (final a in calls)
+      if (a.poll?.voteOf(uid) == Rsvp.yes) a,
+  ];
+  return {
+    for (final a in mine)
+      if (clashesFor(candidate: a, against: mine, uid: uid)
+          case final hits when hits.isNotEmpty)
+        a.id: hits,
+  };
+});

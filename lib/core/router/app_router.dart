@@ -10,6 +10,7 @@ import '../../features/rankings/rankings_screen.dart';
 import '../../features/tournaments/certificates_screen.dart';
 import '../../features/tournaments/tournament_schedule_screen.dart';
 import '../../features/tournaments/officials_screen.dart';
+import '../../features/tournaments/season_entrant_screen.dart';
 import '../../features/tournaments/season_memory_book_screen.dart';
 import '../../features/tournaments/public_tournament_screen.dart';
 import '../../features/tournaments/tournaments_screen.dart';
@@ -87,6 +88,7 @@ import '../../features/teams/my_teams_screen.dart';
 import '../../features/teams/team_detail_screen.dart';
 import '../../features/scoring/live_matches_screen.dart';
 import '../../features/scoring/live_now_screen.dart';
+import '../../features/competitions/quick_tournament_screen.dart';
 import '../../features/scoring/quick_match_screen.dart';
 import '../../features/scoring/match_center_screen.dart';
 import '../../features/scoring/match_result_screen.dart';
@@ -165,6 +167,16 @@ class Routes {
 
   static String seasonMemories(String orgId, String tournamentId) =>
       '/org/$orgId/tournaments/$tournamentId/memories';
+
+  /// One team or player within one season. Deliberately under the season
+  /// rather than under an event: a team entered in three draws of a season is
+  /// one team, and [entrant] — which is per-competition — makes it three.
+  static String seasonEntrant(
+    String orgId,
+    String tournamentId,
+    String entrantId,
+  ) =>
+      '/org/$orgId/tournaments/$tournamentId/entrant/$entrantId';
 
   static const myProfile = '/me';
   static String profile(String uid) => '/player/$uid';
@@ -367,13 +379,47 @@ class Routes {
     String? name,
     String? sportId,
     String? venue,
+
+    /// Members who already said they are coming, by uid.
+    ///
+    /// Uids and not names, deliberately. A player added by name is a stranger
+    /// who happens to share it and nothing accrues to them — the distinction
+    /// `QuickMatchScreen` exists to protect. Passing the accounts means the
+    /// match lands on the right careers, which is the whole reason the
+    /// availability call and the team sheet are the same object.
+    List<String> playerUids = const [],
   }) {
     final q = <String, String>{
       if (name != null && name.isNotEmpty) 'name': name,
       if (sportId != null && sportId.isNotEmpty) 'sport': sportId,
       if (venue != null && venue.isNotEmpty) 'venue': venue,
+      if (playerUids.isNotEmpty) 'players': playerUids.join(','),
     };
     final base = '/org/$orgId/quick-match';
+    if (q.isEmpty) return base;
+    return '$base?${Uri(queryParameters: q).query}';
+  }
+
+  /// The same roster, split into a bracket instead of two sides.
+  ///
+  /// A separate route rather than a flag on [quickMatch] because it produces a
+  /// different object: a competition with entrants and a draw, not one
+  /// fixture. Sharing a screen between them would mean a screen that is two
+  /// screens with an `if` down the middle.
+  static String quickTournament(
+    String orgId, {
+    String? name,
+    String? sportId,
+    String? venue,
+    List<String> playerUids = const [],
+  }) {
+    final q = <String, String>{
+      if (name != null && name.isNotEmpty) 'name': name,
+      if (sportId != null && sportId.isNotEmpty) 'sport': sportId,
+      if (venue != null && venue.isNotEmpty) 'venue': venue,
+      if (playerUids.isNotEmpty) 'players': playerUids.join(','),
+    };
+    final base = '/org/$orgId/quick-tournament';
     if (q.isEmpty) return base;
     return '$base?${Uri(queryParameters: q).query}';
   }
@@ -437,6 +483,18 @@ bool _isPublicRoute(String location) {
   if (location.startsWith(Routes.signIn)) return true;
   if (RegExp(r'^/org/[^/]+/live-tournament/').hasMatch(location)) return true;
   return RegExp(r'^/org/[^/]+/event/[^/]+/watch/').hasMatch(location);
+}
+
+/// Splits the comma-joined uid list a match call hands to the draft screens.
+///
+/// Empty segments are dropped rather than becoming empty-string uids, which
+/// would resolve to no member and put a nameless row on a team sheet.
+List<String> _uidList(String? raw) {
+  if (raw == null || raw.isEmpty) return const [];
+  return [
+    for (final part in raw.split(','))
+      if (part.trim().isNotEmpty) part.trim(),
+  ];
 }
 
 final appRouterProvider = Provider<GoRouter>((ref) {
@@ -899,6 +957,14 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                       tournamentId: state.pathParameters['tournamentId']!,
                     ),
                   ),
+                  GoRoute(
+                    path: 'entrant/:entrantId',
+                    builder: (_, state) => SeasonEntrantScreen(
+                      orgId: state.pathParameters['orgId']!,
+                      tournamentId: state.pathParameters['tournamentId']!,
+                      entrantId: state.pathParameters['entrantId']!,
+                    ),
+                  ),
                 ],
               ),
             ],
@@ -958,6 +1024,17 @@ final appRouterProvider = Provider<GoRouter>((ref) {
               initialName: state.uri.queryParameters['name'],
               initialSportId: state.uri.queryParameters['sport'],
               initialVenue: state.uri.queryParameters['venue'],
+              initialPlayerUids: _uidList(state.uri.queryParameters['players']),
+            ),
+          ),
+          GoRoute(
+            path: 'quick-tournament',
+            builder: (_, state) => QuickTournamentScreen(
+              orgId: state.pathParameters['orgId']!,
+              initialName: state.uri.queryParameters['name'],
+              initialSportId: state.uri.queryParameters['sport'],
+              initialVenue: state.uri.queryParameters['venue'],
+              playerUids: _uidList(state.uri.queryParameters['players']),
             ),
           ),
           GoRoute(

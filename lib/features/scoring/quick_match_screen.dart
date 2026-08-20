@@ -51,6 +51,7 @@ class QuickMatchScreen extends ConsumerStatefulWidget {
     this.initialName,
     this.initialSportId,
     this.initialVenue,
+    this.initialPlayerUids = const [],
   });
 
   final String orgId;
@@ -61,6 +62,15 @@ class QuickMatchScreen extends ConsumerStatefulWidget {
   final String? initialName;
   final String? initialSportId;
   final String? initialVenue;
+
+  /// Members who already said they are coming, from a match availability call.
+  ///
+  /// This is the join between "who is free on Sunday" and the team sheet, and
+  /// it is why the availability call is worth having: the fourteen names an
+  /// organizer collected are dealt into two sides without anybody retyping
+  /// one. Uids rather than names, so the match lands on real careers — see
+  /// [MatchPlayer.uid].
+  final List<String> initialPlayerUids;
 
   @override
   ConsumerState<QuickMatchScreen> createState() => _QuickMatchScreenState();
@@ -115,6 +125,49 @@ class _QuickMatchScreenState extends ConsumerState<QuickMatchScreen> {
     _sideBName.dispose();
     _venue.dispose();
     super.dispose();
+  }
+
+  /// One attempt at dealing the confirmed roster onto the two sides.
+  ///
+  /// Deferred rather than done in `initState` because the names come from
+  /// `orgMembersProvider`, which is a stream that has not delivered on the
+  /// first frame. Guarded so it happens once: the member list rebuilds
+  /// whenever anybody's profile changes, and re-seeding on every rebuild would
+  /// undo an organizer's own edits underneath them.
+  bool _seeded = false;
+
+  void _seedFromRsvp() {
+    if (_seeded) return;
+    final wanted = widget.initialPlayerUids;
+    if (wanted.isEmpty) return;
+    final members =
+        ref.read(orgMembersProvider(widget.orgId)).valueOrNull ?? const [];
+    if (members.isEmpty) return;
+    _seeded = true;
+
+    final byUid = {for (final m in members) m.uid: m.displayName};
+    // Alternated rather than filled in order, so a pool that arrives sorted by
+    // name does not put the whole first half of the alphabet on one side.
+    // Auto-balance is one tap away and is the real answer, but the starting
+    // split should not be visibly silly.
+    var toA = true;
+    for (final uid in wanted) {
+      final name = byUid[uid];
+      if (name == null) continue;
+      final target = toA ? _a : _b;
+      if (target.length >= _side.max) {
+        // The arrangement cannot seat everybody who said yes. Not an error
+        // here — the organizer was offered a mini-tournament on the card and
+        // chose this, so the surplus simply does not make the team sheet.
+        final other = toA ? _b : _a;
+        if (other.length >= _side.max) break;
+        other.add(MatchPlayer(id: uid, name: name, uid: uid));
+      } else {
+        target.add(MatchPlayer(id: uid, name: name, uid: uid));
+      }
+      toA = !toA;
+    }
+    if (mounted) setState(() {});
   }
 
   /// A sensible starting sport — the club's own most recent event.
@@ -419,6 +472,13 @@ class _QuickMatchScreenState extends ConsumerState<QuickMatchScreen> {
     final members = (membersAsync.valueOrNull ?? const [])
         .where((m) => m.isActive)
         .toList();
+    // Post-frame: seeding calls setState, and the members stream can deliver
+    // during this very build.
+    if (!_seeded && members.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _seedFromRsvp();
+      });
+    }
     final theme = Theme.of(context);
     final presets = RulePresets.forSport(_sport.id);
     final isTeamSport = _side.max > 2;

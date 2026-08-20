@@ -147,6 +147,14 @@ class Refs {
   ) =>
       announcements(orgId).doc(announcementId);
 
+  /// The discussion under a match availability call. A subcollection rather
+  /// than a field on the announcement — see [MatchChatMessage] for why.
+  static CollectionReference<Map<String, dynamic>> matchComments(
+    String orgId,
+    String announcementId,
+  ) =>
+      announcement(orgId, announcementId).collection('messages');
+
   /// Documents a club has shared with its members.
   static CollectionReference<Map<String, dynamic>> clubFiles(String orgId) =>
       org(orgId).collection('files');

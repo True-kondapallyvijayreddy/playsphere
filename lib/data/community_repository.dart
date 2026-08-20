@@ -12,6 +12,7 @@ import '../core/models/looking_for_post.dart';
 import '../core/models/sub_group.dart';
 import '../core/models/tournament.dart';
 import '../domain/scoring/scoring_registry.dart';
+import 'org_repository.dart' show guardStream;
 
 /// Central repository for Module A — Clubs & Communities core OS features.
 class CommunityRepository {
@@ -77,6 +78,111 @@ class CommunityRepository {
             .toList());
   }
 
+  // --- Match availability calls -----------------------------------------
+  //
+  // Deliberately thin. A match call IS an announcement with a poll and four
+  // extra facts (see [MatchCall]), so creating one is [createAnnouncement]
+  // with the options filled in, and voting on one is [voteInPoll] unchanged.
+  // Nothing below re-implements either — the vote path in particular is a
+  // single dotted-field write that two members can make simultaneously
+  // without erasing each other, and a second copy of it would be a second
+  // chance to get that wrong.
+
+  /// Publishes "who is free on Sunday", with the answers already set.
+  ///
+  /// The options are not the organizer's to choose. Three fixed answers is
+  /// what makes every card in the feed readable at a glance and what lets the
+  /// clash check know which index means yes — see [Rsvp]. An organizer who
+  /// wants a different question is asking for an ordinary poll, which the club
+  /// feed already offers.
+  Future<void> createMatchRsvp({
+    required String orgId,
+    required String authorUid,
+    required String authorName,
+    required String title,
+    required String content,
+    required MatchCall match,
+  }) =>
+      createAnnouncement(
+        Announcement(
+          id: '',
+          orgId: orgId,
+          authorUid: authorUid,
+          authorName: authorName,
+          title: title,
+          content: content,
+          match: match,
+          poll: const Poll(options: Rsvp.options),
+        ),
+      );
+
+  /// The club's match calls, newest first, with the ones already played
+  /// dropped.
+  ///
+  /// Filtered in Dart rather than by a `where` clause on purpose. A compound
+  /// query on `match.matchDate` plus the existing `createdAt` ordering needs
+  /// its own composite index, and this collection is a club's notice board —
+  /// tens of documents, not thousands — so the read is the same one
+  /// [watchAnnouncements] already makes and the feed costs nothing extra.
+  Stream<List<Announcement>> watchMatchRsvps(String orgId) =>
+      watchAnnouncements(orgId).map(
+        (all) => [
+          for (final a in all)
+            if (a.isMatchRsvp && !_isPast(a)) a,
+        ],
+      );
+
+  /// A match stays on the feed until it has actually been played.
+  ///
+  /// The grace period is the point: a card that vanishes at kick-off vanishes
+  /// exactly when the people standing at the ground are looking at it to find
+  /// out who else is coming.
+  static bool _isPast(Announcement a) {
+    final when = a.match?.matchDate;
+    if (when == null) return true;
+    return DateTime.now().difference(when) > const Duration(hours: 4);
+  }
+
+  /// The discussion under a match call, oldest first — the order a chat reads.
+  Stream<List<MatchChatMessage>> watchMatchComments({
+    required String orgId,
+    required String announcementId,
+  }) =>
+      guardStream(
+        () => Refs.matchComments(orgId, announcementId)
+            .orderBy('createdAt')
+            .snapshots()
+            .map((snap) => snap.docs
+                .map((d) => MatchChatMessage.fromDoc(d.data(), d.id))
+                .toList()),
+      );
+
+  /// Posts a line to the discussion.
+  ///
+  /// Not awaited by its caller, and it must not be: this is typed at a ground
+  /// on a phone with one bar, and Firestore does not resolve a write until the
+  /// SERVER acknowledges it. The local cache has the message immediately and
+  /// the listener above renders it, so the thread moves at the speed of the
+  /// keyboard rather than the speed of the signal.
+  Future<void> sendMatchComment({
+    required String orgId,
+    required String announcementId,
+    required String senderUid,
+    required String senderName,
+    required String text,
+  }) async {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+    await Refs.matchComments(orgId, announcementId).add(
+      MatchChatMessage(
+        id: '',
+        senderUid: senderUid,
+        senderName: senderName,
+        text: trimmed,
+      ).toCreate(),
+    );
+  }
+
   // --- RSVP & Waitlist Auto-Promotion ------------------------------------
 
   /// Withdraws or cancels a user's registration and automatically promotes
@@ -125,14 +231,22 @@ class CommunityRepository {
   /// the platform and leaked other clubs' negotiations into memory. Two `where`
   /// clauses under `Filter.or` push both directions to the server, so a village
   /// club with three challenges downloads three documents.
+  ///
+  /// Guarded, like every other stream that feeds a screen. Unguarded, a
+  /// rejection arrived at the Notifications screen as a raw
+  /// `FirebaseException` and was rendered as "Something went wrong. Please
+  /// try again." — the fallback for a failure nobody modelled, next to four
+  /// sections that could name theirs.
   Stream<List<Challenge>> watchChallengesForOrg(String orgId) {
-    return Refs.challenges
-        .where(Filter.or(
-          Filter('fromOrgId', isEqualTo: orgId),
-          Filter('toOrgId', isEqualTo: orgId),
-        ))
-        .snapshots()
-        .map((snap) => snap.docs.map(Challenge.fromDoc).toList());
+    return guardStream(
+      () => Refs.challenges
+          .where(Filter.or(
+            Filter('fromOrgId', isEqualTo: orgId),
+            Filter('toOrgId', isEqualTo: orgId),
+          ))
+          .snapshots()
+          .map((snap) => snap.docs.map(Challenge.fromDoc).toList()),
+    );
   }
 
   /// Accepts a challenge and creates the competition and fixture the two clubs
