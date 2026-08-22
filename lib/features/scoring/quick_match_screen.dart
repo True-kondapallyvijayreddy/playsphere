@@ -15,6 +15,7 @@ import '../../domain/scoring/rule_config.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../domain/team/team_balancer.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/identity.dart';
 import '../../shared/ui_kit.dart';
 
 /// Start a match and score it, now.
@@ -1060,13 +1061,10 @@ class _FindPlayerDialogState extends ConsumerState<_FindPlayerDialog> {
               Card(
                 color: theme.colorScheme.primaryContainer,
                 child: ListTile(
-                  leading: CircleAvatar(
-                    backgroundImage: found.photoUrl == null
-                        ? null
-                        : NetworkImage(found.photoUrl!),
-                    child: found.photoUrl == null
-                        ? const Icon(Icons.person)
-                        : null,
+                  leading: PsAvatar(
+                    name: found.displayName,
+                    photoUrl: found.photoUrl,
+                    seed: found.uid,
                   ),
                   title: Text(found.displayName),
                   subtitle: Text(found.code),

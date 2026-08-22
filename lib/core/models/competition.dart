@@ -182,6 +182,7 @@ class Competition {
     required this.category,
     required this.scoringPluginKey,
     this.description,
+    this.bannerUrl,
     this.venue,
     this.startDate,
     this.endDate,
@@ -214,6 +215,11 @@ class Competition {
     this.cancelReason,
     this.cancelledAt,
     this.cancelledBy,
+    this.isSuspended = false,
+    this.suspendReason,
+    this.suspendedAt,
+    this.suspendedBy,
+    this.suspendedBySeason = false,
     this.participantOrgIds,
     this.createdBy,
     this.createdAt,
@@ -238,6 +244,15 @@ class Competition {
   final String scoringPluginKey;
 
   final String? description;
+
+  /// The artwork across the top of the event's page, if the organizer set one.
+  ///
+  /// Null is the normal state and not a gap: `PsBanner` paints generated art
+  /// from the event's sport when this is absent, so an event created in
+  /// thirty seconds still has a header. An upload replaces a good default
+  /// rather than filling an empty box.
+  final String? bannerUrl;
+
   final String? venue;
   final DateTime? startDate;
   final DateTime? endDate;
@@ -348,6 +363,20 @@ class Competition {
   /// rather than defaulted at generation time.
   final DrawConfig drawConfig;
 
+  /// Whether this event's draw is split into groups.
+  ///
+  /// Ask this, never `format == groupThenKnockout`. Since [DrawConfig
+  /// .useGroups] existed, a knockout can have a group stage in front of it
+  /// and a round robin can be split into pools, and the screens that kept
+  /// checking the format alone simply refused to draw the group tables for
+  /// either — the fixtures existed, tagged with their group, and nothing
+  /// would show them.
+  bool get hasGroupStage => drawConfig.isGroupedUnder(format);
+
+  /// Whether that group stage promotes into a knockout bracket. False for
+  /// pools, which finish on their own tables.
+  bool get groupsFeedKnockout => drawConfig.feedsKnockoutUnder(format);
+
   /// Courts, match length and rest gaps — everything the scheduler needs to
   /// turn a set of fixtures into a timetable instead of a single start time.
   final ScheduleConfig scheduleConfig;
@@ -452,6 +481,11 @@ class Competition {
         cancelReason: cancelReason,
         cancelledAt: cancelledAt,
         cancelledBy: cancelledBy,
+        isSuspended: isSuspended,
+        suspendReason: suspendReason,
+        suspendedAt: suspendedAt,
+        suspendedBy: suspendedBy,
+        suspendedBySeason: suspendedBySeason,
         participantOrgIds: participantOrgIds,
         createdBy: createdBy,
         createdAt: createdAt,
@@ -472,6 +506,7 @@ class Competition {
     CompetitionCategory? category,
     String? scoringPluginKey,
     String? description,
+    String? bannerUrl,
     String? venue,
     DateTime? startDate,
     DateTime? endDate,
@@ -502,6 +537,11 @@ class Competition {
     String? cancelReason,
     DateTime? cancelledAt,
     String? cancelledBy,
+    bool? isSuspended,
+    String? suspendReason,
+    DateTime? suspendedAt,
+    String? suspendedBy,
+    bool? suspendedBySeason,
     List<String>? participantOrgIds,
     String? createdBy,
     DateTime? createdAt,
@@ -521,6 +561,7 @@ class Competition {
         category: category ?? this.category,
         scoringPluginKey: scoringPluginKey ?? this.scoringPluginKey,
         description: description ?? this.description,
+        bannerUrl: bannerUrl ?? this.bannerUrl,
         venue: venue ?? this.venue,
         startDate: startDate ?? this.startDate,
         endDate: endDate ?? this.endDate,
@@ -551,6 +592,11 @@ class Competition {
         cancelReason: cancelReason ?? this.cancelReason,
         cancelledAt: cancelledAt ?? this.cancelledAt,
         cancelledBy: cancelledBy ?? this.cancelledBy,
+        isSuspended: isSuspended ?? this.isSuspended,
+        suspendReason: suspendReason ?? this.suspendReason,
+        suspendedAt: suspendedAt ?? this.suspendedAt,
+        suspendedBy: suspendedBy ?? this.suspendedBy,
+        suspendedBySeason: suspendedBySeason ?? this.suspendedBySeason,
         participantOrgIds: participantOrgIds ?? this.participantOrgIds,
         createdBy: createdBy ?? this.createdBy,
         createdAt: createdAt ?? this.createdAt,
@@ -579,6 +625,45 @@ class Competition {
   final String? cancelledBy;
 
   bool get isCancelled => status == CompetitionStatus.cancelled;
+
+  /// Whether the organizer has put this event on hold — reversibly, unlike
+  /// [isCancelled].
+  ///
+  /// Cancelling is the end of an event and is deliberately one-way: results
+  /// are told to everyone who entered, and an event that could be
+  /// un-cancelled would make that message meaningless. But the thing an
+  /// organizer actually needs on a wet Saturday is not the end of the event,
+  /// it is a pause — and without one the only available action was the
+  /// permanent one, which is why events get cancelled that were only ever
+  /// meant to slip a week.
+  ///
+  /// Kept off [status] for the reason `Tournament.isSuspended` documents at
+  /// length: the status is what the event *is*, and resuming has to put it
+  /// back exactly where it was rather than guess.
+  final bool isSuspended;
+
+  /// Why. Required by `CompetitionRepository.suspendCompetition` — see
+  /// [cancelReason], which this mirrors and for the same reason.
+  final String? suspendReason;
+
+  final DateTime? suspendedAt;
+  final String? suspendedBy;
+
+  /// Whether this event was paused by the season above it rather than on its
+  /// own account.
+  ///
+  /// It is what lets `TournamentRepository.resumeTournament` put back exactly
+  /// what it took down. An event the organizer paused by hand — one sport
+  /// pulled while the rest of the season plays on — has this false, and
+  /// resuming the season leaves it paused, which is what the organizer asked
+  /// for both times.
+  final bool suspendedBySeason;
+
+  /// Whether entries and new matches are on hold — either because this event
+  /// is itself suspended, or because the season above it is. The season's own
+  /// flag is not visible from here, so screens pass it in.
+  bool isOnHold({bool seasonSuspended = false}) =>
+      isSuspended || seasonSuspended;
 
   /// The organizations taking part, when this competition spans more than the
   /// one that owns it — a school-vs-school or village-vs-village challenge.
@@ -696,6 +781,11 @@ class Competition {
 
   bool get registrationIsOpen {
     if (!status.acceptsRegistrations) return false;
+    // A paused event takes no new entries. Put here rather than at each call
+    // site so every Register button, the transaction that re-checks inside
+    // `CompetitionRepository.register`, and the eligibility copy all agree
+    // without any of them having to know suspension exists.
+    if (isSuspended) return false;
     // A full field is no longer open — unless there is a waitlist, in which
     // case joining the queue is a legitimate thing to be able to do.
     if (openSlotsFull && !waitlistEnabled) return false;
@@ -735,6 +825,7 @@ class Competition {
       category: CompetitionCategory.fromMap(Fs.map(d['category'])),
       scoringPluginKey: Fs.str(d['scoringPluginKey'], 'simple_points'),
       description: Fs.strOrNull(d['description']),
+      bannerUrl: Fs.strOrNull(d['bannerUrl']),
       venue: Fs.strOrNull(d['venue']),
       startDate: Fs.dateOrNull(d['startDate']),
       endDate: Fs.dateOrNull(d['endDate']),
@@ -781,6 +872,11 @@ class Competition {
       cancelReason: Fs.strOrNull(d['cancelReason']),
       cancelledAt: Fs.dateOrNull(d['cancelledAt']),
       cancelledBy: Fs.strOrNull(d['cancelledBy']),
+      isSuspended: Fs.boolean(d['isSuspended']),
+      suspendReason: Fs.strOrNull(d['suspendReason']),
+      suspendedAt: Fs.dateOrNull(d['suspendedAt']),
+      suspendedBy: Fs.strOrNull(d['suspendedBy']),
+      suspendedBySeason: Fs.boolean(d['suspendedBySeason']),
       participantOrgIds: d['participantOrgIds'] is List
           ? Fs.strList(d['participantOrgIds'])
           : null,
@@ -808,6 +904,7 @@ class Competition {
         'category': category.toMap(),
         'scoringPluginKey': scoringPluginKey,
         'description': description,
+        'bannerUrl': bannerUrl,
         'venue': venue,
         'startDate': Fs.ts(startDate),
         'endDate': Fs.ts(endDate),
@@ -870,6 +967,9 @@ class Competition {
         // this never rewrites a match that has been played.
         'scoringConfig': scoringConfig,
         'updatedAt': FieldValue.serverTimestamp(),
+        // The suspension fields are deliberately absent, as they are on
+        // `Tournament`: `suspendCompetition`/`resumeCompetition` own them, and
+        // an edit made to fix a typo must not resume a paused event.
       });
 }
 

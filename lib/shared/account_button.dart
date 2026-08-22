@@ -5,11 +5,13 @@ import 'package:go_router/go_router.dart';
 import '../core/models/app_user.dart';
 import '../core/models/enums.dart';
 import '../core/models/organization.dart';
+import 'club_id_chip.dart';
 import '../core/permissions/capability.dart';
 import '../core/providers.dart';
 import '../core/router/app_router.dart';
 import '../features/settings/language_picker.dart';
 import 'app_scaffold.dart';
+import 'identity.dart';
 import 'invite_card.dart';
 import 'playsphere_logo.dart';
 
@@ -49,19 +51,16 @@ class UserAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final photo = user?.photoUrl;
-    return CircleAvatar(
-      radius: radius,
-      backgroundImage: photo != null ? NetworkImage(photo) : null,
-      child: photo != null
-          ? null
-          : Text(
-              (user?.displayName ?? '?').characters.first.toUpperCase(),
-              style: TextStyle(
-                fontSize: radius * 0.85,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
+    // Kept as a named widget rather than replaced outright: it is referenced
+    // from the app bar, the account panel and the drawer, and `radius` is the
+    // vocabulary those call sites already speak. It is now a thin wrapper —
+    // the drawing itself is [PsAvatar]'s, so this face matches every other
+    // face in the app.
+    return PsAvatar(
+      name: user?.displayName ?? '?',
+      photoUrl: user?.photoUrl,
+      seed: user?.uid,
+      size: radius * 2,
     );
   }
 }
@@ -361,14 +360,29 @@ class _ClubRow extends ConsumerWidget {
                 )
               : null,
           child: ListTile(
-            leading: CircleAvatar(
-              backgroundImage:
-                  org?.logoUrl != null ? NetworkImage(org!.logoUrl!) : null,
-              child: org?.logoUrl != null
-                  ? null
-                  : Text((org?.name ?? '?').characters.first.toUpperCase()),
+            leading: PsCrest(
+              name: org?.name ?? '?',
+              logoUrl: org?.logoUrl,
+              seed: org?.id,
+              size: 40,
             ),
-            title: Text(org?.name ?? 'Loading…'),
+            // The club's id sits beside its name, for every member and not
+            // just the ones who can administer it — see [ClubIdChip] for why
+            // an ordinary member is exactly who needs it.
+            title: Row(
+              children: [
+                Flexible(
+                  child: Text(
+                    org?.name ?? 'Loading…',
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (org != null) ...[
+                  const SizedBox(width: 8),
+                  ClubIdChip(org: org, compact: true),
+                ],
+              ],
+            ),
             subtitle: Text(
               pending
                   ? 'Waiting for an admin to approve you'
@@ -409,6 +423,26 @@ class _ClubRow extends ConsumerWidget {
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
             child: InviteCard(org: org),
+          )
+        // Everybody else gets the half of that card which opens the club
+        // rather than joining it: its id, copyable and shareable. Promoting
+        // the club you play for should not require permission to run it.
+        else if (org != null && !pending)
+          Card(
+            margin: const EdgeInsets.only(bottom: 8),
+            shape: const RoundedRectangleBorder(
+              borderRadius: BorderRadius.vertical(
+                bottom: Radius.circular(12),
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 2, 4, 2),
+              child: Row(
+                children: [
+                  Expanded(child: ClubIdChip(org: org)),
+                ],
+              ),
+            ),
           ),
       ],
     );

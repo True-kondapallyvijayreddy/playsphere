@@ -7,6 +7,8 @@ import '../data/billing_repository.dart';
 import '../data/gov_repository.dart';
 import '../data/razorpay_checkout.dart';
 import '../core/models/gov_aggregate_row.dart';
+import '../data/coach_repository.dart';
+import '../data/sports_medic_repository.dart';
 import '../data/career_repository.dart';
 import '../data/leaderboard_repository.dart';
 import '../data/tournament_repository.dart';
@@ -20,6 +22,7 @@ import '../data/ground_repository.dart';
 import '../data/org_repository.dart';
 import '../data/team_repository.dart';
 import 'models/team.dart';
+import 'models/team_join_request.dart';
 import '../data/give_repository.dart';
 import '../data/shop_repository.dart';
 import '../data/scout_repository.dart';
@@ -49,6 +52,8 @@ import 'models/tournament.dart';
 import 'models/tournament_invite.dart';
 import 'models/tournament_official.dart';
 import 'models/challenge.dart';
+import 'models/coach.dart';
+import 'models/sports_medic.dart';
 import 'models/competition.dart';
 import 'models/dispute.dart';
 import 'models/memory.dart';
@@ -110,6 +115,31 @@ final myTeamsProvider = StreamProvider<List<Team>>((ref) {
 final clubTeamsProvider = StreamProvider.family<List<Team>, String>(
   (ref, orgId) => ref.watch(teamRepositoryProvider).watchClubTeams(orgId),
 );
+
+/// Independent teams playing one sport — the squads with no club behind
+/// them, which [clubTeamsProvider] by definition cannot reach.
+final independentTeamsProvider = StreamProvider.family<List<Team>, String>(
+  (ref, sportId) =>
+      ref.watch(teamRepositoryProvider).watchIndependentTeams(sportId),
+);
+
+/// Who is waiting on one team's captain to let them on.
+final teamJoinRequestsProvider =
+    StreamProvider.family<List<TeamJoinRequest>, String>(
+  (ref, teamId) =>
+      ref.watch(teamRepositoryProvider).watchJoinRequests(teamId),
+);
+
+/// Whether the signed-in person has already asked to join this team, so the
+/// button can say "Asked" rather than inviting them to ask twice.
+final hasAskedToJoinProvider =
+    StreamProvider.family<bool, String>((ref, teamId) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(false);
+  return ref
+      .watch(teamRepositoryProvider)
+      .watchHasRequested(teamId: teamId, uid: uid);
+});
 
 /// The event teams raised for one competition.
 final competitionTeamsProvider = StreamProvider.family<List<Team>, String>(
@@ -189,6 +219,48 @@ final myPromoSportIdsProvider = Provider<List<String>>((ref) {
   return sportIdsFor(career.map((c) => c.sportId));
 });
 
+final coachRepositoryProvider = Provider((ref) => const CoachRepository());
+
+/// This person's own coach listing, or null if they have never made one.
+///
+/// Null is the answer for almost every account — most people are players, not
+/// coaches — so nothing on an ordinary screen should depend on it. It is what
+/// the "list yourself as a coach" entry reads to decide whether it is an
+/// invitation or an edit.
+final myCoachProfileProvider = StreamProvider<CoachProfile?>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(null);
+  return ref.watch(coachRepositoryProvider).watchCoach(uid);
+});
+
+/// One coach's listing, for their page.
+final coachProvider =
+    StreamProvider.family<CoachProfile?, String>((ref, uid) {
+  return ref.watch(coachRepositoryProvider).watchCoach(uid);
+});
+
+final sportsMedicRepositoryProvider =
+    Provider((ref) => const SportsMedicRepository());
+
+/// This person's own sports-medicine listing, or null — which is the answer
+/// for all but a handful of accounts.
+///
+/// Read by the "are you a doctor or physio?" banner to decide whether it is
+/// an invitation or a way back into an existing listing, exactly as
+/// [myCoachProfileProvider] is.
+final mySportsMedicProfileProvider =
+    StreamProvider<SportsMedicProfile?>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(null);
+  return ref.watch(sportsMedicRepositoryProvider).watchMedic(uid);
+});
+
+/// One practitioner's listing, for their page.
+final sportsMedicProvider =
+    StreamProvider.family<SportsMedicProfile?, String>((ref, uid) {
+  return ref.watch(sportsMedicRepositoryProvider).watchMedic(uid);
+});
+
 final groundRepositoryProvider = Provider((ref) => const GroundRepository());
 
 /// The grounds the signed-in person owns. Empty for the vast majority of
@@ -218,31 +290,52 @@ final myGroundBookingsProvider =
   return ref.watch(groundRepositoryProvider).watchMyBookings(uid);
 });
 
-/// One ground search: a city, and optionally a sport.
+/// One ground search: some words, and optionally a sport and an hour.
 ///
-/// A value class with equality rather than a raw string, so
-/// `family` caches "cricket grounds in Hyderabad" separately from "any ground
-/// in Hyderabad" instead of treating them as the same subscription.
+/// A value class with equality rather than a raw string, so `family` caches
+/// "cricket grounds in Gachibowli at 7pm" separately from "any ground in
+/// Gachibowli" instead of treating them as the same request.
+///
+/// [keywords] was [city] until the search stopped being a city search — see
+/// `GroundRepository.searchGrounds`. It takes whatever was typed, whole: a
+/// name, an area, a city, a sport, or several of those at once.
 class GroundQuery {
-  const GroundQuery({required this.city, this.sportId});
+  const GroundQuery({
+    this.keywords = '',
+    this.sportId,
+    this.openAtHour,
+  });
 
-  final String city;
+  final String keywords;
   final String? sportId;
+
+  /// The hour they want to play, so a ground that is shut then never appears
+  /// as an answer.
+  final int? openAtHour;
+
+  /// Whether there is anything to search for at all. Words, or a sport to
+  /// list — with neither, the search has not been asked a question yet.
+  bool get isEmpty => keywords.trim().isEmpty && sportId == null;
 
   @override
   bool operator ==(Object other) =>
-      other is GroundQuery && other.city == city && other.sportId == sportId;
+      other is GroundQuery &&
+      other.keywords == keywords &&
+      other.sportId == sportId &&
+      other.openAtHour == openAtHour;
 
   @override
-  int get hashCode => Object.hash(city, sportId);
+  int get hashCode => Object.hash(keywords, sportId, openAtHour);
 }
 
 final groundSearchProvider =
-    StreamProvider.family<List<Ground>, GroundQuery>((ref, q) {
-  if (q.city.trim().isEmpty) return Stream.value(const []);
-  return ref
-      .watch(groundRepositoryProvider)
-      .searchGrounds(city: q.city, sportId: q.sportId);
+    FutureProvider.family<List<Ground>, GroundQuery>((ref, q) async {
+  if (q.isEmpty) return const [];
+  return ref.watch(groundRepositoryProvider).searchGrounds(
+        keywords: q.keywords,
+        sportId: q.sportId,
+        openAtHour: q.openAtHour,
+      );
 });
 
 final shopRepositoryProvider = Provider((ref) => const ShopRepository());
@@ -409,6 +502,22 @@ final promoForSlotProvider = Provider.family<Promo?, PromoSlot>((ref, slot) {
     liveCampaigns: [for (final c in campaigns) c.toPromo()],
     playerSportIds: ref.watch(myPromoSportIdsProvider),
     seed: PromoCatalog.dailySeed(DateTime.now()),
+  );
+});
+
+/// The row of promos a `PromoStrip` scrolls through for [slot].
+///
+/// A list where `promoForSlotProvider` is a single pick — see
+/// `PromoCatalog.listForSlot`. Same inputs, so a campaign that would have
+/// been chosen as THE banner also leads the strip.
+final promoStripProvider =
+    Provider.family<List<Promo>, PromoSlot>((ref, slot) {
+  final campaigns =
+      ref.watch(approvedCampaignsForSlotProvider(slot)).valueOrNull ?? const [];
+  return PromoCatalog.listForSlot(
+    slot,
+    liveCampaigns: [for (final c in campaigns) c.toPromo()],
+    playerSportIds: ref.watch(myPromoSportIdsProvider),
   );
 });
 
@@ -1380,6 +1489,28 @@ final matchEventsProvider =
   return ref
       .watch(scoringServiceProvider)
       .watchEvents(key.orgId, key.compId, key.fixtureId);
+});
+
+/// The same log, deep enough to be replayed from the first point.
+///
+/// [matchEventsProvider]'s 60-event window is right for a feed that reads each
+/// entry on its own — a cricket delivery says what it is without reference to
+/// the one before it. It is wrong for an engine whose timeline REPLAYS the log
+/// to derive running scores (see `RallyTimeline`): handed the last 60 points of
+/// a 90-point match, a replay starts from 0-0 in the middle of the second game
+/// and prints scores that disagree with the scoreboard directly above them.
+///
+/// 400 covers a five-set tennis match with corrections, which is the longest
+/// log any replaying engine produces. Past that the timeline stops showing
+/// running scores rather than showing wrong ones — see `RallyTimeline.timeline`.
+final matchTimelineProvider =
+    StreamProvider.family<List<MatchEvent>, FixtureRef>((ref, key) {
+  return ref.watch(scoringServiceProvider).watchEvents(
+        key.orgId,
+        key.compId,
+        key.fixtureId,
+        limit: 400,
+      );
 });
 
 /// This person's own "let me score this" request for one match, if any.

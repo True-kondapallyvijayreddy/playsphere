@@ -5,6 +5,7 @@ import '../../core/layout/responsive.dart';
 import '../../core/models/enums.dart';
 import '../../core/models/sponsorship.dart';
 import '../../core/providers.dart';
+import '../../shared/identity.dart';
 import '../../shared/app_scaffold.dart';
 
 /// One listing, in full — story, achievements, what it's asking for, and the
@@ -47,13 +48,26 @@ class SponsorListingDetailScreen extends ConsumerWidget {
                     children: [
                       Row(
                         children: [
-                          Icon(
-                            listing.isAthlete
-                                ? Icons.person_outline
-                                : Icons.groups_outlined,
-                            color: Theme.of(context).colorScheme.primary,
-                          ),
-                          const SizedBox(width: 8),
+                          // Who is asking, drawn the way they are drawn
+                          // everywhere else in the app — a round mark for an
+                          // athlete and a squircle for a club. A sponsorship
+                          // listing is a request from a named person or a
+                          // named institution, and a generic outline glyph
+                          // was the one thing on the page that made it read
+                          // as an anonymous form.
+                          if (listing.isAthlete)
+                            PsAvatar(
+                              name: listing.subjectDisplayName ?? 'An athlete',
+                              seed: listing.subjectUid,
+                              size: 40,
+                            )
+                          else
+                            PsCrest(
+                              name: listing.orgName ?? 'A team',
+                              seed: listing.orgId,
+                              size: 40,
+                            ),
+                          const SizedBox(width: 10),
                           Expanded(
                             child: Text(
                               listing.headline,

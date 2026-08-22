@@ -18,13 +18,15 @@ void main() {
     String name, {
     CompetitionFormat format = CompetitionFormat.knockout,
     int qualifiers = 2,
+    String sportId = 'badminton',
+    String sportName = 'Badminton',
   }) =>
       Competition(
         id: id,
         orgId: 'o1',
         name: name,
-        sportId: 'badminton',
-        sportName: 'Badminton',
+        sportId: sportId,
+        sportName: sportName,
         archetype: CompetitionArchetype.versus,
         entrantType: EntrantType.individual,
         format: format,
@@ -312,6 +314,100 @@ void main() {
         ],
       );
       expect(overview.events.single.champion, 'C');
+    });
+  });
+
+  group('the sport filter', () {
+    test('a single-sport season offers no filter at all', () {
+      // A control with one option costs a read and answers nothing.
+      final board = TournamentLeaderboard.from(
+        events: [event('e1', 'Singles')],
+        fixtures: [played('e1', 0, 'A', 'B', winner: 'A')],
+      );
+      expect(board.isMultiSport, isFalse);
+      expect(board.sportIds, ['badminton']);
+    });
+
+    test("a sport's board counts only that sport's matches", () {
+      // The whole reason this is not the combined board filtered: a filtered
+      // row would print 3 played for somebody who played 2 of that sport.
+      final board = TournamentLeaderboard.from(
+        events: [
+          event('b1', 'Badminton Singles'),
+          event('k1', 'Kabaddi',
+              sportId: 'kabaddi', sportName: 'Kabaddi'),
+        ],
+        fixtures: [
+          played('b1', 0, 'Ravi', 'X', winner: 'Ravi'),
+          played('b1', 1, 'Ravi', 'Y', winner: 'Ravi'),
+          played('k1', 0, 'Ravi', 'Z', winner: 'Z'),
+        ],
+      );
+
+      final combined =
+          board.players.firstWhere((p) => p.entrantId == 'Ravi');
+      expect(combined.played, 3);
+      expect(combined.won, 2);
+
+      final badminton =
+          board.playersFor('badminton').firstWhere((p) => p.entrantId == 'Ravi');
+      expect(badminton.played, 2);
+      expect(badminton.won, 2);
+      expect(badminton.lost, 0);
+
+      final kabaddi =
+          board.playersFor('kabaddi').firstWhere((p) => p.entrantId == 'Ravi');
+      expect(kabaddi.played, 1);
+      expect(kabaddi.won, 0);
+      expect(kabaddi.lost, 1);
+    });
+
+    test('a title counts in its own sport, not in every sport', () {
+      final board = TournamentLeaderboard.from(
+        events: [
+          event('b1', 'Badminton'),
+          event('k1', 'Kabaddi',
+              sportId: 'kabaddi', sportName: 'Kabaddi'),
+        ],
+        fixtures: [
+          played('b1', 0, 'Ravi', 'X', winner: 'Ravi', round: 2),
+          played('k1', 0, 'Ravi', 'Z', winner: 'Z', round: 2),
+        ],
+      );
+      expect(
+        board.playersFor('badminton').firstWhere((p) => p.entrantId == 'Ravi').titles,
+        1,
+      );
+      expect(
+        board.playersFor('kabaddi').firstWhere((p) => p.entrantId == 'Ravi').titles,
+        0,
+      );
+    });
+
+    test('a null sport is the combined board', () {
+      final board = TournamentLeaderboard.from(
+        events: [event('e1', 'Singles')],
+        fixtures: [played('e1', 0, 'A', 'B', winner: 'A')],
+      );
+      expect(board.playersFor(null), board.players);
+    });
+
+    test('records carry the sports they were earned in', () {
+      final board = TournamentLeaderboard.from(
+        events: [
+          event('b1', 'Badminton'),
+          event('k1', 'Kabaddi',
+              sportId: 'kabaddi', sportName: 'Kabaddi'),
+        ],
+        fixtures: [
+          played('b1', 0, 'Ravi', 'X', winner: 'Ravi'),
+          played('k1', 0, 'Ravi', 'Z', winner: 'Z'),
+        ],
+      );
+      final ravi = board.players.firstWhere((p) => p.entrantId == 'Ravi');
+      expect(ravi.sportIds, {'badminton', 'kabaddi'});
+      expect(board.isMultiSport, isTrue);
+      expect(board.sportNames['kabaddi'], 'Kabaddi');
     });
   });
 }

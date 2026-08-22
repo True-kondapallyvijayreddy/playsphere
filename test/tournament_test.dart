@@ -346,6 +346,112 @@ void main() {
       expect(result['B'], 2.0); // A(2)
       expect(result['C'], 2.0); // A(2)
     });
+
+    // -----------------------------------------------------------------
+    // Bye history, as `CompetitionRepository.generateNextSwissRound`
+    // reconstructs it.
+    //
+    // A bye is never written as a fixture, so the app cannot look it up —
+    // it works it out from who is missing from a round. Getting this wrong
+    // hands somebody a second bye while another player has had none, which
+    // is the one thing the pairing rule is supposed to prevent.
+    // -----------------------------------------------------------------
+    group('bye history', () {
+      const swiss = SwissPairing();
+
+      test('the entrant missing from a round is the one who sat it out', () {
+        final byes = swiss.byeRecipients(
+          activeEntrantIds: const ['A', 'B', 'C', 'D', 'E'],
+          entrantIdsByRound: const {
+            1: {'A', 'B', 'C', 'D'}, // E sat out
+            2: {'A', 'B', 'D', 'E'}, // C sat out
+          },
+        );
+        expect(byes, {'E', 'C'});
+      });
+
+      test('an even field produces no byes at all', () {
+        final byes = swiss.byeRecipients(
+          activeEntrantIds: const ['A', 'B', 'C', 'D'],
+          entrantIdsByRound: const {
+            1: {'A', 'B', 'C', 'D'},
+            2: {'A', 'B', 'C', 'D'},
+          },
+        );
+        expect(byes, isEmpty);
+      });
+
+      test('a round with no fixtures is not a bye for the whole field', () {
+        // The round was never written — that is not everyone sitting out,
+        // and reading it as one would mark the entire field bye-ineligible
+        // and force a repeat bye on the next odd round.
+        final byes = swiss.byeRecipients(
+          activeEntrantIds: const ['A', 'B', 'C'],
+          entrantIdsByRound: const {
+            1: {'A', 'B'}, // C sat out
+            2: <String>{}, // not yet generated
+          },
+        );
+        expect(byes, {'C'});
+      });
+
+      test('an entrant who joined late is not credited with earlier byes', () {
+        // Only the active field is asked about, so a withdrawal or a late
+        // entrant cannot pick up a bye from a round they were never in.
+        final byes = swiss.byeRecipients(
+          activeEntrantIds: const ['A', 'B'],
+          entrantIdsByRound: const {
+            1: {'A', 'B', 'C'},
+          },
+        );
+        expect(byes, isEmpty);
+      });
+
+      test('feeds nextSwissRound so the bye moves to someone who has not had '
+          'one', () {
+        final a = entrant('A', seed: 1);
+        final b = entrant('B', seed: 2);
+        final c = entrant('C', seed: 3);
+
+        // Round 1: A beat B, C sat out.
+        final byes = swiss.byeRecipients(
+          activeEntrantIds: const ['A', 'B', 'C'],
+          entrantIdsByRound: const {
+            1: {'A', 'B'},
+          },
+        );
+        expect(byes, {'C'});
+
+        final round2 = swiss.nextSwissRound(
+          standings: [
+            SwissStanding(entrant: a, score: 1, hadBye: byes.contains('A')),
+            SwissStanding(entrant: b, score: 0, hadBye: byes.contains('B')),
+            SwissStanding(entrant: c, score: 0, hadBye: byes.contains('C')),
+          ],
+          playedPairs: {EntrantPair('A', 'B')},
+          round: 2,
+        );
+
+        final bye = round2.singleWhere((f) => f.entrantB == null);
+        expect(
+          bye.entrantA!.id,
+          isNot('C'),
+          reason: 'C already had the round-1 bye',
+        );
+      });
+    });
+
+    test('recommendedRoundCount is what the round generator stops at', () {
+      // The figure the draw sheet offers and the figure
+      // `generateNextSwissRound` refuses to go past are the same call, so a
+      // change here changes both together.
+      const swiss = SwissPairing();
+      expect(swiss.recommendedRoundCount(8), 3);
+      expect(swiss.recommendedRoundCount(16), 4);
+      expect(swiss.recommendedRoundCount(5), 3);
+      expect(swiss.recommendedRoundCount(16, override: 4), 4);
+      expect(swiss.recommendedRoundCount(64, override: 2), 2);
+    });
   });
 
   // =====================================================================

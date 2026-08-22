@@ -397,11 +397,86 @@ class _GraphicalScheduleViewState extends State<GraphicalScheduleView> {
     );
   }
 
+  // --- What the box is actually reporting ---------------------------------
+  //
+  // The header used to say two things: "Schedule", and whether it was a draft.
+  // Neither is a fact about THIS season, so the box was three buttons over a
+  // grid and an organizer could not tell from it whether the timetable was
+  // finished, half-placed, or hadn't started. These are the numbers they were
+  // reading the grid to work out.
+
+  /// Matches that exist but have nowhere to be. The number that decides
+  /// whether the schedule is done, and the one the old header never showed.
+  int get _unplaced =>
+      widget.fixtures.where((f) => f.scheduledAt == null).length;
+
+  /// Placeholder matches from a draft bracket — "Team A vs Team B". A season
+  /// full of these has not been drawn, however complete the grid looks, and
+  /// publishing would send them out under those names. See `Fixture.isDraft`.
+  int get _placeholders => widget.fixtures.where((f) => f.isDraft).length;
+
+  int get _dayCount =>
+      _dayKeys.where((k) => k != _tbdKey).length;
+
+  /// One line of plain arithmetic: what is here, spread over how long, and
+  /// what is still missing.
+  String get _summaryLine {
+    if (widget.fixtures.isEmpty) return 'Nothing drawn yet';
+    final parts = <String>[
+      '${widget.fixtures.length} '
+          '${widget.fixtures.length == 1 ? 'match' : 'matches'}',
+      if (_dayCount > 1) 'across $_dayCount days' else if (_dayCount == 1) 'in one day',
+      if (_unplaced > 0) '$_unplaced with no time yet',
+    ];
+    return parts.join(' · ');
+  }
+
+  /// The one thing to do next, as a sentence rather than as a choice between
+  /// three buttons that all say "schedule".
+  ///
+  /// Ordered by what actually blocks publishing: a placeholder draw blocks it
+  /// outright (`lockSchedule` refuses), an unplaced match makes the timetable
+  /// wrong, and everything else is ready to go out.
+  ({String text, bool isProblem}) get _nextStep {
+    if (widget.fixtures.isEmpty) {
+      return (
+        text: widget.onSetUpWholeSeason != null
+            ? 'Draw every event and place every match in one pass.'
+            : 'Make the draws first, then place them on the courts.',
+        isProblem: false,
+      );
+    }
+    if (_placeholders > 0) {
+      return (
+        text: '$_placeholders of these are placeholders, not real entrants. '
+            'Generate the real draw for those events before publishing.',
+        isProblem: true,
+      );
+    }
+    if (_unplaced > 0) {
+      return (
+        text: '$_unplaced ${_unplaced == 1 ? 'match has' : 'matches have'} no '
+            'court or time. Reschedule to place them, or move them by hand.',
+        isProblem: true,
+      );
+    }
+    return (
+      text: 'Every match has a court and a time. Publish it and everyone '
+          'entered is told.',
+      isProblem: false,
+    );
+  }
+
   Widget _header(ThemeData theme, bool isLocked) {
+    final step = _nextStep;
+    final stateColour =
+        isLocked ? theme.colorScheme.primary : theme.colorScheme.tertiary;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Container(
               padding: const EdgeInsets.all(8),
@@ -420,20 +495,41 @@ class _GraphicalScheduleViewState extends State<GraphicalScheduleView> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    'Schedule',
-                    style: theme.textTheme.titleMedium
-                        ?.copyWith(fontWeight: FontWeight.bold),
+                  Row(
+                    children: [
+                      Text(
+                        'Schedule',
+                        style: theme.textTheme.titleMedium
+                            ?.copyWith(fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(width: 8),
+                      // The draft/published state as a badge rather than a
+                      // sentence, so the line under it is free to carry the
+                      // numbers instead.
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: stateColour.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Text(
+                          isLocked ? 'Published' : 'Draft',
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: stateColour,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
+                  const SizedBox(height: 2),
                   Text(
-                    isLocked
-                        ? 'Published — courts and times are final'
-                        : 'Draft — not yet visible to players',
+                    _summaryLine,
                     style: theme.textTheme.bodySmall?.copyWith(
-                      color: isLocked
-                          ? theme.colorScheme.primary
-                          : theme.colorScheme.tertiary,
-                      fontWeight: FontWeight.w600,
+                      color: theme.colorScheme.onSurfaceVariant,
                     ),
                   ),
                 ],
@@ -447,48 +543,115 @@ class _GraphicalScheduleViewState extends State<GraphicalScheduleView> {
               ),
           ],
         ),
-        if (widget.canManage) ...[
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              if (!isLocked) ...[
-                if (widget.onSetUpWholeSeason != null)
-                  FilledButton.tonalIcon(
-                    icon: const Icon(Icons.auto_awesome, size: 18),
-                    label: const Text('Draw & schedule everything'),
-                    onPressed: () => _promptScheduleParamsAndRegenerate(
-                      wholeSeason: true,
-                    ),
-                  ),
-                OutlinedButton.icon(
-                  icon: const Icon(Icons.tune_outlined, size: 18),
-                  label: Text(
-                    widget.fixtures.isEmpty
-                        ? 'Schedule existing draws'
-                        : 'Change timings & reschedule',
-                  ),
-                  onPressed: _promptScheduleParamsAndRegenerate,
+
+        // Nothing below this is for a spectator: they came for the grid, and
+        // the grid is what follows.
+        if (!widget.canManage) ...[
+          if (!isLocked) ...[
+            const SizedBox(height: 8),
+            Text(
+              'This is a draft. Times and courts can still change.',
+              style: theme.textTheme.bodySmall?.copyWith(color: stateColour),
+            ),
+          ],
+        ] else ...[
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: step.isProblem
+                  ? theme.colorScheme.errorContainer.withValues(alpha: 0.45)
+                  : theme.colorScheme.surfaceContainerHighest
+                      .withValues(alpha: 0.5),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  step.isProblem
+                      ? Icons.error_outline
+                      : isLocked
+                          ? Icons.check_circle_outline
+                          : Icons.arrow_forward,
+                  size: 16,
+                  color: step.isProblem
+                      ? theme.colorScheme.error
+                      : theme.colorScheme.onSurfaceVariant,
                 ),
-                FilledButton.icon(
-                  icon: const Icon(Icons.lock_outline, size: 18),
-                  label: const Text('Lock & Publish'),
-                  onPressed:
-                      widget.fixtures.isEmpty ? null : widget.onLockSchedule,
-                ),
-              ] else
-                Chip(
-                  avatar: Icon(
-                    Icons.check_circle,
-                    color: theme.colorScheme.primary,
-                    size: 18,
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    // Once published there is no next step to nag about; the
+                    // sentence becomes the record of what went out.
+                    isLocked
+                        ? 'Published — courts and times are final. Everyone '
+                            'entered has been told.'
+                        : step.text,
+                    style: theme.textTheme.bodySmall,
                   ),
-                  label: const Text('Locked & Published'),
-                  side: BorderSide.none,
                 ),
-            ],
+              ],
+            ),
           ),
+          const SizedBox(height: 10),
+          // One primary, chosen by the same order the sentence above uses, and
+          // the rest demoted. Three buttons that all said "schedule" was the
+          // reason this box needed reading twice.
+          if (!isLocked)
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                if (widget.fixtures.isEmpty)
+                  FilledButton.icon(
+                    icon: const Icon(Icons.auto_awesome, size: 18),
+                    label: Text(
+                      widget.onSetUpWholeSeason != null
+                          ? 'Draw & schedule everything'
+                          : 'Place the matches on courts',
+                    ),
+                    onPressed: () => _promptScheduleParamsAndRegenerate(
+                      wholeSeason: widget.onSetUpWholeSeason != null,
+                    ),
+                  )
+                else if (_unplaced > 0 || _placeholders > 0)
+                  FilledButton.icon(
+                    icon: const Icon(Icons.auto_awesome, size: 18),
+                    label: const Text('Fix the gaps & reschedule'),
+                    onPressed: () => _promptScheduleParamsAndRegenerate(
+                      wholeSeason: widget.onSetUpWholeSeason != null,
+                    ),
+                  )
+                else
+                  FilledButton.icon(
+                    icon: const Icon(Icons.lock_outline, size: 18),
+                    label: const Text('Lock & publish'),
+                    onPressed: widget.onLockSchedule,
+                  ),
+                if (widget.fixtures.isNotEmpty)
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.tune_outlined, size: 18),
+                    label: const Text('Change timings'),
+                    onPressed: _promptScheduleParamsAndRegenerate,
+                  ),
+                // Still reachable when it is not the primary — an organizer
+                // who knows a draw is placeholder-free and wants it out is
+                // allowed to publish over the warning.
+                if (widget.fixtures.isNotEmpty &&
+                    (_unplaced > 0 || _placeholders > 0))
+                  TextButton.icon(
+                    icon: const Icon(Icons.lock_outline, size: 18),
+                    label: const Text('Publish anyway'),
+                    onPressed: widget.onLockSchedule,
+                  ),
+              ],
+            ),
+          // No reschedule button once published, deliberately. Re-solving a
+          // timetable people have already been sent would move matches
+          // underneath them with no notification; a published season's late
+          // start is shifted through `RunningLateCard`, which moves everything
+          // together and says so.
         ],
       ],
     );
@@ -776,8 +939,11 @@ class _MatchBlock extends StatelessWidget {
     final theme = Theme.of(context);
     final isLive = fixture.status == FixtureStatus.live;
     final isDone = fixture.status == FixtureStatus.completed;
-    final unknown = _isPlaceholder(fixture.entrantAName) &&
-        _isPlaceholder(fixture.entrantBName);
+    // Asked of the ids, not the names. `_isPlaceholder` sniffs for "TBD",
+    // and the draw generator writes "To be decided" — which does not start
+    // with it — so a generated knockout placeholder never once greyed out.
+    // An empty entrant id is what "nobody here yet" actually means.
+    final unknown = fixture.entrantAId.isEmpty && fixture.entrantBId.isEmpty;
 
     final Color background;
     if (isLive) {
@@ -835,15 +1001,22 @@ class _MatchBlock extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 3),
-          _name(theme, fixture.entrantAName),
-          _name(theme, fixture.entrantBName),
+          // "Group B winner" rather than "To be decided" while the group is
+          // still being played — every other screen already says which table
+          // position a slot is waiting on, and this one was the odd one out.
+          _name(theme, fixture.displayNameA(), fixture.entrantAId.isNotEmpty),
+          _name(theme, fixture.displayNameB(), fixture.entrantBId.isNotEmpty),
         ],
       ),
     );
   }
 
-  Widget _name(ThemeData theme, String name) {
-    final placeholder = _isPlaceholder(name);
+  /// [decided] comes from the entrant id, never from reading the name.
+  /// Sniffing the text got this wrong both ways: "To be decided" was styled
+  /// as a real side because it does not start with "TBD", and "Group B
+  /// winner" would be too.
+  Widget _name(ThemeData theme, String name, bool decided) {
+    final placeholder = !decided || _isPlaceholder(name);
     return Text(
       placeholder ? (name.trim().isEmpty ? 'Open slot' : name.trim()) : name,
       maxLines: 1,

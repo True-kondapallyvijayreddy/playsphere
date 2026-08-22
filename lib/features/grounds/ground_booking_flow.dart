@@ -9,6 +9,8 @@ import '../../core/models/ground.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../data/ground_repository.dart';
+import '../../domain/scoring/scoring_registry.dart';
+import '../../shared/identity.dart';
 import '../../shared/app_scaffold.dart';
 
 /// What a completed booking hands back to whoever asked for one.
@@ -97,12 +99,27 @@ class _GroundBookingSheet extends ConsumerStatefulWidget {
 }
 
 class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
-  late final _city = TextEditingController(text: widget.initialCity ?? '');
+  late final _terms = TextEditingController(text: widget.initialCity ?? '');
 
-  /// The city actually searched, as opposed to what is currently being typed.
+  /// What was actually searched, as opposed to what is currently being typed.
   /// Kept separate so the query does not re-run on every keystroke — each one
-  /// would be a new Firestore listener.
-  String _searchedCity = '';
+  /// would be a fresh pair of Firestore reads.
+  String _searchedTerms = '';
+
+  /// Which sport they are looking for a ground for.
+  ///
+  /// Asked first, and asked at all, because it is the question that decides
+  /// whether a listing is an answer: a badminton hall is not a ground for a
+  /// cricket match, and a search that ignores the sport spends somebody's
+  /// evening ringing round places that were never going to work. Pre-filled
+  /// and left alone when the caller already knows — booking from an event
+  /// form should not re-ask a question the event already answered.
+  late String? _sportId = widget.sportId;
+
+  /// The hour they want to start. Null until they say, which is a real
+  /// answer — "anything on Sunday" is how half of these searches begin — so
+  /// it filters the results only when it is set.
+  int? _wantedHour;
 
   /// "Near me" is a separate mode from the city search, not a filter on top
   /// of it — a search-by-distance and a search-by-name return genuinely
@@ -127,15 +144,20 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
     // chose; making them press Search again to confirm their own input is
     // busywork.
     if ((widget.initialCity ?? '').trim().isNotEmpty) {
-      _searchedCity = widget.initialCity!.trim();
+      _searchedTerms = widget.initialCity!.trim();
     }
   }
 
   @override
   void dispose() {
-    _city.dispose();
+    _terms.dispose();
     super.dispose();
   }
+
+  void _runSearch() => setState(() {
+        _searchedTerms = _terms.text.trim();
+        _nearby = null;
+      });
 
   Future<void> _searchNearby() async {
     setState(() {
@@ -166,7 +188,7 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
       final hits = await ref.read(groundRepositoryProvider).nearby(
             latitude: pos.latitude,
             longitude: pos.longitude,
-            sportId: widget.sportId,
+            sportId: _sportId,
           );
       if (mounted) setState(() => _nearby = hits);
     } catch (e) {
@@ -215,7 +237,7 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
             endHour: startHour + _hours,
             bookedBy: me,
             orgId: widget.orgId,
-            sportId: widget.sportId,
+            sportId: _sportId,
           );
       if (mounted) {
         Navigator.of(context).pop(BookedGround(ground: g, booking: booking));
@@ -274,12 +296,90 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
     );
   }
 
+  /// Which sport, when, and then where.
+  ///
+  /// ## Why it asks in that order
+  ///
+  /// It used to open on a city box and nothing else, which quietly assumed
+  /// the two facts that actually decide whether a listing is any use: the
+  /// sport, because a badminton hall is not a cricket ground, and the hour,
+  /// because a ground that shuts at six is not an answer to "somewhere to
+  /// play at seven". Both were knowable before a single result was drawn,
+  /// and asking afterwards means the person rings round places that were
+  /// never going to work.
+  ///
+  /// The sport is a filter that cannot be got wrong, and the time is a
+  /// filter and a head start — the ground they pick opens with that hour
+  /// already selected.
   Widget _searchStep(ThemeData theme) {
     final nearby = _nearby;
+    final query = GroundQuery(
+      keywords: _searchedTerms,
+      sportId: _sportId,
+      openAtHour: _wantedHour,
+    );
+
     return ListView(
       controller: widget.scrollController,
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
       children: [
+        // ---- 1. Which sport ------------------------------------------
+        Text('Which sport?', style: theme.textTheme.titleSmall),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            ChoiceChip(
+              label: const Text('Any'),
+              selected: _sportId == null,
+              onSelected: (_) => setState(() => _sportId = null),
+            ),
+            for (final sport in SportCatalog.all)
+              ChoiceChip(
+                label: Text('${sport.icon}  ${sport.name}'),
+                selected: _sportId == sport.id,
+                onSelected: (on) =>
+                    setState(() => _sportId = on ? sport.id : null),
+              ),
+          ],
+        ),
+
+        // ---- 2. When -------------------------------------------------
+        const SizedBox(height: 20),
+        Text('When?', style: theme.textTheme.titleSmall),
+        const SizedBox(height: 8),
+        _DateRow(date: _date, onPick: (d) => setState(() => _date = d)),
+        const SizedBox(height: 12),
+        _HoursRow(hours: _hours, onChanged: (h) => setState(() => _hours = h)),
+        const SizedBox(height: 12),
+        _StartHourRow(
+          hour: _wantedHour,
+          onChanged: (h) => setState(() => _wantedHour = h),
+        ),
+
+        // ---- 3. Where ------------------------------------------------
+        const SizedBox(height: 20),
+        Text('Where?', style: theme.textTheme.titleSmall),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _terms,
+          textCapitalization: TextCapitalization.words,
+          textInputAction: TextInputAction.search,
+          onSubmitted: (_) => _runSearch(),
+          decoration: InputDecoration(
+            labelText: 'Ground, area, city or sport',
+            hintText: 'e.g. Gachibowli turf',
+            helperText: 'Any word will do — a name, an area, or a city.',
+            prefixIcon: const Icon(Icons.search),
+            border: const OutlineInputBorder(),
+            suffixIcon: IconButton(
+              icon: const Icon(Icons.arrow_forward),
+              onPressed: _runSearch,
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
         OutlinedButton.icon(
           onPressed: _locating ? null : _searchNearby,
           icon: _locating
@@ -296,68 +396,20 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
           Text(_nearbyError!,
               style: TextStyle(color: theme.colorScheme.error)),
         ],
-        const SizedBox(height: 16),
-        Row(
-          children: [
-            const Expanded(child: Divider()),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: Text('or search by city',
-                  style: theme.textTheme.bodySmall),
-            ),
-            const Expanded(child: Divider()),
-          ],
-        ),
-        const SizedBox(height: 16),
-        TextField(
-          controller: _city,
-          textCapitalization: TextCapitalization.words,
-          textInputAction: TextInputAction.search,
-          onSubmitted: (v) =>
-              setState(() {
-                _searchedCity = v.trim();
-                _nearby = null;
-              }),
-          decoration: InputDecoration(
-            labelText: 'City',
-            hintText: 'e.g. Hyderabad',
-            prefixIcon: const Icon(Icons.location_on_outlined),
-            border: const OutlineInputBorder(),
-            suffixIcon: IconButton(
-              icon: const Icon(Icons.search),
-              onPressed: () => setState(() {
-                _searchedCity = _city.text.trim();
-                _nearby = null;
-              }),
-            ),
-          ),
-        ),
-        const SizedBox(height: 12),
-        _DateRow(
-          date: _date,
-          onPick: (d) => setState(() => _date = d),
-        ),
-        const SizedBox(height: 12),
-        _HoursRow(
-          hours: _hours,
-          onChanged: (h) => setState(() => _hours = h),
-        ),
-        const SizedBox(height: 16),
+
+        const SizedBox(height: 20),
 
         if (nearby != null)
           _NearbyResults(hits: nearby, onPick: _pickGround)
-        else if (_searchedCity.isEmpty)
+        else if (query.isEmpty)
           const EmptyState(
             icon: Icons.travel_explore_outlined,
             title: 'Where are you playing?',
-            message: 'Search "Grounds near me", or enter a city.',
+            message: 'Pick a sport, type a name or an area, or tap '
+                '"Grounds near me".',
           )
         else
-          _Results(
-            city: _searchedCity,
-            sportId: widget.sportId,
-            onPick: _pickGround,
-          ),
+          _Results(query: query, onPick: _pickGround),
       ],
     );
   }
@@ -440,17 +492,48 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
                     'Try a shorter slot, another day, or a different ground.',
               );
             }
-            return Wrap(
-              spacing: 8,
-              runSpacing: 8,
+            final wanted = _wantedHour;
+            // The hour they asked for on the way in, answered plainly. They
+            // typed it into the search two screens ago; making them find it
+            // again in a grid of eleven chips is asking twice.
+            final hasWanted = wanted != null && starts.contains(wanted);
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                for (final h in starts)
-                  ActionChip(
-                    label: Text(
-                      '${groundHourLabel(h)}–${groundHourLabel(h + _hours)}',
+                if (wanted != null && !hasWanted)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Text(
+                      '${groundHourLabel(wanted)} is taken here. These are '
+                      'free instead.',
+                      style: theme.textTheme.bodySmall
+                          ?.copyWith(color: theme.colorScheme.error),
                     ),
-                    onPressed: _booking ? null : () => _book(h),
                   ),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final h in starts)
+                      ActionChip(
+                        label: Text(
+                          '${groundHourLabel(h)}\u2013'
+                          '${groundHourLabel(h + _hours)}',
+                        ),
+                        // The one they asked for, marked. Not preselected and
+                        // not auto-booked: an hour of somebody's ground is
+                        // not something to take on their behalf.
+                        avatar: h == wanted
+                            ? Icon(Icons.star,
+                                size: 16, color: theme.colorScheme.primary)
+                            : null,
+                        backgroundColor: h == wanted
+                            ? theme.colorScheme.primaryContainer
+                            : null,
+                        onPressed: _booking ? null : () => _book(h),
+                      ),
+                  ],
+                ),
               ],
             );
           }),
@@ -491,10 +574,26 @@ class _NearbyResults extends StatelessWidget {
           Card(
             margin: const EdgeInsets.only(bottom: 8),
             child: ListTile(
-              leading: CircleAvatar(
-                backgroundColor:
-                    Theme.of(context).colorScheme.surfaceContainerHighest,
-                child: Text(hit.ground.isIndoor ? '🏟️' : '🌳'),
+              // The photo is the whole reason `Ground.photoUrl` exists:
+              // somebody choosing between two grounds an hour apart is
+              // choosing on the strength of a picture. It was on the model
+              // from the start and rendered nowhere. Falls back to the
+              // indoor/outdoor glyph, so a ground with no photo still reads.
+              leading: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: SizedBox(
+                  width: 44,
+                  height: 44,
+                  child: PsNetworkImage(
+                    url: hit.ground.photoUrl,
+                    fallback: ColoredBox(
+                      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                      child: Center(
+                        child: Text(hit.ground.isIndoor ? '\u{1F3DF}' : '\u{1F333}'),
+                      ),
+                    ),
+                  ),
+                ),
               ),
               title: Row(
                 children: [
@@ -530,35 +629,38 @@ class _NearbyResults extends StatelessWidget {
 }
 
 class _Results extends ConsumerWidget {
-  const _Results({
-    required this.city,
-    required this.sportId,
-    required this.onPick,
-  });
+  const _Results({required this.query, required this.onPick});
 
-  final String city;
-  final String? sportId;
+  final GroundQuery query;
   final ValueChanged<Ground> onPick;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final results = ref.watch(
-      groundSearchProvider(GroundQuery(city: city, sportId: sportId)),
-    );
+    final results = ref.watch(groundSearchProvider(query));
 
     return AsyncView(
       value: results,
-      onRetry: () => ref.invalidate(
-        groundSearchProvider(GroundQuery(city: city, sportId: sportId)),
-      ),
+      onRetry: () => ref.invalidate(groundSearchProvider(query)),
       builder: (grounds) {
         if (grounds.isEmpty) {
+          // Named filters, because "no results" with three of them applied
+          // is unactionable — the person cannot tell which one to loosen.
+          final applied = [
+            if (query.keywords.trim().isNotEmpty) '"${query.keywords.trim()}"',
+            if (query.sportId != null)
+              SportCatalog.byId(query.sportId!).name.toLowerCase(),
+            if (query.openAtHour != null)
+              'open at ${groundHourLabel(query.openAtHour!)}',
+          ];
           return EmptyState(
             icon: Icons.stadium_outlined,
-            title: 'No grounds listed in $city yet',
-            message:
-                'PlaySphere is new here. You can still run the event — just '
-                'type where you are playing instead.',
+            title: 'No grounds match that yet',
+            message: applied.isEmpty
+                ? 'PlaySphere is new here. You can still run the event — '
+                    'just type where you are playing instead.'
+                : 'Nothing listed for ${applied.join(' · ')}. Try fewer '
+                    'words, another sport, or a different time — and you can '
+                    'still run the event by typing where you are playing.',
           );
         }
         return Column(
@@ -567,10 +669,26 @@ class _Results extends ConsumerWidget {
               Card(
                 margin: const EdgeInsets.only(bottom: 8),
                 child: ListTile(
-                  leading: CircleAvatar(
-                    backgroundColor:
-                        Theme.of(context).colorScheme.surfaceContainerHighest,
-                    child: Text(g.isIndoor ? '🏟️' : '🌳'),
+              // The photo is the whole reason `Ground.photoUrl` exists:
+                  // somebody choosing between two grounds an hour apart is
+                  // choosing on the strength of a picture. It was on the model
+                  // from the start and rendered nowhere. Falls back to the
+                  // indoor/outdoor glyph, so a ground with no photo still reads.
+                  leading: ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: SizedBox(
+                      width: 44,
+                      height: 44,
+                      child: PsNetworkImage(
+                        url: g.photoUrl,
+                        fallback: ColoredBox(
+                          color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                          child: Center(
+                            child: Text(g.isIndoor ? '\u{1F3DF}' : '\u{1F333}'),
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
                   title: Row(
                     children: [
@@ -644,6 +762,41 @@ class _DateRow extends StatelessWidget {
         ),
         child: Text(DateFormat('EEEE, d MMMM yyyy').format(date)),
       ),
+    );
+  }
+}
+
+/// What time they want to start, or "any time".
+///
+/// Optional on purpose. "Anything on Sunday" is how a good half of these
+/// searches begin, and a required time would force an answer that then
+/// silently filters out the ground they would have taken at four instead of
+/// three. Set, it does two jobs: grounds shut at that hour never appear, and
+/// the ground they pick opens with that hour already chosen.
+class _StartHourRow extends StatelessWidget {
+  const _StartHourRow({required this.hour, required this.onChanged});
+
+  final int? hour;
+  final ValueChanged<int?> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return DropdownButtonFormField<int?>(
+      value: hour,
+      decoration: const InputDecoration(
+        labelText: 'Start time',
+        prefixIcon: Icon(Icons.access_time),
+        border: OutlineInputBorder(),
+      ),
+      items: [
+        const DropdownMenuItem<int?>(
+          value: null,
+          child: Text('Any time'),
+        ),
+        for (var h = 5; h <= 23; h++)
+          DropdownMenuItem<int?>(value: h, child: Text(groundHourLabel(h))),
+      ],
+      onChanged: onChanged,
     );
   }
 }

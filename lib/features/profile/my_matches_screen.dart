@@ -10,6 +10,7 @@ import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/section_header.dart';
+import '../../core/l10n/result_labels.dart';
 
 /// Every match a player has appeared in, across every club and every sport.
 ///
@@ -189,7 +190,8 @@ class PlayerMatchTile extends StatelessWidget {
             Text(
               [
                 if (when != null) friendlyDate(when),
-                if (fixture.summary.isNotEmpty) fixture.summary,
+                if (fixture.summary.isNotEmpty)
+                  localizedSummary(context, fixture.summary),
               ].join(' · '),
               maxLines: 2,
               overflow: TextOverflow.ellipsis,

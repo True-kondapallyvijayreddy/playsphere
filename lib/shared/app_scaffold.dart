@@ -9,6 +9,7 @@ import '../core/providers.dart';
 import '../core/router/app_router.dart';
 import '../features/home/home_providers.dart';
 import 'account_button.dart';
+import 'identity.dart';
 import 'module_drawer.dart';
 import 'playsphere_logo.dart';
 
@@ -162,21 +163,27 @@ class AppScaffold extends ConsumerWidget {
             onTap: () => context.go(Routes.home),
             child: const PlaySphereLogo(markSize: 24, fontSize: 16),
           ),
-          Text(
-            [
-              title,
-              if (subtitle != null)
-                subtitle!
-              else if (org != null)
-                org.name,
-            ].join(' · '),
-            style: Theme.of(context).textTheme.bodySmall,
-            overflow: TextOverflow.ellipsis,
-          ),
+          // Suppressed when it would only repeat the wordmark directly above
+          // it. The dashboard passes `title: 'PlaySphere'` and no subtitle, so
+          // the bar read "PlaySphere" twice, one under the other — a whole
+          // line of the most valuable vertical space on the screen spent
+          // saying the thing the logo had just said.
+          if (_caption(title, subtitle, org?.name) case final caption?)
+            Text(
+              caption,
+              style: Theme.of(context).textTheme.bodySmall,
+              overflow: TextOverflow.ellipsis,
+            ),
         ],
       ),
       actions: [
         ...?actions,
+        // Whether anything scored is still waiting to reach the server, on
+        // EVERY screen rather than only on the pad that queued it. A scorer
+        // who has walked away from the match has no reason to reopen it, and
+        // until this was app-wide the only honest signal that work was still
+        // held locally lived on the one screen they had already left.
+        const SyncStatusIcon(),
         // Bell immediately beside the profile photo, on every screen. The
         // module menu used to sit between them once a back arrow appeared,
         // so the pair a user reaches for by muscle memory moved depending on
@@ -274,6 +281,21 @@ class AppScaffold extends ConsumerWidget {
     );
   }
 }
+
+/// The small line under the wordmark: where you are, and in which club.
+///
+/// Null when there is nothing to add. "PlaySphere" alone is not a caption —
+/// it is the logo, already drawn above — so the dashboard gets no line at
+/// all rather than a duplicate of its own brand.
+String? _caption(String title, String? subtitle, String? orgName) {
+  final parts = [
+    title,
+    if (subtitle != null) subtitle else if (orgName != null) orgName,
+  ];
+  if (parts.length == 1 && parts.first == 'PlaySphere') return null;
+  return parts.join(' \u00b7 ');
+}
+
 
 /// The bell, with a count of what is waiting on this person.
 ///
@@ -429,6 +451,12 @@ class _NavIcon extends StatelessWidget {
 
 /// Consistent empty state, so "nothing here yet" always tells the user what
 /// to do next rather than leaving a blank panel.
+///
+/// The glyph sits inside [PsEmptyArt] — two soft tinted discs in the brand
+/// green — rather than floating as a bare grey icon. That is one edit, and it
+/// reaches the 88 empty states across 70 files that all previously rendered as
+/// a 44pt grey Material icon in the middle of a white screen. Nothing about
+/// the API changed, so no caller had to be touched.
 class EmptyState extends StatelessWidget {
   const EmptyState({
     super.key,
@@ -453,11 +481,13 @@ class EmptyState extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, size: 44, color: Theme.of(context).hintColor),
-              const SizedBox(height: 16),
+              PsEmptyArt(icon: icon),
+              const SizedBox(height: 18),
               Text(
                 title,
-                style: Theme.of(context).textTheme.titleMedium,
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
                 textAlign: TextAlign.center,
               ),
               if (message != null) ...[
@@ -488,17 +518,28 @@ class AsyncView<T> extends StatelessWidget {
     required this.value,
     required this.builder,
     this.onRetry,
+    this.skeleton,
   });
 
   final AsyncValue<T> value;
   final Widget Function(T data) builder;
   final VoidCallback? onRetry;
 
+  /// Drawn instead of the spinner while the value is loading.
+  ///
+  /// Optional, and defaulted to the spinner, so all 65 existing call sites
+  /// keep working untouched and a screen opts in where the shape of what is
+  /// coming is actually known. A spinner says "wait"; a skeleton in the shape
+  /// of the list says "this is what is coming", which is the shorter-feeling
+  /// wait and the more honest one. [PsListSkeleton] covers the common case.
+  final Widget? skeleton;
+
   @override
   Widget build(BuildContext context) {
     return value.when(
       data: builder,
-      loading: () => const Center(child: CircularProgressIndicator()),
+      loading: () =>
+          skeleton ?? const Center(child: CircularProgressIndicator()),
       error: (error, _) => EmptyState(
         icon: Icons.error_outline,
         title: 'Could not load this',
@@ -586,4 +627,61 @@ void showError(BuildContext context, Object error) {
   ScaffoldMessenger.of(context)
     ..hideCurrentSnackBar()
     ..showSnackBar(SnackBar(content: Text(errorMessage(error))));
+}
+
+/// A live, app-wide answer to "has everything I scored actually left this
+/// phone?".
+///
+/// ## Why this is in the app bar and not on the scoring pad
+///
+/// The pad already had a pending banner, and it was the wrong place for it:
+/// the moment a scorer finishes a match they close the pad and never open it
+/// again, so the one surface that could tell them work was still held locally
+/// was the one surface they had left. Sitting in the shell's app bar, this is
+/// on every screen of the product — including the club home an organizer
+/// stares at while asking why the points table has not moved.
+///
+/// Renders nothing at all when the queue is empty, which is almost always.
+/// A permanent "synced ✓" badge trains people to stop reading it, and then
+/// the one time it matters it is invisible for being familiar.
+class SyncStatusIcon extends ConsumerWidget {
+  const SyncStatusIcon({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final pending = ref.watch(pendingScoreEventsProvider).valueOrNull ?? 0;
+    if (pending == 0) return const SizedBox.shrink();
+
+    final scheme = Theme.of(context).colorScheme;
+    return Tooltip(
+      message: '$pending scoring ${pending == 1 ? 'action is' : 'actions are'} '
+          'saved on this phone and waiting to upload. Tap to retry now.',
+      child: InkWell(
+        // A manual retry, because the person holding the phone often knows
+        // something the app cannot: they have just walked into the pavilion
+        // and onto the wi-fi. Waiting out the retry timer for that is a
+        // needless few seconds of doubt.
+        onTap: () => ref.read(syncDriverProvider).syncNow(),
+        borderRadius: BorderRadius.circular(20),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.cloud_upload_outlined,
+                  size: 18, color: scheme.onSurfaceVariant),
+              const SizedBox(width: 4),
+              Text(
+                '$pending',
+                style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w700,
+                    ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }

@@ -5,13 +5,17 @@ import 'package:intl/intl.dart';
 
 import '../../core/layout/responsive.dart';
 import '../../core/models/competition.dart';
+import '../../core/models/draw_config.dart';
 import '../../core/models/enums.dart';
 import '../../core/models/tournament.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../tournaments/widgets/venue_selector_dialog.dart'
+    show showQuickAddVenueDialog;
 import 'widgets/bulk_category_selector_sheet.dart';
+import 'widgets/group_stage_fields.dart';
 
 /// One configured entry in a season: a sport, played in one arrangement
 /// (singles, doubles, 11-a-side...), for one age/gender category.
@@ -28,7 +32,7 @@ class _CategoryDraft {
     required this.sportId,
     required this.sideFormat,
     required this.category,
-  })  : format = SportCatalog.byId(sportId).competitionFormats.first,
+  })  : format = SportCatalog.byId(sportId).defaultCompetitionFormat,
         entries = TextEditingController();
 
   final String sportId;
@@ -41,7 +45,31 @@ class _CategoryDraft {
   CompetitionFormat format;
   final TextEditingController entries;
 
+  /// How this category's field is split up — groups, how many, and how many
+  /// of each go through to the knockout.
+  ///
+  /// Editable here for the same reason [format] is, and it has to be: a
+  /// season is drawn by `setUpWholeSeason`, which reads this off each
+  /// competition and never opens the draw sheet where these were the only
+  /// settable settings in the product.
+  DrawConfig draw = const DrawConfig();
+
   SportSpec get sport => SportCatalog.byId(sportId);
+
+  /// Entrants to plan the group split against. An organizer who left the
+  /// entry limit blank has told us nothing, so a mid-sized field is assumed
+  /// and re-clamped against the real one at draw time.
+  int get plannedEntrants {
+    final typed = int.tryParse(entries.text.trim());
+    return (typed == null || typed < 2) ? 16 : typed;
+  }
+
+  /// The draw config as stored, clamped to what this format and field allow.
+  DrawConfig get drawToSubmit => GroupStageFields.normalize(
+        format: format,
+        entrantCount: plannedEntrants,
+        config: draw,
+      );
 
   /// Whether [other] configures the same slot — same sport, same
   /// arrangement, same category — which would otherwise silently create two
@@ -91,6 +119,7 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
   final _formKey = GlobalKey<FormState>();
   final _name = TextEditingController();
   final _venue = TextEditingController();
+  final Set<String> _venueIds = {};
 
   /// Every sport/arrangement/category combination this season runs. Presence
   /// in this list is what "included" means, so the entries, format and
@@ -99,6 +128,21 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
 
   DateTime? _startDate;
   DateTime? _endDate;
+
+  /// The timetable's shape, captured here rather than left to defaults.
+  ///
+  /// These four numbers are what `generateSchedule` lays matches out with, and
+  /// this screen used to write `ScheduleConfig(venueIds: ...)` and nothing
+  /// else — so every season created from it ran on 30-minute matches between
+  /// 09:00 and 19:00 whatever the sport and whatever hours the ground was
+  /// actually available for. A hockey season and a table-tennis season are not
+  /// the same match length, and an organizer finding that out from a generated
+  /// timetable is finding out too late.
+  int _matchMinutes = 30;
+  int _changeoverMinutes = 5;
+  int _restGapMinutes = 20;
+  int _dayStartHour = 9;
+  int _dayEndHour = 19;
   bool _externalEntries = false;
   bool _busy = false;
 
@@ -214,6 +258,17 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
       showError(context, 'End date cannot be before the start date.');
       return;
     }
+    // A season with no ground cannot be scheduled at all — `generateSchedule`
+    // resolves its courts from these venue documents and refuses when there
+    // are none. Caught here, at creation, rather than weeks later when
+    // somebody presses the only button that would have told them.
+    if (_venueIds.isEmpty) {
+      showError(
+        context,
+        'Pick at least one ground. Matches are scheduled onto their courts.',
+      );
+      return;
+    }
     final uid = ref.read(currentUidProvider);
     if (uid == null) return;
 
@@ -231,6 +286,7 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
           status: TournamentStatus.entriesOpen,
           startDate: start,
           endDate: end ?? start,
+          venueIds: _venueIds.toList(),
           eventCount: _categories.length,
           createdBy: uid,
         ),
@@ -257,6 +313,15 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
             category: draft.category,
             scoringPluginKey: sport.pluginKey,
             scoringConfig: draft.sideFormat.configOverrides,
+            drawConfig: draft.drawToSubmit,
+            scheduleConfig: ScheduleConfig(
+              venueIds: _venueIds.toList(),
+              matchMinutes: _matchMinutes,
+              changeoverMinutes: _changeoverMinutes,
+              restGapMinutes: _restGapMinutes,
+              dayStartHour: _dayStartHour,
+              dayEndHour: _dayEndHour,
+            ),
             venue: _venue.text.trim().isEmpty ? null : _venue.text.trim(),
             startDate: start,
             maxEntrants: _entriesFor(draft),
@@ -338,11 +403,15 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
                   TextFormField(
                     controller: _venue,
                     decoration: const InputDecoration(
-                      labelText: 'Venue (optional)',
+                      labelText: 'Venue label (optional)',
                       hintText: 'e.g. School grounds',
                       border: OutlineInputBorder(),
                     ),
                   ),
+                  const SizedBox(height: 16),
+                  _venuePicker(context),
+                  const SizedBox(height: 16),
+                  _timingsCard(context),
                   const SizedBox(height: 28),
 
                   // ---- Categories -----------------------------------------
@@ -409,6 +478,7 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
                         draft: draft,
                         onFormatChanged: (f) =>
                             setState(() => draft.format = f),
+                        onDrawChanged: (d) => setState(() => draft.draw = d),
                         onRemove: () => _removeCategory(draft),
                       ),
                   const SizedBox(height: 28),
@@ -452,6 +522,207 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
       ),
     );
   }
+
+  /// Match length, the gap between matches, the rest a side is owed, and the
+  /// hours the ground is open. Everything `generateSchedule` needs to lay a
+  /// day out, asked for once, where the person setting up the season already
+  /// is.
+  Widget _timingsCard(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              'Match timings',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 2),
+            const Text(
+              'Used to build the timetable. A match plus its changeover is '
+              'the spacing between two matches on the same court.',
+              style: TextStyle(fontSize: 12, height: 1.4),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: _MinutesField(
+                    label: 'Match length',
+                    value: _matchMinutes,
+                    min: 5,
+                    max: 240,
+                    step: 5,
+                    onChanged: (v) => setState(() => _matchMinutes = v),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _MinutesField(
+                    label: 'Changeover',
+                    value: _changeoverMinutes,
+                    min: 0,
+                    max: 30,
+                    step: 5,
+                    onChanged: (v) => setState(() => _changeoverMinutes = v),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: _MinutesField(
+                    label: 'Rest between a side\'s matches',
+                    value: _restGapMinutes,
+                    min: 0,
+                    max: 120,
+                    step: 5,
+                    onChanged: (v) => setState(() => _restGapMinutes = v),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _HoursField(
+                    startHour: _dayStartHour,
+                    endHour: _dayEndHour,
+                    onChanged: (start, end) => setState(() {
+                      _dayStartHour = start;
+                      _dayEndHour = end;
+                    }),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _venuePicker(BuildContext context) {
+    final venuesAsync = ref.watch(venuesProvider(widget.orgId));
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                const Text(
+                  'Grounds & Courts',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                if (_venueIds.isEmpty)
+                  Text(
+                    'Required',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 2),
+            const Text(
+              'Pick every ground this season may use. Matches are allocated across their courts.',
+              style: TextStyle(fontSize: 12, height: 1.4),
+            ),
+            const SizedBox(height: 10),
+            venuesAsync.when(
+              loading: () => const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(8),
+                  child: SizedBox(
+                    height: 18,
+                    width: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                ),
+              ),
+              error: (e, _) => Text(
+                'Could not load grounds: $e',
+                style: const TextStyle(fontSize: 12),
+              ),
+              data: (venues) {
+                final usable = [
+                  for (final v in venues)
+                    if (!v.isArchived) v,
+                ];
+                if (usable.isEmpty) {
+                  return const Text(
+                    'No grounds saved yet. Add one below.',
+                    style: TextStyle(fontSize: 12, height: 1.4),
+                  );
+                }
+                return Column(
+                  children: [
+                    for (final v in usable)
+                      CheckboxListTile(
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                        controlAffinity: ListTileControlAffinity.leading,
+                        value: _venueIds.contains(v.id),
+                        title: Text(
+                          v.name,
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        subtitle: Text(
+                          '${v.usableCourts.length} usable '
+                          '${v.usableCourts.length == 1 ? "court" : "courts"}'
+                          '${v.address == null ? "" : " · ${v.address}"}',
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                        onChanged: (on) => setState(() {
+                          if (on ?? false) {
+                            _venueIds.add(v.id);
+                          } else {
+                            _venueIds.remove(v.id);
+                          }
+                        }),
+                      ),
+                  ],
+                );
+              },
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: _addVenue,
+              icon: const Icon(Icons.add_location_alt_outlined, size: 18),
+              label: const Text('Add a ground & its courts'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _addVenue() async {
+    final draft = await showQuickAddVenueDialog(context, orgId: widget.orgId);
+    if (draft == null || !mounted) return;
+    try {
+      final id = await ref.read(tournamentRepositoryProvider).createVenue(draft);
+      if (!mounted) return;
+      setState(() => _venueIds.add(id));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not save that ground: $e')),
+      );
+    }
+  }
 }
 
 /// One category already added to the season, shown with its format and
@@ -461,11 +732,13 @@ class _CategoryCard extends StatelessWidget {
     super.key,
     required this.draft,
     required this.onFormatChanged,
+    required this.onDrawChanged,
     required this.onRemove,
   });
 
   final _CategoryDraft draft;
   final ValueChanged<CompetitionFormat> onFormatChanged;
+  final ValueChanged<DrawConfig> onDrawChanged;
   final VoidCallback onRemove;
 
   @override
@@ -551,6 +824,12 @@ class _CategoryCard extends StatelessWidget {
                   ),
                 ),
               ],
+            ),
+            GroupStageFields(
+              format: draft.format,
+              entrantCount: draft.plannedEntrants,
+              config: draft.draw,
+              onChanged: onDrawChanged,
             ),
           ],
         ),
@@ -754,6 +1033,155 @@ class _DateField extends StatelessWidget {
           value == null ? 'Not set' : DateFormat('d MMMM yyyy').format(value!),
         ),
       ),
+    );
+  }
+}
+
+/// A minutes value with a label and a pair of steppers.
+///
+/// A stepper rather than a text field: every one of these is a round number
+/// in practice, a free-text minute count invites "1hr" and "45 mins" to be
+/// typed into an int field, and on a phone a stepper is two taps against a
+/// keyboard, a selection and a dismiss.
+class _MinutesField extends StatelessWidget {
+  const _MinutesField({
+    required this.label,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.step,
+    required this.onChanged,
+  });
+
+  final String label;
+  final int value;
+  final int min;
+  final int max;
+  final int step;
+  final ValueChanged<int> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: theme.textTheme.bodySmall),
+        const SizedBox(height: 4),
+        InputDecorator(
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(),
+            isDense: true,
+            contentPadding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.remove, size: 16),
+                visualDensity: VisualDensity.compact,
+                onPressed: value > min ? () => onChanged(value - step) : null,
+              ),
+              Text(
+                '$value min',
+                style: theme.textTheme.bodyMedium
+                    ?.copyWith(fontWeight: FontWeight.w700),
+              ),
+              IconButton(
+                icon: const Icon(Icons.add, size: 16),
+                visualDensity: VisualDensity.compact,
+                onPressed: value < max ? () => onChanged(value + step) : null,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// The window a ground is available each day.
+///
+/// Stored as two whole hours because that is what `ScheduleConfig` holds, so
+/// the picker opens in its keyboard mode — a dial that accepts 09:37 for a
+/// field that keeps only the 9 is a control that lies about what it saved.
+class _HoursField extends StatelessWidget {
+  const _HoursField({
+    required this.startHour,
+    required this.endHour,
+    required this.onChanged,
+  });
+
+  final int startHour;
+  final int endHour;
+  final void Function(int start, int end) onChanged;
+
+  static String _label(int hour) => '${hour.toString().padLeft(2, '0')}:00';
+
+  Future<void> _pick(BuildContext context, {required bool isStart}) async {
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay(hour: isStart ? startHour : endHour, minute: 0),
+      helpText: isStart ? 'Play may start from' : 'Play must finish by',
+      initialEntryMode: TimePickerEntryMode.inputOnly,
+    );
+    if (picked == null) return;
+
+    var start = isStart ? picked.hour : startHour;
+    var end = isStart ? endHour : picked.hour;
+    // Kept in order, by moving the other end rather than rejecting the entry
+    // — a day that finishes before it starts has no slots in it at all.
+    if (end <= start) {
+      if (isStart) {
+        end = start + 1 > 23 ? 23 : start + 1;
+      } else {
+        start = end - 1 < 0 ? 0 : end - 1;
+      }
+    }
+    onChanged(start, end);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Ground hours', style: theme.textTheme.bodySmall),
+        const SizedBox(height: 4),
+        InputDecorator(
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(),
+            isDense: true,
+            contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              InkWell(
+                onTap: () => _pick(context, isStart: true),
+                child: Text(
+                  _label(startHour),
+                  style: theme.textTheme.bodyMedium
+                      ?.copyWith(fontWeight: FontWeight.w700),
+                ),
+              ),
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 6),
+                child: Text('–'),
+              ),
+              InkWell(
+                onTap: () => _pick(context, isStart: false),
+                child: Text(
+                  _label(endHour),
+                  style: theme.textTheme.bodyMedium
+                      ?.copyWith(fontWeight: FontWeight.w700),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

@@ -100,6 +100,41 @@ class CareerRepository {
         .map((snap) => snap.docs.map(Fixture.fromDoc).toList());
   }
 
+  /// The last few results one club posted in one sport, newest first.
+  ///
+  /// Deliberately not [watchOrgFixtures] filtered down. That one reads a
+  /// club's whole history — up to 300 fixtures across every sport — because
+  /// its caller is a stats screen that aggregates all of it. `SportHubScreen`
+  /// fans out across every club running the sport, so paying 300 documents a
+  /// club to display four rows would be the most expensive thing on a screen
+  /// somebody is only browsing. This asks the database for the four instead.
+  ///
+  /// Ordered by `completedAt`, which means a fixture completed before that
+  /// field was written does not appear. That is the right trade for a
+  /// "recent results" strip — the alternative is an unordered `limit()`,
+  /// which returns four arbitrary matches from any year and calls them
+  /// recent.
+  Stream<List<Fixture>> watchOrgSportResults(
+    String orgId,
+    String sportId, {
+    int limit = 5,
+  }) {
+    return Refs.allFixturesQuery
+        .where('orgId', isEqualTo: orgId)
+        .where('sportId', isEqualTo: sportId)
+        // The same pair [watchOrgFixtures] pins, and for the same reason:
+        // it excludes undrawn placeholder fixtures structurally, which the
+        // rules would otherwise refuse the whole list for.
+        .where('status', whereIn: [
+          FixtureStatus.completed.wire,
+          FixtureStatus.walkover.wire,
+        ])
+        .orderBy('completedAt', descending: true)
+        .limit(limit)
+        .snapshots()
+        .map((snap) => snap.docs.map(Fixture.fromDoc).toList());
+  }
+
   /// Every sport this player has a record in, most-played first.
   Stream<List<CareerLine>> watchCareer(String uid) {
     final stats = Refs.userCareerStats(uid).snapshots();

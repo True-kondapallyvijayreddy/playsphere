@@ -11,7 +11,11 @@ import '../../domain/scoring/scoring_registry.dart';
 import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
+import '../../data/image_composer.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/club_id_chip.dart';
+import '../../shared/identity.dart';
+import '../../shared/image_upload.dart';
 import '../../shared/live_dot.dart';
 import '../../shared/ui_kit.dart';
 import '../home/event_feed.dart';
@@ -258,7 +262,15 @@ class _ClubHeader extends ConsumerWidget {
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _Crest(org: org),
+                _Crest(
+                  org: org,
+                  // The same capability that shows the settings cog. A member
+                  // who cannot manage the club is not shown a camera badge
+                  // whose write `firestore.rules` would refuse.
+                  canEdit: ref
+                      .watch(myCapabilitiesProvider(orgId))
+                      .contains(Capability.manageOrganization),
+                ),
                 const SizedBox(width: 14),
                 Expanded(
                   child: Column(
@@ -272,6 +284,11 @@ class _ClubHeader extends ConsumerWidget {
                           color: Ps.ink,
                         ),
                       ),
+                      // The full form here rather than the bare code: this is
+                      // the club's own page, and sharing it is something a
+                      // member arrives here to do.
+                      const SizedBox(height: 4),
+                      ClubIdChip(org: org),
                       const SizedBox(height: 4),
                       Text(
                         [
@@ -384,54 +401,54 @@ class _ClubHeader extends ConsumerWidget {
 }
 
 /// The club crest, or its initial where no logo has been uploaded.
-class _Crest extends StatelessWidget {
-  const _Crest({required this.org});
+///
+/// Tappable for an admin, which is the only route to setting a crest in the
+/// app. `OrgRepository.uploadClubLogo` had existed, complete and correct, with
+/// no caller at all — three screens read `logoUrl` and nothing could write it.
+/// Putting the affordance on the crest itself rather than burying it in club
+/// settings is deliberate: the thing you want to change is the thing you tap.
+class _Crest extends ConsumerWidget {
+  const _Crest({required this.org, this.canEdit = false});
 
   final Organization org;
+  final bool canEdit;
 
-  @override
-  Widget build(BuildContext context) {
-    final logo = org.logoUrl;
-    if (logo != null && logo.trim().isNotEmpty) {
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(Ps.radiusSm),
-        child: Image.network(
-          logo,
-          width: 56,
-          height: 56,
-          fit: BoxFit.cover,
-          // A club whose logo host is down must still render a club header.
-          errorBuilder: (_, __, ___) => _InitialCrest(name: org.name),
-        ),
-      );
-    }
-    return _InitialCrest(name: org.name);
-  }
-}
-
-class _InitialCrest extends StatelessWidget {
-  const _InitialCrest({required this.name});
-
-  final String name;
-
-  @override
-  Widget build(BuildContext context) {
-    final initial = name.trim().isEmpty ? '?' : name.trim()[0].toUpperCase();
-    return Container(
-      width: 56,
-      height: 56,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        color: Ps.primary.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(Ps.radiusSm),
+  Future<void> _change(BuildContext context, WidgetRef ref) {
+    final me = ref.read(currentUserProvider).valueOrNull;
+    if (me == null) return Future.value();
+    final repo = ref.read(orgRepositoryProvider);
+    return pickAndUploadImage(
+      context: context,
+      title: 'Club crest',
+      shape: ImageShape.square,
+      successMessage: 'Crest updated.',
+      removedMessage: 'Crest removed.',
+      onUpload: (image) => repo.uploadClubLogo(
+        orgId: org.id,
+        uid: me.uid,
+        bytes: image.bytes,
+        contentType: image.contentType,
       ),
-      child: Text(
-        initial,
-        style: const TextStyle(
-          fontSize: 24,
-          fontWeight: FontWeight.w800,
-          color: Ps.primary,
-        ),
+      onRemove:
+          org.logoUrl == null ? null : () => repo.removeClubLogo(org.id),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return EditableImage(
+      shape: BoxShape.rectangle,
+      tooltip: 'Change the club crest',
+      onTap: canEdit ? () => _change(context, ref) : null,
+      // The bespoke `Image.network` + initials pair this replaced was a
+      // near-duplicate of the one on the rankings ladder, and the two
+      // disagreed about corner radius and about whether initials meant one
+      // letter or two — so the same club looked like two clubs.
+      child: PsCrest(
+        name: org.name,
+        logoUrl: org.logoUrl,
+        seed: org.id,
+        size: 56,
       ),
     );
   }
@@ -560,14 +577,7 @@ class _CompetitionTile extends StatelessWidget {
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
-        leading: CircleAvatar(
-          backgroundColor:
-              Theme.of(context).colorScheme.surfaceContainerHighest,
-          child: Text(
-            _sportEmoji(c.sportId),
-            style: const TextStyle(fontSize: 18),
-          ),
-        ),
+        leading: SportBadge(sportId: c.sportId, size: 40),
         title: Text(c.name),
         subtitle: Text(
           [
@@ -582,19 +592,6 @@ class _CompetitionTile extends StatelessWidget {
     );
   }
 
-  static String _sportEmoji(String sportId) => switch (sportId) {
-        'cricket' => '🏏',
-        'badminton' => '🏸',
-        'table_tennis' => '🏓',
-        'volleyball' => '🏐',
-        'football' => '⚽',
-        'basketball' => '🏀',
-        'kabaddi' => '🤼',
-        'hockey' => '🏑',
-        'chess' => '♟️',
-        'tennis' => '🎾',
-        _ => '🏅',
-      };
 }
 
 class _StatusChip extends StatelessWidget {

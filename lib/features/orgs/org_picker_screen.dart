@@ -7,6 +7,8 @@ import '../../core/models/enums.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/identity.dart';
+import '../../shared/club_id_chip.dart';
 
 /// Landing screen: the organizations this person actually belongs to.
 ///
@@ -145,12 +147,31 @@ class _OrgTile extends ConsumerWidget {
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
       child: ListTile(
-        leading: CircleAvatar(
-          child: Text(
-            (org?.name ?? '?').characters.first.toUpperCase(),
-          ),
+        // Read `logoUrl`. This row drew a grey Material circle with one
+        // letter in it even for a club that had uploaded a crest — the club
+        // switcher was the one place a member could not recognise their own
+        // club by sight.
+        leading: PsCrest(
+          name: org?.name ?? '?',
+          logoUrl: org?.logoUrl,
+          seed: orgId,
+          size: 40,
         ),
-        title: Text(org?.name ?? 'Loading…'),
+        title: Row(
+          children: [
+            Flexible(
+              child: Text(
+                org?.name ?? 'Loading…',
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            // Beside the name, for every member — see [ClubIdChip].
+            if (org != null) ...[
+              const SizedBox(width: 8),
+              ClubIdChip(org: org, compact: true),
+            ],
+          ],
+        ),
         subtitle: Text(
           pending
               ? 'Waiting for an admin to approve you'

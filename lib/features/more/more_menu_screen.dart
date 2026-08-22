@@ -6,6 +6,7 @@ import '../../core/layout/responsive.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/identity.dart';
 import '../../shared/ui_kit.dart';
 import '../home/home_providers.dart';
 
@@ -44,6 +45,8 @@ class MoreMenuScreen extends ConsumerWidget {
                 children: [
                   _ProfileRow(
                     name: user?.displayName ?? 'Sports person',
+                    photoUrl: user?.photoUrl,
+                    uid: user?.uid,
                     // The player code is the thing another club asks for by
                     // name, so it wins the one line available over an email
                     // address the person already knows.
@@ -163,11 +166,19 @@ class _ProfileRow extends StatelessWidget {
     required this.name,
     required this.detail,
     required this.onTap,
+    this.photoUrl,
+    this.uid,
   });
 
   final String name;
   final String? detail;
   final VoidCallback onTap;
+
+  /// The row drew a green disc with an initial in it and never looked at the
+  /// photo, so the one place a person sees their own account in the menu was
+  /// the one place their own face was missing.
+  final String? photoUrl;
+  final String? uid;
 
   @override
   Widget build(BuildContext context) {
@@ -176,19 +187,11 @@ class _ProfileRow extends StatelessWidget {
       onTap: onTap,
       child: Row(
         children: [
-          CircleAvatar(
-            radius: 20,
-            backgroundColor: Ps.primary,
-            child: Text(
-              // `characters` is not needed for one glyph of an initial, but
-              // `substring` is: a name that begins with an emoji or a
-              // combining Devanagari cluster would throw on a raw index.
-              name.isEmpty ? 'P' : name.characters.first.toUpperCase(),
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
+          PsAvatar(
+            name: name.isEmpty ? 'P' : name,
+            photoUrl: photoUrl,
+            seed: uid,
+            size: 40,
           ),
           const SizedBox(width: 12),
           Expanded(

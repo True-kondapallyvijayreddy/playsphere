@@ -215,4 +215,93 @@ void main() {
       expect(a.cityKey, 'hyderabad');
     });
   });
+
+  // A ground nobody can find is a ground nobody books, and the search that
+  // shipped could only find one whose city you had already typed in full.
+  group('search words', () {
+    test('a ground is findable by its own name', () {
+      final tokens = ground().searchTokens;
+      expect(tokens, contains('gachibowli'));
+      expect(tokens, contains('turf'));
+    });
+
+    test('an area is a searchable word, not only a city', () {
+      // "Gachibowli" is not a city, and the old search returned nothing for
+      // it — which is the single most likely thing somebody types.
+      const g = Ground(
+        id: 'g',
+        ownerUid: 'o',
+        name: 'Sunrise Sports Arena',
+        city: 'Hyderabad',
+        district: 'Rangareddy',
+        address: 'Plot 4, Gachibowli Main Road',
+      );
+      expect(g.searchTokens, contains('gachibowli'));
+      expect(g.searchTokens, contains('rangareddy'));
+      expect(g.searchTokens, contains('hyderabad'));
+    });
+
+    test('a sport is searchable by each of its words', () {
+      // Somebody typing "tennis" has to find the table tennis hall, and
+      // somebody typing "table tennis" has to find it by both words.
+      const g = Ground(
+        id: 'g',
+        ownerUid: 'o',
+        name: 'Hall',
+        city: 'Warangal',
+        sportIds: ['table_tennis'],
+      );
+      expect(g.searchTokens, contains('table'));
+      expect(g.searchTokens, contains('tennis'));
+    });
+
+    test('indoor and outdoor are searchable', () {
+      expect(
+        const Ground(id: 'g', ownerUid: 'o', name: 'H', city: 'C',
+            isIndoor: true).searchTokens,
+        contains('indoor'),
+      );
+      expect(
+        const Ground(id: 'g', ownerUid: 'o', name: 'H', city: 'C')
+            .searchTokens,
+        contains('outdoor'),
+      );
+    });
+
+    test('single characters are dropped', () {
+      // They match nearly every listing, which would make the indexed read
+      // as wide as a full scan — the one thing the token design avoids.
+      expect(Ground.tokenize(['A 1 turf']), ['turf']);
+    });
+
+    test('punctuation and case are not part of a word', () {
+      expect(
+        Ground.tokenize(['Plot-4, ST. ANNs Ground']),
+        containsAll(<String>['plot', 'st', 'anns', 'ground']),
+      );
+    });
+
+    test('the token list is capped', () {
+      // It is written into every ground document and read back by every
+      // search; an address someone pasted a paragraph into must not turn
+      // one listing into a kilobyte.
+      final long = List.generate(200, (i) => 'word$i').join(' ');
+      expect(Ground.tokenize([long]).length, lessThanOrEqualTo(40));
+    });
+
+    test('duplicates across fields collapse', () {
+      const g = Ground(
+        id: 'g',
+        ownerUid: 'o',
+        name: 'Hyderabad Turf',
+        city: 'Hyderabad',
+      );
+      expect(g.searchTokens.where((t) => t == 'hyderabad').length, 1);
+    });
+
+    test('nothing typed is no words, not one empty word', () {
+      expect(Ground.tokenize(['   ']), isEmpty);
+      expect(Ground.tokenize([null]), isEmpty);
+    });
+  });
 }

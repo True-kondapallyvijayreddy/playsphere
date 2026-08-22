@@ -1,7 +1,8 @@
 rules_version = '2';
 
-// Cloud Storage rules for PlaySphere media — profile photos, club logos and
-// match memories.
+// Cloud Storage rules for PlaySphere media — profile photos, club and team
+// crests, event and season banners, ground photos, club files and match
+// memories.
 //
 // ## The shape of the problem
 //
@@ -155,6 +156,87 @@ service firebase.storage {
       allow read: if isSignedIn();
       allow create: if isSelf(uid) && isDocumentUnder(10);
       allow update: if false;
+      allow delete: if isSelf(uid);
+    }
+
+    // --- Team crests ------------------------------------------------------
+    //
+    // Same shape as club logos, and the same division of labour: the uid
+    // segment is all this file can check, and the authority that decides whose
+    // object becomes the team's crest lives in firestore.rules, where
+    // `teamRuns()` limits the write on `teams/{teamId}.photoUrl` to the
+    // captain, the manager or the creator.
+    //
+    // World-readable because a crest shows up on the public spectator page for
+    // any match the team plays, which is reachable without signing in.
+    match /teams/{teamId}/logo/{uid}/{fileName} {
+      allow read: if true;
+      allow write: if isSelf(uid) && isImageUnder(4);
+      allow delete: if isSelf(uid);
+    }
+
+    // --- Event and season banners ------------------------------------------
+    //
+    // The artwork across the top of a competition or a tournament. Both are
+    // world-readable for a stronger reason than the crests above: the public
+    // tournament page and the single-match watch page are deliberately
+    // signed-out — a parent at work and a class on a laptop have to be able to
+    // open them — so a banner that required auth would be a hole in the middle
+    // of the one page aimed at people who do not have the app.
+    //
+    // 8 MB rather than the crests' 4: a banner is a full-bleed 1600px photo,
+    // and the client caps itself at 6 before it uploads (see MediaUploader).
+    // Write authority is `canManageCompetitions(orgId)` in firestore.rules.
+    match /competitions/{compId}/banner/{uid}/{fileName} {
+      allow read: if true;
+      allow write: if isSelf(uid) && isImageUnder(8);
+      allow delete: if isSelf(uid);
+    }
+
+    match /tournaments/{tournamentId}/banner/{uid}/{fileName} {
+      allow read: if true;
+      allow write: if isSelf(uid) && isImageUnder(8);
+      allow delete: if isSelf(uid);
+    }
+
+    // --- Ground photos -----------------------------------------------------
+    //
+    // A picture of the ground itself, set by its owner. World-readable: a
+    // ground listing is an advertisement, and the whole point of the photo is
+    // that somebody deciding between two grounds can see them. The Firestore
+    // gate is ownership of `grounds/{groundId}`.
+    match /grounds/{groundId}/photo/{uid}/{fileName} {
+      allow read: if true;
+      allow write: if isSelf(uid) && isImageUnder(8);
+      allow delete: if isSelf(uid);
+    }
+
+    // --- Advertiser creatives ---------------------------------------------
+    //
+    // Keyed on the advertiser's own uid and not on a campaign id, because the
+    // artwork is picked while the campaign is being written and there is no id
+    // yet. World-readable: an approved banner is shown to signed-out
+    // spectators on the public match and tournament pages.
+    //
+    // Approval is the real gate and it is not here. Uploading artwork does not
+    // put it in front of anybody — `adCampaigns.status` starts at `pending`
+    // and only the `admin` claim can move it to `approved` (see
+    // firestore.rules). An object nobody approved is an object nobody sees.
+    match /adCreatives/{uid}/{fileName} {
+      allow read: if true;
+      allow write: if isSelf(uid) && isImageUnder(4);
+      allow delete: if isSelf(uid);
+    }
+
+    // --- Club store product photos -----------------------------------------
+    //
+    // The orgId segment is descriptive rather than protective — this file
+    // cannot ask Firestore whether the uploader runs that club, so the uid
+    // segment does the work and `clubProducts/{productId}` in firestore.rules
+    // decides whose object becomes a listing.
+    match /clubProducts/{orgId}/{uid}/{fileName} {
+      allow read: if true;
+      allow write: if isSelf(uid) && isImageUnder(4);
       allow delete: if isSelf(uid);
     }
 

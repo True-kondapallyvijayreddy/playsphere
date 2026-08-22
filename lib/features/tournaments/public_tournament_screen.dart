@@ -9,7 +9,10 @@ import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/tournament/tournament_overview.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/ps_banner.dart';
+import '../competitions/widgets/suspend_sheet.dart';
 import 'widgets/leaderboard_cards.dart';
+import '../../core/l10n/result_labels.dart';
 
 /// The whole tournament on one public link.
 ///
@@ -68,17 +71,48 @@ class PublicTournamentScreen extends ConsumerWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    // The spectator half of the suspension. Somebody who
+                    // blocked out Saturday and followed the public link is
+                    // exactly who the reason was written for; without this
+                    // they read a schedule that is not going to happen.
+                    if (tournament.isSuspended)
+                      OnHoldBanner(
+                        what: 'season',
+                        reason: tournament.suspendReason,
+                      ),
+                    // This page is the one thing a club sends to people who
+                    // do not have PlaySphere — the page that replaces the
+                    // Telegram channel — and it opened with an app bar
+                    // reading "Tournament" and nothing else. The banner is
+                    // the season's own identity on the only surface where a
+                    // stranger forms an impression of the product.
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+                      child: PsBanner(
+                        imageUrl: tournament.bannerUrl,
+                        seed: tournament.id,
+                        fallbackIcon: Icons.emoji_events_outlined,
+                        fallbackColor: const Color(0xFF0F766E),
+                        height: 168,
+                        child: Text(
+                          tournament.name,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.w800,
+                            color: Colors.white,
+                            height: 1.15,
+                          ),
+                        ),
+                      ),
+                    ),
                     Card(
                       child: Padding(
                         padding: const EdgeInsets.all(16),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(
-                              tournament.name,
-                              style: theme.textTheme.headlineSmall,
-                            ),
-                            const SizedBox(height: 8),
                             Wrap(
                               spacing: 8,
                               runSpacing: 8,
@@ -200,7 +234,10 @@ class _PublicMatch extends StatelessWidget {
         trailing: f.isLiveAt(DateTime.now())
             ? Icon(Icons.circle, size: 10, color: theme.colorScheme.error)
             : (f.summary.isNotEmpty
-                ? Text(f.summary, style: theme.textTheme.labelSmall)
+                ? Text(
+                    localizedSummary(context, f.summary),
+                    style: theme.textTheme.labelSmall,
+                  )
                 : null),
       ),
     );

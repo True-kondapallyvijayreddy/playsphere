@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../core/models/sport_stat_row.dart';
 import '../../core/providers.dart';
+import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/ui_kit.dart';
 
@@ -189,12 +191,11 @@ class _SportRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return PsCard(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      onTap: () {
-        // Deliberately inert until the per-sport landing page exists. A row
-        // that navigates nowhere is better than one that pushes a plausible
-        // but wrong destination, and the tap target is kept so the affordance
-        // does not have to be added back later.
-      },
+      // The per-sport landing page the tap target was kept for. Until it
+      // existed this row was deliberately inert — a row that navigates
+      // nowhere being better than one that pushes a plausible but wrong
+      // destination. See [SportHubScreen].
+      onTap: () => context.push(Routes.sport(spec.id)),
       child: Row(
         children: [
           SportBadge(sportId: spec.id),

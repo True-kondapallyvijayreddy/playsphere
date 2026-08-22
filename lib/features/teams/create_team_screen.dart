@@ -9,6 +9,7 @@ import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/identity.dart';
 
 /// Raising a squad out of a club's members list.
 ///
@@ -163,16 +164,10 @@ class _CreateTeamScreenState extends ConsumerState<CreateTeamScreen> {
                       for (final m in candidates)
                         CheckboxListTile(
                           value: _picked.contains(m.uid),
-                          secondary: CircleAvatar(
-                            backgroundImage: m.photoUrl != null
-                                ? NetworkImage(m.photoUrl!)
-                                : null,
-                            child: m.photoUrl == null
-                                ? Text(
-                                    m.displayName.characters.first
-                                        .toUpperCase(),
-                                  )
-                                : null,
+                          secondary: PsAvatar(
+                            name: m.displayName,
+                            photoUrl: m.photoUrl,
+                            seed: m.uid,
                           ),
                           title: Text(m.displayName),
                           subtitle: Text(m.role.label),

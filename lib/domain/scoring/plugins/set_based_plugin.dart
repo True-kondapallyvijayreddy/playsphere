@@ -1,5 +1,7 @@
 import '../player_stats.dart';
+import '../racket_rules.dart';
 import '../scoring_plugin.dart';
+import '../rally_timeline.dart';
 
 /// Set/game based scoring for badminton, volleyball, tennis and table tennis.
 ///
@@ -16,7 +18,7 @@ import '../scoring_plugin.dart';
 ///
 /// All three are configuration, not hard-coded constants, so one plugin
 /// serves every set-based sport a school might run.
-class SetBasedPlugin extends ScoringPlugin {
+class SetBasedPlugin extends ScoringPlugin with RallyTimeline, RacketMatch {
   const SetBasedPlugin();
 
   static const pluginKey = 'set_based';
@@ -101,24 +103,13 @@ class SetBasedPlugin extends ScoringPlugin {
         }
         return ScoringResult.ok(mutate(state, (s) => s[key] = current - 1));
 
-      case 'retire':
+      case RacketMatch.retireAction:
         // A player retiring hurt or being disqualified mid-match still needs
-        // a recorded winner — the other side.
-        if (action.side == Side.neutral) {
-          return const ScoringResult.rejected('Retirement needs a side.');
-        }
-        return ScoringResult.ok(mutate(state, (s) {
-          s['complete'] = true;
-          s['winner'] = action.side.opposite.wire;
-          s['retired'] = action.side.wire;
-        }));
+        // a recorded winner — the other side — and, now, a recorded reason.
+        return retireResult(state, action);
 
       case 'reopen':
-        return ScoringResult.ok(mutate(state, (s) {
-          s['complete'] = false;
-          s['winner'] = null;
-          s.remove('retired');
-        }));
+        return reopenResult(state);
 
       default:
         return ScoringResult.rejected('Unknown action "${action.type}".');
@@ -167,6 +158,17 @@ class SetBasedPlugin extends ScoringPlugin {
     });
   }
 
+  /// Never raises a mid-set change of ends.
+  ///
+  /// This is the generic set/game engine — it serves throwball and whatever
+  /// else an organizer points it at — and it does not know the court it is
+  /// being played on. Sports whose laws fix a change of ends implement it in
+  /// their own engine, where the number comes from the actual rulebook rather
+  /// than from a guess made here.
+  @override
+  EndsChange? endsChangeDue(Map<String, dynamic> state, ScoringContext ctx) =>
+      null;
+
   @override
   String headline(Map<String, dynamic> state, ScoringContext ctx) {
     if (state['complete'] == true) {
@@ -190,11 +192,8 @@ class SetBasedPlugin extends ScoringPlugin {
   @override
   String? statusLine(Map<String, dynamic> state, ScoringContext ctx) {
     if (state['complete'] == true) {
-      final retired = state['retired'];
-      if (retired is String) {
-        return '${ctx.nameFor(Side.fromWire(retired))} retired';
-      }
-      return 'Final · sets ${state['setsA']}-${state['setsB']}';
+      return retirementLine(state, ctx) ??
+          'Final · sets ${state['setsA']}-${state['setsB']}';
     }
     final setNumber = copyList(state['completedSets']).length + 1;
     final target = _pointsForSet(state, ctx);
@@ -205,6 +204,82 @@ class SetBasedPlugin extends ScoringPlugin {
     return atDeuce
         ? 'Set $setNumber · deuce, win by $winBy'
         : 'Set $setNumber · to $target';
+  }
+
+  // The generic set/game engine gets the two-sided pad as well.
+  //
+  // It serves volleyball and throwball, and those are rally sports too: every
+  // event is "that side won the point", forty to sixty times a set, entered by
+  // somebody watching the court. The reason to give it the same pad as
+  // badminton is not consistency for its own sake — it is that the alternative
+  // is a row of small buttons for a job that is two big ones.
+  //
+  // No serve indicator: this engine deliberately knows nothing about service
+  // rotation (see the note on `point`), and inventing one here would be the
+  // pad asserting a fact the rules engine cannot back up.
+  @override
+  PadLayout get padLayout => PadLayout.duel;
+
+  @override
+  DuelBoard? duelBoard(Map<String, dynamic> state, ScoringContext ctx) {
+    final done = state['complete'] == true;
+    final a = ((state['currentA'] as num?) ?? 0).toInt();
+    final b = ((state['currentB'] as num?) ?? 0).toInt();
+    final setsA = ((state['setsA'] as num?) ?? 0).toInt();
+    final setsB = ((state['setsB'] as num?) ?? 0).toInt();
+    final target = _pointsForSet(state, ctx);
+    final winBy = ctx.intConfig('winBy', 2);
+    final setsToWin = ctx.intConfig('setsToWin', 2);
+
+    String? tagFor(int mine, int theirs, int setsMine) {
+      if (done) return null;
+      if (mine < target - 1 || mine - theirs < winBy - 1) return null;
+      return setsMine == setsToWin - 1 ? 'Match point' : 'Set point';
+    }
+
+    final completed = copyList(state['completedSets']);
+    // Sets, not points, once it is over — the point counters are zeroed when
+    // each set closes.
+    final winner = state['winner'];
+    return DuelBoard(
+      matchScore: DuelMatchScore(
+        a: ((state['setsA'] as num?) ?? 0).toInt(),
+        b: ((state['setsB'] as num?) ?? 0).toInt(),
+        label: 'SETS WON',
+      ),
+      a: DuelSide(
+        name: ctx.entrantAName,
+        score: done ? '$setsA' : '$a',
+        sub: done ? 'Sets won' : 'Sets $setsA',
+        tag: done ? (winner == 'a' ? 'Won' : null) : tagFor(a, b, setsA),
+        pips: done ? null : a,
+      ),
+      b: DuelSide(
+        name: ctx.entrantBName,
+        score: done ? '$setsB' : '$b',
+        sub: done ? 'Sets won' : 'Sets $setsB',
+        tag: done ? (winner == 'b' ? 'Won' : null) : tagFor(b, a, setsB),
+        pips: done ? null : b,
+      ),
+      periods: [
+        for (final (i, st) in completed.indexed)
+          DuelPeriod(
+            label: 'S${i + 1}',
+            a: ((st['a'] as num?) ?? 0).toInt(),
+            b: ((st['b'] as num?) ?? 0).toInt(),
+          ),
+        if (!done)
+          DuelPeriod(
+            label: 'S${completed.length + 1}',
+            a: a,
+            b: b,
+            current: true,
+          ),
+      ],
+      status: statusLine(state, ctx),
+      pipTarget: done ? null : target,
+      pointsNote: '$target points per set · best of ${setsToWin * 2 - 1}',
+    );
   }
 
   @override
@@ -284,23 +359,7 @@ class SetBasedPlugin extends ScoringPlugin {
           ),
         ],
       ),
-      const ScoreControlGroup(
-        title: 'Match',
-        controls: [
-          ScoreControl(
-            action: 'retire',
-            label: 'A retires',
-            side: Side.a,
-            style: ControlStyle.danger,
-          ),
-          ScoreControl(
-            action: 'retire',
-            label: 'B retires',
-            side: Side.b,
-            style: ControlStyle.danger,
-          ),
-        ],
-      ),
+      ...retireControls(ctx),
     ];
   }
 
@@ -326,4 +385,15 @@ class SetBasedPlugin extends ScoringPlugin {
           StatColumn(key: _rallies, label: 'Rallies won', shortLabel: 'R'),
         ],
       );
+
+  // --- Rally timeline ----------------------------------------------------
+
+  @override
+  List<Map<String, dynamic>> rallyCompletedPeriods(
+    Map<String, dynamic> state,
+  ) =>
+      copyList(state['completedSets']);
+
+  @override
+  String get rallyPeriodNoun => 'Set';
 }

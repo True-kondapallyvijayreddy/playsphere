@@ -5,6 +5,7 @@ import '../../../core/models/competition.dart';
 import '../../../core/models/enums.dart';
 import '../../../core/providers.dart';
 import '../../../data/competition_repository.dart';
+import '../../../domain/tournament/house_roster.dart';
 import '../../../domain/tournament/team_partitioner.dart';
 import '../../../shared/app_scaffold.dart';
 
@@ -123,7 +124,7 @@ class _TeamBuilderSheetState extends ConsumerState<TeamBuilderSheet> {
     final c = widget.competition;
     final houses = c.presetHouses.isNotEmpty
         ? c.presetHouses
-        : ['Red House', 'Blue House', 'Green House', 'Yellow House'];
+        : HouseTemplates.schoolColours;
 
     setState(() {
       final allPlayers = [

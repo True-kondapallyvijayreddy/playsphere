@@ -8,6 +8,7 @@ import '../../core/models/organization.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/identity.dart';
 
 class JoinOrgScreen extends ConsumerStatefulWidget {
   const JoinOrgScreen({super.key, this.initialCode});
@@ -168,10 +169,14 @@ class _JoinOrgScreenState extends ConsumerState<JoinOrgScreen> {
               else ...[
                 Card(
                   child: ListTile(
-                    leading: CircleAvatar(
-                      child: Text(
-                        target.orgName.characters.first.toUpperCase(),
-                      ),
+                    // `InviteTarget` carries no logo — it is the public
+                    // preview a stranger reads before joining — so this gets
+                    // the generated crest, seeded on the org id so it matches
+                    // the one they will see inside.
+                    leading: PsCrest(
+                      name: target.orgName,
+                      seed: target.orgId,
+                      size: 40,
                     ),
                     title: Text(target.orgName),
                     subtitle: Text(

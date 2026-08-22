@@ -21,6 +21,7 @@ class AdCampaign {
     required this.body,
     required this.emoji,
     required this.ctaLabel,
+    this.imageUrl,
     this.sportIds = const [],
     this.destination,
     this.slots = const [PromoSlot.home],
@@ -38,6 +39,10 @@ class AdCampaign {
   final String headline;
   final String body;
   final String emoji;
+
+  /// The advertiser's own artwork. Null is a complete campaign — see
+  /// [Promo.imageUrl] for why the emoji is still the thing that lays out.
+  final String? imageUrl;
   final String ctaLabel;
   final List<String> sportIds;
 
@@ -76,6 +81,7 @@ class AdCampaign {
         headline: headline,
         body: body,
         emoji: emoji,
+        imageUrl: imageUrl,
         ctaLabel: ctaLabel,
         sportIds: sportIds,
         destination: destination,
@@ -90,6 +96,7 @@ class AdCampaign {
       headline: Fs.str(d['headline']),
       body: Fs.str(d['body']),
       emoji: Fs.str(d['emoji'], '📣'),
+      imageUrl: Fs.strOrNull(d['imageUrl']),
       ctaLabel: Fs.str(d['ctaLabel'], 'Learn more'),
       sportIds: (d['sportIds'] as List?)?.map((e) => e.toString()).toList(growable: false) ??
           const [],
@@ -116,6 +123,7 @@ class AdCampaign {
         'headline': headline,
         'body': body,
         'emoji': emoji,
+        'imageUrl': imageUrl,
         'ctaLabel': ctaLabel,
         'sportIds': sportIds,
         'destination': destination,

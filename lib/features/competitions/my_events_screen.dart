@@ -11,7 +11,7 @@ import '../../shared/app_scaffold.dart';
 import '../../shared/section_header.dart';
 import '../home/event_feed.dart';
 import '../home/home_providers.dart';
-import '../home/home_screen.dart' show EventCard;
+import 'widgets/event_card.dart';
 
 /// Every event and tournament across every club this person belongs to.
 ///

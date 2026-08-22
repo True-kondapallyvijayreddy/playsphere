@@ -144,6 +144,25 @@ mixin PeriodedMatch on ScoringPlugin {
   /// half ends, and making a scorer type 45 to say so would put a dialog in
   /// front of one of the pad's most-pressed buttons. Injury time reaches the
   /// clock through the events that need it — a substitution names its minute.
+  /// Offered from the moment the final period starts.
+  ///
+  /// Every sport that mixes this in has the same shape — a fixed number of
+  /// periods, and a result that is whatever the score says when the last one
+  /// ends — so the answer is the same for all of them and is written once
+  /// here rather than five times. See [ScoringPlugin.finishControl].
+  @override
+  ScoreControl? finishControl(Map<String, dynamic> state, ScoringContext ctx) =>
+      isFinalPeriod(state, ctx) ? endMatchControl : null;
+
+  /// The control that records the final whistle. Danger-styled because it is
+  /// the one press on the pad that cannot be taken back with an undo.
+  static const endMatchControl = ScoreControl(
+    action: 'finish',
+    label: 'End match',
+    style: ControlStyle.danger,
+    shortcut: 'f',
+  );
+
   ScoreControl nextPeriodControl(ScoringContext ctx) => ScoreControl(
         action: 'next_period',
         label: 'Next ${periodNoun(ctx).toLowerCase()}',

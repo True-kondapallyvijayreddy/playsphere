@@ -126,7 +126,6 @@ Future<void> setUpWholeSeason({
     report = await ref.read(tournamentRepositoryProvider).setUpWholeSeason(
           orgId: orgId,
           tournamentId: tournamentId,
-          byUid: uid,
           matchMinutes: timings.matchMinutes,
           changeoverMinutes: timings.changeoverMinutes,
           restGapMinutes: timings.restGapMinutes,
@@ -287,5 +286,37 @@ Future<void> lockTournamentSchedule({
   } catch (e) {
     if (!context.mounted) return;
     messenger.showSnackBar(SnackBar(content: Text('Could not publish: $e')));
+  }
+}
+
+/// Brings a paused season back, and says what came back with it.
+///
+/// No reason box and no confirmation dialog on this side: pausing is the half
+/// that owes an explanation to everyone who entered, resuming is the half
+/// they were waiting for. Every event the season paused resumes with it — see
+/// `TournamentRepository.resumeTournament` for the one that does not.
+Future<void> resumeSeason({
+  required BuildContext context,
+  required WidgetRef ref,
+  required String orgId,
+  required String tournamentId,
+}) async {
+  final messenger = ScaffoldMessenger.of(context);
+  final uid = ref.read(currentUidProvider);
+  if (uid == null) return;
+
+  try {
+    await ref.read(tournamentRepositoryProvider).resumeTournament(
+          orgId: orgId,
+          tournamentId: tournamentId,
+          byUid: uid,
+        );
+    if (!context.mounted) return;
+    messenger.showSnackBar(
+      const SnackBar(content: Text('Season resumed. Entries are open again.')),
+    );
+  } catch (e) {
+    if (!context.mounted) return;
+    showError(context, e);
   }
 }

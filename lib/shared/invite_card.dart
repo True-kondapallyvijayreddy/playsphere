@@ -39,6 +39,20 @@ class InviteCard extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      // The club's name, above its code, because the code on
+                      // its own says nothing about what it opens. A member
+                      // reading one out over a phone, screenshotting this
+                      // card into a WhatsApp group or holding it up at a
+                      // ground is promoting the club, not the six characters
+                      // — and the person on the other end has no way to tell
+                      // one club's code from another's.
+                      Text(
+                        org.name,
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
                       Text(
                         'Invite code',
                         style: theme.textTheme.labelMedium,
@@ -96,11 +110,19 @@ class InviteCard extends StatelessWidget {
                   label: const Text('Share invite'),
                 ),
                 TextButton.icon(
+                  // Copies the club's name with the link, not the bare URL.
+                  // A link pasted into a group chat on its own is an
+                  // unexplained address; with the name in front of it, it is
+                  // an invitation, and that is the whole job of this card.
                   onPressed: () async {
-                    await Clipboard.setData(ClipboardData(text: link));
+                    await Clipboard.setData(
+                      ClipboardData(
+                        text: 'Join ${org.name} on PlaySphere: $link',
+                      ),
+                    );
                     if (context.mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Invite link copied.')),
+                        const SnackBar(content: Text('Invite copied.')),
                       );
                     }
                   },

@@ -27,6 +27,7 @@ import {
   deleteDoc,
   getDoc,
   getDocs,
+  increment,
   limit,
   orderBy,
   query,
@@ -6988,6 +6989,69 @@ describe('ground bookings: price derived server-side, hourHolds are the real '
     await assertSucceeds(batch.commit());
   });
 
+  // -------------------------------------------------------------------
+  // The whole write GroundRepository.book actually performs.
+  //
+  // Every test above checks one document of it in isolation, and each of
+  // them passed while booking was completely broken in the app: the
+  // transaction also bumps the GROUND's `bookingCount`, and the only
+  // `allow update` on a ground required `ownerUid == uid()`. So every
+  // booking by anybody other than the ground's own owner — which is every
+  // real booking — died on that one line with permission-denied, surfacing
+  // as "Something went wrong".
+  //
+  // This test is the shape of the real transaction, run as a stranger,
+  // because that is the only shape that could have caught it.
+  // -------------------------------------------------------------------
+  it('lets a stranger complete a whole booking: doc, holds and the '
+    + "ground's own bookingCount", async () => {
+    const db = testEnv.authenticatedContext(BOOKER).firestore();
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'grounds', GROUND, 'bookings', 'bk_1'), booking());
+    batch.set(
+      doc(db, 'grounds', GROUND, 'hourHolds', '2026-08-10_18'),
+      hold({ hour: 18 }),
+    );
+    batch.set(
+      doc(db, 'grounds', GROUND, 'hourHolds', '2026-08-10_19'),
+      hold({ hour: 19 }),
+    );
+    batch.update(doc(db, 'grounds', GROUND), {
+      bookingCount: increment(1),
+    });
+    await assertSucceeds(batch.commit());
+  });
+
+  it('refuses a stranger touching anything on the ground except the '
+    + 'counter', async () => {
+    // The counter bump is the one write a non-owner may make to a ground.
+    // Opening it must not have opened the listing itself — the price, the
+    // hours and the verified badge are still the owner's alone.
+    const db = testEnv.authenticatedContext(BOOKER).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'grounds', GROUND), {
+        bookingCount: increment(1),
+        hourlyRatePaise: 1,
+      }),
+    );
+    await assertFails(
+      updateDoc(doc(db, 'grounds', GROUND), { isVerified: true }),
+    );
+  });
+
+  it('refuses a stranger inflating the counter by more than one', async () => {
+    // One booking, one increment. A ground's booking count is the closest
+    // thing it has to a reputation, and a stranger who could add 500 to it
+    // could sell that.
+    const db = testEnv.authenticatedContext(BOOKER).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'grounds', GROUND), { bookingCount: increment(50) }),
+    );
+    await assertFails(
+      updateDoc(doc(db, 'grounds', GROUND), { bookingCount: 999 }),
+    );
+  });
+
   it('refuses an hour hold with no matching booking in the same batch', async () => {
     const db = testEnv.authenticatedContext(BOOKER).firestore();
     await assertFails(
@@ -7620,5 +7684,116 @@ describe('career: a player reading their own matches across every club', () => {
     await seedCareer(15);
     const db = testEnv.authenticatedContext(OUTSIDER).firestore();
     await assertFails(getDocs(careerQuery(db)));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The owner who cannot score their own club's match
+// ---------------------------------------------------------------------------
+//
+// Reported as "even though I am the owner and I am scoring, the app says I am
+// not the one scoring". It is not a pen conflict and not a device problem —
+// nobody else holds the pen at all.
+//
+// `ScoringScreen` opens the pad for anyone with `manageCompetitions`, and
+// `generateDraw` deliberately writes an EMPTY `scorerUids` (its own doc
+// comment says so, and promises "an unassigned match is not an unscorable one
+// — an organizer may score any match in their own club"). So the ordinary
+// club case is: owner walks up to a match nobody was assigned to, opens the
+// pad, taps.
+//
+// The fixture update passes — branch (a) admits an organizer. The EVENT
+// create is the one that fails, and because a scoring write is a batch
+// containing both, the whole thing rolls back: the score moves on the
+// scorer's screen from the local cache, then jumps back a second later.
+describe('an organizer scoring an unassigned match in their own club', () => {
+  const COMP = 'comp1';
+  const FX = 'fx_unassigned';
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG), organization(OWNER, 'public'));
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'members', OWNER),
+        membership(OWNER, PUBLIC_ORG, 'owner'),
+      );
+      await setDoc(doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP), {
+        orgId: PUBLIC_ORG,
+        name: 'Club Championship',
+        sportId: 'badminton',
+        format: 'knockout',
+        status: 'in_progress',
+        createdAt: serverTimestamp(),
+      });
+      // Exactly what the draw generator writes: nobody assigned to score.
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP, 'fixtures', FX),
+        fixture(PUBLIC_ORG, COMP, []),
+      );
+    });
+  });
+
+  /** The batch `ScoringService.submit` actually issues. */
+  const scoringBatch = (db) => {
+    const batch = writeBatch(db);
+    batch.set(
+      doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP, 'fixtures', FX,
+        'events', '0000000001'),
+      {
+        seq: 1,
+        type: 'point',
+        payload: { side: 'a' },
+        byUid: OWNER,
+        clientEventId: 'abc123',
+        at: serverTimestamp(),
+      },
+    );
+    batch.update(
+      doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP, 'fixtures', FX),
+      {
+        scoreState: { currentA: 1 },
+        lastSeq: 1,
+        summary: '1-0',
+        status: 'live',
+        winnerEntrantId: null,
+        isDraw: false,
+      },
+    );
+    return batch;
+  };
+
+  it('lets the owner score a match nobody was assigned to', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(scoringBatch(db).commit());
+  });
+
+  it('lets the owner record the very first event, the one that races the pen claim',
+    async () => {
+      // The pad repairs `scorerUids` with a fire-and-forget TRANSACTION
+      // (`UmpireRepository.claimPen`). A transaction needs the network, and a
+      // ground is where there is none — so the first taps routinely arrive
+      // before the repair lands, or instead of it. Scoring must not depend on
+      // that race being won.
+      const db = testEnv.authenticatedContext(OWNER).firestore();
+      await assertSucceeds(scoringBatch(db).commit());
+    });
+
+  it('still refuses an outsider with no role in the club', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(scoringBatch(db).commit());
+  });
+
+  it('still refuses the owner while somebody else holds the pen', async () => {
+    // The single-scorer rule is the point of the pen and must survive this
+    // fix: an organizer who wants control takes it deliberately, which leaves
+    // a record, rather than by opening a screen and typing over the umpire.
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', COMP, 'fixtures', FX),
+        { ...fixture(PUBLIC_ORG, COMP, [SCORER]), activeScorerUid: SCORER },
+      );
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(scoringBatch(db).commit());
   });
 });

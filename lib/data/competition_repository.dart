@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 
 import '../core/errors/app_exception.dart';
 import '../core/firebase/chunked_batch.dart';
@@ -28,6 +30,7 @@ import '../domain/rating/glicko2.dart';
 import '../domain/tournament/entrant_promoter.dart';
 import '../domain/tournament/house_roster.dart';
 import '../domain/tournament/team_partitioner.dart';
+import 'media_uploader.dart';
 import 'rating_service.dart';
 import '../domain/standings/standings_calculator.dart';
 import '../domain/scoring/scoring_plugin.dart';
@@ -50,7 +53,58 @@ class TeamDraftSpec {
 }
 
 class CompetitionRepository {
-  const CompetitionRepository();
+  const CompetitionRepository({FirebaseStorage? storage}) : _storage = storage;
+
+  /// Injectable so a test can drive the banner upload against a fake bucket.
+  final FirebaseStorage? _storage;
+
+  MediaUploader get _media => MediaUploader(storage: _storage);
+
+  // --- Branding ---------------------------------------------------------
+
+  /// Puts artwork across the top of an event's page.
+  ///
+  /// Optional in every sense: `PsBanner` already paints generated art from
+  /// the event's sport, so this replaces a working default rather than
+  /// filling a hole. That is the point — an organizer who skips it must not
+  /// end up with a page that looks broken, or the field becomes a required
+  /// one in practice and events stop being quick to create.
+  ///
+  /// Writes the one field rather than going through `Competition.toUpdate`,
+  /// which rewrites the schedule, the entry rules and the fee alongside it.
+  ///
+  /// `firestore.rules` gates this on `canManageCompetitions(orgId)` and
+  /// refuses it outright once the event is completed — a finished event is a
+  /// historical record, artwork included.
+  Future<String> uploadEventBanner({
+    required String orgId,
+    required String compId,
+    required String uid,
+    required Uint8List bytes,
+    required String contentType,
+  }) =>
+      guard(() async {
+        final url = await _media.putImage(
+          folder: 'competitions/$compId/banner',
+          uid: uid,
+          bytes: bytes,
+          contentType: contentType,
+          // Banners are 1600px and full-bleed, so they earn more headroom
+          // than a 512px crest does.
+          maxMegabytes: 6,
+        );
+        await Refs.competition(orgId, compId).update({'bannerUrl': url});
+        return url;
+      });
+
+  /// Goes back to the generated banner.
+  Future<void> removeEventBanner({
+    required String orgId,
+    required String compId,
+  }) =>
+      guard(
+        () => Refs.competition(orgId, compId).update({'bannerUrl': null}),
+      );
 
   /// Failures from a write that was applied to the local cache and returned
   /// to the caller *before* the server acknowledged it — every method below

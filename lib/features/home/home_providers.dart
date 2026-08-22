@@ -412,3 +412,152 @@ final myRsvpClashesProvider = Provider<Map<String, List<Announcement>>>((ref) {
         a.id: hits,
   };
 });
+
+
+// --- The home dashboard's six counters ---------------------------------------
+
+/// One tile's worth of state: the number, and one line saying what is behind
+/// it.
+///
+/// The subtitle is the whole reason this is a record and not an int. "12
+/// Events" is a fact; "12 Events / 3 this week" is a reason to tap. A counter
+/// with nothing useful to add carries an empty subtitle rather than filler.
+///
+/// [unknown] is the third state a bare int cannot hold. A count that could
+/// not be READ is not a count of zero, and rendering it as one tells a player
+/// standing at the ground that nothing is on — the exact lie the old
+/// dashboard's "Could not load live matches" notice existed to prevent. The
+/// tile draws an em dash instead, and puts the reason on the detail line.
+typedef HomeCount = ({int value, String? detail, bool unknown});
+
+/// Clubs this person is an active member of.
+final clubCountProvider = Provider<HomeCount>((ref) {
+  final ids = ref.watch(myActiveOrgIdsProvider);
+  return (value: ids.length, unknown: false, detail: null);
+});
+
+/// Events open for entry across every club in this person's feed.
+///
+/// Open for ENTRY, which is narrower than [myUpcomingEventsProvider] and
+/// deliberately so. That list also carries what is already running and what
+/// is merely scheduled, because a club page has room to say which is which.
+/// A counter has one number and no room to qualify it, so it counts the only
+/// state a member can act on today — the ones they can still enter. Anything
+/// else makes the tile read "12 Events" for a season where eleven of them
+/// closed last month.
+final eventCountProvider = Provider<HomeCount>((ref) {
+  final events = [
+    for (final c in ref.watch(myUpcomingEventsProvider).valueOrNull ??
+        const <Competition>[])
+      if (c.status == CompetitionStatus.registrationOpen) c,
+  ];
+  final now = DateTime.now();
+  final thisWeek = events.where((c) {
+    final start = c.startDate;
+    if (start == null) return false;
+    final away = start.difference(now);
+    return !away.isNegative && away.inDays <= 7;
+  }).length;
+  return (
+    value: events.length,
+    unknown: false,
+    detail: thisWeek == 0 ? null : '$thisWeek this week',
+  );
+});
+
+/// Matches being played right now across this person's clubs.
+final liveCountProvider = Provider<HomeCount>((ref) {
+  final async = ref.watch(myLiveFixturesProvider);
+  // Nothing loaded at all. `myLiveFixturesProvider` only errors when EVERY
+  // club was refused, so this is the total-failure case and the tile must
+  // not claim a zero.
+  if (async.hasError) {
+    return (value: 0, unknown: true, detail: 'could not load');
+  }
+
+  final live = async.valueOrNull ?? const <Fixture>[];
+  // Some clubs loaded and some did not. The number is real as far as it
+  // goes, and saying how far that is keeps it honest — Bug #4, which used to
+  // be a full-width banner and is now one line on the tile that is wrong.
+  final failures = ref.watch(myLiveFixtureFailuresProvider);
+  if (failures > 0) {
+    return (
+      value: live.length,
+      unknown: false,
+      detail: '$failures club${failures == 1 ? '' : 's'} unavailable',
+    );
+  }
+  return (
+    value: live.length,
+    unknown: false,
+    detail: live.isEmpty ? null : 'in progress',
+  );
+});
+
+/// This person's own matches — played and still to come.
+final matchCountProvider = Provider<HomeCount>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return (value: 0, unknown: false, detail: null);
+  final fixtures =
+      ref.watch(playerFixturesProvider(uid)).valueOrNull ?? const [];
+
+  // The next one is the only detail worth the line. A career total is a
+  // record; "Tomorrow 7:30 PM" is something to do.
+  final now = DateTime.now();
+  DateTime? next;
+  for (final f in fixtures) {
+    final when = f.scheduledAt;
+    if (when == null || when.isBefore(now)) continue;
+    if (next == null || when.isBefore(next)) next = when;
+  }
+  return (value: fixtures.length, unknown: false, detail: next == null ? null : _soon(next));
+});
+
+/// Sports this person has actually played, not sports they follow.
+final sportCountProvider = Provider<HomeCount>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return (value: 0, unknown: false, detail: null);
+  final lines = ref.watch(careerProvider(uid)).valueOrNull ?? const [];
+  final played = lines.where((l) => l.matchesPlayed > 0).length;
+  return (value: played, unknown: false, detail: null);
+});
+
+/// Match calls waiting on an answer from this person.
+///
+/// Counts UNANSWERED calls, not all of them. A tile that keeps saying "2"
+/// after both have been answered is a badge that has stopped meaning
+/// anything, and people learn to ignore those within a week.
+final rsvpCountProvider = Provider<HomeCount>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  final calls = ref.watch(myMatchRsvpsProvider).valueOrNull ?? const [];
+  if (uid == null) return (value: 0, unknown: false, detail: null);
+  final waiting = calls.where((a) => a.poll?.voteOf(uid) == null).length;
+  final clashes = ref.watch(myRsvpClashesProvider).length;
+  return (
+    value: waiting,
+    unknown: false,
+    detail: clashes > 0
+        ? '$clashes clash${clashes == 1 ? '' : 'es'}'
+        : (waiting == 0 ? null : 'waiting on you'),
+  );
+});
+
+/// "Today 7:30 pm", "Tomorrow 7:30 pm", "Sat 7:30 pm" — never a bare date,
+/// which is the one form nobody can act on without counting.
+String _soon(DateTime when) {
+  final local = when.toLocal();
+  final now = DateTime.now();
+  final days = DateTime(local.year, local.month, local.day)
+      .difference(DateTime(now.year, now.month, now.day))
+      .inDays;
+  final h = local.hour % 12 == 0 ? 12 : local.hour % 12;
+  final m = local.minute.toString().padLeft(2, '0');
+  final clock = '$h:$m${local.hour < 12 ? 'am' : 'pm'}';
+  const names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  return switch (days) {
+    0 => 'Today $clock',
+    1 => 'Tomorrow $clock',
+    _ when days > 1 && days < 7 => '${names[(local.weekday - 1) % 7]} $clock',
+    _ => '${local.day}/${local.month}',
+  };
+}

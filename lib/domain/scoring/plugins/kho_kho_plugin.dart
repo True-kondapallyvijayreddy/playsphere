@@ -58,9 +58,13 @@ class KhoKhoPlugin extends ScoringPlugin {
   Map<String, dynamic> initialState(ScoringContext ctx) => {
         'a': 0,
         'b': 0,
-        // Turn 1 = side A attacking. Turns alternate.
+        // Turn 1 belongs to whoever the toss put on the chase. Turns
+        // alternate from there, so setting this one field is enough to make
+        // the whole match read the right way round — "chase first" and
+        // "defend first" are the two things a kho-kho toss can produce and
+        // both now arrive here through `ScoringContext.startingSide`.
         'turn': 1,
-        'attackingSide': 'a',
+        'attackingSide': ctx.startingSide.wire,
         'defendersOut': 0,
         'batchNumber': 1,
         'complete': false,
@@ -286,6 +290,29 @@ class KhoKhoPlugin extends ScoringPlugin {
           : Side.fromWire(state['winner'] as String),
       scoreForA: a,
       scoreForB: b,
+    );
+  }
+
+  /// Offered once both innings have run their turns.
+  ///
+  /// Kho kho keeps no clock and no periods, so the signal is its own: the
+  /// turn counter passing the last turn of the second innings is the point
+  /// at which there is nothing left to play. `end_turn` already refuses to
+  /// go past it — this is the same fact, said as a button instead of an
+  /// error. See [ScoringPlugin.finishControl].
+  @override
+  ScoreControl? finishControl(
+    Map<String, dynamic> state,
+    ScoringContext ctx,
+  ) {
+    if (state['complete'] == true) return null;
+    final turn = ((state['turn'] as num?) ?? 1).toInt();
+    if (turn < _turnsPerInnings(ctx) * 2) return null;
+    return const ScoreControl(
+      action: 'finish',
+      label: 'End match',
+      style: ControlStyle.danger,
+      shortcut: 'f',
     );
   }
 

@@ -32,6 +32,7 @@ class Promo {
     required this.body,
     required this.emoji,
     required this.ctaLabel,
+    this.imageUrl,
     this.sportIds = const [],
     this.destination,
     this.advertiser,
@@ -41,13 +42,30 @@ class Promo {
   final String headline;
   final String body;
 
+  /// The mark shown when there is no artwork, and while artwork is loading.
+  ///
   /// An emoji rather than an image asset, on purpose. Banners appear on the
   /// home screen and above match lists, which are the screens most likely to
   /// be open on a village ground on a bad 4G connection — and a banner that
   /// arrives half a second after the fixtures do is a banner that shoves the
   /// thing somebody came to read off the screen. A glyph costs nothing and
   /// lays out on the first frame.
+  ///
+  /// That argument is why [imageUrl] does not replace this field: it sits on
+  /// top of it. PlaySphere's own house promotions still ship as glyphs.
   final String emoji;
+
+  /// An advertiser's own artwork, when they have uploaded some.
+  ///
+  /// The layout reason above is not weakened by this, because the image is
+  /// drawn through `PsNetworkImage` into the *same* box the emoji occupies:
+  /// the glyph lays out on the first frame, the artwork fades in over it when
+  /// it arrives, and nothing on the screen ever moves. A slow connection
+  /// degrades to exactly the banner this field did not exist for.
+  ///
+  /// Optional, like every other image in the product — a campaign with no
+  /// artwork is a complete campaign, not a broken one.
+  final String? imageUrl;
 
   final String ctaLabel;
 
@@ -162,6 +180,38 @@ class PromoCatalog {
       ctaLabel: 'See Premium',
       destination: '/premium',
     ),
+    Promo(
+      id: 'ps-explore-sport',
+      emoji: '🔎',
+      headline: 'Everything in your sport',
+      body: 'Clubs, teams, grounds, events and rankings, scoped to one sport.',
+      ctaLabel: 'Explore sports',
+      destination: '/sports',
+    ),
+    Promo(
+      id: 'ps-find-players',
+      emoji: '🧑‍🤝‍🧑',
+      headline: 'Short of a player?',
+      body: 'Search by sport, age group and district, and message them.',
+      ctaLabel: 'Find players',
+      destination: '/scout/search',
+    ),
+    Promo(
+      id: 'ps-sponsor',
+      emoji: '🤝',
+      headline: 'Back a player near you',
+      body: 'Small sponsorships for athletes and teams in your district.',
+      ctaLabel: 'See who is asking',
+      destination: '/sponsor/browse',
+    ),
+    Promo(
+      id: 'ps-open-events',
+      emoji: '📅',
+      headline: 'Open for entry now',
+      body: 'Tournaments and one-off matches still taking entrants.',
+      ctaLabel: 'Browse events',
+      destination: '/events',
+    ),
   ];
 
   /// Picks the promo to show in [slot].
@@ -230,6 +280,42 @@ class PromoCatalog {
   /// A live campaign always wins over a house ad when both are available: a
   /// house promotion is filler for an empty slot, not a competitor to
   /// somebody who paid for the space.
+  /// Every promo eligible for [slot], live advertiser campaigns first.
+  ///
+  /// The single-slot picker above answers "which ONE banner goes here". A
+  /// strip is a different question: a row a person scrolls through, where the
+  /// house catalogue is what keeps it from looking empty on a platform that
+  /// has not sold much inventory yet.
+  ///
+  /// Paid campaigns lead, and within each group the ones matching the
+  /// player's own sports lead again — a badminton player scrolling past
+  /// cricket bats is inventory wasted on both sides.
+  static List<Promo> listForSlot(
+    PromoSlot slot, {
+    List<Promo> liveCampaigns = const [],
+    List<String> playerSportIds = const [],
+    int limit = 10,
+  }) {
+    List<Promo> ranked(List<Promo> pool) {
+      final matching = <Promo>[];
+      final rest = <Promo>[];
+      for (final p in pool) {
+        if (p.sportIds.isNotEmpty && p.sportIds.any(playerSportIds.contains)) {
+          matching.add(p);
+        } else {
+          rest.add(p);
+        }
+      }
+      return [...matching, ...rest];
+    }
+
+    final out = <Promo>[
+      ...ranked(liveCampaigns.where((p) => _fits(p, slot)).toList()),
+      ...ranked(_all.where((p) => _fits(p, slot)).toList()),
+    ];
+    return out.length <= limit ? out : out.sublist(0, limit);
+  }
+
   static Promo? forSlotWithCampaigns(
     PromoSlot slot, {
     required List<Promo> liveCampaigns,

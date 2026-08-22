@@ -8,6 +8,7 @@ import '../../domain/scoring/scoring_plugin.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../core/providers.dart';
 import '../../shared/app_scaffold.dart';
+import 'registered_squad.dart';
 
 /// Everything that has to happen between "the teams have arrived" and the
 /// first ball: who is playing, and who won the toss.
@@ -33,8 +34,24 @@ class LineupEditor extends ConsumerStatefulWidget {
 }
 
 class _LineupEditorState extends ConsumerState<LineupEditor> {
-  late final List<MatchPlayer> _a = [...widget.fixture.lineupA];
-  late final List<MatchPlayer> _b = [...widget.fixture.lineupB];
+  /// The two team sheets being edited.
+  ///
+  /// Empty until [_seed] has run, which is why [_seeded] exists as its own
+  /// flag: "this side has nobody on it" and "we have not worked out who is on
+  /// this side yet" are different states, and conflating them would let a
+  /// scorer save an empty sheet over a registered squad in the frame before
+  /// the registration arrived.
+  final List<MatchPlayer> _a = [];
+  final List<MatchPlayer> _b = [];
+  final Set<int> _seeded = {};
+
+  /// Sides where the scorer has asked to see the rest of the club.
+  ///
+  /// Off by default, and that is the whole point of this screen's rework. The
+  /// club's wider membership is the substitute path — a registered player did
+  /// not turn up and somebody else is filling in — not the starting point.
+  final Set<int> _showClubMembers = {};
+
   bool _busy = false;
   int _tab = 0;
 
@@ -91,6 +108,40 @@ class _LineupEditorState extends ConsumerState<LineupEditor> {
 
   bool _lockedFor(int side) =>
       side == 0 ? widget.fixture.squadLockedA : widget.fixture.squadLockedB;
+
+  /// Fills a side's sheet the first time we know enough to do it.
+  ///
+  /// Order of preference, and it is the order that fixes the reported bug:
+  ///
+  ///  1. What is already saved on the fixture. A sheet somebody has edited is
+  ///     never silently rewritten.
+  ///  2. The side's REGISTERED squad. A team that entered this competition
+  ///     named its players when it entered; match day is not a second
+  ///     selection meeting, and presenting one is what let a member of
+  ///     another team end up on this team's sheet.
+  ///  3. Nothing, for a side with no registration to honour — an individual
+  ///     event, an ad-hoc entrant, a knockout slot still awaiting a qualifier.
+  /// [squad] is null while the registration is still being read, or when
+  /// reading it failed. A saved sheet is seeded either way — it is already on
+  /// the fixture and needs nothing else — but an empty side waits rather than
+  /// seeding from nothing, because seeding empty would mark the side done and
+  /// the registration would never be applied when it did arrive.
+  void _seed(int side, RegisteredSquad? squad) {
+    if (_seeded.contains(side)) return;
+
+    final saved = side == 0 ? widget.fixture.lineupA : widget.fixture.lineupB;
+    final target = side == 0 ? _a : _b;
+
+    if (saved.isNotEmpty) {
+      _seeded.add(side);
+      target.addAll(saved);
+      return;
+    }
+
+    if (squad == null) return;
+    _seeded.add(side);
+    if (squad.isRegistered) target.addAll(squad.players);
+  }
 
   void _toggleMember(String uid, String name) {
     setState(() {
@@ -159,6 +210,14 @@ class _LineupEditorState extends ConsumerState<LineupEditor> {
       _tab = editable.first;
     }
 
+    final squadsAsync = ref.watch(
+      registeredSquadsProvider(FixtureRef(f.orgId, f.compId, f.id)),
+    );
+    final squads = squadsAsync.valueOrNull;
+    _seed(0, squads?.a);
+    _seed(1, squads?.b);
+    final squad = squads?.forSide(_tab);
+
     final membersAsync = ref.watch(orgMembersProvider(_memberOrgFor(_tab)));
     final members = membersAsync.valueOrNull ?? const [];
     final active = members.where((m) => m.isActive).toList();
@@ -166,8 +225,19 @@ class _LineupEditorState extends ConsumerState<LineupEditor> {
     final locked = _lockedFor(_tab);
     final canEditThisSide = editable.contains(_tab) && !locked;
 
+    // The registered squad is what this side entered with. Everyone else in
+    // the club is offered separately and only on request — see
+    // [_showClubMembers].
+    final registered = squad != null && squad.isRegistered;
+    final registeredIds = registered
+        ? squad.players.map((p) => p.id).toSet()
+        : const <String>{};
+    final others =
+        active.where((m) => !registeredIds.contains(m.uid)).toList();
+    final showingOthers = !registered || _showClubMembers.contains(_tab);
+
     return AlertDialog(
-      title: const Text('Who is playing?'),
+      title: Text(registered ? 'Confirm the team sheet' : 'Who is playing?'),
       content: SizedBox(
         width: 460,
         height: 460,
@@ -200,22 +270,81 @@ class _LineupEditorState extends ConsumerState<LineupEditor> {
               const _SquadNotice(
                 icon: Icons.lock_outline,
                 message: 'This squad is locked. Reopen it to make changes.',
+              )
+            else if (registered)
+              _SquadNotice(
+                icon: Icons.verified_outlined,
+                message: 'These are the players registered for '
+                    '${squad.entrantName}. Untick anyone who has not turned '
+                    'up — nothing else needs changing.',
               ),
             // Without this, a rejected member read leaves an empty checklist
             // and the scorer concludes the club has no players.
             AsyncErrorStrip(value: membersAsync, what: 'the member list'),
+            AsyncErrorStrip(
+              value: squadsAsync,
+              what: 'the registered squad',
+            ),
             Expanded(
               child: ListView(
                 children: [
-                  for (final m in active)
-                    CheckboxListTile(
-                      dense: true,
-                      value: selectedIds.contains(m.uid),
-                      onChanged: canEditThisSide
-                          ? (_) => _toggleMember(m.uid, m.displayName)
+                  // The registered squad, first and ticked. A registered team
+                  // that named nobody falls straight through to the club list
+                  // below rather than showing an empty section.
+                  if (registered && squad.players.isNotEmpty) ...[
+                    for (final p in squad.players)
+                      CheckboxListTile(
+                        dense: true,
+                        value: selectedIds.contains(p.id),
+                        onChanged: canEditThisSide
+                            ? (_) => _toggleMember(p.id, p.name)
+                            : null,
+                        title: Text(p.name),
+                      ),
+                    const Divider(height: 20),
+                  ],
+                  // Everyone else in the club, behind a deliberate tap.
+                  //
+                  // Not hidden to be tidy: this is the list a mis-tap adds a
+                  // player from another team out of, which is exactly what
+                  // was reported. Reaching it should be a decision, and the
+                  // decision should be labelled with what it means.
+                  if (registered && !showingOthers)
+                    TextButton.icon(
+                      onPressed: canEditThisSide
+                          ? () => setState(() => _showClubMembers.add(_tab))
                           : null,
-                      title: Text(m.displayName),
+                      icon: const Icon(Icons.person_search_outlined),
+                      label: const Text('Add a substitute from the club'),
                     ),
+                  if (showingOthers) ...[
+                    if (registered)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+                        child: Text(
+                          'Not registered for ${squad.entrantName}. Only add '
+                          'them if they are genuinely playing for this side '
+                          'today.',
+                          style: Theme.of(context)
+                              .textTheme
+                              .bodySmall
+                              ?.copyWith(
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .onSurfaceVariant,
+                              ),
+                        ),
+                      ),
+                    for (final m in others)
+                      CheckboxListTile(
+                        dense: true,
+                        value: selectedIds.contains(m.uid),
+                        onChanged: canEditThisSide
+                            ? (_) => _toggleMember(m.uid, m.displayName)
+                            : null,
+                        title: Text(m.displayName),
+                      ),
+                  ],
                   // Guests already added to this side.
                   for (final g in _current.where((p) => p.isGuest))
                     ListTile(
@@ -321,6 +450,7 @@ class _LineupEditorState extends ConsumerState<LineupEditor> {
     }
   }
 }
+
 
 /// A short explanation of why this squad is not editable right now.
 class _SquadNotice extends StatelessWidget {
@@ -533,7 +663,12 @@ class PlayerPicker extends StatefulWidget {
     this.multiRoles = const {},
     this.exclusiveRoleGroups = const [],
     this.values = const [],
+    this.choices = const [],
   });
+
+  /// Fixed-answer questions — "why is the match ending?" — asked after the
+  /// people and the numbers. See [ChoicePrompt].
+  final List<ChoicePrompt> choices;
 
   /// Numbers to collect alongside the people — a time, a distance, a wind
   /// reading. Rendered after the roles, because "who" comes before "how
@@ -588,6 +723,9 @@ class PlayerPicker extends StatefulWidget {
 class _PlayerPickerState extends State<PlayerPicker> {
   final Map<String, String> _chosen = {};
   final Map<String, Set<String>> _chosenMany = {};
+
+  /// The answer picked for each [ChoicePrompt], by payload key.
+  final Map<String, String> _picked = {};
 
   bool _filled(String key) => widget.multiRoles.contains(key)
       ? (_chosenMany[key]?.isNotEmpty ?? false)
@@ -660,7 +798,11 @@ class _PlayerPickerState extends State<PlayerPicker> {
       widget.roles.keys.every(
         (key) => widget.optionalRoles.contains(key) || _filled(key),
       ) &&
-      widget.values.every((v) => v.optional || _valueOf(v) != null);
+      widget.values.every((v) => v.optional || _valueOf(v) != null) &&
+      // A required choice with nothing picked is the case this whole prompt
+      // exists for: a retirement with no reason is exactly what the engine
+      // refuses, so the dialog must not offer to send one.
+      widget.choices.every((c) => c.optional || _picked[c.key] != null);
 
   /// Fills a role that has exactly one candidate, so the scorer is not asked
   /// a question with one answer.
@@ -774,6 +916,30 @@ class _PlayerPickerState extends State<PlayerPicker> {
                   onChanged: (text) => setState(() => _typed[v.key] = text),
                 ),
               ),
+            for (final c in widget.choices)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: DropdownButtonFormField<String>(
+                  value: _picked[c.key],
+                  isExpanded: true,
+                  decoration: InputDecoration(
+                    labelText: c.label,
+                    helperText: c.optional ? 'Optional' : null,
+                    border: const OutlineInputBorder(),
+                  ),
+                  items: [
+                    for (final o in c.options)
+                      DropdownMenuItem(value: o.value, child: Text(o.label)),
+                  ],
+                  onChanged: (v) => setState(() {
+                    if (v == null) {
+                      _picked.remove(c.key);
+                    } else {
+                      _picked[c.key] = v;
+                    }
+                  }),
+                ),
+              ),
           ],
         ),
       ),
@@ -800,6 +966,7 @@ class _PlayerPickerState extends State<PlayerPicker> {
                     for (final v in widget.values)
                       if (_valueOf(v) case final n?)
                         v.key: v.isInteger ? n.round() : n,
+                    for (final e in _picked.entries) e.key: e.value,
                   })
               : null,
           child: const Text('Confirm'),

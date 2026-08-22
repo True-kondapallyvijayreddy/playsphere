@@ -4,7 +4,8 @@ import '../../../core/models/competition.dart';
 import '../../../core/models/draw_config.dart';
 import '../../../core/models/enums.dart';
 import '../../../core/models/venue.dart';
-import '../../../domain/draw/group_bounds.dart';
+import '../../../domain/draw/swiss_pairing.dart';
+import 'group_stage_fields.dart';
 
 /// Asks the organizer how the draw should be shaped and laid out, immediately
 /// before it is generated.
@@ -73,29 +74,15 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
     super.dispose();
   }
 
-  /// Formats that can carry a group stage at all.
+  /// Whether this format can carry a group stage, and how the field will be
+  /// split if it does.
   ///
-  /// Swiss pairs by standing each round and double elimination already gives
-  /// everyone a second life, so neither has a group phase to add. Everything
-  /// else does.
-  bool get _canUseGroups =>
-      widget.competition.format == CompetitionFormat.groupThenKnockout ||
-      widget.competition.format == CompetitionFormat.knockout ||
-      widget.competition.format == CompetitionFormat.roundRobin ||
-      widget.competition.format == CompetitionFormat.leagueTable;
-
-  /// Groups+Knockout says it in the format; every other format asks.
-  bool get _groupsAreImplied =>
-      widget.competition.format == CompetitionFormat.groupThenKnockout;
-
-  bool get _isGroups => _groupsAreImplied || (_canUseGroups && _draw.useGroups);
-
-  /// Whether the group stage feeds a knockout, which is what decides if
-  /// "qualifiers per group" is a real question.
-  bool get _groupsFeedKnockout =>
-      _isGroups &&
-      widget.competition.format != CompetitionFormat.roundRobin &&
-      widget.competition.format != CompetitionFormat.leagueTable;
+  /// Delegated to [GroupStageFields] rather than answered here: the season
+  /// screens ask the same questions before a competition exists, and two
+  /// copies of "can this format have groups?" is exactly how the sheet came
+  /// to offer groups of ten that the generator would never draw.
+  bool get _isGroups =>
+      GroupStageFields.isGrouped(widget.competition.format, _draw);
 
   bool get _isDoubleElim =>
       widget.competition.format == CompetitionFormat.doubleElimination;
@@ -104,24 +91,17 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
       widget.competition.format == CompetitionFormat.roundRobin ||
       widget.competition.format == CompetitionFormat.leagueTable;
 
-  /// Group sizing, delegated to [GroupBounds] so the rule the generator
-  /// obeys and the rule the stepper offers are the same rule.
-  int get _minGroups => GroupBounds.minGroups(widget.entrantCount);
+  bool get _isSwiss =>
+      widget.competition.format == CompetitionFormat.swiss;
 
-  int get _maxGroups => GroupBounds.maxGroups(
-        widget.entrantCount,
-        // Nothing to qualify into in a pool format, so group size is bounded
-        // only by what makes a group a group.
-        qualifiersPerGroup: _groupsFeedKnockout ? _draw.qualifiersPerGroup : 1,
-      );
-
-  /// The group count the generator will actually use, so the summary line
-  /// below cannot promise something different from what gets drawn.
-  int get _effectiveGroups => GroupBounds.resolve(
-        entrants: widget.entrantCount,
-        requested: _draw.numGroups,
-        qualifiersPerGroup: _groupsFeedKnockout ? _draw.qualifiersPerGroup : 1,
-      );
+  /// Rounds needed to rank this field by score alone — `⌈log2 N⌉`.
+  ///
+  /// Offered as the stepper's starting value rather than written into the
+  /// config, so a competition that says nothing about rounds keeps meaning
+  /// "however many it takes" and re-derives the number if entrants are still
+  /// arriving.
+  int get _recommendedSwissRounds =>
+      const SwissPairing().recommendedRoundCount(widget.entrantCount);
 
   /// A fresh draw number when the organizer has not fixed one, so a
   /// supervised draw is genuinely drawn rather than repeating yesterday's.
@@ -160,59 +140,13 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
             ),
             const SizedBox(height: 20),
 
-            if (_canUseGroups && !_groupsAreImplied)
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Split into groups'),
-                subtitle: Text(
-                  widget.competition.format == CompetitionFormat.knockout
-                      ? 'A group stage first, with the top of each group '
-                          'going through to the knockout.'
-                      : 'Pools — everyone plays everyone in their own group '
-                          'instead of one table of ${widget.entrantCount}.',
-                ),
-                value: _draw.useGroups,
-                onChanged: (v) => setState(
-                  () => _draw = _draw.copyWith(useGroups: v),
-                ),
-              ),
-
-            if (_isGroups) ...[
-              const _SectionLabel('Groups'),
-              _Stepper(
-                label: 'Number of groups',
-                // Bounded so the organizer cannot choose a group size the
-                // draw is not allowed to have, rather than accepting the
-                // number and quietly generating something else.
-                value: _effectiveGroups,
-                min: _minGroups,
-                max: _maxGroups,
-                onChanged: (v) =>
-                    setState(() => _draw = _draw.copyWith(numGroups: v)),
-              ),
-              if (_groupsFeedKnockout)
-                _Stepper(
-                  label: 'Qualifiers from each group',
-                  value: _draw.qualifiersPerGroup,
-                  min: 1,
-                  max: 4,
-                  onChanged: (v) => setState(() {
-                    // Raising the qualifier count can shrink [_maxGroups] below
-                    // the chosen group count, so the choice is re-clamped here
-                    // instead of being left invalid until the next rebuild.
-                    _draw = _draw.copyWith(qualifiersPerGroup: v);
-                    _draw = _draw.copyWith(numGroups: _effectiveGroups);
-                  }),
-                ),
-              Padding(
-                padding: const EdgeInsets.only(top: 4, bottom: 16),
-                child: Text(
-                  _groupSummary(),
-                  style: theme.textTheme.bodySmall
-                      ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-                ),
-              ),
-            ],
+            GroupStageFields(
+              format: widget.competition.format,
+              entrantCount: widget.entrantCount,
+              config: _draw,
+              onChanged: (v) => setState(() => _draw = v),
+            ),
+            if (_isGroups) const SizedBox(height: 16),
 
             if (_isRoundRobin)
               SwitchListTile(
@@ -241,6 +175,32 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
                 onChanged: (v) =>
                     setState(() => _draw = _draw.copyWith(bracketReset: v)),
               ),
+
+            if (_isSwiss) ...[
+              CountStepper(
+                label: 'Rounds',
+                value: _draw.swissRounds ?? _recommendedSwissRounds,
+                min: 1,
+                // A Swiss event that runs as many rounds as it has entrants
+                // has become a round robin the long way round, so that is the
+                // point past which the format stops being the right one.
+                max: widget.entrantCount < 2 ? 1 : widget.entrantCount - 1,
+                onChanged: (v) =>
+                    setState(() => _draw = _draw.copyWith(swissRounds: v)),
+              ),
+              Padding(
+                padding: const EdgeInsets.only(top: 4, bottom: 16),
+                child: Text(
+                  'Only round one is drawn now. Each later round is paired '
+                  'from the standings once the round before it has finished '
+                  '— $_recommendedSwissRounds '
+                  '${_recommendedSwissRounds == 1 ? 'round ranks' : 'rounds rank'} '
+                  'a field of ${widget.entrantCount}.',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                ),
+              ),
+            ],
 
             const SizedBox(height: 8),
             const _SectionLabel('Seeding and the draw'),
@@ -337,7 +297,7 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
                 onChanged: (_) => setState(() {}),
               ),
             const SizedBox(height: 12),
-            _Stepper(
+            CountStepper(
               label: 'Minutes per match',
               value: _schedule.matchMinutes,
               min: 5,
@@ -347,7 +307,7 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
                 () => _schedule = _schedule.copyWith(matchMinutes: v),
               ),
             ),
-            _Stepper(
+            CountStepper(
               label: 'Changeover between matches',
               value: _schedule.changeoverMinutes,
               min: 0,
@@ -357,7 +317,7 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
                 () => _schedule = _schedule.copyWith(changeoverMinutes: v),
               ),
             ),
-            _Stepper(
+            CountStepper(
               label: 'Minimum rest for a player',
               value: _schedule.restGapMinutes,
               min: 0,
@@ -412,29 +372,15 @@ class _DrawSetupSheetState extends State<DrawSetupSheet> {
 
   /// [_draw] with every derived bound applied, ready for the generator.
   DrawConfig get _drawToSubmit {
-    var out = _draw;
-    if (_isGroups) out = out.copyWith(numGroups: _effectiveGroups);
+    var out = GroupStageFields.normalize(
+      format: widget.competition.format,
+      entrantCount: widget.entrantCount,
+      config: _draw,
+    );
     if (out.method == 'federation' && out.shuffleSeed == null) {
       out = out.copyWith(shuffleSeed: _suggestedSeed);
     }
     return out;
-  }
-
-  String _groupSummary() {
-    final groups = _effectiveGroups;
-    final qualifiers = groups * _draw.qualifiersPerGroup;
-    final smallest = GroupBounds.smallestGroupSize(widget.entrantCount, groups);
-    final largest = GroupBounds.largestGroupSize(widget.entrantCount, groups);
-    // "About four" hid the uneven split that an organizer has to explain to
-    // whoever drew the group of five.
-    final size = smallest == largest ? '$smallest' : '$smallest–$largest';
-    // Pools have no knockout to promise anybody into, and saying "8 into the
-    // knockout stage" under a format that has none is the summary lying.
-    if (!_groupsFeedKnockout) {
-      return '$groups groups of $size, each playing its own table.';
-    }
-    return '$groups groups of $size, '
-        '$qualifiers into the knockout stage.';
   }
 
   String _scheduleSummary() {
@@ -469,54 +415,6 @@ class _SectionLabel extends StatelessWidget {
           color: theme.colorScheme.primary,
           letterSpacing: 1.0,
         ),
-      ),
-    );
-  }
-}
-
-class _Stepper extends StatelessWidget {
-  const _Stepper({
-    required this.label,
-    required this.value,
-    required this.min,
-    required this.max,
-    required this.onChanged,
-    this.step = 1,
-  });
-
-  final String label;
-  final int value;
-  final int min;
-  final int max;
-  final int step;
-  final ValueChanged<int> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      child: Row(
-        children: [
-          Expanded(child: Text(label)),
-          IconButton(
-            icon: const Icon(Icons.remove_circle_outline),
-            onPressed:
-                value - step >= min ? () => onChanged(value - step) : null,
-          ),
-          SizedBox(
-            width: 44,
-            child: Text(
-              '$value',
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.add_circle_outline),
-            onPressed:
-                value + step <= max ? () => onChanged(value + step) : null,
-          ),
-        ],
       ),
     );
   }

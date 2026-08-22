@@ -7,6 +7,7 @@ import '../core/providers.dart';
 import '../core/router/app_router.dart';
 import '../features/home/home_providers.dart';
 import '../features/settings/language_picker.dart';
+import 'identity.dart';
 import 'playsphere_logo.dart';
 
 /// One entry in the module menu.
@@ -206,10 +207,34 @@ class ModuleDrawer extends ConsumerWidget {
           path: Routes.lookingFor,
         ),
         const ModuleEntry(
+          icon: Icons.groups_2_outlined,
+          label: 'Independent teams',
+          description:
+              'A squad with no club — make one, or join one with a code',
+          path: Routes.standaloneTeams,
+        ),
+        const ModuleEntry(
+          icon: Icons.school_outlined,
+          label: 'Coaches',
+          description: 'Find a coach for your sport — or list yourself as one',
+          path: Routes.coaches,
+        ),
+        const ModuleEntry(
           icon: Icons.sports,
           label: 'Umpire & scorer registry',
           description: 'Register as an official, or find one for your match',
           path: Routes.umpireRegistry,
+        ),
+        // Sits in Community rather than a health section of its own. It is
+        // the same act as finding a coach or an umpire — reaching a person
+        // near you through the directory — and a one-entry section would
+        // make it harder to find, not easier.
+        const ModuleEntry(
+          icon: Icons.medical_services_outlined,
+          label: 'Sports doctors & physios',
+          description:
+              'Find a physio near you, warm-ups by sport, injury first aid',
+          path: Routes.sportsMedicine,
         ),
         // Deliberately org-free. Discovering a tournament to enter is the one
         // journey that must not start by picking which of your clubs you are
@@ -321,9 +346,11 @@ class ModuleDrawer extends ConsumerWidget {
                   color: theme.colorScheme.primaryContainer,
                   child: ListTile(
                     dense: true,
-                    leading: CircleAvatar(
-                      radius: 16,
-                      child: Text(org.name.characters.first.toUpperCase()),
+                    leading: PsCrest(
+                      name: org.name,
+                      logoUrl: org.logoUrl,
+                      seed: org.id,
+                      size: 32,
                     ),
                     title: Text(
                       org.name,

@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 
 import '../core/ads/promo.dart';
 import '../core/providers.dart';
+import 'identity.dart';
 
 /// A banner in one ad slot: shown with a five-second countdown, closable
 /// after it, gone for the session once closed.
@@ -145,7 +146,23 @@ class _PromoBannerState extends ConsumerState<PromoBanner> {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(promo.emoji, style: const TextStyle(fontSize: 26)),
+                // Fixed box, drawn on the first frame with the glyph in
+                // it. Artwork fades in over the top when it arrives, so a
+                // slow connection never shifts the fixtures below.
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: SizedBox(
+                    width: 40,
+                    height: 40,
+                    child: PsNetworkImage(
+                      url: promo.imageUrl,
+                      fallback: Center(
+                        child: Text(promo.emoji,
+                            style: const TextStyle(fontSize: 26)),
+                      ),
+                    ),
+                  ),
+                ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(

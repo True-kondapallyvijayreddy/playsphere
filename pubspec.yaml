@@ -55,6 +55,14 @@ dependencies:
   # must shrink an 8MP camera photo rather than pushing 6MB up the wire.
   image_picker: ^1.1.2
 
+  # Disk-caching every remote image the app draws — crests, banners, faces.
+  # Flutter's built-in ImageCache is memory-only and per-process, so scrolling
+  # back up a members list re-downloaded every face over mobile data. That is
+  # the single largest avoidable data cost in an app that already downscales
+  # uploads to 1600px for exactly this reason. All remote images go through
+  # `shared/identity.dart`, never `Image.network` directly.
+  cached_network_image: ^3.4.1
+
   # Presentation
   intl: ^0.19.0
 

@@ -13,6 +13,7 @@ import '../core/models/player_code.dart';
 import '../core/models/organization.dart';
 import '../core/models/owner_proposal.dart';
 import '../domain/governance/owner_vote.dart';
+import 'media_uploader.dart';
 
 /// Translates raw Firestore failures into [AppException]s.
 ///
@@ -37,10 +38,54 @@ Future<T> guard<T>(Future<T> Function() body) async {
 /// stops, and every one of them reached the UI as a raw `FirebaseException`
 /// rendered as "Something went wrong". A stream that feeds a screen belongs
 /// behind this for the same reason a write does.
-Stream<T> guardStream<T>(Stream<T> Function() body) => body().handleError(
-      (Object e) => throw asAppException(e as FirebaseException),
-      test: (e) => e is FirebaseException,
-    );
+///
+/// ## Why a rejected read is retried before it is believed
+///
+/// A Firestore listener that errors is finished — the SDK never re-subscribes
+/// it, and the Riverpod provider holding it keeps that error for the life of
+/// the app. That is the right behaviour for a permanent refusal and the wrong
+/// one for the refusal a founder actually meets, which is temporary and is
+/// caused by us:
+///
+/// Writes here are deliberately not awaited (see `createOrganization`), so a
+/// new club and its owner membership land in the LOCAL cache first and reach
+/// the server a moment later. The membership listener sees the local copy
+/// immediately, the dashboard fans out over the new club at once — and every
+/// one of those org-scoped reads is refused, because `firestore.rules` asks
+/// the server whether an owner membership exists and the server does not have
+/// it yet. Nothing retries, so five red "could not load" strips sit on the
+/// Notifications screen of somebody who has owned a club for four seconds,
+/// and stay there until the app is restarted.
+///
+/// So `permission-denied` — and only that code — is retried a couple of times
+/// with a short backoff. A denial that is real survives it and reaches the
+/// user about five seconds later than it used to; a denial that was a race
+/// against our own write disappears on its own, which is what the founder
+/// should have seen in the first place.
+Stream<T> guardStream<T>(Stream<T> Function() body) async* {
+  // Two extra attempts is enough for a server acknowledgement on a phone
+  // network, and short enough that a genuine refusal is not left looking
+  // like a hung screen.
+  const backoff = [Duration(milliseconds: 1500), Duration(seconds: 4)];
+
+  for (var attempt = 0;; attempt++) {
+    try {
+      // `await for` rather than `yield*`: a `yield*` hands the inner stream's
+      // error straight to the listener without ever entering this frame, so
+      // the catch below would never run and the retry would be dead code.
+      await for (final value in body()) {
+        yield value;
+      }
+      return;
+    } on FirebaseException catch (e) {
+      final mapped = asAppException(e);
+      if (mapped is! PermissionDeniedException || attempt >= backoff.length) {
+        throw mapped;
+      }
+      await Future<void>.delayed(backoff[attempt]);
+    }
+  }
+}
 
 /// Firebase error code -> the sentence a user sees. Shared by [guard] and
 /// [guardStream] so a read and a write never disagree about what a code means.
@@ -58,7 +103,13 @@ AppException asAppException(FirebaseException e) => switch (e.code) {
     };
 
 class UserRepository {
-  const UserRepository();
+  const UserRepository({FirebaseStorage? storage}) : _storage = storage;
+
+  /// Injectable so a test can drive the photo upload against a fake bucket,
+  /// matching [OrgRepository].
+  final FirebaseStorage? _storage;
+
+  MediaUploader get _media => MediaUploader(storage: _storage);
 
   Stream<AppUser?> watch(String uid) => guardStream(
         () => Refs.user(uid).snapshots().map(
@@ -70,6 +121,87 @@ class UserRepository {
         final doc = await Refs.user(uid).get();
         return doc.exists ? AppUser.fromDoc(doc) : null;
       });
+
+  /// Several accounts in as few reads as Firestore allows, keyed by uid.
+  ///
+  /// Exists for the team sheet. A registered squad is stored as a list of
+  /// uids — Rule 31's snapshot of who entered — and turning that back into
+  /// names on a match-day screen is eleven documents. One at a time that is
+  /// eleven round trips on a phone at a ground; batched it is one.
+  ///
+  /// A uid with no readable document is simply absent from the result rather
+  /// than an error: a squad member whose profile is private to this viewer
+  /// must not blank the whole team sheet. Callers fall back to whatever name
+  /// they already hold.
+  ///
+  /// `whereIn` takes at most 30 values per query, so the input is chunked and
+  /// the chunks run together.
+  Future<Map<String, AppUser>> fetchMany(Iterable<String> uids) async {
+    final ids = uids.where((u) => u.isNotEmpty).toSet().toList();
+    if (ids.isEmpty) return const {};
+
+    const chunkSize = 30;
+    final chunks = <List<String>>[
+      for (var i = 0; i < ids.length; i += chunkSize)
+        ids.sublist(i, i + chunkSize > ids.length ? ids.length : i + chunkSize),
+    ];
+
+    final snaps = await Future.wait([
+      for (final chunk in chunks)
+        Refs.users.where(FieldPath.documentId, whereIn: chunk).get(),
+    ]);
+
+    return {
+      for (final snap in snaps)
+        for (final doc in snap.docs) doc.id: AppUser.fromDoc(doc),
+    };
+  }
+
+  /// Replaces this person's profile photo with one they picked themselves.
+  ///
+  /// `storage.rules` has permitted `users/{uid}/profile/**` since it was
+  /// written, and until now nothing in the app wrote there — a member's photo
+  /// came from Google's `photoURL` at sign-in or it did not exist. That left
+  /// anyone who signed in without a Google photo with a grey initial on every
+  /// squad sheet and leaderboard in the product, permanently, with no way to
+  /// fix it.
+  ///
+  /// Write is self-only in both rule files, which is the whole security story
+  /// here: the uid in the path and the uid in the document are the same one,
+  /// and it is the caller's own.
+  Future<String> uploadProfilePhoto({
+    required String uid,
+    required Uint8List bytes,
+    required String contentType,
+  }) =>
+      guard(() async {
+        final url = await _media.putImage(
+          folder: 'users/$uid/profile',
+          uid: uid,
+          bytes: bytes,
+          contentType: contentType,
+          // The rules ceiling for this path is 8 MB; a 512px crest that
+          // reaches even 4 is already pathological.
+          maxMegabytes: 4,
+        );
+        await Refs.user(uid).update({
+          'photoUrl': url,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+        return url;
+      });
+
+  /// Goes back to having no photo.
+  ///
+  /// Clears the reference rather than the object, for the reason
+  /// [MediaUploader] documents: the URL may be cached in half a dozen places
+  /// and an unreferenced object is already unreachable.
+  Future<void> removeProfilePhoto(String uid) => guard(
+        () => Refs.user(uid).update({
+          'photoUrl': null,
+          'updatedAt': FieldValue.serverTimestamp(),
+        }),
+      );
 
   /// Called once after the first Google sign-in, when the user supplies the
   /// date of birth Google never gives us.
@@ -200,7 +332,7 @@ class OrgRepository {
   /// bucket, matching [MemoryRepository] and [ClubFileRepository].
   final FirebaseStorage? _storage;
 
-  FirebaseStorage get _bucket => _storage ?? FirebaseStorage.instance;
+  MediaUploader get _media => MediaUploader(storage: _storage);
 
   Stream<Organization?> watch(String orgId) => Refs.org(orgId).snapshots().map(
         (doc) => doc.exists ? Organization.fromDoc(doc) : null,
@@ -256,34 +388,27 @@ class OrgRepository {
     required String contentType,
   }) =>
       guard(() async {
-        if (bytes.lengthInBytes >= 4 * 1024 * 1024) {
-          throw const ValidationException(
-            'That image is too large. Please keep logos under 4 MB.',
-          );
-        }
-        // The uid segment is what `storage.rules` gates on; the timestamp
-        // makes each upload a new object so a replaced crest is never served
-        // from a CDN cache of the old one.
-        final path = 'orgs/$orgId/logo/$uid/'
-            '${DateTime.now().millisecondsSinceEpoch}.jpg';
-        final ref = _bucket.ref(path);
-        await ref.putData(
-          bytes,
-          SettableMetadata(
-            contentType: contentType,
-            // A crest at a versioned path never changes, so let devices and
-            // the CDN keep it. Re-fetching an image the user has already seen
-            // is the biggest avoidable data cost on a metered connection.
-            cacheControl: 'public, max-age=31536000, immutable',
-          ),
+        final url = await _media.putImage(
+          folder: 'orgs/$orgId/logo',
+          uid: uid,
+          bytes: bytes,
+          contentType: contentType,
+          maxMegabytes: 4,
         );
-        final url = await ref.getDownloadURL();
         await Refs.org(orgId).update({
           'logoUrl': url,
           'updatedAt': FieldValue.serverTimestamp(),
         });
         return url;
       });
+
+  /// Goes back to the generated crest.
+  Future<void> removeClubLogo(String orgId) => guard(
+        () => Refs.org(orgId).update({
+          'logoUrl': null,
+          'updatedAt': FieldValue.serverTimestamp(),
+        }),
+      );
 
   // --- Following --------------------------------------------------------
   //
@@ -543,6 +668,45 @@ class OrgRepository {
     required MembershipRole role,
   }) =>
       guard(() => Refs.member(orgId, uid).update({'role': role.wire}));
+
+  // --- Roster grouping ---------------------------------------------------
+
+  /// Records where members sit inside this club — house, department, year,
+  /// class, section. See [MemberGrouping] for why this is club-scoped data on
+  /// the membership rather than anything on the person's profile.
+  ///
+  /// Takes a map rather than one uid because the realistic unit of work is a
+  /// whole class: an admin who has to tap through four hundred students one at
+  /// a time will not do it, and a roster half-filled-in is worse than an empty
+  /// one — auto-placement would quietly split a year group in two.
+  ///
+  /// Merged into the existing document rather than replacing it: stamping a
+  /// department onto a batch of students must not wipe the houses somebody
+  /// else set last term.
+  Future<void> setMemberGroupings({
+    required String orgId,
+    required Map<String, MemberGrouping> groupings,
+  }) =>
+      guard(() async {
+        if (groupings.isEmpty) return;
+        final batch = Refs.db.batch();
+        for (final e in groupings.entries) {
+          batch.set(
+            Refs.member(orgId, e.key),
+            {'grouping': e.value.toMap()},
+            SetOptions(mergeFields: ['grouping']),
+          );
+        }
+        await batch.commit();
+      });
+
+  /// One member, for the edit-in-place path on the roster.
+  Future<void> setMemberGrouping({
+    required String orgId,
+    required String uid,
+    required MemberGrouping grouping,
+  }) =>
+      setMemberGroupings(orgId: orgId, groupings: {uid: grouping});
 
   // --- Ownership --------------------------------------------------------
 

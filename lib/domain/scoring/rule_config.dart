@@ -291,6 +291,145 @@ class RulePresets {
       },
     ),
 
+    // --- Pickleball -------------------------------------------------------
+    RulePreset(
+      id: 'pickleball_11_sideout',
+      sportId: 'pickleball',
+      name: '11 point, side-out (best of 3)',
+      isDefault: true,
+      description:
+          'Traditional scoring: only the serving side can score. Two servers '
+          'a side, one for whoever opens the game. Ends change at 6.',
+      source: 'USA Pickleball Official Rulebook',
+      values: {
+        'pointsPerSet': 11,
+        'setsToWin': 2,
+        'maxSets': 3,
+        'winBy': 2,
+        'hardCap': 0,
+        'rallyScoring': false,
+        'serversPerSide': 2,
+        'firstServerException': true,
+        'changeEndsAt': 6,
+      },
+    ),
+    RulePreset(
+      id: 'pickleball_15_sideout',
+      sportId: 'pickleball',
+      name: '15 point, side-out',
+      description: 'Longer tournament games to 15, ends changing at 8.',
+      values: {
+        'pointsPerSet': 15,
+        'setsToWin': 2,
+        'maxSets': 3,
+        'winBy': 2,
+        'hardCap': 0,
+        'rallyScoring': false,
+        'serversPerSide': 2,
+        'firstServerException': true,
+        'changeEndsAt': 8,
+      },
+    ),
+    RulePreset(
+      id: 'pickleball_21_rally',
+      sportId: 'pickleball',
+      name: '21 point, rally scoring',
+      description:
+          'Every rally scores, the way badminton does. Used by MLP-style '
+          'league play where the match has to fit a clock.',
+      values: {
+        'pointsPerSet': 21,
+        'setsToWin': 2,
+        'maxSets': 3,
+        'winBy': 2,
+        'hardCap': 0,
+        'rallyScoring': true,
+        'serversPerSide': 2,
+        'firstServerException': false,
+        'changeEndsAt': 11,
+      },
+    ),
+
+    // --- Padel ------------------------------------------------------------
+    RulePreset(
+      id: 'padel_best_of_3',
+      sportId: 'padel',
+      name: 'Best of 3 sets',
+      isDefault: true,
+      description:
+          'Tennis scoring on a padel court: 15/30/40, advantage at deuce, '
+          'tiebreak at 6-6.',
+      source: 'International Padel Federation rules of play',
+      values: {
+        'setsToWin': 2,
+        'gamesPerSet': 6,
+        'gamesWinBy': 2,
+        'tiebreakTo': 7,
+        'tiebreakWinBy': 2,
+        'pointsToWinGame': 4,
+        'gameWinBy': 2,
+        'noAd': false,
+        'decidingSetTiebreak': false,
+        'matchTiebreakTo': 10,
+        'tiebreakChangeEndsEvery': 6,
+        'doubles': true,
+      },
+    ),
+    RulePreset(
+      id: 'padel_golden_point',
+      sportId: 'padel',
+      name: 'Golden point (no advantage)',
+      description:
+          'Deuce is settled by a single point — the format used on the '
+          'professional tour and by most clubs running a timetable.',
+      values: {
+        'setsToWin': 2,
+        'gamesPerSet': 6,
+        'gamesWinBy': 2,
+        'tiebreakTo': 7,
+        'tiebreakWinBy': 2,
+        'pointsToWinGame': 4,
+        'gameWinBy': 1,
+        'noAd': true,
+        'decidingSetTiebreak': false,
+        'matchTiebreakTo': 10,
+        'tiebreakChangeEndsEvery': 6,
+        'doubles': true,
+      },
+    ),
+
+    // --- Squash -----------------------------------------------------------
+    RulePreset(
+      id: 'squash_par11',
+      sportId: 'squash',
+      name: 'PAR 11, best of 5',
+      isDefault: true,
+      description:
+          'Point-a-rally to 11, win by 2, best of five games. The modern '
+          'scoring system — every rally scores whoever served it.',
+      source: 'World Squash Federation rules',
+      values: {
+        'pointsPerSet': 11,
+        'setsToWin': 3,
+        'maxSets': 5,
+        'winBy': 2,
+        'hardCap': 0,
+      },
+    ),
+    RulePreset(
+      id: 'squash_par15',
+      sportId: 'squash',
+      name: 'PAR 15, best of 3',
+      description: 'Shorter format for club nights and box leagues.',
+      values: {
+        'pointsPerSet': 15,
+        'setsToWin': 2,
+        'maxSets': 3,
+        'winBy': 2,
+        'hardCap': 0,
+      },
+    ),
+
     // --- Volleyball -------------------------------------------------------
     RulePreset(
       id: 'volleyball_5_set',
@@ -847,6 +986,15 @@ class RuleFields {
     'badminton': ['pointsPerSet', 'setsToWin', 'winBy', 'hardCap', 'intervalAt'],
     'table_tennis': ['pointsPerSet', 'setsToWin', 'winBy', 'servesPerTurn'],
     'tennis': ['gamesPerSet', 'setsToWin', 'noAd', 'tiebreakTo'],
+    'padel': ['gamesPerSet', 'setsToWin', 'noAd', 'tiebreakTo'],
+    'pickleball': [
+      'pointsPerSet',
+      'setsToWin',
+      'winBy',
+      'rallyScoring',
+      'changeEndsAt',
+    ],
+    'squash': ['pointsPerSet', 'setsToWin', 'winBy'],
     'volleyball': [
       'pointsPerSet',
       'setsToWin',

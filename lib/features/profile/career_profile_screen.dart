@@ -10,10 +10,13 @@ import '../../core/models/team.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../data/career_repository.dart';
+import '../../data/image_composer.dart';
 import '../../domain/career/head_to_head.dart';
 import '../../domain/rating/glicko2.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/identity.dart';
+import '../../shared/image_upload.dart';
 import '../../shared/ui_kit.dart';
 import 'widgets/memory_grid.dart';
 
@@ -189,30 +192,60 @@ class _CareerProfileScreenState extends ConsumerState<CareerProfileScreen> {
   }
 }
 
-class _Identity extends StatelessWidget {
+class _Identity extends ConsumerWidget {
   const _Identity({required this.user, required this.isMe});
 
   final AppUser user;
   final bool isMe;
 
+  /// Only your own face, and only ever your own: the storage rule and the
+  /// Firestore rule are both self-only, so this check is the courtesy of not
+  /// showing a button that would be refused.
+  Future<void> _changePhoto(BuildContext context, WidgetRef ref) {
+    final repo = ref.read(userRepositoryProvider);
+    return pickAndUploadImage(
+      context: context,
+      title: 'Your profile photo',
+      // Disclosure, not a block. A junior's profile is already gated behind
+      // guardian consent in `firestore.rules`, and a face on a club team
+      // sheet is ordinary — but the person picking the picture should know
+      // where it lands before they pick it.
+      note: user.isMinor
+          ? 'Shows on your career page, which only your guardian and your '
+              'clubs can open.'
+          : null,
+      shape: ImageShape.square,
+      successMessage: 'Photo updated.',
+      removedMessage: 'Photo removed.',
+      onUpload: (image) => repo.uploadProfilePhoto(
+        uid: user.uid,
+        bytes: image.bytes,
+        contentType: image.contentType,
+      ),
+      onRemove: user.photoUrl == null
+          ? null
+          : () => repo.removeProfilePhoto(user.uid),
+    );
+  }
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final where = user.geo.district;
 
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        CircleAvatar(
-          radius: 40,
-          backgroundImage:
-              user.photoUrl != null ? NetworkImage(user.photoUrl!) : null,
-          child: user.photoUrl == null
-              ? Text(
-                  user.displayName.characters.first.toUpperCase(),
-                  style: theme.textTheme.headlineMedium,
-                )
-              : null,
+        EditableImage(
+          tooltip: 'Change your photo',
+          badgeSize: 26,
+          onTap: isMe ? () => _changePhoto(context, ref) : null,
+          child: PsAvatar(
+            name: user.displayName,
+            photoUrl: user.photoUrl,
+            seed: user.uid,
+            size: 80,
+          ),
         ),
         const SizedBox(width: 16),
         Expanded(
@@ -319,13 +352,11 @@ class _TeamsStrip extends ConsumerWidget {
             for (final team in teams.take(_preview))
               ListTile(
                 contentPadding: EdgeInsets.zero,
-                leading: CircleAvatar(
-                  backgroundImage: team.photoUrl != null
-                      ? NetworkImage(team.photoUrl!)
-                      : null,
-                  child: team.photoUrl == null
-                      ? Text(SportCatalog.byId(team.sportId).icon)
-                      : null,
+                leading: PsCrest(
+                  name: team.name,
+                  logoUrl: team.photoUrl,
+                  seed: team.id,
+                  size: 40,
                 ),
                 title: Text(team.name),
                 subtitle: Text('${team.memberUids.length} players'),

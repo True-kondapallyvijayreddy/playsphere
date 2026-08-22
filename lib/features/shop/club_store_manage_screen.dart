@@ -6,7 +6,11 @@ import '../../core/models/billing.dart';
 import '../../core/models/club_product.dart';
 import '../../core/models/enums.dart';
 import '../../core/providers.dart';
+import '../../data/image_composer.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/identity.dart';
+import '../../shared/image_upload.dart';
+import '../../shared/ui_kit.dart';
 
 /// The club's own catalog management view — add, edit, pause. Gated by
 /// `firestore.rules`' `canManageOrg` (owner-only) on `clubProducts`, since
@@ -141,6 +145,10 @@ class _ProductEditorSheetState extends ConsumerState<_ProductEditorSheet> {
       widget.existing?.category ?? ClubProductCategory.jersey;
   bool _busy = false;
 
+  /// Seeded from the product being edited and held here until save, so
+  /// backing out of the sheet changes nothing.
+  late String? _imageUrl = widget.existing?.imageUrl;
+
   @override
   void dispose() {
     _name.dispose();
@@ -148,6 +156,27 @@ class _ProductEditorSheetState extends ConsumerState<_ProductEditorSheet> {
     _price.dispose();
     _sizes.dispose();
     super.dispose();
+  }
+
+  Future<void> _pickPhoto() async {
+    final me = ref.read(currentUserProvider).valueOrNull;
+    if (me == null) return;
+    await pickAndUploadImage(
+      context: context,
+      title: 'Product photo',
+      shape: ImageShape.banner,
+      successMessage: 'Photo added.',
+      onUpload: (image) async {
+        final url =
+            await ref.read(clubCommerceRepositoryProvider).uploadProductImage(
+                  orgId: widget.orgId,
+                  uid: me.uid,
+                  bytes: image.bytes,
+                  contentType: image.contentType,
+                );
+        if (mounted) setState(() => _imageUrl = url);
+      },
+    );
   }
 
   Future<void> _save() async {
@@ -178,6 +207,7 @@ class _ProductEditorSheetState extends ConsumerState<_ProductEditorSheet> {
             category: _category,
             listPricePaise: (rupees * 100).round(),
             sizes: sizes,
+            imageUrl: _imageUrl,
           ),
           createdByUid: me.uid,
         );
@@ -191,6 +221,7 @@ class _ProductEditorSheetState extends ConsumerState<_ProductEditorSheet> {
           category: _category,
           listPricePaise: (rupees * 100).round(),
           sizes: sizes,
+          imageUrl: _imageUrl,
           isActive: existing.isActive,
         ));
       }
@@ -222,6 +253,14 @@ class _ProductEditorSheetState extends ConsumerState<_ProductEditorSheet> {
                 .textTheme
                 .titleMedium
                 ?.copyWith(fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 12),
+          _PhotoRow(
+            imageUrl: _imageUrl,
+            emoji: _category.emoji,
+            onPick: _pickPhoto,
+            onClear:
+                _imageUrl == null ? null : () => setState(() => _imageUrl = null),
           ),
           const SizedBox(height: 12),
           Wrap(
@@ -303,6 +342,78 @@ class _ProductEditorSheetState extends ConsumerState<_ProductEditorSheet> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// The photo slot on the product form.
+///
+/// Optional, and says so. A club listing three jerseys from a phone at a
+/// ground should be able to finish the form in a minute; the category emoji is
+/// a perfectly good stand-in until somebody has time to take a picture.
+class _PhotoRow extends StatelessWidget {
+  const _PhotoRow({
+    required this.imageUrl,
+    required this.emoji,
+    required this.onPick,
+    required this.onClear,
+  });
+
+  final String? imageUrl;
+  final String emoji;
+  final VoidCallback onPick;
+  final VoidCallback? onClear;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(10),
+          child: Container(
+            width: 64,
+            height: 64,
+            color: Ps.canvas,
+            child: PsNetworkImage(
+              url: imageUrl,
+              fallback: Center(
+                child: Text(emoji, style: const TextStyle(fontSize: 28)),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Photo (optional)',
+                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5),
+              ),
+              const SizedBox(height: 2),
+              const Text(
+                'Skip it and the category icon is used.',
+                style: TextStyle(fontSize: 12, color: Ps.muted),
+              ),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: onPick,
+                    icon: const Icon(Icons.image_outlined, size: 18),
+                    label: Text(imageUrl == null ? 'Add photo' : 'Replace'),
+                  ),
+                  if (onClear != null)
+                    TextButton(onPressed: onClear, child: const Text('Remove')),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

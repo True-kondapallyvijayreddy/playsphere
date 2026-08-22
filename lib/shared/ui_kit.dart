@@ -107,7 +107,25 @@ class SportVisual {
     'carrom': SportVisual(Color(0xFFA16207), Icons.album),
     'athletics_sprint': SportVisual(Color(0xFFF59E0B), Icons.directions_run),
     'athletics_field': SportVisual(Color(0xFFEA580C), Icons.sports_score),
+    // The catalogue holds twenty sports and this map held fifteen, so padel,
+    // pickleball, squash, swimming and "other" fell through to the grey
+    // fallback below. Five grey tiles in a grid of colour reads as a bug, and
+    // now that generated crests and banners take their colour from here, a
+    // missing entry costs a whole sport its identity rather than one icon.
+    'padel': SportVisual(Color(0xFF0891B2), Icons.sports_tennis),
+    'pickleball': SportVisual(Color(0xFFCA8A04), Icons.sports_tennis),
+    'squash': SportVisual(Color(0xFF7C3AED), Icons.sports_tennis),
+    'swimming': SportVisual(Color(0xFF0284C7), Icons.pool),
+    // Named explicitly rather than left to the fallback: "other" is a real
+    // choice an organizer makes, not an unrecognised id, and it should look
+    // chosen.
+    'other': SportVisual(Color(0xFF475569), Icons.sports),
   };
+
+  /// Every sport this map knows, for the test that asserts it covers the
+  /// catalogue. A sport added to `SportCatalog` without a colour here is the
+  /// one failure mode this map has.
+  static Iterable<String> get knownIds => _byId.keys;
 }
 
 /// The saturated rounded square itself, at whatever size the caller needs —

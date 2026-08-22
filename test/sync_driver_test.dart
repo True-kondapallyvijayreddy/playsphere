@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -229,6 +231,76 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       expect(h.attempts(), 1);
+    });
+
+    test('a pass that never settles does not wedge the driver forever',
+        () async {
+      // The reported failure, reproduced.
+      //
+      // `_replayFixtureGroup` ends in an awaited `WriteBatch.commit()`, and
+      // with Firestore's offline persistence on, an awaited write does not
+      // complete until the SERVER acknowledges it. Off signal that is never.
+      // The pass therefore never returned, the re-entrancy guard stayed set
+      // for the life of the process, and every later trigger — resume, tick,
+      // the `syncNow()` fired after each score — returned instantly without
+      // doing anything. The queue then sat there on full signal until the app
+      // was force-quit: "the official awarded the point and it never showed
+      // up, not even ten minutes later".
+      var started = 0;
+      final hang = Completer<void>();
+
+      final driver = SyncDriver(
+        reconcile: () async {
+          started++;
+          // First pass hangs the way an offline commit does; later passes
+          // return, standing in for the network coming back.
+          if (started == 1) return hang.future;
+        },
+        pendingCount: () async => 3,
+        retryInterval: const Duration(milliseconds: 20),
+        passTimeout: const Duration(milliseconds: 40),
+      );
+      addTearDown(() {
+        driver.dispose();
+        // Let the abandoned pass finish so it cannot outlive the test.
+        if (!hang.isCompleted) hang.complete();
+      });
+
+      driver.start();
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+
+      // The hung pass is abandoned, not awaited forever, and the loop keeps
+      // running. Before the watchdog this was stuck at exactly 1.
+      expect(started, greaterThan(1));
+    });
+
+    test('a trigger arriving mid-pass is not dropped', () async {
+      // A scorer tapping four runs while a pass is in flight has queued
+      // something that pass has already read past. Dropping the trigger made
+      // them wait a full retry interval for no reason.
+      var started = 0;
+      final driver = SyncDriver(
+        reconcile: () async {
+          started++;
+          await Future<void>.delayed(const Duration(milliseconds: 30));
+        },
+        pendingCount: () async => 0,
+        retryInterval: const Duration(hours: 1),
+      );
+      addTearDown(driver.dispose);
+
+      driver.start();
+      // Lands while the first pass is still running.
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      driver.syncNow();
+
+      // Generous, deliberately. What is being asserted is "promptly rather
+      // than in an hour", and a tight window turns that into an assertion
+      // about how loaded the machine running the suite happens to be.
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+
+      // The second pass ran without waiting out the retry interval.
+      expect(started, greaterThanOrEqualTo(2));
     });
 
     test('disposing stops the loop', () async {

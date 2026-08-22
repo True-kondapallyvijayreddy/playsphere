@@ -6,17 +6,25 @@ import '../../core/layout/responsive.dart';
 import '../../core/models/competition.dart';
 import '../../core/models/enums.dart';
 import '../../core/models/fixture.dart';
+import '../../core/models/organization.dart';
 import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../core/models/draw_slot.dart';
 import '../../domain/draw/seeding.dart';
+import '../../domain/draw/swiss_pairing.dart';
+import '../../domain/tournament/house_roster.dart';
 import '../../domain/standings/standings_calculator.dart';
 import '../../domain/standings/tiebreak.dart';
+import '../../data/image_composer.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/identity.dart';
+import '../../shared/image_upload.dart';
+import '../../shared/ps_banner.dart';
 import '../../shared/ui_kit.dart';
 import 'widgets/cancel_event_sheet.dart';
 import 'widgets/competition_rule_editor.dart';
+import 'widgets/houses_editor_sheet.dart';
 import 'widgets/draw_setup_sheet.dart';
 import 'widgets/group_entry_sheet.dart';
 import 'widgets/move_match_sheet.dart';
@@ -24,6 +32,7 @@ import 'widgets/team_builder_sheet.dart';
 import '../tournaments/widgets/running_late_card.dart';
 import 'widgets/squad_call_card.dart';
 import 'widgets/start_early_sheet.dart';
+import 'widgets/suspend_sheet.dart';
 import '../scoring/widgets/live_score_card.dart';
 import '../scoring/widgets/share_match_button.dart';
 
@@ -71,8 +80,20 @@ class CompetitionDetailScreen extends ConsumerWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    _Header(competition: comp),
+                    _Header(competition: comp, canManage: canManage),
                     const SizedBox(height: 16),
+                    // Above the organizer's own controls: a paused event is
+                    // the first thing anyone opening this needs to know, and
+                    // the reason is what stops them phoning to ask.
+                    if (comp.isSuspended)
+                      OnHoldBanner(
+                        what: 'event',
+                        reason: comp.suspendReason,
+                        resumeLabel: 'Resume',
+                        onResume: !canManage || comp.suspendedBySeason
+                            ? null
+                            : () => _resumeEvent(context, ref, comp),
+                      ),
                     if (canManage) _OrganizerActions(competition: comp),
                     // Before real entries close there is nothing to draw a
                     // real bracket from, but an organizer still wants to see
@@ -87,6 +108,7 @@ class CompetitionDetailScreen extends ConsumerWidget {
                             comp.status == CompetitionStatus.registrationOpen))
                       _DraftScheduleCard(competition: comp),
                     if (canManage) _QualifierCard(competition: comp),
+                    if (canManage) _SwissRoundCard(competition: comp),
                     // Only for a standalone event: one inside a tournament is
                     // shifted from the tournament screen, because its matches
                     // share courts with fourteen other draws and moving it
@@ -151,41 +173,114 @@ class CompetitionDetailScreen extends ConsumerWidget {
 /// any of the screen's actual content. As one muted dot-separated line they
 /// take 18pt and read faster, because a sentence is read faster than four
 /// boxes are scanned.
-class _Header extends StatelessWidget {
-  const _Header({required this.competition});
+class _Header extends ConsumerWidget {
+  const _Header({required this.competition, this.canManage = false});
   final Competition competition;
+  final bool canManage;
+
+  Future<void> _changeBanner(BuildContext context, WidgetRef ref) {
+    final uid = ref.read(currentUidProvider);
+    if (uid == null) return Future.value();
+    final repo = ref.read(competitionRepositoryProvider);
+    return pickAndUploadImage(
+      context: context,
+      title: 'Event banner',
+      shape: ImageShape.banner,
+      successMessage: 'Banner updated.',
+      removedMessage: 'Banner removed.',
+      onUpload: (image) => repo.uploadEventBanner(
+        orgId: competition.orgId,
+        compId: competition.id,
+        uid: uid,
+        bytes: image.bytes,
+        contentType: image.contentType,
+      ),
+      onRemove: competition.bannerUrl == null
+          ? null
+          : () => repo.removeEventBanner(
+                orgId: competition.orgId,
+                compId: competition.id,
+              ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final c = competition;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: PsBanner(
+        imageUrl: c.bannerUrl,
+        sportId: c.sportId,
+        seed: c.id,
+        height: 156,
+        trailing: canManage
+            ? _BannerEditButton(onTap: () => _changeBanner(context, ref))
+            : null,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              c.name,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 21,
+                fontWeight: FontWeight.w800,
+                color: Colors.white,
+                height: 1.15,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              [
+                c.sportName,
+                c.category.label,
+                c.format.label,
+                // Derived, not stored: nothing writes the status field when a
+                // registration deadline passes, so a closed event went on
+                // advertising "Registration Open" (Bug #6).
+                c.displayStatus().label,
+                if (c.venue != null && c.venue!.trim().isNotEmpty) c.venue!,
+              ].join(' · '),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 12.5,
+                height: 1.35,
+                color: Color(0xE6FFFFFF),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The one control that sits on top of a banner.
+///
+/// A filled circle rather than a plain [IconButton]: it has to stay legible
+/// over an uploaded photograph of unknown brightness, and a bare white glyph
+/// disappears against a pale sky.
+class _BannerEditButton extends StatelessWidget {
+  const _BannerEditButton({required this.onTap});
+
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    final c = competition;
-    return PsCard(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            c.name,
-            style: const TextStyle(
-              fontSize: 19,
-              fontWeight: FontWeight.w700,
-              color: Ps.ink,
-              height: 1.2,
-            ),
-          ),
-          const SizedBox(height: 6),
-          PsMetaRow(
-            items: [
-              c.sportName,
-              c.category.label,
-              c.format.label,
-              // Derived, not stored: nothing writes the status field when a
-              // registration deadline passes, so a closed event went on
-              // advertising "Registration Open" (Bug #6).
-              c.displayStatus().label,
-              c.venue,
-            ],
-          ),
-        ],
+    return Material(
+      color: const Color(0x8A000000),
+      shape: const CircleBorder(),
+      clipBehavior: Clip.antiAlias,
+      child: IconButton(
+        tooltip: 'Change the banner',
+        iconSize: 18,
+        visualDensity: VisualDensity.compact,
+        icon: const Icon(Icons.photo_camera_outlined, color: Colors.white),
+        onPressed: onTap,
       ),
     );
   }
@@ -259,11 +354,12 @@ class _OrganizerActions extends ConsumerWidget {
                 // reproduced identically — after the fact.
                 await repo.updateCompetition(configured);
 
-                final uid = ref.read(currentUidProvider);
+                // No default scorer. The organizer making the draw cannot be
+                // at every court, and naming them on every match produced a
+                // roster nobody believed — see `generateDraw`'s parameter.
                 final made = await repo.generateDraw(
                   competition: configured,
                   entrants: entrants,
-                  defaultScorerUids: uid == null ? const [] : [uid],
                 );
                 if (!context.mounted) return;
                 ScaffoldMessenger.of(context).showSnackBar(
@@ -389,11 +485,41 @@ class _OrganizerActions extends ConsumerWidget {
             onSelected: () =>
                 CompetitionRuleEditor.show(context, competition: c),
           ),
+          // Only for events people enter as part of a group. An individual
+          // event has nothing to split into houses, and offering the editor
+          // there would be a menu item that changes nothing.
+          if (c.entrantType == EntrantType.team)
+            PsAction(
+              label: 'Houses & groups',
+              icon: Icons.holiday_village_outlined,
+              onSelected: () =>
+                  HousesEditorSheet.show(context, competition: c),
+            ),
           PsAction(
             label: 'Send a note',
             icon: Icons.campaign_outlined,
             onSelected: () => EventNoteSheet.show(context, competition: c),
           ),
+          // Above cancelling in the menu, and not destructive: it is the
+          // one an organizer actually wants on a wet morning, and the
+          // permanent one below it is what they used to reach for instead.
+          // Nothing offered when the SEASON paused this event: the resume
+          // belongs on the season, and an event-level button that always
+          // fails is worse than no button.
+          if (canStillCancel && !c.suspendedBySeason)
+            if (c.isSuspended)
+              PsAction(
+                label: 'Resume event',
+                icon: Icons.play_circle_outline,
+                onSelected: () => _resumeEvent(context, ref, c),
+              )
+            else
+              PsAction(
+                label: 'Put on hold',
+                icon: Icons.pause_circle_outline,
+                onSelected: () =>
+                    SuspendSheet.showForEvent(context, competition: c),
+              ),
           if (canStillCancel)
             PsAction(
               label: 'Cancel event',
@@ -475,6 +601,27 @@ class _DraftScheduleCard extends ConsumerWidget {
                           'lining up venues, times and officials before '
                           'anyone has registered.',
               style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 10),
+            // Said out loud because an organizer will not risk a half-built
+            // bracket on a guess. It is true at every layer, not just this
+            // one: the fixture list pins `isDraft == false` for anyone
+            // without `manageCompetitions`, `firestore.rules` refuses a
+            // draft to them on both the nested and collection-group paths,
+            // and a draft carries no scorer for anyone to reach it through.
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(Icons.lock_outline, size: 15, color: Ps.faint),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    'Only club admins can see a draft. Nothing here reaches '
+                    'members, entrants or other clubs until you publish it.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 12),
             Wrap(
@@ -635,8 +782,7 @@ class _DraftScheduleSheetState extends State<_DraftScheduleSheet> {
       (widget.competition.maxEntrants ?? 8).clamp(_minTeams, 64);
   int _teamsPerGroup = 4;
 
-  bool get _isGroups =>
-      widget.competition.format == CompetitionFormat.groupThenKnockout;
+  bool get _isGroups => widget.competition.hasGroupStage;
 
   @override
   Widget build(BuildContext context) {
@@ -827,12 +973,34 @@ class _Entries extends ConsumerWidget {
     Future<void> enter() async {
       if (me == null) return;
 
-      // School House selection
-      if (c.teamEntryMode == TeamEntryMode.houseBatch) {
+      // House / group selection.
+      //
+      // Which house someone represents is an affiliation, not an entrant
+      // shape: a sprinter in the 100m enters as herself and still scores for
+      // Red House. Gating this on `houseBatch` meant every individual event
+      // in a school season — athletics, singles, chess, the bulk of a sports
+      // day — registered people with no house at all, and the organizer was
+      // left with a flat list no house table could be built from. So the ask
+      // follows the house list the organizer authored, not the entry mode.
+      // `houseBatch` still differs downstream, where `EntrantPromoter` folds
+      // a house's registrations into one entrant; here the two are the same
+      // question.
+      if (c.presetHouses.isNotEmpty ||
+          c.teamEntryMode == TeamEntryMode.houseBatch) {
+        // The fallback is for events created before houses were editable,
+        // whose `presetHouses` is empty. A new event always carries the
+        // organizer's own list — see `HousesEditorSheet`.
         final houses = c.presetHouses.isNotEmpty
             ? c.presetHouses
-            : ['Red House', 'Blue House', 'Green House', 'Yellow House'];
-        String selectedHouse = houses.first;
+            : HouseTemplates.schoolColours;
+        // The club already knows this student is ECE 3rd Year; making her say
+        // so again is how a roster and a registration drift apart. Falls back
+        // to the first house only when the membership cannot answer — see
+        // `HouseAssigner`, which is the same matcher the bulk placement uses.
+        String selectedHouse =
+            HouseAssigner.assign(membership?.grouping ?? MemberGrouping.empty,
+                    houses) ??
+                houses.first;
 
         final confirmed = await showDialog<bool>(
           context: context,
@@ -842,14 +1010,17 @@ class _Entries extends ConsumerWidget {
                 children: [
                   Icon(Icons.school_outlined),
                   SizedBox(width: 8),
-                  Text('Select Your House'),
+                  Text('Select Your Group'),
                 ],
               ),
               content: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('Which house or section are you representing?'),
+                  const Text(
+                    'Which house, department, year or section are you '
+                    'representing?',
+                  ),
                   const SizedBox(height: 12),
                   for (final h in houses)
                     RadioListTile<String>(
@@ -1104,13 +1275,11 @@ class _Entries extends ConsumerWidget {
                 ListTile(
                   dense: true,
                   contentPadding: EdgeInsets.zero,
-                  leading: CircleAvatar(
-                    radius: 16,
-                    backgroundImage:
-                        r.photoUrl != null ? NetworkImage(r.photoUrl!) : null,
-                    child: r.photoUrl == null
-                        ? Text(r.displayName.characters.first.toUpperCase())
-                        : null,
+                  leading: PsAvatar(
+                    name: r.displayName,
+                    photoUrl: r.photoUrl,
+                    seed: r.uid,
+                    size: 32,
                   ),
                   title: Text(r.displayName),
                   subtitle: Text(
@@ -1120,6 +1289,12 @@ class _Entries extends ConsumerWidget {
                         'Waitlist #${r.waitlistPosition}'
                       else
                         r.status.label,
+                      // The house is the whole point of a school event —
+                      // an entries list that does not show it cannot be
+                      // checked against the roster, and the organizer has no
+                      // way to spot the student who picked the wrong one
+                      // until the house table comes out wrong.
+                      if (r.houseName != null) r.houseName!,
                       // Marked so the open registrants can see which slots
                       // were ever really available to them.
                       if (r.preselected) 'picked by organizer',
@@ -1269,9 +1444,9 @@ class _QualifierCardState extends ConsumerState<_QualifierCard> {
   @override
   Widget build(BuildContext context) {
     final c = widget.competition;
-    if (c.format != CompetitionFormat.groupThenKnockout) {
-      return const SizedBox.shrink();
-    }
+    // Qualifier promotion is a groups-into-a-bracket thing, and asking the
+    // format alone missed a knockout that had a group stage added to it.
+    if (!c.groupsFeedKnockout) return const SizedBox.shrink();
 
     final fixtures =
         ref.watch(fixturesProvider(CompRef(c.orgId, c.id))).valueOrNull ??
@@ -1357,6 +1532,158 @@ class _QualifierCardState extends ConsumerState<_QualifierCard> {
           ),
         ),
       );
+    } catch (e) {
+      if (mounted) showError(context, e);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+}
+
+/// Pairs the next Swiss round, and says why it cannot yet when it cannot.
+///
+/// ## Why Swiss needs a card and a knockout does not
+///
+/// Every other format's whole shape is written at draw time: a knockout's
+/// quarter-final exists, empty, from the moment the bracket does, and
+/// finishing a match just fills a name into a document already there. Swiss
+/// has nothing to fill. Round three does not exist in any form until round
+/// two has been played, because its pairings ARE the standings — so somebody
+/// has to ask for it, and until this card there was nowhere to ask.
+///
+/// The card is deliberately loud about the two reasons pairing is refused —
+/// a round still being played, and the event having run its distance —
+/// because both look identical from the organizer's side otherwise: a button
+/// that does nothing.
+class _SwissRoundCard extends ConsumerStatefulWidget {
+  const _SwissRoundCard({required this.competition});
+  final Competition competition;
+
+  @override
+  ConsumerState<_SwissRoundCard> createState() => _SwissRoundCardState();
+}
+
+class _SwissRoundCardState extends ConsumerState<_SwissRoundCard> {
+  bool _busy = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.competition;
+    if (c.format != CompetitionFormat.swiss) {
+      return const SizedBox.shrink();
+    }
+
+    final fixtures =
+        ref.watch(fixturesProvider(CompRef(c.orgId, c.id))).valueOrNull ??
+            const <Fixture>[];
+    // Before the draw exists there is no round to pair from, and "Make the
+    // draw" is already the screen's primary action — two buttons asking for
+    // the same thing is worse than one.
+    if (fixtures.isEmpty) return const SizedBox.shrink();
+
+    final entrants =
+        ref.watch(entrantsProvider(CompRef(c.orgId, c.id))).valueOrNull ??
+            const <Entrant>[];
+    final activeCount = entrants.where((e) => !e.withdrawn).length;
+    if (activeCount < 2) return const SizedBox.shrink();
+
+    final currentRound =
+        fixtures.fold<int>(1, (hi, f) => f.round > hi ? f.round : hi);
+    final totalRounds = const SwissPairing().recommendedRoundCount(
+      activeCount,
+      override: c.drawConfig.swissRounds,
+    );
+    final pending = fixtures
+        .where((f) => f.round == currentRound && !f.hasResult)
+        .length;
+
+    final isComplete = currentRound >= totalRounds;
+    final canPair = !isComplete && pending == 0;
+
+    final theme = Theme.of(context);
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Card(
+        color: theme.colorScheme.tertiaryContainer,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Round $currentRound of $totalRounds',
+                style: theme.textTheme.titleMedium,
+              ),
+              const SizedBox(height: 6),
+              Text(
+                isComplete
+                    ? 'Every round has been played. The standings below are '
+                        'the final order.'
+                    : pending > 0
+                        ? '$pending ${pending == 1 ? 'match' : 'matches'} '
+                            'still ${pending == 1 ? 'needs' : 'need'} a '
+                            'result. Swiss pairs the next round by standing, '
+                            'so the table has to be final before it can be '
+                            'drawn.'
+                        : 'Round $currentRound is finished. Pairing round '
+                            '${currentRound + 1} puts each entrant against '
+                            'the closest opponent on the table they have not '
+                            'already played.',
+                style: theme.textTheme.bodyMedium,
+              ),
+              if (!isComplete) ...[
+                const SizedBox(height: 12),
+                FilledButton.tonalIcon(
+                  onPressed: _busy || !canPair ? null : _pair,
+                  icon: _busy
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.playlist_add_outlined),
+                  label: Text('Pair round ${currentRound + 1}'),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pair() async {
+    setState(() => _busy = true);
+    final c = widget.competition;
+    try {
+      final entrants =
+          ref.read(entrantsProvider(CompRef(c.orgId, c.id))).valueOrNull ??
+              const <Entrant>[];
+      final outcome = await ref
+          .read(competitionRepositoryProvider)
+          .generateNextSwissRound(competition: c, entrants: entrants);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Round ${outcome.round} paired — ${outcome.written} '
+            '${outcome.written == 1 ? 'match' : 'matches'}.'
+            // The bye is the absence of a fixture, so it is the one thing
+            // about the new round that the fixture list cannot show. An
+            // organizer who is not told here gets asked at the venue.
+            '${outcome.byeEntrantName != null ? ' ${outcome.byeEntrantName} has the bye.' : ''}'
+            '${outcome.isFinalRound ? ' This is the final round.' : ''}',
+          ),
+        ),
+      );
+      if (outcome.hasScheduleProblems) {
+        await showDialog<void>(
+          context: context,
+          builder: (_) =>
+              _ScheduleProblemsDialog(problems: outcome.scheduleProblems),
+        );
+      }
     } catch (e) {
       if (mounted) showError(context, e);
     } finally {
@@ -1596,14 +1923,17 @@ class _StandingsTable extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    if (!_tableFormats.contains(competition.format)) {
+    // A knockout with a group stage in front of it has tables too — its
+    // groups are round robins. Gating on the format alone hid them.
+    if (!_tableFormats.contains(competition.format) &&
+        !competition.hasGroupStage) {
       return const SizedBox.shrink();
     }
 
     // A groups draw has several tables and no meaningful combined one: Group
     // A's players have never met Group B's, so their points do not compare.
     // Showing one merged table was not just untidy, it was wrong.
-    if (competition.format == CompetitionFormat.groupThenKnockout) {
+    if (competition.hasGroupStage) {
       final groupsAsync = ref.watch(
         groupStandingsProvider(CompRef(competition.orgId, competition.id)),
       );
@@ -1804,13 +2134,31 @@ class _AssignScorersDialogState extends ConsumerState<_AssignScorersDialog> {
   Widget build(BuildContext context) {
     final membersAsync = ref.watch(orgMembersProvider(widget.fixture.orgId));
     final members = membersAsync.valueOrNull ?? const [];
-    // Only roles that carry the scoring capability. Offering a plain member
-    // would let an organizer assign someone the rules will then reject.
-    final eligible = members
-        .where((m) =>
-            m.isActive &&
-            PermissionMatrix.can(m.role, Capability.scoreMatches))
-        .toList();
+    final canPromote = ref
+        .watch(myCapabilitiesProvider(widget.fixture.orgId))
+        .contains(Capability.manageMembers);
+
+    // EVERY active member, not only the ones who already hold a scoring role.
+    //
+    // This list used to be filtered to role-holders, on the reasoning that
+    // offering a plain member would let an organizer assign somebody the
+    // rules then reject. True as far as it went, and it made the common case
+    // a dead end: on a Sunday morning the person willing to score is whoever
+    // turned up, a club that has never appointed a scorer saw "Nobody here
+    // holds the scorer role yet", and the fix was three screens away in the
+    // middle of a match that was about to start.
+    //
+    // Both halves of the grant are made here instead. Anyone without the role
+    // is shown with that fact against their name, and choosing them promotes
+    // them to Judge / Scorer — the club's narrowest role — as part of saving.
+    // An event manager, who may assign but not change roles, is told so
+    // rather than being handed a grant that dies at the database.
+    final eligible = [
+      for (final m in members)
+        if (m.isActive)
+          if (canPromote || PermissionMatrix.can(m.role, Capability.scoreMatches))
+            m,
+    ];
 
     return AlertDialog(
       title: const Text('Who can score this match?'),
@@ -1830,7 +2178,12 @@ class _AssignScorersDialogState extends ConsumerState<_AssignScorersDialog> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('Nobody here holds the scorer role yet.'),
+                  Text(
+                    canPromote
+                        ? 'This club has no active members yet.'
+                        : 'Nobody here holds the scorer role yet, and only a '
+                            'club admin can give it to someone.',
+                  ),
                   const SizedBox(height: 12),
                   PsSecondaryButton(
                     label: 'Open members',
@@ -1856,7 +2209,12 @@ class _AssignScorersDialogState extends ConsumerState<_AssignScorersDialog> {
                         }
                       }),
                       title: Text(m.displayName),
-                      subtitle: Text(m.role.label),
+                      subtitle: Text(
+                        PermissionMatrix.can(m.role, Capability.scoreMatches)
+                            ? m.role.label
+                            : '${m.role.label} — will be made a '
+                                'Judge / Scorer',
+                      ),
                       dense: true,
                     ),
                 ],
@@ -1873,6 +2231,25 @@ class _AssignScorersDialogState extends ConsumerState<_AssignScorersDialog> {
               : () async {
                   setState(() => _busy = true);
                   try {
+                    // The role grants first, and awaited: assigning somebody
+                    // who cannot score is the failure this whole dialog was
+                    // rewritten to stop, so the pen is only handed over once
+                    // the authority behind it exists.
+                    final org = ref.read(orgRepositoryProvider);
+                    for (final m in eligible) {
+                      if (!_selected.contains(m.uid)) continue;
+                      if (PermissionMatrix.can(
+                        m.role,
+                        Capability.scoreMatches,
+                      )) {
+                        continue;
+                      }
+                      await org.changeRole(
+                        orgId: widget.fixture.orgId,
+                        uid: m.uid,
+                        role: MembershipRole.judgeScorer,
+                      );
+                    }
                     await ref
                         .read(competitionRepositoryProvider)
                         .assignScorers(
@@ -2132,5 +2509,33 @@ class _InterClubSquads extends ConsumerWidget {
         fixture: fixtures.first,
       ),
     );
+  }
+}
+
+/// Brings one paused event back.
+///
+/// Refuses out of the repository when the season above it is on hold, so this
+/// does not have to know whether there is a season — the message that comes
+/// back names the season and tells the organizer to resume that instead.
+Future<void> _resumeEvent(
+  BuildContext context,
+  WidgetRef ref,
+  Competition competition,
+) async {
+  final uid = ref.read(currentUidProvider);
+  if (uid == null) return;
+  final messenger = ScaffoldMessenger.of(context);
+  try {
+    await ref.read(competitionRepositoryProvider).resumeCompetition(
+          orgId: competition.orgId,
+          compId: competition.id,
+          byUid: uid,
+        );
+    if (!context.mounted) return;
+    messenger.showSnackBar(
+      const SnackBar(content: Text('Event resumed. Entries are open again.')),
+    );
+  } catch (e) {
+    if (context.mounted) showError(context, e);
   }
 }

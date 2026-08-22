@@ -11,7 +11,7 @@ class CategoryDraftItem {
     required this.sideFormat,
     required this.category,
     this.equipmentType,
-  })  : format = SportCatalog.byId(sportId).competitionFormats.first,
+  })  : format = SportCatalog.byId(sportId).defaultCompetitionFormat,
         entries = TextEditingController();
 
   final String sportId;

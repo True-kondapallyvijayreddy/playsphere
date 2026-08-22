@@ -11,8 +11,11 @@ import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/identity.dart';
+import '../../shared/ui_kit.dart';
 import '../../shared/invite_card.dart';
 import 'widgets/ownership_actions.dart';
+import 'widgets/member_grouping_sheet.dart';
 
 /// Roster and approval queue.
 ///
@@ -72,7 +75,27 @@ class MembersScreen extends ConsumerWidget {
                         ),
                     ],
                     const SizedBox(height: 20),
-                    _SectionTitle('Members (${active.length})'),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _SectionTitle('Members (${active.length})'),
+                        ),
+                        // Sits on the roster rather than inside an event:
+                        // which house a student is in is a fact about the
+                        // club that outlives any one tournament, and entering
+                        // it once is what lets every later event place them
+                        // without asking again.
+                        if (canManage && active.isNotEmpty)
+                          TextButton.icon(
+                            onPressed: () => MemberGroupingSheet.show(
+                              context,
+                              orgId: orgId,
+                            ),
+                            icon: const Icon(Icons.tune, size: 18),
+                            label: const Text('Houses & classes'),
+                          ),
+                      ],
+                    ),
                     for (final m in active)
                       _MemberTile(
                         orgId: orgId,
@@ -153,7 +176,7 @@ class _TeamChipTile extends StatelessWidget {
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
-        leading: CircleAvatar(child: Text(sport.icon)),
+        leading: SportBadge(sportId: sport.id, size: 40),
         title: Text(team.name),
         subtitle: Text('${sport.name} · ${team.memberUids.length} players'),
         trailing: const Icon(Icons.chevron_right),
@@ -205,12 +228,10 @@ class _PendingTile extends ConsumerWidget {
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
-        leading: CircleAvatar(
-          backgroundImage:
-              member.photoUrl != null ? NetworkImage(member.photoUrl!) : null,
-          child: member.photoUrl == null
-              ? Text(member.displayName.characters.first.toUpperCase())
-              : null,
+        leading: PsAvatar(
+          name: member.displayName,
+          photoUrl: member.photoUrl,
+          seed: member.uid,
         ),
         title: Text(member.displayName),
         subtitle: const Text('Wants to join'),
@@ -235,6 +256,10 @@ class _PendingTile extends ConsumerWidget {
     );
   }
 }
+
+/// Menu sentinel, so one `PopupMenuButton` can carry both the role picks and
+/// the grouping edit without inventing an enum for a single extra item.
+const String _kEditGrouping = '__edit_grouping__';
 
 class _MemberTile extends ConsumerWidget {
   const _MemberTile({
@@ -279,12 +304,10 @@ class _MemberTile extends ConsumerWidget {
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
-        leading: CircleAvatar(
-          backgroundImage:
-              member.photoUrl != null ? NetworkImage(member.photoUrl!) : null,
-          child: member.photoUrl == null
-              ? Text(member.displayName.characters.first.toUpperCase())
-              : null,
+        leading: PsAvatar(
+          name: member.displayName,
+          photoUrl: member.photoUrl,
+          seed: member.uid,
         ),
         title: Text(member.displayName + (isSelf ? ' (you)' : '')),
         subtitle: Row(
@@ -292,7 +315,17 @@ class _MemberTile extends ConsumerWidget {
           children: [
             _RoleDot(isOwner: targetIsOwner),
             const SizedBox(width: 6),
-            Text(member.role.label),
+            // The grouping wins the line where there is one. Scanning a
+            // roster to check who still has no house is the actual task, and
+            // "Member" repeated four hundred times does not help with it.
+            Flexible(
+              child: Text(
+                member.grouping.isEmpty
+                    ? member.role.label
+                    : member.grouping.summary,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
           ],
         ),
         trailing: canProposeRemoval || canStepDown
@@ -306,22 +339,35 @@ class _MemberTile extends ConsumerWidget {
                 label: Text(member.role.label),
                 visualDensity: VisualDensity.compact,
               )
-            : PopupMenuButton<MembershipRole>(
-                tooltip: 'Change role',
+            : PopupMenuButton<Object>(
+                tooltip: 'Manage member',
                 icon: const Icon(Icons.more_vert),
                 itemBuilder: (context) => [
+                  const PopupMenuItem(
+                    value: _kEditGrouping,
+                    child: Text('Set house & class'),
+                  ),
+                  const PopupMenuDivider(),
                   for (final r in assignable)
                     PopupMenuItem(
                       value: r,
                       child: Text('Make ${r.label}'),
                     ),
                 ],
-                onSelected: (role) async {
+                onSelected: (choice) async {
+                  if (choice == _kEditGrouping) {
+                    await MemberGroupingSheet.show(
+                      context,
+                      orgId: orgId,
+                      only: member,
+                    );
+                    return;
+                  }
                   try {
                     await ref.read(orgRepositoryProvider).changeRole(
                           orgId: orgId,
                           uid: member.uid,
-                          role: role,
+                          role: choice as MembershipRole,
                         );
                   } catch (e) {
                     if (context.mounted) showError(context, e);

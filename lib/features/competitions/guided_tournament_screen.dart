@@ -4,12 +4,19 @@ import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/models/competition.dart';
+import '../../core/models/draw_config.dart';
 import '../../core/models/enums.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/ui_kit.dart';
 import '../../shared/wizard.dart';
+import 'widgets/daily_hours_field.dart';
+import 'widgets/group_stage_fields.dart';
+import '../tournaments/widgets/venue_selector_dialog.dart'
+    show showQuickAddVenueDialog;
+import '../../domain/tournament/house_roster.dart';
+import 'widgets/house_list_editor.dart';
 
 /// Tournament creation, one decision at a time.
 ///
@@ -42,12 +49,41 @@ class _GuidedTournamentScreenState
   final _shortName = TextEditingController();
   final _venue = TextEditingController();
 
+  final Set<String> _venueIds = {};
+  int _matchMinutes = 30;
+  int _changeoverMinutes = 5;
+  int _restGapMinutes = 20;
+  /// Editable, which they were not — see [DailyHoursField] for what that
+  /// cost every tournament created before this.
+  int _dayStartHour = 9;
+  int _dayEndHour = 19;
+
   SportSpec _sport = SportCatalog.byId('cricket');
   late CompetitionCategory _category = CompetitionCategory.presets().first;
   CompetitionFormat _format = CompetitionFormat.groupThenKnockout;
+
+  /// The shape of the group stage — how many groups, and how many of each go
+  /// through to the knockout.
+  ///
+  /// Asked on the Format step rather than left to "Make the draw", because
+  /// the format chosen there is Groups+Knockout by default and an organizer
+  /// picking it is already thinking about exactly this. Persisted onto the
+  /// competition, so the draw sheet opens on the organizer's own numbers
+  /// instead of the generator's fallback.
+  DrawConfig _draw = const DrawConfig();
+
+  /// [_draw] clamped to what the format and the expected field allow.
+  DrawConfig get _drawToSubmit => GroupStageFields.normalize(
+        format: _format,
+        entrantCount: _maxEntrants,
+        config: _draw,
+      );
   ParticipationModel _participation = ParticipationModel.open;
   TeamEntryMode _teamEntryMode = TeamEntryMode.preformedTeam;
-  final List<String> _presetHouses = ['Red House', 'Blue House', 'Green House', 'Yellow House'];
+  /// Seeded from the school-colours template only because a list has to open
+  /// with something. Editable right here — see [HouseListEditor], and
+  /// [HouseRoster] for why four colours were the wrong thing to hard-code.
+  List<String> _presetHouses = [...HouseTemplates.schoolColours];
 
   DateTime? _startDate;
   DateTime? _endDate;
@@ -115,17 +151,34 @@ class _GuidedTournamentScreenState
                   archetype: _sport.archetype,
                   entrantType: _sport.defaultEntrantType,
                   format: _format,
+                  drawConfig: _drawToSubmit,
                   status: CompetitionStatus.registrationOpen,
                   category: _category,
                   scoringPluginKey: _sport.pluginKey,
                   teamEntryMode: _sport.defaultEntrantType == EntrantType.individual
                       ? TeamEntryMode.individual
                       : _teamEntryMode,
-                  presetHouses: _presetHouses,
+                  // Only the house mode authored these. `_presetHouses`
+                  // holds the school-colour default from the moment the
+                  // wizard opens, and persisting it on a pre-formed-club or
+                  // player-pool event would put four houses nobody chose in
+                  // front of everyone who enters.
+                  presetHouses: _teamEntryMode == TeamEntryMode.houseBatch &&
+                          _sport.defaultEntrantType == EntrantType.team
+                      ? _presetHouses
+                      : const [],
                   venue:
                       _venue.text.trim().isEmpty ? null : _venue.text.trim(),
                   startDate: _startsAt,
                   maxEntrants: _maxEntrants,
+                  scheduleConfig: ScheduleConfig(
+                    venueIds: _venueIds.toList(),
+                    matchMinutes: _matchMinutes,
+                    changeoverMinutes: _changeoverMinutes,
+                    restGapMinutes: _restGapMinutes,
+                    dayStartHour: _dayStartHour,
+                    dayEndHour: _dayEndHour,
+                  ),
                   participationModel: _approvalRequired
                       ? ParticipationModel.approval
                       : _participation,
@@ -160,7 +213,13 @@ class _GuidedTournamentScreenState
         ),
         WizardStep(title: 'Teams', builder: _teamsStep),
         WizardStep(title: 'Format', builder: _formatStep),
-        WizardStep(title: 'Schedule', builder: _scheduleStep),
+        WizardStep(
+          title: 'Schedule',
+          // Same requirement as the season flow, for the same reason: without
+          // a ground there are no courts, and `generateSchedule` refuses.
+          canAdvance: () => _venueIds.isNotEmpty,
+          builder: _scheduleStep,
+        ),
         WizardStep(title: 'Settings', builder: _settingsStep),
         WizardStep(title: 'Review', builder: _reviewStep),
       ],
@@ -255,12 +314,27 @@ class _GuidedTournamentScreenState
                 const SizedBox(height: 8),
                 _ParticipationChoice(
                   label: 'School Houses / Class Batches',
-                  help: 'Students register individually by selecting their House (Red, Blue, Green, Yellow)',
+                  help: _teamEntryMode == TeamEntryMode.houseBatch
+                      ? 'Students register individually by picking one of the '
+                          '${_presetHouses.length} groups below'
+                      : 'Students register individually by picking their house, '
+                          'department, year or section',
                   selected: _teamEntryMode == TeamEntryMode.houseBatch,
                   onTap: () => setState(
                     () => _teamEntryMode = TeamEntryMode.houseBatch,
                   ),
                 ),
+                // Shown only once the mode is chosen: the names are the whole
+                // substance of this mode, and a list of text boxes under an
+                // unselected radio is noise on a phone screen.
+                if (_teamEntryMode == TeamEntryMode.houseBatch)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 10, left: 4, right: 4),
+                    child: HouseListEditor(
+                      initial: _presetHouses,
+                      onChanged: (h) => setState(() => _presetHouses = h),
+                    ),
+                  ),
                 const SizedBox(height: 8),
                 _ParticipationChoice(
                   label: 'Player Pool & Organizer Draft',
@@ -372,63 +446,270 @@ class _GuidedTournamentScreenState
             _formatExplanation(_format),
             style: const TextStyle(fontSize: 12, color: Ps.muted, height: 1.4),
           ),
+          GroupStageFields(
+            format: _format,
+            entrantCount: _maxEntrants,
+            config: _draw,
+            onChanged: (v) => setState(() => _draw = v),
+          ),
         ],
       ),
     );
   }
 
   Widget _scheduleStep(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        PsCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              WizardField(
+                label: 'Start Date',
+                child: _DateField(
+                  value: _startDate,
+                  hint: 'Pick a start date',
+                  onPick: (d) => setState(() {
+                    _startDate = d;
+                    if (_endDate != null && _endDate!.isBefore(d)) _endDate = d;
+                  }),
+                ),
+              ),
+              WizardField(
+                label: 'End Date',
+                child: _DateField(
+                  value: _endDate,
+                  hint: 'Pick an end date',
+                  firstDate: _startDate,
+                  onPick: (d) => setState(() => _endDate = d),
+                ),
+              ),
+              WizardField(
+                label: 'Match Start Time',
+                child: InkWell(
+                  onTap: () async {
+                    final picked = await showTimePicker(
+                      context: context,
+                      initialTime: _startTime,
+                    );
+                    if (picked != null) setState(() => _startTime = picked);
+                  },
+                  borderRadius: BorderRadius.circular(Ps.radiusSm),
+                  child: _FakeField(text: _startTime.format(context)),
+                ),
+              ),
+              WizardField(
+                label: 'Venue',
+                child: TextField(
+                  controller: _venue,
+                  decoration: _input('Green Field Ground'),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        _venuePicker(context),
+        const SizedBox(height: 12),
+        PsCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                'Match Timings & Operating Hours',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: Ps.ink,
+                ),
+              ),
+              const SizedBox(height: 2),
+              const Text(
+                'Configure standard match durations, court changeover gaps, and venue daily operating hours.',
+                style: TextStyle(fontSize: 12, color: Ps.muted, height: 1.4),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: WizardField(
+                      label: 'Match Duration',
+                      child: _TimingStepper(
+                        value: _matchMinutes,
+                        unit: 'min',
+                        min: 5,
+                        max: 240,
+                        step: 5,
+                        onChanged: (v) => setState(() => _matchMinutes = v),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: WizardField(
+                      label: 'Changeover',
+                      child: _TimingStepper(
+                        value: _changeoverMinutes,
+                        unit: 'min',
+                        min: 0,
+                        max: 30,
+                        step: 5,
+                        onChanged: (v) => setState(() => _changeoverMinutes = v),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: WizardField(
+                      label: 'Min Rest Gap',
+                      child: _TimingStepper(
+                        value: _restGapMinutes,
+                        unit: 'min',
+                        min: 0,
+                        max: 120,
+                        step: 5,
+                        onChanged: (v) => setState(() => _restGapMinutes = v),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: WizardField(
+                      label: 'Daily Hours',
+                      child: DailyHoursField(
+                        startHour: _dayStartHour,
+                        endHour: _dayEndHour,
+                        onChanged: (start, end) => setState(() {
+                          _dayStartHour = start;
+                          _dayEndHour = end;
+                        }),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _venuePicker(BuildContext context) {
+    final venuesAsync = ref.watch(venuesProvider(widget.orgId));
+
     return PsCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          WizardField(
-            label: 'Start Date',
-            child: _DateField(
-              value: _startDate,
-              hint: 'Pick a start date',
-              onPick: (d) => setState(() {
-                _startDate = d;
-                // Keep the end on or after the start rather than validating
-                // afterwards: an impossible range is easier to prevent than
-                // to explain.
-                if (_endDate != null && _endDate!.isBefore(d)) _endDate = d;
-              }),
+          const Text(
+            'Grounds & Courts',
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w700,
+              color: Ps.ink,
             ),
           ),
-          WizardField(
-            label: 'End Date',
-            child: _DateField(
-              value: _endDate,
-              hint: 'Pick an end date',
-              firstDate: _startDate,
-              onPick: (d) => setState(() => _endDate = d),
-            ),
+          const SizedBox(height: 2),
+          const Text(
+            'Pick every ground this tournament may use. Matches are spread across '
+            'their courts when the schedule is generated.',
+            style: TextStyle(fontSize: 12, color: Ps.muted, height: 1.4),
           ),
-          WizardField(
-            label: 'Match Start Time',
-            child: InkWell(
-              onTap: () async {
-                final picked = await showTimePicker(
-                  context: context,
-                  initialTime: _startTime,
+          const SizedBox(height: 12),
+          venuesAsync.when(
+            loading: () => const Padding(
+              padding: EdgeInsets.symmetric(vertical: 12),
+              child: Center(
+                child: SizedBox(
+                  height: 20,
+                  width: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+            ),
+            error: (e, _) => Text(
+              'Could not load your venues: $e',
+              style: const TextStyle(fontSize: 12, color: Ps.muted),
+            ),
+            data: (venues) {
+              final usable = [
+                for (final v in venues)
+                  if (!v.isArchived) v,
+              ];
+              if (usable.isEmpty) {
+                return const Text(
+                  'No grounds saved yet. Add one below — a tournament with no '
+                  'courts cannot be scheduled.',
+                  style: TextStyle(fontSize: 12, color: Ps.muted, height: 1.4),
                 );
-                if (picked != null) setState(() => _startTime = picked);
-              },
-              borderRadius: BorderRadius.circular(Ps.radiusSm),
-              child: _FakeField(text: _startTime.format(context)),
-            ),
+              }
+              return Column(
+                children: [
+                  for (final v in usable)
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      controlAffinity: ListTileControlAffinity.leading,
+                      value: _venueIds.contains(v.id),
+                      title: Text(
+                        v.name,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: Ps.ink,
+                        ),
+                      ),
+                      subtitle: Text(
+                        '${v.usableCourts.length} usable '
+                        '${v.usableCourts.length == 1 ? "court" : "courts"}'
+                        '${v.address == null ? "" : " · ${v.address}"}',
+                        style: const TextStyle(fontSize: 12, color: Ps.muted),
+                      ),
+                      onChanged: (on) => setState(() {
+                        if (on ?? false) {
+                          _venueIds.add(v.id);
+                        } else {
+                          _venueIds.remove(v.id);
+                        }
+                      }),
+                    ),
+                ],
+              );
+            },
           ),
-          WizardField(
-            label: 'Venue',
-            child: TextField(
-              controller: _venue,
-              decoration: _input('Green Field Ground'),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: _addVenue,
+            icon: const Icon(Icons.add_location_alt_outlined, size: 18),
+            label: const Text('Add a ground & its courts'),
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 12),
             ),
           ),
         ],
       ),
     );
+  }
+
+  Future<void> _addVenue() async {
+    final draft = await showQuickAddVenueDialog(context, orgId: widget.orgId);
+    if (draft == null || !mounted) return;
+    try {
+      final id = await ref.read(tournamentRepositoryProvider).createVenue(draft);
+      if (!mounted) return;
+      setState(() => _venueIds.add(id));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not save that ground: $e')),
+      );
+    }
   }
 
   Widget _settingsStep(BuildContext context) {
@@ -498,6 +779,15 @@ class _GuidedTournamentScreenState
               WizardReviewRow(label: 'Sport', value: _sport.name),
               WizardReviewRow(label: 'Category', value: _category.label),
               WizardReviewRow(label: 'Format', value: _format.label),
+              if (GroupStageFields.isGrouped(_format, _draw))
+                WizardReviewRow(
+                  label: 'Groups',
+                  value: GroupStageFields.summary(
+                    format: _format,
+                    entrantCount: _maxEntrants,
+                    config: _draw,
+                  ),
+                ),
               WizardReviewRow(
                 label: _sport.defaultEntrantType == EntrantType.team
                     ? 'Maximum teams'
@@ -817,6 +1107,58 @@ class _FakeField extends StatelessWidget {
             ),
           ),
           Icon(icon, size: 18, color: Ps.faint),
+        ],
+      ),
+    );
+  }
+}
+
+class _TimingStepper extends StatelessWidget {
+  const _TimingStepper({
+    required this.value,
+    required this.unit,
+    required this.min,
+    required this.max,
+    required this.step,
+    required this.onChanged,
+  });
+
+  final int value;
+  final String unit;
+  final int min;
+  final int max;
+  final int step;
+  final ValueChanged<int> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Ps.surface,
+        borderRadius: BorderRadius.circular(Ps.radiusSm),
+        border: Border.all(color: Ps.border),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          IconButton(
+            icon: const Icon(Icons.remove, size: 16),
+            onPressed: value > min ? () => onChanged(value - step) : null,
+            visualDensity: VisualDensity.compact,
+          ),
+          Text(
+            '$value $unit',
+            style: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: Ps.ink,
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.add, size: 16),
+            onPressed: value < max ? () => onChanged(value + step) : null,
+            visualDensity: VisualDensity.compact,
+          ),
         ],
       ),
     );

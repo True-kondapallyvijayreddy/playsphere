@@ -7,6 +7,7 @@ import '../../core/models/ranking_entry.dart';
 import '../../core/providers.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/identity.dart';
 import '../../shared/ui_kit.dart';
 
 /// Which ladder the screen is showing.
@@ -384,7 +385,12 @@ class _RankingRowTile extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
-          _Avatar(name: row.displayName),
+          // Still no network image, for the reason this row always had:
+          // `RankingEntry` carries no `photoUrl`, and fetching one picture per
+          // visible row would put a hundred requests behind a table that
+          // scrolls. Passing no `photoUrl` keeps that property exactly, while
+          // the monogram now matches the one this player has everywhere else.
+          PsAvatar(name: row.displayName, seed: row.uid, size: 28),
           const SizedBox(width: 10),
           Expanded(
             child: Text(
@@ -453,7 +459,7 @@ class _YourRankBar extends StatelessWidget {
                 ),
               ),
             ),
-            _Avatar(name: row.displayName),
+            PsAvatar(name: row.displayName, seed: row.uid, size: 28),
             const SizedBox(width: 10),
             Expanded(
               child: Column(
@@ -485,39 +491,6 @@ class _YourRankBar extends StatelessWidget {
               ),
             ),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-/// An initial in a tinted circle.
-///
-/// Not a network image. Ranking entries carry a display name and no photo —
-/// `RankingEntry` has no `photoUrl` — and fetching one profile picture per
-/// visible row would put a hundred image requests behind a table that scrolls.
-class _Avatar extends StatelessWidget {
-  const _Avatar({required this.name});
-
-  final String name;
-
-  @override
-  Widget build(BuildContext context) {
-    final initial = name.trim().isEmpty ? '?' : name.trim()[0].toUpperCase();
-    return Container(
-      width: 28,
-      height: 28,
-      alignment: Alignment.center,
-      decoration: const BoxDecoration(
-        color: Ps.canvas,
-        shape: BoxShape.circle,
-      ),
-      child: Text(
-        initial,
-        style: const TextStyle(
-          fontSize: 12,
-          fontWeight: FontWeight.w700,
-          color: Ps.muted,
         ),
       ),
     );
@@ -773,7 +746,12 @@ class _ClubRowTile extends StatelessWidget {
           Expanded(
             child: Row(
               children: [
-                _ClubCrest(name: club.name, logoUrl: club.logoUrl),
+                PsCrest(
+                  name: club.name,
+                  logoUrl: club.logoUrl,
+                  seed: club.clubId,
+                  size: 30,
+                ),
                 const SizedBox(width: 10),
                 Flexible(
                   child: Column(
@@ -825,68 +803,6 @@ class _ClubRowTile extends StatelessWidget {
             ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-/// A club's logo, or its initials when it has none.
-class _ClubCrest extends StatelessWidget {
-  const _ClubCrest({required this.name, this.logoUrl});
-
-  final String name;
-  final String? logoUrl;
-
-  @override
-  Widget build(BuildContext context) {
-    if (logoUrl != null && logoUrl!.isNotEmpty) {
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(6),
-        child: Image.network(
-          logoUrl!,
-          width: 26,
-          height: 26,
-          fit: BoxFit.cover,
-          // A broken logo must not take the ladder row down with it.
-          errorBuilder: (_, __, ___) => _InitialsCrest(name: name),
-        ),
-      );
-    }
-    return _InitialsCrest(name: name);
-  }
-}
-
-class _InitialsCrest extends StatelessWidget {
-  const _InitialsCrest({required this.name});
-
-  final String name;
-
-  @override
-  Widget build(BuildContext context) {
-    final initials = name.trim().isEmpty
-        ? '?'
-        : name
-            .trim()
-            .split(RegExp(r'\s+'))
-            .take(2)
-            .map((w) => w[0].toUpperCase())
-            .join();
-    return Container(
-      width: 26,
-      height: 26,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        color: Ps.canvas,
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: Ps.border),
-      ),
-      child: Text(
-        initials,
-        style: const TextStyle(
-          fontSize: 10,
-          fontWeight: FontWeight.w800,
-          color: Ps.muted,
-        ),
       ),
     );
   }

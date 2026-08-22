@@ -284,12 +284,12 @@ class _Results extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final results =
-        ref.watch(groundSearchProvider(GroundQuery(city: city)));
+        ref.watch(groundSearchProvider(GroundQuery(keywords: city)));
 
     return AsyncView(
       value: results,
       onRetry: () =>
-          ref.invalidate(groundSearchProvider(GroundQuery(city: city))),
+          ref.invalidate(groundSearchProvider(GroundQuery(keywords: city))),
       builder: (grounds) {
         if (grounds.isEmpty) {
           return Padding(

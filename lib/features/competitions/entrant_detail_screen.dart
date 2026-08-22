@@ -4,13 +4,13 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/layout/responsive.dart';
 import '../../core/models/competition.dart';
-import '../../core/models/enums.dart';
 import '../../core/models/fixture.dart';
 import '../../core/models/organization.dart';
 import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/identity.dart';
 import '../scoring/widgets/live_score_card.dart';
 
 /// One entrant's page inside a competition — what tapping a name on a match,
@@ -132,7 +132,7 @@ class _TeamEntrantView extends ConsumerWidget {
     // else has at most one table.
     Standing? standing;
     String? groupLabel;
-    if (competition?.format == CompetitionFormat.groupThenKnockout) {
+    if (competition?.hasGroupStage ?? false) {
       final groups =
           ref.watch(groupStandingsProvider(key)).valueOrNull ?? const {};
       for (final e in groups.entries) {
@@ -258,12 +258,10 @@ class _RosterTile extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 6),
       child: ListTile(
         dense: true,
-        leading: CircleAvatar(
-          backgroundImage:
-              member?.photoUrl != null ? NetworkImage(member!.photoUrl!) : null,
-          child: member?.photoUrl == null
-              ? Text(name.characters.first.toUpperCase())
-              : null,
+        leading: PsAvatar(
+          name: name,
+          photoUrl: member?.photoUrl,
+          seed: member?.uid,
         ),
         title: Text(name),
         trailing: const Icon(Icons.chevron_right),

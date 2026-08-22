@@ -8,6 +8,7 @@ import '../../core/router/app_router.dart';
 import '../../data/career_repository.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/identity.dart';
 
 /// Every club a player has represented, each opening that club's page.
 ///
@@ -106,12 +107,11 @@ class _ClubRow extends ConsumerWidget {
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
-        leading: CircleAvatar(
-          backgroundImage:
-              org?.logoUrl != null ? NetworkImage(org!.logoUrl!) : null,
-          child: org?.logoUrl == null
-              ? Icon(Icons.shield_outlined, color: theme.hintColor)
-              : null,
+        leading: PsCrest(
+          name: org?.name ?? 'Club',
+          logoUrl: org?.logoUrl,
+          seed: orgId,
+          size: 40,
         ),
         title: Text(org?.name ?? 'Club'),
         subtitle: Text(

@@ -11,7 +11,6 @@ import 'package:playsphere/core/models/enums.dart';
 import 'package:playsphere/core/models/fixture.dart';
 import 'package:playsphere/core/models/organization.dart';
 import 'package:playsphere/core/models/scoring_request.dart';
-import 'package:playsphere/core/layout/responsive.dart';
 import 'package:playsphere/core/notifications/notification_model.dart';
 import 'package:playsphere/core/permissions/capability.dart';
 import 'package:playsphere/core/providers.dart';
@@ -130,6 +129,16 @@ void main() {
           '/org/:orgId/live',
           '/live',
           '/events/mine',
+          // The dashboard's own doors: the sport directory behind "Explore
+          // sport", the RSVP page the RSVP counter opens, and the career
+          // profile the Explore list links to.
+          '/sports',
+          '/rsvp',
+          '/player/:uid',
+          '/scout/search',
+          '/grounds',
+          '/events',
+          '/sponsor',
         ])
           GoRoute(
             path: path,
@@ -207,7 +216,7 @@ void main() {
   /// "is it merely below the fold?" are the same result — which is how the
   /// menu tests came to be passing against the dashboard's Explore grid
   /// instead of against the menu.
-  const drawerView = Size(420, 1600);
+  const drawerView = Size(420, 2200);
 
   Future<void> openMenu(WidgetTester tester) async {
     await tester.tap(find.byTooltip('Open navigation menu'));
@@ -255,8 +264,8 @@ void main() {
   }
 
   testWidgets(
-      'shows the date, no name salutation, and lists every club they '
-      'belong to', (tester) async {
+      'shows the date and the claim, and carries counts rather than lists',
+      (tester) async {
     await pump(
       tester,
       harness(
@@ -270,11 +279,18 @@ void main() {
     expect(tester.takeException(), isNull);
     // Deliberately no "Good morning/evening, Ravi" salutation — it used to
     // be the single largest thing on the dashboard for a fact the member
-    // already knows. See _Greeting's doc comment.
+    // already knows.
     expect(find.textContaining('Ravi'), findsNothing);
     expect(find.textContaining('Good '), findsNothing);
-    expect(find.text('Nizampet High School'), findsOneWidget);
-    expect(find.text('Kompally Sports Academy'), findsOneWidget);
+    expect(find.text('ALL SPORTS. ONE OS.'), findsOneWidget);
+
+    // The dashboard holds COUNTS, not lists. Two clubs produce a "2" on the
+    // Clubs tile and no club cards at all — the list belongs on /orgs, where
+    // it has room to be complete. This is the whole shape of the screen and
+    // the reason it fits above the fold.
+    expect(find.text('Clubs'), findsOneWidget);
+    expect(find.text('Nizampet High School'), findsNothing);
+    expect(find.text('Kompally Sports Academy'), findsNothing);
 
     // The brand and the account button are the two fixed points of the shell.
     // The wordmark is a two-span rich text so "Play" and "Sphere" can be
@@ -285,7 +301,8 @@ void main() {
     expect(find.byTooltip('You and your clubs'), findsOneWidget);
   });
 
-  testWidgets('surfaces a live match from any of the clubs', (tester) async {
+  testWidgets('counts a live match rather than drawing its scorecard',
+      (tester) async {
     await pump(
       tester,
       harness(
@@ -295,33 +312,26 @@ void main() {
     );
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Blue House'), findsOneWidget);
-    expect(find.text('Red House'), findsOneWidget);
-    expect(find.text('1 LIVE'), findsOneWidget);
-    expect(find.textContaining('being played right now'), findsWidgets);
+    // The scorecard itself lives on /live. What belongs here is the fact
+    // that there IS one, which is a number and a dot.
+    expect(find.text('Live'), findsOneWidget);
+    expect(find.text('in progress'), findsOneWidget);
     expect(find.byType(LiveDot), findsWidgets);
+    expect(find.text('Blue House'), findsNothing);
   });
 
-  testWidgets('tells a member with no club what to do about it',
+  testWidgets('a member with no club still gets a usable dashboard',
       (tester) async {
     await pump(tester, harness(memberships: const []));
 
     expect(tester.takeException(), isNull);
-    expect(find.text('You are not in a club yet'), findsOneWidget);
-    expect(find.text('Join with a code'), findsOneWidget);
-    // Scoped to the card: "Create a club" is also a standing quick-action
-    // chip, so an unscoped finder matches twice and says nothing about
-    // whether the card that explains the situation is on screen.
-    expect(
-      find.descendant(
-        of: find.ancestor(
-          of: find.text('You are not in a club yet'),
-          matching: find.byType(Card),
-        ),
-        matching: find.text('Create a club'),
-      ),
-      findsOneWidget,
-    );
+    // The "You are not in a club yet" card is gone with the rest of the
+    // lists. What replaces it is not an explanation but a way in: the two
+    // primary actions are on screen whether or not this person has a club,
+    // and Explore is the one that works without one.
+    expect(find.text('Explore sport'), findsOneWidget);
+    expect(find.text('Play sport'), findsOneWidget);
+    expect(find.text('Clubs'), findsOneWidget);
   });
 
   testWidgets('the three-lines menu carries the modules that are not on the bar',
@@ -334,14 +344,14 @@ void main() {
 
     await openMenu(tester);
 
-    expect(inDrawer('Rules library'), findsOneWidget);
     expect(inDrawer('Looking for'), findsOneWidget);
+    expect(inDrawer('Coaches'), findsOneWidget);
     expect(inDrawer('Umpire & scorer registry'), findsOneWidget);
+    expect(inDrawer('Rules library'), findsOneWidget);
     // An event manager holds viewAnalytics, so it is offered — below the fold
     // now that the drawer carries rankings, tournaments and venues too.
     await scrollToInDrawer(tester, 'Analytics');
     expect(inDrawer('Analytics'), findsOneWidget);
-    expect(find.text('Kompally Sports Academy'), findsWidgets);
   });
 
   testWidgets('a member without analytics rights is not offered analytics',
@@ -366,29 +376,26 @@ void main() {
   // The counters and the Explore tiles: small, and each one a door.
   // -------------------------------------------------------------------------
 
-  /// The card a given label sits in — how these tests measure a tile without
-  /// reaching for a private widget type.
-  Finder cardAround(String label) => find.ancestor(
-        of: find.text(label),
-        matching: find.byType(Card),
-      );
-
-  /// The counter tile with this label, as opposed to any other place the same
-  /// words appear on the page.
+  /// The tappable tile a given label sits in — how these tests measure and
+  /// tap a tile without reaching for a private widget type.
   ///
-  /// "Live now" is both a counter and the heading over the live ticker that
-  /// sits above it, so a bare `find.text` matches two widgets and `.first`
-  /// silently picks the heading. Scoping to the grid names the one we mean.
-  Finder statTile(String label) => find.descendant(
-        of: find.byType(AdaptiveGrid),
-        matching: find.text(label),
-      );
+  /// Every counter and every Explore row is an `InkWell`, so this is the same
+  /// helper for both. It was a `Card` ancestor scoped to an `AdaptiveGrid`
+  /// when the dashboard was a grid of cards; neither is on the screen any
+  /// more, which is why every test using it had gone stale.
+  Finder tileAround(String label) => find
+      .ancestor(of: find.text(label), matching: find.byType(InkWell))
+      .first;
+
+  /// The counter tile with this label.
+  ///
+  /// A bare `find.text` is enough now: the dashboard holds counts rather than
+  /// lists, so no heading duplicates a counter's label. The scoped version
+  /// existed because "Live now" was both a counter and the heading over a
+  /// live ticker that no longer exists.
+  Finder statTile(String label) => find.text(label);
 
   /// Taps a counter, scrolling it into view first.
-  ///
-  /// The counters sit below the live ticker and the "Play match now" button
-  /// since those moved to the top, which puts them off a 900px test viewport
-  /// on a page with any content on it at all.
   Future<void> tapStatTile(WidgetTester tester, String label) async {
     final tile = statTile(label);
     await tester.ensureVisible(tile);
@@ -423,7 +430,7 @@ void main() {
       ),
     );
 
-    await tapStatTile(tester, 'Live now');
+    await tapStatTile(tester, 'Live');
     await settle(tester);
     expect(find.text('AT /live'), findsOneWidget);
   });
@@ -432,8 +439,12 @@ void main() {
   // clubs, events and the rest of the dashboard off several screens' worth
   // of scrolling. The preview stops at three; everything past that is one
   // tap away on the cross-club hub rather than simply missing.
-  testWidgets('caps the live preview at three and offers the rest via More',
-      (tester) async {
+  // A member with a lot going on at once must not have live scorecards push
+  // the rest of the dashboard off several screens' worth of scrolling. The
+  // dashboard holds the COUNT; the matches themselves are one tap away on the
+  // cross-club hub. This used to be a three-card preview with a "More" link,
+  // which is the shape that made the screen two and a half screenfuls long.
+  testWidgets('five live matches are a count, not five cards', (tester) async {
     final live = [
       for (var i = 0; i < 5; i++)
         Fixture(
@@ -457,36 +468,30 @@ void main() {
     );
     await settle(tester);
 
-    expect(find.text('Team A0'), findsOneWidget);
-    expect(find.text('Team A1'), findsOneWidget);
-    expect(find.text('Team A2'), findsOneWidget);
-    expect(find.text('Team A3'), findsNothing);
-    expect(find.text('Team A4'), findsNothing);
-
-    final more = find.text('More · 2 more live');
-    expect(more, findsOneWidget);
-    // Scrolled into view before tapping. The redesigned banner and the search
-    // field above it are ~110pt taller than what this test was written
-    // against, which puts this button just below an 800x600 test viewport
-    // once three live cards are stacked above it. Tapping an off-screen
-    // widget lands on whatever occupies those coordinates instead, so the
-    // failure reads as "navigation did not happen" and hides the real cause.
-    await tester.ensureVisible(more);
-    await settle(tester);
-    await tester.tap(more);
-    await settle(tester);
-    expect(find.text('AT /live'), findsOneWidget);
+    // Not one entrant name anywhere. The scorecards live on /live.
+    for (var i = 0; i < 5; i++) {
+      expect(find.text('Team A$i'), findsNothing);
+    }
+    // Scoped to the tile. The bottom bar's "Live now" item carries the same
+    // number as its own badge, which is correct and not what this is about.
+    expect(
+      find.descendant(of: tileAround('Live'), matching: find.text('5')),
+      findsOneWidget,
+    );
+    expect(find.text('in progress'), findsOneWidget);
+    // No "More" link under a preview list, because there is no preview list.
+    // Scoped to the dashboard itself: the bottom bar has a "More" tab, which
+    // is the module menu and not what this is guarding.
+    expect(
+      find.descendant(
+        of: find.byType(ListView).first,
+        matching: find.textContaining('More'),
+      ),
+      findsNothing,
+    );
   });
 
-  // Only registration-open events belong on the dashboard — a scheduled or
-  // already-running event is not something a member can act on today, and
-  // clutters the one section meant to answer "what can I enter right now".
-  // Six clubs' open entry windows must not push the rest of the dashboard
-  // down several screens either, so the preview caps at five with the same
-  // "More" pattern as Live now.
-  testWidgets(
-      'shows only open-for-entry events, caps the preview at five, and '
-      'offers the rest via More', (tester) async {
+  testWidgets('counts only the events that are open for entry', (tester) async {
     Competition comp(String id, CompetitionStatus status) => Competition(
           id: id,
           orgId: orgA,
@@ -502,7 +507,8 @@ void main() {
         );
 
     final competitions = [
-      for (var i = 0; i < 6; i++) comp('open$i', CompetitionStatus.registrationOpen),
+      for (var i = 0; i < 6; i++)
+        comp('open$i', CompetitionStatus.registrationOpen),
       comp('running', CompetitionStatus.inProgress),
       comp('later', CompetitionStatus.scheduled),
     ];
@@ -516,25 +522,14 @@ void main() {
     );
     await settle(tester);
 
-    // Only open-for-entry events show — the running and scheduled ones do
-    // not belong on the dashboard at all.
+    // No event names at all — the list belongs on /events/mine. What is here
+    // is the six that are open, and not the running or scheduled ones.
+    expect(find.textContaining('Event open'), findsNothing);
     expect(find.text('Event running'), findsNothing);
     expect(find.text('Event later'), findsNothing);
-    for (var i = 0; i < 5; i++) {
-      expect(find.text('Event open$i'), findsOneWidget);
-    }
-    expect(find.text('Event open5'), findsNothing);
+    expect(find.text('6'), findsOneWidget);
 
-    final more = find.text('More · 1 more open');
-    expect(more, findsOneWidget);
-    await tester.scrollUntilVisible(
-      more,
-      200,
-      scrollable: find.byType(Scrollable).first,
-    );
-    await tester.ensureVisible(more);
-    await settle(tester);
-    await tester.tap(more);
+    await tapStatTile(tester, 'Events');
     await settle(tester);
     expect(find.text('AT /events/mine'), findsOneWidget);
   });
@@ -580,7 +575,10 @@ void main() {
     await tapStatTile(tester, 'Events');
     await settle(tester);
 
-    expect(find.textContaining('AT '), findsNothing);
+    // `'AT /'` and not `'AT '`: the hero renders the date in caps, so on any
+    // Saturday "SAT 22 AUG" matched the looser probe and this test failed
+    // once a week for reasons that had nothing to do with routing.
+    expect(find.textContaining('AT /'), findsNothing);
     expect(find.text('Events'), findsOneWidget);
   });
 
@@ -594,12 +592,23 @@ void main() {
     // width:height ratio, so dropping to one column on a phone made each
     // Explore tile 162px tall and the counters ran to three rows. Heights
     // here are the fixed extents, not ratios, so they hold at every width.
-    expect(tester.getSize(cardAround('Clubs')).height, lessThanOrEqualTo(84));
+    expect(tester.getSize(tileAround('Clubs')).height, lessThanOrEqualTo(96));
+
+    // Three across on a phone, so six counters are two rows rather than six.
+    // Measured off the tile rather than asserted as a column count, because
+    // the width is what a wrapped fourth tile would give away.
+    final grid = tester.getSize(
+      find.ancestor(of: find.text('Clubs'), matching: find.byType(Wrap)).first,
+    );
     expect(
-      // Was 'Rules library', which has since moved off the dashboard into the
-      // module menu (Bug #7). Any Explore tile proves the same fixed extent.
-      tester.getSize(cardAround('Career profile')).height,
-      lessThanOrEqualTo(70),
+      tester.getSize(tileAround('Clubs')).width,
+      lessThan(grid.width / 2),
+    );
+
+    // An Explore row is a ListTile, not a 162px card.
+    expect(
+      tester.getSize(tileAround('Career profile')).height,
+      lessThanOrEqualTo(80),
     );
   });
 
@@ -764,9 +773,15 @@ void main() {
         ),
       );
 
-      // The match at the club that DID load is on screen.
-      expect(find.text('Blue House'), findsWidgets);
+      // The match at the club that DID load is still counted. The dashboard
+      // holds counts rather than cards now, so what proves the other club
+      // survived is the number — one live match, not a dash.
+      expect(
+        find.descendant(of: tileAround('Live'), matching: find.text('1')),
+        findsOneWidget,
+      );
       expect(find.text('Could not load live matches'), findsNothing);
+      expect(find.text('—'), findsNothing);
     });
 
     testWidgets('is reported rather than silently dropped', (tester) async {
@@ -786,10 +801,11 @@ void main() {
       // a club would tell a player nothing is on at the ground they are
       // standing in, which is the failure the strict combiner existed to
       // prevent — so the notice has to be there too.
-      expect(
-        find.text('One club’s matches could not be loaded'),
-        findsOneWidget,
-      );
+      //
+      // The notice used to be a full-width banner under a list of live
+      // cards. Both are gone, so it is now the tile's own detail line —
+      // same promise, one line instead of a section.
+      expect(find.text('1 club unavailable'), findsOneWidget);
     });
 
     testWidgets('every club failing still reports an error', (tester) async {
@@ -801,8 +817,17 @@ void main() {
         ),
       );
 
-      // Nothing loaded at all, so an empty state would be a lie.
-      expect(find.text('Could not load live matches'), findsOneWidget);
+      // Nothing loaded at all, so a zero would be a lie — the tile draws an
+      // em dash and says why. See `HomeCount.unknown`.
+      expect(
+        find.descendant(of: tileAround('Live'), matching: find.text('—')),
+        findsOneWidget,
+      );
+      expect(find.text('could not load'), findsOneWidget);
+      expect(
+        find.descendant(of: tileAround('Live'), matching: find.text('0')),
+        findsNothing,
+      );
     });
   });
 
@@ -815,6 +840,13 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.byType(NavigationRail), findsOneWidget);
-    expect(find.text('Nizampet High School'), findsWidgets);
+    // The club is a count here, not a name — the dashboard reads the same at
+    // 1400pt as on a phone, which is the point of the rail test. The club's
+    // name belongs to `/orgs`, one tap away through this tile.
+    expect(find.text('Clubs'), findsOneWidget);
+    expect(
+      find.descendant(of: tileAround('Clubs'), matching: find.text('1')),
+      findsOneWidget,
+    );
   });
 }

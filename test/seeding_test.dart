@@ -10,6 +10,7 @@ import 'package:playsphere/domain/rating/glicko2.dart';
 /// `Random(42)` when nobody had one, so an unseeded 38-player draw was a
 /// raffle — while Glicko-2 sat computed and ignored in the next folder.
 void main() {
+  _teamRatingTests();
   const policy = SeedingPolicy();
 
   Entrant player(String id, {int? seed, String? club}) => Entrant(
@@ -340,6 +341,94 @@ void main() {
         ],
       };
       expect(named.length, 8, reason: 'nobody may be lost or duplicated');
+    });
+  });
+}
+
+/// A team had no rating at all, so every team event drew its bracket from
+/// `Random(42)` while Glicko-2 sat computed for every individual in it.
+/// See `combineTeamRating`.
+void _teamRatingTests() {
+  Rating rated(double r, {int games = 20, double rd = 60}) => Rating(
+        rating: r,
+        deviation: rd,
+        volatility: 0.06,
+        gamesPlayed: games,
+      );
+
+  group('combineTeamRating', () {
+    test('a side with nobody rated has no rating, not a default one', () {
+      final combined = combineTeamRating([
+        const Rating(),
+        const Rating(),
+        const Rating(),
+      ]);
+      expect(combined, isNull);
+    });
+
+    test('rating is the mean of the members who have played', () {
+      final combined = combineTeamRating([
+        rated(1600),
+        rated(1400),
+        // Unrated: excluded from the mean rather than dragging it to 1500.
+        const Rating(),
+      ]);
+      expect(combined!.rating, closeTo(1500, 0.001));
+    });
+
+    test('deviation does not shrink with squad size', () {
+      // Eleven separate admissions that we know nothing must not add up to
+      // confidence. The standard-error formula would return ~105 here, which
+      // `SeedingPolicy` would read as settled enough to seed on.
+      final combined = combineTeamRating([
+        for (var i = 0; i < 11; i++) rated(1500, rd: 300, games: 8),
+      ]);
+      expect(combined!.deviation, closeTo(300, 0.001));
+      expect(
+        const SeedingPolicy().assign(
+          entrants: [
+            const Entrant(
+              id: 'team',
+              displayName: 'Team',
+              entrantType: EntrantType.team,
+              memberUids: ['a'],
+            ),
+          ],
+          ratings: {'team': combined},
+        ).seededCount,
+        0,
+      );
+    });
+
+    test('games played is the median, so one veteran cannot carry ten '
+        'debutants', () {
+      final combined = combineTeamRating([
+        rated(1800, games: 60),
+        for (var i = 0; i < 10; i++) const Rating(),
+      ]);
+      expect(combined!.gamesPlayed, 0);
+    });
+
+    test('a squad of established players is seedable', () {
+      final combined = combineTeamRating([
+        rated(1700, games: 30, rd: 55),
+        rated(1650, games: 25, rd: 65),
+        rated(1690, games: 40, rd: 50),
+      ]);
+      expect(combined!.gamesPlayed, 30);
+      expect(combined.deviation, lessThan(150));
+      expect(combined.rating, closeTo(1680, 1));
+    });
+
+    test('one debutant does not sink a settled side', () {
+      final combined = combineTeamRating([
+        rated(1700, games: 30),
+        rated(1650, games: 25),
+        rated(1690, games: 40),
+        const Rating(),
+      ]);
+      // Median of [0, 25, 30, 40] — still evidence enough to seed on.
+      expect(combined!.gamesPlayed, greaterThanOrEqualTo(5));
     });
   });
 }

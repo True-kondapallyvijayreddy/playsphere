@@ -128,6 +128,68 @@ class Ground {
   /// documents to a `where` clause unless one canonical form is stored.
   String get cityKey => city.trim().toLowerCase();
 
+  /// Every word this ground should be findable by, lowercased and
+  /// deduplicated — its name, its locality, its city and district, and its
+  /// sports.
+  ///
+  /// ## Why a token array and not "search by city"
+  ///
+  /// The search this replaced took a city and nothing else, so the only
+  /// findable ground was one whose city you had already typed correctly. That
+  /// is not how anybody looks for a pitch. They know a name ("Sunrise Turf"),
+  /// or an area ("Gachibowli"), or just the sport, and a search that answers
+  /// none of those sends them back to WhatsApp.
+  ///
+  /// Firestore has no full-text search, so the words have to be on the
+  /// document to be queryable at all. One `array-contains` on the rarest word
+  /// typed narrows the read, and the rest of the words are checked in Dart
+  /// against that small set — which is what makes "turf gachibowli cricket"
+  /// a single indexed query rather than three.
+  ///
+  /// ## Why the sport ids come apart into words
+  ///
+  /// `table_tennis` becomes `table` and `tennis`, so somebody typing either
+  /// word finds the hall and somebody typing "table tennis" finds it by both.
+  /// Nobody types an underscore, so the joined form is not kept. Splitting
+  /// here rather than importing the sport catalog keeps this model free of a
+  /// dependency on the scoring layer — a sport's display name is its id
+  /// prettified, which is exactly what this produces.
+  ///
+  /// Matching is on whole words, in the query and in the refinement alike —
+  /// see `GroundRepository.searchGrounds`. Half a word matches nothing, which
+  /// is predictable; a prefix match that worked on some of the words typed
+  /// and not others would not be.
+  List<String> get searchTokens => tokenize([
+        name,
+        city,
+        district,
+        address,
+        ...sportIds,
+        surface,
+        if (isIndoor) 'indoor' else 'outdoor',
+      ]);
+
+  /// Splits free text into searchable words.
+  ///
+  /// Single characters are dropped: they match almost every ground and would
+  /// make the `array-contains` read as wide as a full scan, which is the one
+  /// thing this design exists to avoid. The cap is there because the token
+  /// list is written into every ground document and read back by every
+  /// search — an address someone pasted a paragraph into must not turn one
+  /// listing into a kilobyte.
+  static List<String> tokenize(Iterable<String?> parts, {int cap = 40}) {
+    final out = <String>{};
+    for (final part in parts) {
+      if (part == null) continue;
+      for (final raw in part.toLowerCase().split(RegExp(r'[^a-z0-9]+'))) {
+        if (raw.length < 2) continue;
+        out.add(raw);
+        if (out.length >= cap) return out.toList();
+      }
+    }
+    return out.toList();
+  }
+
   bool get isFree => hourlyRatePaise == 0;
 
   String get rateLabel =>
@@ -193,6 +255,10 @@ class Ground {
         'nameLower': name.toLowerCase(),
         'city': city.trim(),
         'cityKey': cityKey,
+        // Derived on every write, never entered. A listing edited to add a
+        // sport or fix an area name has to become findable by the new words
+        // in the same save — see [searchTokens].
+        'searchTokens': searchTokens,
         'address': address,
         'district': district,
         'latitude': latitude,

@@ -7,7 +7,11 @@ import '../../core/models/ad_campaign.dart';
 import '../../core/models/billing.dart';
 import '../../core/models/enums.dart';
 import '../../core/providers.dart';
+import '../../data/image_composer.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/identity.dart';
+import '../../shared/ui_kit.dart';
+import '../../shared/image_upload.dart';
 
 /// The advertiser's own console: submit a campaign, see it through review.
 ///
@@ -105,7 +109,20 @@ class _CampaignTile extends StatelessWidget {
           children: [
             Row(
               children: [
-                Text(campaign.emoji, style: const TextStyle(fontSize: 22)),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: SizedBox(
+                    width: 30,
+                    height: 30,
+                    child: PsNetworkImage(
+                      url: campaign.imageUrl,
+                      fallback: Center(
+                        child: Text(campaign.emoji,
+                            style: const TextStyle(fontSize: 22)),
+                      ),
+                    ),
+                  ),
+                ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(campaign.headline,
@@ -161,6 +178,10 @@ class _CampaignEditorSheetState extends ConsumerState<_CampaignEditorSheet> {
   final Set<PromoSlot> _slots = {PromoSlot.home};
   bool _busy = false;
 
+  /// Held here rather than written anywhere until submit, so an advertiser who
+  /// picks artwork and then closes the sheet has changed nothing.
+  String? _imageUrl;
+
   @override
   void dispose() {
     _advertiserName.dispose();
@@ -171,6 +192,25 @@ class _CampaignEditorSheetState extends ConsumerState<_CampaignEditorSheet> {
     _sport.dispose();
     _budget.dispose();
     super.dispose();
+  }
+
+  Future<void> _pickCreative() async {
+    final me = ref.read(currentUserProvider).valueOrNull;
+    if (me == null) return;
+    await pickAndUploadImage(
+      context: context,
+      title: 'Campaign artwork',
+      shape: ImageShape.square,
+      successMessage: 'Artwork added.',
+      onUpload: (image) async {
+        final url = await ref.read(adRepositoryProvider).uploadCreative(
+              advertiserUid: me.uid,
+              bytes: image.bytes,
+              contentType: image.contentType,
+            );
+        if (mounted) setState(() => _imageUrl = url);
+      },
+    );
   }
 
   Future<void> _submit() async {
@@ -195,6 +235,9 @@ class _CampaignEditorSheetState extends ConsumerState<_CampaignEditorSheet> {
               headline: _headline.text.trim(),
               body: _body.text.trim(),
               emoji: _emoji.text.trim().isEmpty ? '📣' : _emoji.text.trim(),
+              // Optional. A campaign with no artwork runs on its emoji, which
+              // is what every house promotion does.
+              imageUrl: _imageUrl,
               ctaLabel: _ctaLabel.text.trim().isEmpty ? 'Learn more' : _ctaLabel.text.trim(),
               sportIds: _sport.text.trim().isEmpty ? const [] : [_sport.text.trim()],
               slots: _slots.toList(growable: false),
@@ -240,6 +283,15 @@ class _CampaignEditorSheetState extends ConsumerState<_CampaignEditorSheet> {
                 labelText: 'Business / brand name',
                 border: OutlineInputBorder(),
               ),
+            ),
+            const SizedBox(height: 12),
+            _CreativeRow(
+              imageUrl: _imageUrl,
+              emoji: _emoji.text,
+              onPick: _pickCreative,
+              onClear: _imageUrl == null
+                  ? null
+                  : () => setState(() => _imageUrl = null),
             ),
             const SizedBox(height: 12),
             Row(
@@ -351,6 +403,83 @@ class _CampaignEditorSheetState extends ConsumerState<_CampaignEditorSheet> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// The artwork slot on the campaign form.
+///
+/// Explicitly labelled optional. An advertiser is the one person in the
+/// product with a commercial reason to be nagged into uploading something, and
+/// nagging them is still the wrong call: a campaign that runs on its emoji is
+/// a complete campaign, and a required upload is how a small shop in a
+/// district town abandons the form.
+class _CreativeRow extends StatelessWidget {
+  const _CreativeRow({
+    required this.imageUrl,
+    required this.emoji,
+    required this.onPick,
+    required this.onClear,
+  });
+
+  final String? imageUrl;
+  final String emoji;
+  final VoidCallback onPick;
+  final VoidCallback? onClear;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(10),
+          child: Container(
+            width: 56,
+            height: 56,
+            color: Ps.canvas,
+            child: PsNetworkImage(
+              url: imageUrl,
+              fallback: Center(
+                child: Text(
+                  emoji.trim().isEmpty ? '📣' : emoji.trim(),
+                  style: const TextStyle(fontSize: 26),
+                ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Artwork (optional)',
+                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5),
+              ),
+              const SizedBox(height: 2),
+              const Text(
+                'Skip it and your emoji is used instead.',
+                style: TextStyle(fontSize: 12, color: Ps.muted),
+              ),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: onPick,
+                    icon: const Icon(Icons.image_outlined, size: 18),
+                    label: Text(imageUrl == null ? 'Add artwork' : 'Replace'),
+                  ),
+                  if (onClear != null)
+                    TextButton(onPressed: onClear, child: const Text('Remove')),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

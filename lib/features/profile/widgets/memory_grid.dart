@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/models/memory.dart';
+import '../../../shared/identity.dart';
 
 /// A square-tiled grid of memories, with a tap-to-open full-screen viewer.
 ///
@@ -113,17 +114,15 @@ class _Tile extends StatelessWidget {
                       child: Icon(Icons.play_circle_outline,
                           size: 32, color: scheme.onSurfaceVariant),
                     )
-                  : Image.network(
-                      memory.url,
+                  : PsNetworkImage(
+                      url: memory.url,
                       fit: BoxFit.cover,
                       // A memory that fails to load must not render as a blank
                       // square indistinguishable from a slow one.
-                      errorBuilder: (_, __, ___) => Center(
+                      fallback: Center(
                         child: Icon(Icons.broken_image_outlined,
                             size: 24, color: scheme.onSurfaceVariant),
                       ),
-                      loadingBuilder: (_, child, progress) =>
-                          progress == null ? child : const SizedBox.shrink(),
                     ),
             ),
             if (memory.isVideo)
@@ -245,10 +244,10 @@ class _MemoryViewerState extends State<_MemoryViewer> {
                 return InteractiveViewer(
                   maxScale: 4,
                   child: Center(
-                    child: Image.network(
-                      m.url,
+                    child: PsNetworkImage(
+                      url: m.url,
                       fit: BoxFit.contain,
-                      errorBuilder: (_, __, ___) => const Center(
+                      fallback: const Center(
                         child: Text(
                           'This photo could not be loaded.',
                           style: TextStyle(color: Colors.white70),

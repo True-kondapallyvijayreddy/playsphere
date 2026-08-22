@@ -207,6 +207,37 @@ class Refs {
   static Query<Map<String, dynamic>> teamsForCompetition(String compId) =>
       teams.where('competitionId', isEqualTo: compId);
 
+  /// Independent teams in one sport — the squads with no club behind them.
+  ///
+  /// A direct query, not a fan-out across clubs. It is allowed because
+  /// `firestore.rules` opens `/teams/{teamId}` to any signed-in reader as a
+  /// flat rule with no per-club condition on it — unlike a fixture, whose
+  /// read depends on `orgIsReadable(orgId)` and therefore genuinely cannot be
+  /// asked platform-wide. A club team is still reached through
+  /// [teamsForClub]; this is the half that has no club to be reached through.
+  static Query<Map<String, dynamic>> independentTeamsForSport(String sportId) =>
+      teams
+          .where('type', isEqualTo: 'independent')
+          .where('sportId', isEqualTo: sportId)
+          .where('status', isEqualTo: 'active');
+
+  /// The team a shared code points at. See `Team.joinCode` for why finding a
+  /// team is all a code does.
+  static Query<Map<String, dynamic>> teamsByJoinCode(String code) =>
+      teams.where('joinCode', isEqualTo: code.trim().toUpperCase()).limit(1);
+
+  /// People asking to be let onto one team.
+  static CollectionReference<Map<String, dynamic>> teamJoinRequests(
+    String teamId,
+  ) =>
+      team(teamId).collection('joinRequests');
+
+  static DocumentReference<Map<String, dynamic>> teamJoinRequest(
+    String teamId,
+    String uid,
+  ) =>
+      teamJoinRequests(teamId).doc(uid);
+
   static CollectionReference<Map<String, dynamic>> get lookingForPosts =>
       db.collection('lookingForPosts');
 
@@ -673,6 +704,35 @@ class Refs {
   /// function-written, not client-computed.
   static DocumentReference<Map<String, dynamic>> get giveImpactStats =>
       db.collection('give').doc('impactStats');
+
+  // --- Coaches -------------------------------------------------------------
+
+  /// Coach listings, at `coaches/{uid}`. Top-level for the same reason
+  /// [grounds] is: "who coaches kabaddi in Warangal" has to be one query, and
+  /// most coaches belong to no club at all, so there is no org to nest them
+  /// under. Keyed by uid — see `CoachProfile` for why a person is one coach.
+  static CollectionReference<Map<String, dynamic>> get coaches =>
+      db.collection('coaches');
+
+  static DocumentReference<Map<String, dynamic>> coach(String uid) =>
+      coaches.doc(uid);
+
+  // --- Sports medicine -----------------------------------------------------
+
+  /// Sports doctors, physiotherapists and surgeons who have listed
+  /// themselves, at `sportsMedics/{uid}`.
+  ///
+  /// A separate collection from [coaches] rather than a `role` field on it.
+  /// The two answer different questions and carry different duties of care —
+  /// see `SportsMedicProfile` — and merging them would put an unverified
+  /// coach into the results for "orthopaedic surgeon", which is the one
+  /// mistake this directory must not make. Keyed by uid for the same reason
+  /// [coach] is: a person is one practitioner.
+  static CollectionReference<Map<String, dynamic>> get sportsMedics =>
+      db.collection('sportsMedics');
+
+  static DocumentReference<Map<String, dynamic>> sportsMedic(String uid) =>
+      sportsMedics.doc(uid);
 
   // --- Sponsor an Athlete / Sponsor a Team --------------------------------
 

@@ -8,6 +8,7 @@ import '../../../core/models/squad_entry.dart';
 import '../../../core/permissions/capability.dart';
 import '../../../core/providers.dart';
 import '../../../shared/app_scaffold.dart';
+import '../../../shared/identity.dart';
 
 /// One club's side of a challenge, and how it is being filled.
 ///
@@ -165,13 +166,11 @@ class _SideBlock extends ConsumerWidget {
             ListTile(
               dense: true,
               contentPadding: EdgeInsets.zero,
-              leading: CircleAvatar(
-                radius: 14,
-                backgroundImage:
-                    e.photoUrl != null ? NetworkImage(e.photoUrl!) : null,
-                child: e.photoUrl == null
-                    ? Text(e.displayName.characters.first.toUpperCase())
-                    : null,
+              leading: PsAvatar(
+                name: e.displayName,
+                photoUrl: e.photoUrl,
+                seed: e.uid,
+                size: 28,
               ),
               title: Text(e.displayName),
               subtitle: Text(

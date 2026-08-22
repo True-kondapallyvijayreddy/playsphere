@@ -65,6 +65,81 @@ class SeedingResult {
 /// and a deviation small enough to be a statement rather than a placeholder.
 /// Everyone else is drawn at random, which is both fairer and what every
 /// federation does with an unranked entry.
+/// One rating for a side made of several people.
+///
+/// ## Why a team needed its own answer
+///
+/// [SeedingPolicy] reads `ratings[entrant.id]`, and the only thing that ever
+/// filled that map was `RatingService.getRating(entrant.uid)` — which is null
+/// for every team, however strong. So a league of clubs, a school kabaddi
+/// tournament and a corporate cricket season all drew their brackets from
+/// `Random(42)` while Glicko-2 sat computed for every individual in them. The
+/// ratings existed; nothing added them up.
+///
+/// ## How the three numbers are combined, and why each is the conservative one
+///
+///  - **Rating: the mean.** A team is its players, and at seeding time there
+///    is nothing to weight them by — minutes, roles and contribution are facts
+///    about matches already played, not about a squad list.
+///
+///  - **Deviation: the mean, NOT the standard error of the mean.** The
+///    tempting formula is `sqrt(Σrd²)/n`, which shrinks with squad size: it
+///    would hand a team of eleven complete unknowns an RD of 105 — the
+///    algorithm's way of saying "we are confident" — out of eleven separate
+///    admissions that we know nothing. That is manufacturing certainty from
+///    ignorance. The mean says what is true instead: a team of unknowns is
+///    unknown, a team of established players is known, and squad size does not
+///    change either. It also leaves room for the uncertainty no per-player
+///    number captures at all — which eleven of the twenty on the sheet
+///    actually turn up.
+///
+///  - **Games played: the median.** [SeedingPolicy.minGames] asks whether
+///    there is enough evidence to seed on. The mean lets one veteran of sixty
+///    matches carry ten debutants over the line; the minimum lets one debutant
+///    sink a settled side. The median asks the question that matters — is this
+///    side, in the main, made of players we have seen — and neither outlier
+///    moves it.
+///
+/// Returns null for a side with nobody rated at all, which the policy already
+/// reads correctly as "no rating yet — drawn at random".
+Rating? combineTeamRating(List<Rating> members) {
+  final rated = [
+    for (final r in members)
+      // A member with no rating document at all arrives as the Glicko default
+      // (1500 / 350 / 0 games). Averaging those in would drag a strong side
+      // toward 1500 and pretend the absent player was merely average, so they
+      // are excluded from the rating and counted in the median as the zero
+      // games they have.
+      if (r.gamesPlayed > 0) r,
+  ];
+  if (rated.isEmpty) return null;
+
+  final rating =
+      rated.map((r) => r.rating).reduce((a, b) => a + b) / rated.length;
+  final deviation =
+      rated.map((r) => r.deviation).reduce((a, b) => a + b) / rated.length;
+  final volatility =
+      rated.map((r) => r.volatility).reduce((a, b) => a + b) / rated.length;
+
+  // Over EVERY member, not only the rated ones: a squad that is half
+  // debutants is half unproven, and dropping them from the count would let
+  // the two players who have records speak for the eleven who have not.
+  final games = [for (final r in members) r.gamesPlayed]..sort();
+  final median = games.isEmpty
+      ? 0
+      : games.length.isOdd
+          ? games[games.length ~/ 2]
+          : ((games[games.length ~/ 2 - 1] + games[games.length ~/ 2]) / 2)
+              .floor();
+
+  return Rating(
+    rating: rating,
+    deviation: deviation,
+    volatility: volatility,
+    gamesPlayed: median,
+  );
+}
+
 class SeedingPolicy {
   const SeedingPolicy({
     this.minGames = 5,

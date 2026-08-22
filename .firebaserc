@@ -1,0 +1,15 @@
+{
+  "projects": {},
+  "targets": {},
+  "etags": {
+    "playsphere-os": {
+      "extensionInstances": {
+        "bq-competitions": "3fb5b893007867ed10b7050ab039867397a322fa9bf1a1c4f39c097a31b75cb0",
+        "bq-fixtures": "cd1fddc7ac5d34d23a62026d35966374923f8a83a57c958b9082273c54e15db9",
+        "bq-orgs": "ce0a3ef0edaf532a7d79b5d61716d499853d51574d8ae0d7d1598a40fe4bb247",
+        "bq-ratings": "43f4c1ef7d24661e3aa259ba5196b2b2d2140df6c707f64cd11c18aaf126fe53",
+        "bq-users": "b339fa2601832340640e43f681751fb65a72a1e77ba6fa436e05f62f9814b249"
+      }
+    }
+  }
+}

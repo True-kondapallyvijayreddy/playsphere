@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/models/competition.dart';
+import '../../core/models/draw_config.dart';
 import '../../core/models/enums.dart';
 import '../../core/models/tournament.dart';
 import '../../core/models/venue.dart';
@@ -12,9 +13,13 @@ import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/ui_kit.dart';
 import '../../shared/wizard.dart';
+import 'widgets/daily_hours_field.dart';
 import '../tournaments/widgets/venue_selector_dialog.dart'
     show showQuickAddVenueDialog;
 import 'widgets/bulk_category_selector_sheet.dart';
+import 'widgets/group_stage_fields.dart';
+import '../../domain/tournament/house_roster.dart';
+import 'widgets/house_list_editor.dart';
 
 /// One sport category in a season, in a specific arrangement and age/gender band.
 class _SeasonSport {
@@ -25,13 +30,34 @@ class _SeasonSport {
     CompetitionFormat? format,
   })  : sideFormat = sideFormat ?? SportCatalog.byId(sportId).defaultSideFormat,
         category = category ?? CompetitionCategory.presets().first,
-        format = format ?? SportCatalog.byId(sportId).competitionFormats.first;
+        format =
+            format ?? SportCatalog.byId(sportId).defaultCompetitionFormat;
 
   final String sportId;
   SideFormat sideFormat;
   CompetitionCategory category;
   CompetitionFormat format;
   int maxEntrants = 16;
+
+  /// How this category's field is split up — groups, how many, and how many
+  /// of each go through.
+  ///
+  /// Set here rather than at "Make the draw", because a season is drawn by
+  /// `setUpWholeSeason` in one pass over every event and never opens that
+  /// sheet at all. A category created without this took the empty default —
+  /// no groups — whatever its format said.
+  DrawConfig draw = const DrawConfig();
+
+  /// The draw config as it will be stored, clamped to what this format and
+  /// this expected field size allow.
+  ///
+  /// [maxEntrants] is a plan, not a roll: `GroupBounds` re-clamps against the
+  /// real field when the draw is finally generated.
+  DrawConfig get drawToSubmit => GroupStageFields.normalize(
+        format: format,
+        entrantCount: maxEntrants,
+        config: draw,
+      );
 
   SportSpec get sport => SportCatalog.byId(sportId);
 
@@ -94,7 +120,29 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
   DateTime? _startDate;
   DateTime? _endDate;
 
+  int _matchMinutes = 30;
+  int _changeoverMinutes = 5;
+  int _restGapMinutes = 20;
+  /// When play may start and when it must stop, per day.
+  ///
+  /// Editable, which they were not: the two fields existed, were written into
+  /// every event's `ScheduleConfig`, and were shown on this screen as plain
+  /// text with no way to change them. Every season in the product was
+  /// therefore scheduled 09:00–19:00 whatever its organizer actually had the
+  /// ground for, and a school with the field until 4pm got a timetable that
+  /// ran three hours past the gate being locked.
+  int _dayStartHour = 9;
+  int _dayEndHour = 19;
+
   bool _externalEntries = false;
+
+  /// The houses/departments/sections an internal season's team events split
+  /// into. Only reaches the created competitions when the season stays inside
+  /// the club — an open season takes pre-formed teams from other clubs, and
+  /// house names would mean nothing to them. Seeded from the school-colours
+  /// template because a list has to open with something; see [HouseRoster]
+  /// for why four colours are no longer the only option.
+  List<String> _presetHouses = [...HouseTemplates.schoolColours];
   bool _liveScoring = true;
   bool _leaderboard = true;
   bool _playerStats = true;
@@ -198,6 +246,9 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
           endDate: end,
           venueIds: _venueIds.toList(),
           eventCount: _sports.length,
+          matchMinutesDefault: _matchMinutes,
+          changeoverMinutes: _changeoverMinutes,
+          restGapMinutes: _restGapMinutes,
           createdBy: uid,
         ),
       );
@@ -226,10 +277,19 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
             category: entry.category,
             scoringPluginKey: sport.pluginKey,
             scoringConfig: entry.sideFormat.configOverrides,
+            drawConfig: entry.drawToSubmit,
+            scheduleConfig: ScheduleConfig(
+              venueIds: _venueIds.toList(),
+              matchMinutes: _matchMinutes,
+              changeoverMinutes: _changeoverMinutes,
+              restGapMinutes: _restGapMinutes,
+              dayStartHour: _dayStartHour,
+              dayEndHour: _dayEndHour,
+            ),
             teamEntryMode: sport.defaultEntrantType == EntrantType.individual
                 ? TeamEntryMode.individual
                 : (_externalEntries ? TeamEntryMode.preformedTeam : TeamEntryMode.houseBatch),
-            presetHouses: const ['Red House', 'Blue House', 'Green House', 'Yellow House'],
+            presetHouses: _externalEntries ? const [] : _presetHouses,
             venue: _venue.text.trim().isEmpty ? null : _venue.text.trim(),
             startDate: start,
             maxEntrants: entry.maxEntrants,
@@ -284,7 +344,13 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
         ),
         WizardStep(
           title: 'Schedule',
-          canAdvance: () => _startDate != null,
+          // Grounds are as much a prerequisite as a start date, and until now
+          // only the date was treated as one. `generateSchedule` resolves its
+          // courts from these venue documents and refuses outright when there
+          // are none, so a season published without them had exactly one
+          // scheduling button and it always failed — with nothing on the
+          // creation flow having ever said a ground was needed.
+          canAdvance: () => _startDate != null && _venueIds.isNotEmpty,
           builder: _scheduleStep,
         ),
         WizardStep(
@@ -497,6 +563,16 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
                           setState(() => entry.format = v ?? entry.format),
                     ),
                   ),
+                  // Asked here because a season never opens the draw sheet:
+                  // `setUpWholeSeason` draws every event from the config
+                  // stored on it, so this is the only place the shape of the
+                  // group stage can be chosen.
+                  GroupStageFields(
+                    format: entry.format,
+                    entrantCount: entry.maxEntrants,
+                    config: entry.draw,
+                    onChanged: (v) => setState(() => entry.draw = v),
+                  ),
                   WizardField(
                     label: entry.sport.defaultEntrantType == EntrantType.team
                         ? 'Maximum teams'
@@ -575,6 +651,91 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
         ),
         const SizedBox(height: 12),
         _venuePicker(context),
+        const SizedBox(height: 12),
+        PsCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                'Match Timings & Operating Hours',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: Ps.ink,
+                ),
+              ),
+              const SizedBox(height: 2),
+              const Text(
+                'Configure standard match durations, court changeover gaps, and venue daily operating hours.',
+                style: TextStyle(fontSize: 12, color: Ps.muted, height: 1.4),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: WizardField(
+                      label: 'Match Duration',
+                      child: _TimingStepper(
+                        value: _matchMinutes,
+                        unit: 'min',
+                        min: 5,
+                        max: 240,
+                        step: 5,
+                        onChanged: (v) => setState(() => _matchMinutes = v),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: WizardField(
+                      label: 'Changeover',
+                      child: _TimingStepper(
+                        value: _changeoverMinutes,
+                        unit: 'min',
+                        min: 0,
+                        max: 30,
+                        step: 5,
+                        onChanged: (v) => setState(() => _changeoverMinutes = v),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: WizardField(
+                      label: 'Min Rest Gap',
+                      child: _TimingStepper(
+                        value: _restGapMinutes,
+                        unit: 'min',
+                        min: 0,
+                        max: 120,
+                        step: 5,
+                        onChanged: (v) => setState(() => _restGapMinutes = v),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: WizardField(
+                      label: 'Daily Hours',
+                      child: DailyHoursField(
+                        startHour: _dayStartHour,
+                        endHour: _dayEndHour,
+                        onChanged: (start, end) => setState(() {
+                          _dayStartHour = start;
+                          _dayEndHour = end;
+                        }),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
       ],
     );
   }
@@ -593,13 +754,30 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Text(
-            'Grounds & Courts',
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.w700,
-              color: Ps.ink,
-            ),
+          Row(
+            children: [
+              const Text(
+                'Grounds & Courts',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: Ps.ink,
+                ),
+              ),
+              const SizedBox(width: 6),
+              // Marked required, and enforced by the step's `canAdvance`. The
+              // two have to agree: a disabled Next button with nothing
+              // explaining it is how an organizer concludes the app is broken.
+              if (_venueIds.isEmpty)
+                const Text(
+                  'Required',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: Ps.live,
+                  ),
+                ),
+            ],
           ),
           const SizedBox(height: 2),
           const Text(
@@ -774,6 +952,44 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
             ],
           ),
         ),
+        // An internal season's team events are entered house by house, so the
+        // houses are part of setting one up — not something to discover as
+        // four colours after the fact. An open season is entered by whole
+        // clubs and has no use for them.
+        if (!_externalEntries) ...[
+          const SizedBox(height: 12),
+          PsCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  'Houses & Groups',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: Ps.ink,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  'What your students pick from when they enter a team event. '
+                  'Houses, departments, years, sections — whatever you '
+                  'actually split by. You can change these later.',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    color: Ps.muted,
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                HouseListEditor(
+                  initial: _presetHouses,
+                  onChanged: (h) => setState(() => _presetHouses = h),
+                ),
+              ],
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -858,6 +1074,16 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
                 value: _venueIds.isEmpty
                     ? 'None — the schedule cannot be generated'
                     : '${_venueIds.length} selected',
+              ),
+              WizardReviewRow(
+                label: 'Match timings',
+                // Worth confirming here now that these are genuinely editable
+                // — they were fixed at 30 minutes and 09:00–19:00 for every
+                // season the product had ever created.
+                value: '$_matchMinutes min + $_changeoverMinutes min '
+                    'changeover, '
+                    '${_dayStartHour.toString().padLeft(2, '0')}:00–'
+                    '${_dayEndHour.toString().padLeft(2, '0')}:00',
               ),
               WizardReviewRow(
                 label: 'Entries',
@@ -1131,3 +1357,56 @@ class _DateBox extends StatelessWidget {
     );
   }
 }
+
+class _TimingStepper extends StatelessWidget {
+  const _TimingStepper({
+    required this.value,
+    required this.unit,
+    required this.min,
+    required this.max,
+    required this.step,
+    required this.onChanged,
+  });
+
+  final int value;
+  final String unit;
+  final int min;
+  final int max;
+  final int step;
+  final ValueChanged<int> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Ps.surface,
+        borderRadius: BorderRadius.circular(Ps.radiusSm),
+        border: Border.all(color: Ps.border),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          IconButton(
+            icon: const Icon(Icons.remove, size: 16),
+            onPressed: value > min ? () => onChanged(value - step) : null,
+            visualDensity: VisualDensity.compact,
+          ),
+          Text(
+            '$value $unit',
+            style: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: Ps.ink,
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.add, size: 16),
+            onPressed: value < max ? () => onChanged(value + step) : null,
+            visualDensity: VisualDensity.compact,
+          ),
+        ],
+      ),
+    );
+  }
+}
+

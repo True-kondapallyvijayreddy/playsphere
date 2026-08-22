@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
 
 import '../../core/layout/responsive.dart';
 import '../../core/models/enums.dart';
@@ -10,6 +11,8 @@ import '../../core/models/tournament_official.dart';
 import '../../core/models/umpire_profile.dart';
 import '../../core/providers.dart';
 import '../../domain/draw/officials_roster.dart';
+import '../../domain/scoring/scoring_registry.dart';
+import '../../domain/tournament/officiating_demand.dart';
 import '../../shared/app_scaffold.dart';
 
 /// The season owner's officiating panel — added ahead of the tournament,
@@ -85,6 +88,20 @@ class OfficialsScreen extends ConsumerWidget {
                       value: fixturesAsync,
                       what: 'the matches',
                     ),
+                    // Above the panel, because it is the question the panel
+                    // is the answer to. An organizer opening this screen is
+                    // deciding who else to call, and "kabaddi: 12 matches,
+                    // nobody on the panel" is that decision made.
+                    _CoverageBySport(
+                      demand: officiatingDemand(
+                        events: ref
+                                .watch(tournamentEventsProvider(key))
+                                .valueOrNull ??
+                            const [],
+                        fixtures: fixtures,
+                        roster: roster,
+                      ),
+                    ),
                     if (roster.isEmpty)
                       const EmptyState(
                         icon: Icons.sports_outlined,
@@ -107,6 +124,7 @@ class OfficialsScreen extends ConsumerWidget {
                           orgId: orgId,
                           tournamentId: tournamentId,
                           official: o,
+                          seasonDays: seasonDayKeys(fixtures),
                         ),
                       const SizedBox(height: 16),
                       FilledButton.icon(
@@ -199,15 +217,39 @@ class OfficialsScreen extends ConsumerWidget {
                 '${result.unstaffed.length} could not be.',
               ),
               const SizedBox(height: 12),
-              for (final u in result.unstaffed)
+              // Grouped by event rather than listed flat. Forty unstaffed
+              // matches under one heading is a wall an organizer scrolls
+              // past; the same forty under "Kabaddi U-14 (12)" is a phone
+              // call to one person.
+              for (final entry in result.unstaffedByEvent.entries) ...[
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.only(top: 4, bottom: 4),
                   child: Text(
-                    '${u.slot.label.isEmpty ? u.slot.fixtureId : u.slot.label}\n'
-                    '${u.reason}',
-                    style: Theme.of(context).textTheme.bodySmall,
+                    '${entry.key} (${entry.value.length})',
+                    style: Theme.of(context).textTheme.titleSmall,
                   ),
                 ),
+                // One reason per event, not per match: every match in a draw
+                // that has no certified official fails for the same reason,
+                // and printing it twelve times buries the eleven other draws.
+                Text(
+                  entry.value.first.reason,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 4),
+                for (final u in entry.value.take(4))
+                  Text(
+                    '· ${u.slot.label.isEmpty ? u.slot.fixtureId : u.slot.label}'
+                    '${u.slot.groupId == null ? '' : '  (Group ${u.slot.groupId})'}',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                if (entry.value.length > 4)
+                  Text(
+                    '· and ${entry.value.length - 4} more',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                const SizedBox(height: 8),
+              ],
             ],
           ),
         ),
@@ -222,46 +264,246 @@ class OfficialsScreen extends ConsumerWidget {
   }
 }
 
+/// What each sport needs, and whether the panel can cover it.
+///
+/// The screen used to open on a flat panel list and a flat list of unstaffed
+/// matches, which between them could not answer the only question an organizer
+/// opens this screen with: which sport is short. See [officiatingDemand].
+class _CoverageBySport extends StatelessWidget {
+  const _CoverageBySport({required this.demand});
+
+  final List<SportDemand> demand;
+
+  @override
+  Widget build(BuildContext context) {
+    if (demand.isEmpty) return const SizedBox.shrink();
+    final theme = Theme.of(context);
+    final short = demand.where((d) => d.hasNobody).length;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.fact_check_outlined, size: 20),
+                  const SizedBox(width: 8),
+                  Text('What needs officiating',
+                      style: theme.textTheme.titleMedium),
+                  const Spacer(),
+                  Text(
+                    short == 0
+                        ? 'every sport covered'
+                        : '$short with nobody',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: short == 0
+                          ? theme.colorScheme.onSurfaceVariant
+                          : theme.colorScheme.error,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Assignment is per sport — somebody on the panel for kabaddi '
+                'is never put on a badminton court.',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              ),
+              const SizedBox(height: 4),
+              for (final d in demand) _SportDemandRow(demand: d),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SportDemandRow extends StatelessWidget {
+  const _SportDemandRow({required this.demand});
+
+  final SportDemand demand;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final d = demand;
+    final colour = d.hasNobody
+        ? theme.colorScheme.error
+        : d.isCovered
+            ? theme.colorScheme.primary
+            : theme.colorScheme.tertiary;
+
+    return Theme(
+      data: theme.copyWith(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        tilePadding: EdgeInsets.zero,
+        childrenPadding: const EdgeInsets.only(left: 22, bottom: 8),
+        leading: Container(
+          width: 10,
+          height: 10,
+          margin: const EdgeInsets.only(top: 6),
+          decoration: BoxDecoration(shape: BoxShape.circle, color: colour),
+        ),
+        title: Text(d.sportName, style: theme.textTheme.bodyMedium),
+        subtitle: Text(
+          d.hasNobody
+              ? '${d.needed} ${d.needed == 1 ? 'match' : 'matches'} · nobody '
+                  'on the panel officiates this'
+              : [
+                  '${d.staffed}/${d.total} staffed',
+                  if (d.unscheduled > 0) '${d.unscheduled} not yet timed',
+                  '${d.panelCount} on the panel',
+                ].join(' · '),
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: d.hasNobody ? colour : theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+        children: [
+          for (final name in d.events)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 2),
+              child: Row(
+                children: [
+                  const Icon(Icons.subdirectory_arrow_right, size: 14),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(name, style: theme.textTheme.bodySmall),
+                  ),
+                ],
+              ),
+            ),
+          // Groups are where the volume is, so they get counted rather than
+          // folded into the event total an organizer then has to divide up.
+          if (d.groups.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              'Groups still needing somebody',
+              style: theme.textTheme.labelSmall,
+            ),
+            for (final g in d.groups.entries)
+              Text(
+                '${g.key} — ${g.value}',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+          ],
+          if (d.dayKeys.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              'Plays on ${d.dayKeys.map(prettyDay).join(', ')}',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// `2026-08-22` as `Sat 22 Aug`. Falls back to the key itself rather than
+/// throwing on anything unparseable.
+String prettyDay(String dayKey) {
+  try {
+    return DateFormat('EEE d MMM').format(DateTime.parse(dayKey));
+  } catch (_) {
+    return dayKey;
+  }
+}
+
 class _OfficialTile extends ConsumerWidget {
   const _OfficialTile({
     required this.orgId,
     required this.tournamentId,
     required this.official,
+    required this.seasonDays,
   });
 
   final String orgId;
   final String tournamentId;
   final TournamentOfficial official;
 
+  /// The days this season actually plays on, offered as the availability
+  /// choices. Empty before anything is scheduled, which is why the editor
+  /// says so rather than showing an empty list.
+  final List<String> seasonDays;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final o = official;
+    final theme = Theme.of(context);
+
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
         leading: const Icon(Icons.sports_outlined),
         title: Text(o.name),
-        subtitle: Text(
-          [
-            _roleLabel(o.role),
-            if (o.sports.isNotEmpty) o.sports.join(', '),
-            if (!o.scoringRightsGranted) 'scoring rights not granted',
-          ].join(' · '),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              [
+                _roleLabel(o.role),
+                o.sports.isEmpty ? 'any sport' : o.sports.join(', '),
+                'up to ${o.maxMatchesPerDay}/day',
+                if (!o.scoringRightsGranted) 'scoring rights not granted',
+              ].join(' · '),
+            ),
+            Text(
+              o.availableDates.isEmpty
+                  ? 'Available every day'
+                  : 'Available ${o.availableDates.map(prettyDay).join(', ')}',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
         ),
-        trailing: IconButton(
-          icon: const Icon(Icons.close),
-          tooltip: 'Remove from panel',
-          onPressed: () async {
-            try {
-              await ref.read(tournamentRepositoryProvider).removeOfficialFromRoster(
-                    orgId: orgId,
-                    tournamentId: tournamentId,
-                    uid: o.uid,
-                  );
-            } catch (e) {
-              if (context.mounted) showError(context, e);
-            }
-          },
+        isThreeLine: true,
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              icon: const Icon(Icons.event_available_outlined),
+              tooltip: 'Sports & availability',
+              onPressed: () => showModalBottomSheet<void>(
+                context: context,
+                isScrollControlled: true,
+                showDragHandle: true,
+                builder: (_) => _AvailabilitySheet(
+                  orgId: orgId,
+                  tournamentId: tournamentId,
+                  official: o,
+                  seasonDays: seasonDays,
+                ),
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.close),
+              tooltip: 'Remove from panel',
+              onPressed: () async {
+                try {
+                  await ref
+                      .read(tournamentRepositoryProvider)
+                      .removeOfficialFromRoster(
+                        orgId: orgId,
+                        tournamentId: tournamentId,
+                        uid: o.uid,
+                      );
+                } catch (e) {
+                  if (context.mounted) showError(context, e);
+                }
+              },
+            ),
+          ],
         ),
       ),
     );
@@ -274,6 +516,194 @@ class _OfficialTile extends ConsumerWidget {
         'linesman' => 'Linesman',
         _ => 'Umpire',
       };
+}
+
+/// Which sports one official will take, which days they can come, and how
+/// many matches they will stand for in a day.
+///
+/// All three are what the bulk assigner reads. Before they existed it read
+/// only the panel, so it produced a roster that was even, neutral, clash-free
+/// and wrong — a badminton umpire on the kabaddi mat, and a Saturday-only
+/// volunteer down for the Sunday final.
+class _AvailabilitySheet extends ConsumerStatefulWidget {
+  const _AvailabilitySheet({
+    required this.orgId,
+    required this.tournamentId,
+    required this.official,
+    required this.seasonDays,
+  });
+
+  final String orgId;
+  final String tournamentId;
+  final TournamentOfficial official;
+  final List<String> seasonDays;
+
+  @override
+  ConsumerState<_AvailabilitySheet> createState() => _AvailabilitySheetState();
+}
+
+class _AvailabilitySheetState extends ConsumerState<_AvailabilitySheet> {
+  late final Set<String> _sports = widget.official.sports.toSet();
+  late final Set<String> _days = widget.official.availableDates.toSet();
+  late int _cap = widget.official.maxMatchesPerDay;
+  bool _busy = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(widget.official.name, style: theme.textTheme.titleLarge),
+              const SizedBox(height: 2),
+              Text(
+                'Only what is set here is used when matches are assigned '
+                'automatically.',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              ),
+
+              const SizedBox(height: 20),
+              Text('Sports they will officiate',
+                  style: theme.textTheme.titleSmall),
+              Text(
+                _sports.isEmpty
+                    ? 'None picked — they will be offered any sport.'
+                    : 'They will only be put on these.',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final sport in SportCatalog.all)
+                    FilterChip(
+                      label: Text('${sport.icon}  ${sport.name}'),
+                      selected: _sports.contains(sport.id),
+                      onSelected: (on) => setState(() {
+                        if (on) {
+                          _sports.add(sport.id);
+                        } else {
+                          _sports.remove(sport.id);
+                        }
+                      }),
+                    ),
+                ],
+              ),
+
+              const SizedBox(height: 20),
+              Text('Days they can come', style: theme.textTheme.titleSmall),
+              Text(
+                widget.seasonDays.isEmpty
+                    ? 'Nothing is scheduled yet, so there are no days to pick '
+                        'from. Generate the schedule and come back.'
+                    : _days.isEmpty
+                        ? 'None picked — they are treated as available every '
+                            'day.'
+                        : 'They will not be put on a match outside these.',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final day in widget.seasonDays)
+                    FilterChip(
+                      label: Text(prettyDay(day)),
+                      selected: _days.contains(day),
+                      onSelected: (on) => setState(() {
+                        if (on) {
+                          _days.add(day);
+                        } else {
+                          _days.remove(day);
+                        }
+                      }),
+                    ),
+                ],
+              ),
+
+              const SizedBox(height: 20),
+              Text('Most matches in one day',
+                  style: theme.textTheme.titleSmall),
+              Text(
+                'An umpire who stands for fourteen matches is not officiating '
+                'the last four.',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: Slider(
+                      value: _cap.toDouble().clamp(1, 20),
+                      min: 1,
+                      max: 20,
+                      divisions: 19,
+                      label: '$_cap',
+                      onChanged: (v) => setState(() => _cap = v.round()),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 36,
+                    child: Text('$_cap', style: theme.textTheme.titleMedium),
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed:
+                        _busy ? null : () => Navigator.of(context).pop(),
+                    child: const Text('Cancel'),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    onPressed: _busy ? null : _save,
+                    child: Text(_busy ? 'Saving…' : 'Save'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _save() async {
+    setState(() => _busy = true);
+    try {
+      await ref.read(tournamentRepositoryProvider).updateOfficialOnRoster(
+            orgId: widget.orgId,
+            tournamentId: widget.tournamentId,
+            official: widget.official.copyWith(
+              sports: _sports.toList()..sort(),
+              availableDates: _days.toList()..sort(),
+              maxMatchesPerDay: _cap,
+            ),
+          );
+      if (mounted) Navigator.of(context).pop();
+    } catch (e) {
+      if (mounted) {
+        setState(() => _busy = false);
+        showError(context, e);
+      }
+    }
+  }
 }
 
 /// A scheduled match with no official yet — the manual fallback for whatever

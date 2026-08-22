@@ -162,6 +162,39 @@ class SwissPairing {
     return fixtures;
   }
 
+  /// Who has already sat a round out, derived from who appeared in each
+  /// round rather than from a stored flag.
+  ///
+  /// [entrantIdsByRound] maps a round number to every entrant that played a
+  /// fixture in it. [activeEntrantIds] is the field still in the event.
+  ///
+  /// ## Why this is derived and not recorded
+  ///
+  /// A Swiss bye is one entrant left over from an odd field. There is no
+  /// match, so `PlannedFixture.isWalkover` keeps it out of the database
+  /// entirely — which means "had a bye in round 3" is exactly "was active,
+  /// and appears in no fixture of round 3". Deriving it needs no extra field
+  /// on the competition and, more to the point, cannot drift away from the
+  /// fixtures it describes the way a separately-maintained list would.
+  ///
+  /// A round nobody appears in is skipped rather than treated as a round
+  /// everybody sat out: an empty round is one that was never written, not a
+  /// bye for the entire field.
+  Set<String> byeRecipients({
+    required Iterable<String> activeEntrantIds,
+    required Map<int, Set<String>> entrantIdsByRound,
+  }) {
+    final active = activeEntrantIds.toList(growable: false);
+    final out = <String>{};
+    for (final played in entrantIdsByRound.values) {
+      if (played.isEmpty) continue;
+      for (final id in active) {
+        if (!played.contains(id)) out.add(id);
+      }
+    }
+    return out;
+  }
+
   /// Sum of the scores of every opponent an entrant has faced.
   ///
   /// This mirrors — deliberately, not by coincidence — the Buchholz

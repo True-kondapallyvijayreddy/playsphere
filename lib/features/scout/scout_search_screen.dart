@@ -10,6 +10,7 @@ import '../../domain/gov/age_group.dart';
 import '../../domain/scout/player_verification_tier.dart';
 import '../../domain/scout/talent_profile.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/identity.dart';
 
 const _sports = [
   ('cricket', 'Cricket'),
@@ -30,7 +31,12 @@ const _sports = [
 /// it — it is `firestore.rules` on `/users/{userId}`, already enforced
 /// before a result ever reaches this list).
 class ScoutSearchScreen extends ConsumerStatefulWidget {
-  const ScoutSearchScreen({super.key});
+  const ScoutSearchScreen({super.key, this.initialSportId});
+
+  /// Pre-picked sport, when the search was opened from somewhere that already
+  /// knew one — a sport hub's "Find players". Null when opened cold, which is
+  /// the case the chip row above the filters exists for.
+  final String? initialSportId;
 
   @override
   ConsumerState<ScoutSearchScreen> createState() => _ScoutSearchScreenState();
@@ -42,6 +48,20 @@ class _ScoutSearchScreenState extends ConsumerState<ScoutSearchScreen> {
   AgeGroup? _ageGroup;
   bool _recentFormOnly = false;
   bool _verifiedOnly = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // After the first frame: `_runSearch` writes a provider, and a state
+    // write during a widget's build phase is a framework error. Skipped when
+    // the sport is not one this screen offers, rather than searching for a
+    // chip the person cannot see selected.
+    final sportId = widget.initialSportId;
+    if (sportId == null || !_sports.any((s) => s.$1 == sportId)) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _runSearch(sportId);
+    });
+  }
 
   @override
   void dispose() {
@@ -250,12 +270,10 @@ class _ResultCard extends StatelessWidget {
     return Card(
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 10),
       child: ListTile(
-        leading: CircleAvatar(
-          backgroundImage:
-              result.photoUrl != null ? NetworkImage(result.photoUrl!) : null,
-          child: result.photoUrl == null
-              ? Text(result.displayName.isEmpty ? '?' : result.displayName[0])
-              : null,
+        leading: PsAvatar(
+          name: result.displayName,
+          photoUrl: result.photoUrl,
+          seed: result.profile.uid,
         ),
         title: Text(result.displayName, style: const TextStyle(fontWeight: FontWeight.w700)),
         subtitle: Text(

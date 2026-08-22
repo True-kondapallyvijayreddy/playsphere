@@ -1,7 +1,11 @@
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:playsphere/core/models/match_player.dart';
+import 'package:playsphere/domain/scoring/plugins/badminton_plugin.dart';
 import 'package:playsphere/domain/scoring/plugins/cricket_plugin.dart';
+import 'package:playsphere/domain/scoring/plugins/kho_kho_plugin.dart';
+import 'package:playsphere/domain/scoring/plugins/table_tennis_plugin.dart';
+import 'package:playsphere/domain/scoring/plugins/tennis_plugin.dart';
 import 'package:playsphere/domain/scoring/scoring_plugin.dart';
 
 /// The toss has to reach the ENGINE, not just the config beside it.
@@ -131,5 +135,65 @@ void main() {
     expect(((rebuilt['innings'] as List).first as Map)['runs'], 0,
         reason: 'which is exactly what must not be allowed to happen to a '
             'match already under way');
+  });
+
+  /// Every other sport had the same bug cricket did, one layer along.
+  ///
+  /// `recordToss` has written `startingSide` into the frozen config for every
+  /// sport for a while — "who served first" and "who raided first" belong on a
+  /// scorecard as much as "who batted first". Cricket was the only engine that
+  /// ever read it, under its own `battingFirst` key. So a badminton pair that
+  /// won the toss and chose to serve opened the match receiving, and the
+  /// scorer had to notice and correct it on the first rally of every match.
+  ///
+  /// The choice itself is already resolved before it gets here: `TossOptions`
+  /// knows that "receive" and "choose ends" hand the first turn to the other
+  /// side, and `TossDialog._startingSide` turns winner + choice into one
+  /// answer. These pin the last link — that the answer reaches the engine.
+  group('the toss decides who starts, in every sport', () {
+    ScoringContext startingWith(String? side) => ScoringContext(
+          entrantAName: 'Anand',
+          entrantBName: 'Bhavani',
+          config: side == null ? const {} : {'startingSide': side},
+          lineupA: const [MatchPlayer(id: 'p1', name: 'Anand')],
+          lineupB: const [MatchPlayer(id: 'p2', name: 'Bhavani')],
+        );
+
+    test('badminton opens with the toss winner serving', () {
+      const plugin = BadmintonPlugin();
+      expect(plugin.initialState(startingWith('b'))['server'], 'b');
+      expect(plugin.initialState(startingWith('a'))['server'], 'a');
+    });
+
+    test('tennis opens with the toss winner serving', () {
+      const plugin = TennisPlugin();
+      expect(plugin.initialState(startingWith('b'))['server'], 'b');
+    });
+
+    test('table tennis opens with the toss winner serving', () {
+      const plugin = TableTennisPlugin();
+      expect(plugin.initialState(startingWith('b'))['firstServer'], 'b');
+    });
+
+    test('kho-kho opens with the side that chose to chase attacking', () {
+      const plugin = KhoKhoPlugin();
+      expect(plugin.initialState(startingWith('b'))['attackingSide'], 'b');
+    });
+
+    test('a skipped toss still opens with side A, as it always did', () {
+      // Nothing recorded the toss, so there is no answer to honour. Side A is
+      // the only defensible default and is what every match played before
+      // this change opened with.
+      const plugin = BadmintonPlugin();
+      expect(plugin.initialState(startingWith(null))['server'], 'a');
+    });
+
+    test('an unrecognised value falls back to A rather than to neither side',
+        () {
+      // `Side.fromWire` answers `neutral` for anything it does not know, and
+      // "neither side serves" is not a state any of these engines can open in.
+      const plugin = BadmintonPlugin();
+      expect(plugin.initialState(startingWith('nonsense'))['server'], 'a');
+    });
   });
 }

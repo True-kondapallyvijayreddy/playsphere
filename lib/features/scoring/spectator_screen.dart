@@ -15,6 +15,7 @@ import 'widgets/ask_to_score.dart';
 import 'widgets/cheer_bar.dart';
 import 'widgets/box_score_table.dart';
 import 'widgets/share_match_button.dart';
+import 'widgets/point_log.dart';
 
 /// The remote viewer's screen — a parent in an office, a class on a laptop.
 ///
@@ -81,7 +82,10 @@ class SpectatorScreen extends ConsumerWidget {
             summary: plugin.summary(fixture.scoreState, ctx),
           );
 
-          final commentary = _Commentary(fixtureKey: key);
+          // The same log the scorer sees, so a spectator arguing a point
+          // and the scorer checking it are reading one record rather than
+          // two renderings of it.
+          final commentary = PointLog(fixture: fixture, initiallyShown: 20);
           // This screen is where a club member who taps an unscored match
           // ends up — the match list sends anyone without the pen to the
           // spectator view. So it is the one place the offer to score has to
@@ -384,99 +388,6 @@ class _EntrantName extends StatelessWidget {
         ),
       ),
     );
-  }
-}
-
-class _Commentary extends ConsumerWidget {
-  const _Commentary({required this.fixtureKey});
-  final FixtureRef fixtureKey;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final events = ref.watch(matchEventsProvider(fixtureKey));
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              'Ball by ball',
-              style: Theme.of(context).textTheme.titleSmall,
-            ),
-            const SizedBox(height: 12),
-            events.when(
-              loading: () => const Center(
-                child: Padding(
-                  padding: EdgeInsets.all(24),
-                  child: CircularProgressIndicator(),
-                ),
-              ),
-              error: (e, _) => Text(
-                'Commentary unavailable.',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-              data: (list) {
-                if (list.isEmpty) {
-                  return Text(
-                    'Nothing has happened yet.',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  );
-                }
-                return Column(
-                  children: [
-                    for (final e in list.take(40))
-                      ListTile(
-                        dense: true,
-                        contentPadding: EdgeInsets.zero,
-                        leading: CircleAvatar(
-                          radius: 14,
-                          child: Text(
-                            '${e.seq}',
-                            style: const TextStyle(fontSize: 10),
-                          ),
-                        ),
-                        title: Text(_describe(e)),
-                        trailing: e.at == null
-                            ? null
-                            : Text(
-                                DateFormat.Hms().format(e.at!),
-                                style:
-                                    Theme.of(context).textTheme.labelSmall,
-                              ),
-                      ),
-                  ],
-                );
-              },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  static String _describe(MatchEvent e) {
-    final side = e.payload['side'];
-    final sideText = side == 'a' ? 'A' : (side == 'b' ? 'B' : '');
-    final runs = e.payload['runs'];
-    return switch (e.type) {
-      'runs' => '$runs run${runs == 1 ? '' : 's'}',
-      'wicket' => 'Wicket!',
-      'wide' => 'Wide',
-      'no_ball' => 'No ball — free hit',
-      'bye' => 'Bye',
-      'leg_bye' => 'Leg bye',
-      'point' => 'Point to $sideText',
-      'score' => 'Score for $sideText',
-      'correct' => 'Correction ($sideText)',
-      'next_period' => 'Next period',
-      'end_innings' => 'End of innings',
-      'finish' => 'Match ended',
-      'retire' => 'Retired',
-      _ => e.type,
-    };
   }
 }
 

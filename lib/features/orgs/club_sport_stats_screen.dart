@@ -11,6 +11,7 @@ import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/section_header.dart' show friendlyDate;
 import '../../shared/ui_kit.dart';
+import '../../core/l10n/result_labels.dart';
 
 /// One sport within a club's record — its full stat tally and its match
 /// list, the club-scoped counterpart to [PlayerSportScreen].
@@ -183,7 +184,8 @@ class _ClubMatchTile extends StatelessWidget {
           [
             fixture.resolvedSource.label,
             if (when != null) friendlyDate(when),
-            if (fixture.summary.isNotEmpty) fixture.summary,
+            if (fixture.summary.isNotEmpty)
+              localizedSummary(context, fixture.summary),
           ].join(' · '),
           maxLines: 2,
           overflow: TextOverflow.ellipsis,

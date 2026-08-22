@@ -10,6 +10,7 @@ import '../../core/models/organization.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/identity.dart';
 import '../../shared/plan_card.dart';
 import '../../shared/real_payment_sheet.dart';
 
@@ -277,13 +278,11 @@ class _CreateOrgScreenState extends ConsumerState<CreateOrgScreen> {
         Card(
           color: theme.colorScheme.surfaceContainerHighest,
           child: ListTile(
-            leading: CircleAvatar(
-              child: Text(
-                _name.text.trim().isEmpty
-                    ? '?'
-                    : _name.text.trim().characters.first.toUpperCase(),
-              ),
-            ),
+            // A live preview of the crest the club is about to get. No
+            // seed: the org has no id yet, so this falls back to colouring on
+            // the name — which is also what makes the preview change as they
+            // type, and reads as the club taking shape.
+            leading: PsCrest(name: _name.text.trim(), size: 40),
             title: Text(
               _name.text.trim(),
               style: const TextStyle(fontWeight: FontWeight.bold),

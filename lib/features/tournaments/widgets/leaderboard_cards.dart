@@ -37,9 +37,7 @@ class GroupsSummaryCard extends StatelessWidget {
                   Text('Groups', style: theme.textTheme.titleMedium),
                   const Spacer(),
                   Text(
-                    live == 0
-                        ? 'all decided'
-                        : '$live still live',
+                    live == 0 ? 'all decided' : '$live still live',
                     style: theme.textTheme.labelSmall?.copyWith(
                       color: live == 0
                           ? theme.colorScheme.onSurfaceVariant
@@ -132,17 +130,41 @@ class _GroupRow extends StatelessWidget {
 /// doubles and mixed appears in three of them as three unrelated rows. It is
 /// also the board that replaces a Telegram message, because it names people
 /// rather than draws.
-class LeaderboardCard extends StatelessWidget {
-  const LeaderboardCard({super.key, required this.leaderboard});
+class LeaderboardCard extends StatefulWidget {
+  const LeaderboardCard({
+    super.key,
+    required this.leaderboard,
+    this.onTapEntrant,
+  });
 
   final TournamentLeaderboard? leaderboard;
 
+  /// Opens one competitor's season. Null on the public page, where there is
+  /// no season-entrant route to land on and a row that looks pressable and
+  /// is not would be worse than a row that does not.
+  final void Function(PlayerRecord record)? onTapEntrant;
+
+  @override
+  State<LeaderboardCard> createState() => _LeaderboardCardState();
+}
+
+class _LeaderboardCardState extends State<LeaderboardCard> {
+  /// Null is "All sports" — the combined board, which is what the card
+  /// opened on before the filter existed and what a single-sport season
+  /// only ever shows.
+  String? _sportId;
+
   @override
   Widget build(BuildContext context) {
-    final board = leaderboard;
+    final board = widget.leaderboard;
     if (board == null || board.players.isEmpty) return const SizedBox.shrink();
     final theme = Theme.of(context);
-    final top = board.top();
+
+    // A sport that has since been detached from the season leaves a selection
+    // pointing at a board that no longer exists; falling back to the combined
+    // one is better than an empty table with a live-looking filter.
+    final selected = board.bySport.containsKey(_sportId) ? _sportId : null;
+    final top = board.topFor(selected);
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 16),
@@ -157,12 +179,40 @@ class LeaderboardCard extends StatelessWidget {
                   const Icon(Icons.leaderboard_outlined, size: 20),
                   const SizedBox(width: 8),
                   Text('Leaderboard', style: theme.textTheme.titleMedium),
+                  const Spacer(),
+                  // Only when there is genuinely a choice. A control with one
+                  // option is a control that costs a read and answers nothing.
+                  if (board.isMultiSport)
+                    DropdownButtonHideUnderline(
+                      child: DropdownButton<String?>(
+                        value: selected,
+                        isDense: true,
+                        borderRadius: BorderRadius.circular(12),
+                        style: theme.textTheme.bodySmall,
+                        items: [
+                          const DropdownMenuItem<String?>(
+                            value: null,
+                            child: Text('All sports'),
+                          ),
+                          for (final id in board.sportIds)
+                            DropdownMenuItem<String?>(
+                              value: id,
+                              child: Text(board.sportNames[id] ?? id),
+                            ),
+                        ],
+                        onChanged: (v) => setState(() => _sportId = v),
+                      ),
+                    ),
                 ],
               ),
               const SizedBox(height: 4),
               Text(
-                'Across every event. Walkovers are left out — turning up is '
-                'not a good tournament.',
+                selected == null
+                    ? 'Across every event. Walkovers are left out — turning '
+                        'up is not a good tournament.'
+                    : '${board.sportNames[selected] ?? selected} only — '
+                        'these are their matches in this sport, not their '
+                        'season totals.',
                 style: theme.textTheme.bodySmall
                     ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
               ),
@@ -195,7 +245,13 @@ class LeaderboardCard extends StatelessWidget {
               ),
               const Divider(height: 12),
               for (var i = 0; i < top.length; i++)
-                _PlayerRow(rank: i + 1, record: top[i]),
+                _PlayerRow(
+                  rank: i + 1,
+                  record: top[i],
+                  onTap: widget.onTapEntrant == null
+                      ? null
+                      : () => widget.onTapEntrant!(top[i]),
+                ),
             ],
           ),
         ),
@@ -205,10 +261,15 @@ class LeaderboardCard extends StatelessWidget {
 }
 
 class _PlayerRow extends StatelessWidget {
-  const _PlayerRow({required this.rank, required this.record});
+  const _PlayerRow({
+    required this.rank,
+    required this.record,
+    this.onTap,
+  });
 
   final int rank;
   final PlayerRecord record;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -216,72 +277,79 @@ class _PlayerRow extends StatelessWidget {
     final r = record;
     final rate = r.winRate;
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 26,
-            child: r.titles > 0
-                ? Icon(Icons.emoji_events,
-                    size: 16, color: theme.colorScheme.primary)
-                : Text(
-                    '$rank',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 26,
+              child: r.titles > 0
+                  ? Icon(Icons.emoji_events,
+                      size: 16, color: theme.colorScheme.primary)
+                  : Text(
+                      '$rank',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
                     ),
-                  ),
-          ),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  r.displayName,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodyMedium,
-                ),
-                if (r.eventsEntered > 1 || r.titles > 0 || r.finals > 0)
+            ),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
                   Text(
-                    [
-                      if (r.titles > 0)
-                        '${r.titles} title${r.titles == 1 ? '' : 's'}',
-                      if (r.finals > r.titles)
-                        '${r.finals - r.titles} runner-up',
-                      if (r.eventsEntered > 1)
-                        '${r.eventsEntered} events',
-                    ].join(' · '),
-                    style: theme.textTheme.labelSmall
-                        ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                    r.displayName,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodyMedium,
                   ),
-              ],
+                  if (r.eventsEntered > 1 || r.titles > 0 || r.finals > 0)
+                    Text(
+                      [
+                        if (r.titles > 0)
+                          '${r.titles} title${r.titles == 1 ? '' : 's'}',
+                        if (r.finals > r.titles)
+                          '${r.finals - r.titles} runner-up',
+                        if (r.eventsEntered > 1) '${r.eventsEntered} events',
+                      ].join(' · '),
+                      style: theme.textTheme.labelSmall
+                          ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                    ),
+                ],
+              ),
             ),
-          ),
-          SizedBox(
-            width: 30,
-            child: Text('${r.won}',
-                textAlign: TextAlign.end,
-                style: theme.textTheme.bodyMedium
-                    ?.copyWith(fontWeight: FontWeight.bold)),
-          ),
-          SizedBox(
-            width: 30,
-            child: Text('${r.lost}',
-                textAlign: TextAlign.end,
-                style: theme.textTheme.bodySmall),
-          ),
-          SizedBox(
-            width: 46,
-            child: Text(
-              // Blank below three matches rather than "100%": a player who won
-              // their only match is not on a hundred per cent in any sense
-              // worth printing.
-              rate == null ? '—' : '${(rate * 100).round()}%',
-              textAlign: TextAlign.end,
-              style: theme.textTheme.bodySmall,
+            SizedBox(
+              width: 30,
+              child: Text('${r.won}',
+                  textAlign: TextAlign.end,
+                  style: theme.textTheme.bodyMedium
+                      ?.copyWith(fontWeight: FontWeight.bold)),
             ),
-          ),
-        ],
+            SizedBox(
+              width: 30,
+              child: Text('${r.lost}',
+                  textAlign: TextAlign.end, style: theme.textTheme.bodySmall),
+            ),
+            SizedBox(
+              width: 46,
+              child: Text(
+                // Blank below three matches rather than "100%": a player who won
+                // their only match is not on a hundred per cent in any sense
+                // worth printing.
+                rate == null ? '—' : '${(rate * 100).round()}%',
+                textAlign: TextAlign.end,
+                style: theme.textTheme.bodySmall,
+              ),
+            ),
+            if (onTap != null)
+              Icon(
+                Icons.chevron_right,
+                size: 18,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -510,8 +578,7 @@ class _BoardRow extends StatelessWidget {
           SizedBox(
             width: 34,
             child: Text('${entry.matches}',
-                textAlign: TextAlign.end,
-                style: theme.textTheme.bodySmall),
+                textAlign: TextAlign.end, style: theme.textTheme.bodySmall),
           ),
           SizedBox(
             width: 56,
@@ -529,6 +596,7 @@ class _BoardRow extends StatelessWidget {
 
   /// Whole numbers stay whole; rates and averages keep two places — the same
   /// rule the stat breakdown formats by, so a figure reads identically on both.
-  static String _format(num v) =>
-      v is int || v == v.roundToDouble() ? psGrouped(v.round()) : v.toStringAsFixed(2);
+  static String _format(num v) => v is int || v == v.roundToDouble()
+      ? psGrouped(v.round())
+      : v.toStringAsFixed(2);
 }

@@ -7,6 +7,7 @@ import '../../core/models/tournament.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
+import '../../shared/identity.dart';
 import '../../shared/section_header.dart';
 
 /// One row in an events feed — either a standalone [Competition] or every
@@ -117,7 +118,6 @@ class SeasonCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
     final tournament = ref
         .watch(tournamentProvider((orgId: orgId, tournamentId: tournamentId)))
         .valueOrNull;
@@ -145,12 +145,14 @@ class SeasonCard extends ConsumerWidget {
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
-        leading: CircleAvatar(
-          backgroundColor: theme.colorScheme.secondaryContainer,
-          child: Icon(
-            Icons.calendar_month_outlined,
-            color: theme.colorScheme.onSecondaryContainer,
-          ),
+        // Was the same calendar glyph on every row, which made the feed
+        // read as one repeated item. The club's crest is the thing a member
+        // recognises without reading.
+        leading: PsCrest(
+          name: org?.name ?? '?',
+          logoUrl: org?.logoUrl,
+          seed: org?.id ?? competitions.first.orgId,
+          size: 40,
         ),
         title: Text(title),
         subtitle: Text(

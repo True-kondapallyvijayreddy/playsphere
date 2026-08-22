@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 
 import '../core/errors/app_exception.dart';
 import '../core/firebase/chunked_batch.dart';
@@ -21,12 +23,59 @@ import '../domain/draw/schedule_guarantees.dart';
 import '../domain/draw/schedule_shift.dart';
 import '../domain/draw/tournament_scheduler.dart';
 import 'competition_repository.dart';
-import 'org_repository.dart' show guard;
+import 'media_uploader.dart';
+import 'org_repository.dart' show guard, guardStream;
 
 /// Venues, tournaments, and the one operation that needs both: laying out
 /// every match of every event across one shared pool of courts.
 class TournamentRepository {
-  const TournamentRepository();
+  const TournamentRepository({FirebaseStorage? storage}) : _storage = storage;
+
+  /// Injectable so a test can drive the banner upload against a fake bucket.
+  final FirebaseStorage? _storage;
+
+  MediaUploader get _media => MediaUploader(storage: _storage);
+
+  // --- Branding ---------------------------------------------------------
+
+  /// Puts artwork across the top of a season, including on its public link.
+  ///
+  /// This is the highest-value image in the product. The public tournament
+  /// page is the one thing a club sends to people who do not have PlaySphere
+  /// — the page that replaces the Telegram channel — and until now it opened
+  /// with an app bar reading "Tournament".
+  ///
+  /// Deliberately a one-field write. `Tournament.toUpdate` is what the edit
+  /// sheet calls and it does not carry `bannerUrl`, so the two can never
+  /// clobber each other.
+  Future<String> uploadSeasonBanner({
+    required String orgId,
+    required String tournamentId,
+    required String uid,
+    required Uint8List bytes,
+    required String contentType,
+  }) =>
+      guard(() async {
+        final url = await _media.putImage(
+          folder: 'tournaments/$tournamentId/banner',
+          uid: uid,
+          bytes: bytes,
+          contentType: contentType,
+          maxMegabytes: 6,
+        );
+        await Refs.tournament(orgId, tournamentId)
+            .update({'bannerUrl': url});
+        return url;
+      });
+
+  /// Goes back to the generated banner.
+  Future<void> removeSeasonBanner({
+    required String orgId,
+    required String tournamentId,
+  }) =>
+      guard(
+        () => Refs.tournament(orgId, tournamentId).update({'bannerUrl': null}),
+      );
 
   static final StreamController<AppException> _writeFailures =
       StreamController<AppException>.broadcast();
@@ -156,6 +205,166 @@ class TournamentRepository {
             'venueIds': venueIds,
             'updatedAt': FieldValue.serverTimestamp(),
           }));
+
+  /// Puts a season on hold, reversibly, and says why.
+  ///
+  /// ## Why this is not cancellation
+  ///
+  /// The only stop button a season had was `status: cancelled`, which is
+  /// one-way by design — every entrant is told the season is off, and a
+  /// season that could be un-cancelled would make that message worthless. But
+  /// the thing that actually happens to a grassroots season is not it being
+  /// called off, it is a monsoon week, an exam fortnight, a ground the
+  /// municipality has taken back for a fair. The season resumes; it just is
+  /// not running right now.
+  ///
+  /// With only the permanent button available, organizers used it — and then
+  /// re-created the season, losing the draws, the standings and everyone's
+  /// registrations with it. This is the reversible one.
+  ///
+  /// What it changes: no new entries anywhere under it (every event goes on
+  /// hold with it), and the season reads as paused everywhere it appears.
+  /// What it does not change: [Tournament.status], the draws, the schedule,
+  /// or anything already played. See [Tournament.isSuspended].
+  ///
+  /// [reason] is required and refused when blank, for the reason
+  /// `CompetitionRepository.cancelCompetition` documents: a season that goes
+  /// quiet without one is indistinguishable from the app being broken.
+  Future<void> suspendTournament({
+    required String orgId,
+    required String tournamentId,
+    required String reason,
+    required String byUid,
+  }) =>
+      guard(() async {
+        final text = reason.trim();
+        if (text.isEmpty) {
+          throw const ValidationException(
+            'Give a reason. Everyone who entered will see it, and a season '
+            'that stops without one reads as a fault in the app.',
+          );
+        }
+        if (text.length > 500) {
+          throw const ValidationException(
+            'Keep the reason under 500 characters.',
+          );
+        }
+
+        final snap = await Refs.tournament(orgId, tournamentId).get();
+        if (!snap.exists) {
+          throw const NotFoundException('That season no longer exists.');
+        }
+        final tournament = Tournament.fromDoc(snap);
+        if (tournament.isSuspended) {
+          throw const ValidationException('This season is already on hold.');
+        }
+        if (tournament.status == TournamentStatus.completed) {
+          throw const ValidationException(
+            'This season has finished. There is nothing left to pause.',
+          );
+        }
+
+        await _setSuspension(
+          orgId: orgId,
+          tournamentId: tournamentId,
+          suspended: true,
+          reason: text,
+          byUid: byUid,
+        );
+      });
+
+  /// Brings a suspended season back, exactly where it was.
+  ///
+  /// The status was never touched on the way down, so there is nothing to
+  /// restore and nothing to guess: clearing the flag is the whole operation.
+  /// Events paused by the season resume with it — but an event the organizer
+  /// paused *individually* stays paused, because that was a separate decision
+  /// and this one does not overrule it. See [suspendTournament].
+  Future<void> resumeTournament({
+    required String orgId,
+    required String tournamentId,
+    required String byUid,
+  }) =>
+      guard(() async {
+        final snap = await Refs.tournament(orgId, tournamentId).get();
+        if (!snap.exists) {
+          throw const NotFoundException('That season no longer exists.');
+        }
+        if (!Tournament.fromDoc(snap).isSuspended) {
+          throw const ValidationException('This season is not on hold.');
+        }
+
+        await _setSuspension(
+          orgId: orgId,
+          tournamentId: tournamentId,
+          suspended: false,
+          reason: null,
+          byUid: byUid,
+        );
+      });
+
+  /// Writes the flag onto the season and onto every event it paused.
+  ///
+  /// Events carry their own copy rather than reading the season's, because
+  /// most of the app holds a `Competition` without the `Tournament` above it —
+  /// an event tile in a club's list, a registration form, the scoring screen.
+  /// A flag they cannot see is a flag they cannot honour.
+  ///
+  /// `suspendedBySeason` is what keeps resume honest. Without it, resuming
+  /// would have to either leave every event paused (so the organizer un-pauses
+  /// fifteen events by hand) or resume all of them (so the one event they had
+  /// deliberately pulled out comes back too). With it, the season only ever
+  /// resumes what the season paused.
+  Future<void> _setSuspension({
+    required String orgId,
+    required String tournamentId,
+    required bool suspended,
+    required String? reason,
+    required String byUid,
+  }) async {
+    final eventsSnap = await Refs.competitions(orgId)
+        .where('tournamentId', isEqualTo: tournamentId)
+        .get();
+
+    final batch = ChunkedBatch(Refs.db);
+    batch.update(Refs.tournament(orgId, tournamentId), {
+      'isSuspended': suspended,
+      'suspendReason': suspended ? reason : null,
+      'suspendedAt': suspended ? FieldValue.serverTimestamp() : null,
+      'suspendedBy': suspended ? byUid : null,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+
+    for (final doc in eventsSnap.docs) {
+      final event = Competition.fromDoc(doc);
+      if (suspended) {
+        // Already paused by hand — leave it alone, and do not claim the
+        // season paused it, or resuming the season would un-pause it.
+        if (event.isSuspended) continue;
+        batch.update(doc.reference, {
+          'isSuspended': true,
+          'suspendReason': reason,
+          'suspendedAt': FieldValue.serverTimestamp(),
+          'suspendedBy': byUid,
+          'suspendedBySeason': true,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      } else {
+        // Only what the season paused. An event pulled by hand stays pulled.
+        if (!event.isSuspended || !event.suspendedBySeason) continue;
+        batch.update(doc.reference, {
+          'isSuspended': false,
+          'suspendReason': null,
+          'suspendedAt': null,
+          'suspendedBy': null,
+          'suspendedBySeason': false,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+    }
+
+    await batch.commitAll();
+  }
 
   /// Locks the tournament schedule and releases it to participants.
   ///
@@ -313,7 +522,6 @@ class TournamentRepository {
   Future<SeasonSetupReport> setUpWholeSeason({
     required String orgId,
     required String tournamentId,
-    required String byUid,
     int? matchMinutes,
     int? changeoverMinutes,
     int? restGapMinutes,
@@ -380,7 +588,6 @@ class TournamentRepository {
             await comps.generateDraw(
               competition: event,
               entrants: entrants,
-              defaultScorerUids: [byUid],
             );
             drawn.add(event.name);
           } on AppException catch (e) {
@@ -531,14 +738,21 @@ class TournamentRepository {
 
   /// Tournaments other clubs have invited [orgId] into and are still waiting
   /// on an answer for.
+  ///
+  /// Guarded for the same reason as `watchChallengesForOrg`: this feeds an
+  /// error strip on the Notifications screen, and an unguarded rejection
+  /// reached it as a raw `FirebaseException` that the UI could only render as
+  /// "Something went wrong".
   Stream<List<TournamentInvite>> watchIncomingInvites(String orgId) {
-    return Refs.tournamentInvites
-        .where('toOrgId', isEqualTo: orgId)
-        .where('status', isEqualTo: 'pending')
-        .snapshots()
-        .map((snap) => snap.docs.map(TournamentInvite.fromDoc).toList()
-          ..sort((a, b) => (a.startDate ?? DateTime(9999))
-              .compareTo(b.startDate ?? DateTime(9999))));
+    return guardStream(
+      () => Refs.tournamentInvites
+          .where('toOrgId', isEqualTo: orgId)
+          .where('status', isEqualTo: 'pending')
+          .snapshots()
+          .map((snap) => snap.docs.map(TournamentInvite.fromDoc).toList()
+            ..sort((a, b) => (a.startDate ?? DateTime(9999))
+                .compareTo(b.startDate ?? DateTime(9999)))),
+    );
   }
 
   /// Records the invited club's answer, or the host taking the offer back.
@@ -581,6 +795,28 @@ class TournamentRepository {
   }) =>
       guard(() => Refs.tournamentOfficial(orgId, tournamentId, official.uid)
           .set(official.toCreate(addedBy: addedByUid)));
+
+  /// Edits a panel entry in place — the sports they cover, the days they can
+  /// come, their daily limit.
+  ///
+  /// A separate call from [addOfficialToRoster] rather than a re-add, because
+  /// re-adding would rewrite `addedBy` and `addedAt`, which `firestore.rules`
+  /// refuses on update and which record something true: who put this person
+  /// on the panel, and when. Editing their availability is not a re-add.
+  Future<void> updateOfficialOnRoster({
+    required String orgId,
+    required String tournamentId,
+    required TournamentOfficial official,
+  }) =>
+      guard(() async {
+        if (official.maxMatchesPerDay < 1) {
+          throw const ValidationException(
+            'An official has to be able to take at least one match a day.',
+          );
+        }
+        await Refs.tournamentOfficial(orgId, tournamentId, official.uid)
+            .update(official.toUpdate());
+      });
 
   Future<void> removeOfficialFromRoster({
     required String orgId,
@@ -635,6 +871,17 @@ class TournamentRepository {
             .get();
         final fixtures = fixSnap.docs.map(Fixture.fromDoc).toList();
 
+        // The events, for the sport each match is and the name to report an
+        // unstaffed one under. A fixture carries `sportId` only when the draw
+        // that wrote it recorded one — older ones and quick matches do not —
+        // so the event is the authority and the fixture is the fallback.
+        final eventsSnap = await Refs.competitions(orgId)
+            .where('tournamentId', isEqualTo: tournamentId)
+            .get();
+        final eventById = {
+          for (final doc in eventsSnap.docs) doc.id: Competition.fromDoc(doc),
+        };
+
         // Entrant -> club, one lookup per event — the same shape as the
         // uid-by-entrant map `generateSchedule` builds above, for clubs
         // instead of players.
@@ -661,6 +908,7 @@ class TournamentRepository {
               clubByEntrant[f.entrantBId]!,
           };
 
+          final event = eventById[f.compId];
           slots.add(OfficiatingSlot(
             fixtureId: f.id,
             window: ScheduleWindow(
@@ -669,6 +917,10 @@ class TournamentRepository {
             ),
             courtKey: f.courtId ?? f.venue ?? f.id,
             contestingClubIds: clubs,
+            sportId: event?.sportId ?? f.sportId,
+            eventId: f.compId,
+            eventName: event?.name ?? '',
+            groupId: f.bracket == Bracket.group ? f.groupId : null,
             label: '${f.entrantAName} vs ${f.entrantBName}',
           ));
           byFixtureId[f.id] = f;
@@ -688,6 +940,9 @@ class TournamentRepository {
               name: o.name,
               clubId: o.clubId,
               role: o.role,
+              sports: o.sports,
+              availableDays: o.availableDates.toSet(),
+              maxMatches: o.maxMatchesPerDay,
             ),
         ];
 

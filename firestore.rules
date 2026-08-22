@@ -919,6 +919,46 @@ service cloud.firestore {
 
       // No deletes, ever.
       allow delete: if false;
+
+      // -----------------------------------------------------------------
+      // People asking to be let onto this team.
+      // -----------------------------------------------------------------
+      // The half of an independent team that a join code cannot do. The read
+      // rule on the team above is a flat `isSignedIn()` — a roster has to be
+      // readable for a team page to render — so a code stored on that
+      // document is knowledge anybody can obtain, and "you may add yourself
+      // if you send the right code" would authorize the whole platform. The
+      // code finds the team; this is what admits the player.
+      match /joinRequests/{requesterUid} {
+        // Your own request, or every request if you run the team. Not open
+        // to the rest of the roster: who asked and was turned down is the
+        // captain's business and the asker's, nobody else's.
+        allow read: if isSignedIn()
+          && (requesterUid == uid()
+              || teamRuns(get(/databases/$(database)/documents/teams/$(teamId)).data));
+
+        // Only ever about yourself, and only for a team still taking people.
+        allow create: if isSignedIn()
+          && requesterUid == uid()
+          && request.resource.data.uid == uid()
+          && request.resource.data.displayName is string
+          && request.resource.data.displayName.size() > 0
+          && request.resource.data.get('message', '').size() <= 300
+          && serverTimed('createdAt');
+
+        // Asking again replaces the ask. Nothing else about it may change,
+        // so a request cannot be edited into somebody else's name.
+        allow update: if isSignedIn()
+          && requesterUid == uid()
+          && unchanged('uid');
+
+        // Withdrawn by the asker, declined by the captain — the same write,
+        // because the two leave the database in the identical state and a
+        // tombstone would only record that somebody was turned down.
+        allow delete: if isSignedIn()
+          && (requesterUid == uid()
+              || teamRuns(get(/databases/$(database)/documents/teams/$(teamId)).data));
+      }
     }
 
     match /lookingForPosts/{postId} {
@@ -1936,8 +1976,35 @@ service cloud.firestore {
                 || isFixtureOfficial(fixtureDoc(orgId, compId, fixtureId))
               )
               && (
+                // An organizer of the club that owns this match.
+                //
+                // FIRST, because it is the commonest case and the cheapest test:
+                // it reads one membership document that `canScore` above has
+                // already read, where every other arm here re-fetches the fixture.
+                //
+                // ## The bug this fixes
+                //
+                // `generateDraw` deliberately writes an EMPTY `scorerUids` — its
+                // own doc comment says so, and promises that "an unassigned match
+                // is not an unscorable one: an organizer may score any match in
+                // their own club". That promise was false. An owner who walked up
+                // to their club's match was not on `scorerUids`, was not a named
+                // official, and was not playing — so this gate refused them, the
+                // batch rolled back, and the score jumped backwards on the pad
+                // seconds after they tapped.
+                //
+                // The repair the old comment relied on (claimPen adding them to
+                // `scorerUids`) is a TRANSACTION, and a transaction needs the
+                // network. On a ground there is none, so the first taps raced the
+                // repair and lost. Scoring must not depend on winning that race.
+                //
+                // This widens nothing: the gate above already requires
+                // `canScore(orgId)`, and `holdsPen` below still gives one person
+                // exclusive control, so an organizer still cannot type over an
+                // umpire who holds the pen.
+                canManageCompetitions(orgId)
                 // Named scorer path (tournaments, challenge matches).
-                uid() in fixtureDoc(orgId, compId, fixtureId).scorerUids
+                || uid() in fixtureDoc(orgId, compId, fixtureId).scorerUids
                 // Official / entrant player path: they are part of the match even
                 // without being on scorerUids. assignScorer() adds them to scorerUids
                 // fire-and-forget from the pad, so subsequent writes use the faster
@@ -2484,6 +2551,144 @@ service cloud.firestore {
     // gets reached for elsewhere.
     function groundOwnerUid(groundId) {
       return get(/databases/$(database)/documents/grounds/$(groundId)).data.ownerUid;
+    }
+
+    // -------------------------------------------------------------------
+    // Coach listings, at `coaches/{uid}`.
+    // -------------------------------------------------------------------
+    // Public to read, like every other discovery directory here: a parent
+    // looking for a coach is usually not signed in yet.
+    //
+    // The one rule in this file that exists for safeguarding rather than for
+    // correctness is the adult gate on create. A coach listing is a public
+    // invitation to bring a child to a stranger, carrying a phone number; a
+    // minor must not be able to publish one about themselves, and no client
+    // may assert its own age. `subjectIsAdult` reads the date of birth live
+    // off the user's own profile, which `unchanged('dateOfBirth')` on that
+    // document means cannot be edited to get around this.
+    match /coaches/{coachUid} {
+      allow read: if true;
+
+      allow create: if isSignedIn()
+        && coachUid == uid()
+        && subjectIsAdult(uid())
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() >= 2
+        && request.resource.data.displayName.size() <= 120
+        // At least one sport, and not a claim to coach the whole catalog.
+        // A listing with no sport cannot be found by anybody looking for a
+        // coach; one claiming every sport is not a claim worth indexing.
+        && request.resource.data.sportIds is list
+        && request.resource.data.sportIds.size() >= 1
+        && request.resource.data.sportIds.size() <= 6
+        && request.resource.data.sessionRatePaise is int
+        && request.resource.data.sessionRatePaise >= 0
+        && request.resource.data.yearsExperience is int
+        && request.resource.data.yearsExperience >= 0
+        && request.resource.data.yearsExperience <= 80
+        // PlaySphere's judgement, never the coach's. This is the one
+        // directory where a badge decides whether somebody hands over a
+        // child, so a self-set one would be worse than no badge at all.
+        && request.resource.data.isVerified == false
+        && serverTimed('createdAt');
+
+      allow update: if isSignedIn()
+        && coachUid == uid()
+        && unchanged('isVerified')
+        && unchanged('createdAt')
+        && request.resource.data.sportIds is list
+        && request.resource.data.sportIds.size() >= 1
+        && request.resource.data.sportIds.size() <= 6
+        && request.resource.data.sessionRatePaise is int
+        && request.resource.data.sessionRatePaise >= 0
+        && request.resource.data.yearsExperience is int
+        && request.resource.data.yearsExperience >= 0
+        && request.resource.data.yearsExperience <= 80;
+
+      // Delisting is `isActive: false`, which is an update. A hard delete
+      // would take the listing out from under anybody mid-conversation with
+      // it, and leaves nothing for the coach to switch back on next season.
+      allow delete: if false;
+    }
+
+    // Sports doctors, physiotherapists and surgeons who have listed
+    // themselves. Shaped like /coaches above — public read, one document per
+    // person keyed by uid, self-written, delisted rather than deleted — and
+    // kept as a separate collection for the reason given on
+    // `SportsMedicProfile`: merging the two would put an unverified coach
+    // into the results for "orthopaedic surgeon".
+    match /sportsMedics/{medicUid} {
+      // Public. A parent looking for a physiotherapist for their daughter has
+      // usually not made an account, and requiring one before they can even
+      // look is how a directory stays empty.
+      allow read: if true;
+
+      allow create: if isSignedIn()
+        && medicUid == uid()
+        // A practice listing is a public invitation carrying a phone number
+        // and a clinical claim. Adults only, same rule as a coach listing.
+        && subjectIsAdult(uid())
+        && validMedic()
+        // PlaySphere's judgement, never the practitioner's. A self-set badge
+        // on a directory people choose a doctor from would be worse than no
+        // badge at all.
+        && request.resource.data.isVerified == false
+        && serverTimed('createdAt');
+
+      allow update: if isSignedIn()
+        && medicUid == uid()
+        && unchanged('isVerified')
+        && unchanged('createdAt')
+        && validMedic();
+
+      // Delisting is `isActive: false`. A hard delete would take the listing
+      // out from under a patient mid-treatment and leave nothing for the
+      // practitioner to switch back on.
+      allow delete: if false;
+    }
+
+    // Shared by the create and update rules above so the two cannot drift —
+    // a listing that could be created valid and then edited invalid is the
+    // same bug written twice.
+    function validMedic() {
+      return request.resource.data.displayName is string
+        && request.resource.data.displayName.size() >= 2
+        && request.resource.data.displayName.size() <= 120
+        // Exactly one specialty. This is the filter the whole directory turns
+        // on, and somebody in three lists means three different promises to
+        // three different patients.
+        && request.resource.data.role in [
+             'sports_doctor', 'physiotherapist', 'orthopedic_surgeon',
+             'rehab_specialist', 'sports_nutritionist'
+           ]
+        // At least one qualification: it is the first thing a patient reads,
+        // and a medical listing without one is not a listing.
+        && request.resource.data.qualifications is list
+        && request.resource.data.qualifications.size() >= 1
+        && request.resource.data.qualifications.size() <= 12
+        // Somewhere to be found. `cityKey` is what the directory queries, so
+        // a listing without it is invisible rather than merely incomplete.
+        && request.resource.data.city is string
+        && request.resource.data.city.size() > 0
+        && request.resource.data.cityKey is string
+        && request.resource.data.cityKey.size() > 0
+        // Unlike a coach's, an empty sport list is legitimate here — a
+        // general orthopaedic surgeon treats every sport's knee — so only the
+        // ceiling is enforced.
+        && request.resource.data.sportIds is list
+        && request.resource.data.sportIds.size() <= 10
+        && request.resource.data.bodyPartsTreated is list
+        && request.resource.data.bodyPartsTreated.size() <= 12
+        // A listing offering no way to be seen is a row somebody taps and
+        // cannot act on.
+        && request.resource.data.consultationModes is list
+        && request.resource.data.consultationModes.size() >= 1
+        && request.resource.data.consultationModes.size() <= 4
+        && request.resource.data.consultationFeePaise is int
+        && request.resource.data.consultationFeePaise >= 0
+        && request.resource.data.experienceYears is int
+        && request.resource.data.experienceYears >= 0
+        && request.resource.data.experienceYears <= 70;
     }
 
     match /grounds/{groundId} {

@@ -8,6 +8,7 @@ import '../../core/router/app_router.dart';
 import '../../domain/career/leaderboard.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/identity.dart';
 import '../../shared/ui_kit.dart';
 
 /// The app-wide "who leads in this stat" board — CricHeroes' and every top
@@ -112,7 +113,12 @@ class _LeaderboardRow extends StatelessWidget {
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
       color: isSelf ? theme.colorScheme.primaryContainer : null,
       child: ListTile(
-        leading: _RankAvatar(rank: entry.rank, photoUrl: entry.photoUrl),
+        leading: _RankAvatar(
+          rank: entry.rank,
+          name: entry.displayName,
+          imageUrl: entry.photoUrl,
+          seed: entry.uid,
+        ),
         title: Text(
           entry.displayName,
           overflow: TextOverflow.ellipsis,
@@ -138,10 +144,17 @@ class _LeaderboardRow extends StatelessWidget {
 /// its own boards, kept local rather than shared since the two screens have
 /// no other code in common.
 class _RankAvatar extends StatelessWidget {
-  const _RankAvatar({required this.rank, this.photoUrl});
+  const _RankAvatar({
+    required this.rank,
+    required this.name,
+    this.imageUrl,
+    this.seed,
+  });
 
   final int rank;
-  final String? photoUrl;
+  final String name;
+  final String? imageUrl;
+  final String? seed;
 
   @override
   Widget build(BuildContext context) {
@@ -161,11 +174,9 @@ class _RankAvatar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 6),
-          CircleAvatar(
-            radius: 15,
-            backgroundImage: photoUrl != null ? NetworkImage(photoUrl!) : null,
-            child: photoUrl == null ? const Icon(Icons.person, size: 17) : null,
-          ),
+          // Was a round mark with a generic person glyph behind it, so
+          // every player without a photo was the same faceless silhouette.
+          PsAvatar(name: name, photoUrl: imageUrl, seed: seed, size: 30),
         ],
       ),
     );

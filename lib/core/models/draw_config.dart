@@ -1,3 +1,4 @@
+import 'enums.dart';
 import 'firestore_codec.dart';
 
 /// The organizer's choices about the *shape* of a draw.
@@ -25,6 +26,7 @@ class DrawConfig {
     this.shuffleSeed,
     this.method = 'ranked',
     this.seedFromRatings = false,
+    this.swissRounds,
   });
 
   /// Split the field into groups, whatever the format.
@@ -82,6 +84,54 @@ class DrawConfig {
   /// evidence — see `SeedingPolicy`.
   final bool seedFromRatings;
 
+  /// Swiss: how many rounds the event runs, overriding `⌈log2 N⌉`.
+  ///
+  /// Null means "however many it takes to rank the field", which is the
+  /// figure `SwissPairing.recommendedRoundCount` computes from the entrant
+  /// count. An organizer running a fixed-length club night — four rounds,
+  /// everyone home by nine — sets it explicitly, and the round generator
+  /// stops there rather than second-guessing them.
+  ///
+  /// Only read for [CompetitionFormat.swiss]; every other format's round
+  /// count is a property of the bracket, not a choice.
+  final int? swissRounds;
+
+  /// Whether [format] can carry a group stage at all.
+  ///
+  /// Swiss pairs by standing each round and double elimination already gives
+  /// everyone a second life, so neither has a group phase to add. Everything
+  /// with a table or a bracket does.
+  static bool formatSupportsGroups(CompetitionFormat format) =>
+      format == CompetitionFormat.groupThenKnockout ||
+      format == CompetitionFormat.knockout ||
+      format == CompetitionFormat.roundRobin ||
+      format == CompetitionFormat.leagueTable;
+
+  /// Groups+Knockout says it in the format; every other format asks via
+  /// [useGroups].
+  static bool groupsImplied(CompetitionFormat format) =>
+      format == CompetitionFormat.groupThenKnockout;
+
+  /// Whether a draw built from this config under [format] is split into
+  /// groups.
+  ///
+  /// The canonical answer, and it has to be canonical: every screen that
+  /// shows a group table used to ask `format == groupThenKnockout` instead,
+  /// which was true before [useGroups] existed and has been wrong since. A
+  /// knockout with a group stage in front of it, or a round robin split into
+  /// pools, produced group fixtures that no standings table would display —
+  /// so the organizer saw a draw whose groups the app refused to admit to.
+  bool isGroupedUnder(CompetitionFormat format) =>
+      groupsImplied(format) || (formatSupportsGroups(format) && useGroups);
+
+  /// Whether that group stage promotes into a knockout bracket, which is what
+  /// decides whether [qualifiersPerGroup] means anything. Pools — a round
+  /// robin or league split into groups — have nothing to promote into.
+  bool feedsKnockoutUnder(CompetitionFormat format) =>
+      isGroupedUnder(format) &&
+      format != CompetitionFormat.roundRobin &&
+      format != CompetitionFormat.leagueTable;
+
   static DrawConfig fromMap(Map<String, dynamic>? m) {
     if (m == null) return const DrawConfig();
     return DrawConfig(
@@ -97,6 +147,7 @@ class DrawConfig {
       shuffleSeed: Fs.intOrNull(m['shuffleSeed']),
       method: Fs.str(m['method'], 'ranked'),
       seedFromRatings: Fs.boolean(m['seedFromRatings']),
+      swissRounds: Fs.intOrNull(m['swissRounds']),
     );
   }
 
@@ -110,6 +161,7 @@ class DrawConfig {
         'shuffleSeed': shuffleSeed,
         'method': method,
         'seedFromRatings': seedFromRatings,
+        'swissRounds': swissRounds,
       };
 
   DrawConfig copyWith({
@@ -122,6 +174,7 @@ class DrawConfig {
     int? shuffleSeed,
     String? method,
     bool? seedFromRatings,
+    int? swissRounds,
   }) =>
       DrawConfig(
         useGroups: useGroups ?? this.useGroups,
@@ -133,6 +186,7 @@ class DrawConfig {
         shuffleSeed: shuffleSeed ?? this.shuffleSeed,
         method: method ?? this.method,
         seedFromRatings: seedFromRatings ?? this.seedFromRatings,
+        swissRounds: swissRounds ?? this.swissRounds,
       );
 }
 

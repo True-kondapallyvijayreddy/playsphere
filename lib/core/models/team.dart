@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'enums.dart';
@@ -51,6 +53,7 @@ class Team {
     this.baseTeamId,
     this.photoUrl,
     this.homeArea,
+    this.joinCode,
     this.createdAt,
   });
 
@@ -110,6 +113,21 @@ class Team {
   /// version of "nearby teams" is the area its members say they play in.
   final String? homeArea;
 
+  /// The code a captain reads out so friends can find this team, or null for
+  /// a team nobody joins by asking — a club squad is picked from the club's
+  /// roster, and an event team is picked for one tournament.
+  ///
+  /// ## Why the code is not what authorizes joining
+  ///
+  /// `firestore.rules` opens every team document to any signed-in reader, so
+  /// a code stored on the document is knowledge anybody could obtain. It is a
+  /// *lookup key* — the answer to "which of the eleven teams called Warriors
+  /// is my one" — and nothing more. What actually admits somebody is the
+  /// captain approving a [TeamJoinRequest], which is also what makes the
+  /// roster consented on both sides: the player asked, and the captain said
+  /// yes.
+  final String? joinCode;
+
   final DateTime? createdAt;
 
   /// Everyone who can act for this team, in one place.
@@ -168,6 +186,7 @@ class Team {
     TeamStatus? status,
     String? photoUrl,
     String? homeArea,
+    String? joinCode,
     TeamType? type,
     String? clubId,
     bool clearCompetitionId = false,
@@ -187,6 +206,7 @@ class Team {
         baseTeamId: baseTeamId,
         photoUrl: photoUrl ?? this.photoUrl,
         homeArea: homeArea ?? this.homeArea,
+        joinCode: joinCode ?? this.joinCode,
         createdAt: createdAt,
       );
 
@@ -215,6 +235,7 @@ class Team {
         baseTeamId: Fs.strOrNull(d['baseTeamId']),
         photoUrl: Fs.strOrNull(d['photoUrl']),
         homeArea: Fs.strOrNull(d['homeArea']),
+        joinCode: Fs.strOrNull(d['joinCode']),
         createdAt: Fs.dateOrNull(d['createdAt']),
       );
 
@@ -235,6 +256,21 @@ class Team {
         'baseTeamId': baseTeamId,
         'photoUrl': photoUrl,
         'homeArea': homeArea,
+        'joinCode': joinCode,
         'createdAt': FieldValue.serverTimestamp(),
       };
+
+  /// A code a person can read off a phone screen and type without asking
+  /// which character that is.
+  ///
+  /// Same alphabet as `Organization.generateInviteCode`, and for the same
+  /// reason: no O/0, no I/1/l. Six characters from 31 is about 900 million
+  /// combinations, which is not a security boundary and does not need to be
+  /// — see [joinCode].
+  static String generateJoinCode([Random? random]) {
+    const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+    final rng = random ?? Random.secure();
+    return List.generate(6, (_) => alphabet[rng.nextInt(alphabet.length)])
+        .join();
+  }
 }

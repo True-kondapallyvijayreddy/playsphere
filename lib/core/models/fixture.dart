@@ -40,6 +40,11 @@ class Fixture {
     this.scheduledAt,
     this.venue,
     this.scorerUids = const [],
+    this.activeScorerUid,
+    this.activeScorerDeviceId,
+    this.penGrantedByUid,
+    this.penGrantedAt,
+    this.lastRestartSeq,
     this.participantOrgIds,
     this.officials = const [],
     this.scoreState = const {},
@@ -138,6 +143,58 @@ class Fixture {
   /// on every event write, so an unrelated member cannot alter a score.
   final List<String> scorerUids;
 
+  /// Who holds the pen right now — the ONE person whose taps are the match.
+  ///
+  /// ## Why `scorerUids` was not enough
+  ///
+  /// `scorerUids` answers "who is allowed to score this match", and a list is
+  /// the right shape for that: a club assigns two umpires to a final, one
+  /// takes the first half, the other the second, and both need the right for
+  /// the whole match. What it cannot say is which of them is scoring *now*.
+  /// So both pads were live at once, both were authoritative, and the loser
+  /// of each race for a sequence number had their tap discarded — which the
+  /// scorer sees as the score jumping backwards under their thumb.
+  ///
+  /// This field is the answer to the second question, and it holds exactly
+  /// one uid or none. An owner GRANTS it (see `UmpireRepository.grantPen`)
+  /// and can take it back at any time; while it is held, nobody else — the
+  /// owner very much included — may advance the score. An organizer who
+  /// wants the pen back has to say so, and that reassignment is recorded.
+  /// The alternative is an owner who can silently overwrite the official
+  /// standing at the ground, which is the thing every scoring dispute is
+  /// actually about.
+  ///
+  /// Null means the pen is free: the first eligible person to open the pad
+  /// claims it.
+  final String? activeScorerUid;
+
+  /// Which device the pen holder is scoring on. See [DeviceId] for why a uid
+  /// alone cannot express this.
+  ///
+  /// Claimed by the first device the holder opens the pad on, and only
+  /// cleared by a grant or a release — so the same person signed in on a
+  /// phone and a tablet still has exactly one live pad, and the second one
+  /// has to take over deliberately rather than by being opened.
+  final String? activeScorerDeviceId;
+
+  /// The organizer who handed the pen over, and when. This is the audit
+  /// trail a disputed result is argued from: who was authorised to score,
+  /// by whom, from what moment.
+  final String? penGrantedByUid;
+  final DateTime? penGrantedAt;
+
+  /// The sequence number of the restart the match is currently running from,
+  /// or null if the match has never been restarted (or the restart has since
+  /// been withdrawn).
+  ///
+  /// Derived state — [ScoringPlugin.rebuild] would tell you the same thing
+  /// from the log — kept on the fixture so a reader can offer "continue the
+  /// previous score" without opening a second listener on the event log. The
+  /// screen that needs to offer it is the one a reassigned official opens
+  /// after somebody restarted the match by mistake, which is exactly the
+  /// moment you do not want to be asking the network extra questions.
+  final int? lastRestartSeq;
+
   /// The two organizations contesting an inter-club match, mirrored from the
   /// parent competition.
   ///
@@ -218,7 +275,18 @@ class Fixture {
   final List<MatchPlayer> lineupA;
   final List<MatchPlayer> lineupB;
 
-  bool get hasLineups => lineupA.isNotEmpty && lineupB.isNotEmpty;
+  /// True when players or registered entrants are available.
+  /// Registered teams / players start immediately without blocking for line-up selection.
+  bool get hasLineups =>
+      (lineupA.isNotEmpty && lineupB.isNotEmpty) ||
+      (entrantAName.isNotEmpty &&
+          entrantBName.isNotEmpty &&
+          entrantAName != 'To be decided' &&
+          entrantBName != 'To be decided') ||
+      (entrantAUid != null &&
+          entrantAUid!.isNotEmpty &&
+          entrantBUid != null &&
+          entrantBUid!.isNotEmpty);
 
   /// Whether each club has declared its side final.
   ///
@@ -368,8 +436,24 @@ class Fixture {
         entrantAName: entrantAName,
         entrantBName: entrantBName,
         config: scoringConfig,
-        lineupA: lineupA,
-        lineupB: lineupB,
+        lineupA: lineupA.isNotEmpty
+            ? lineupA
+            : [
+                MatchPlayer(
+                  id: entrantAUid ?? (entrantAId.isNotEmpty ? entrantAId : 'entrant_a'),
+                  name: entrantAName.isNotEmpty ? entrantAName : 'Side A',
+                  uid: entrantAUid,
+                ),
+              ],
+        lineupB: lineupB.isNotEmpty
+            ? lineupB
+            : [
+                MatchPlayer(
+                  id: entrantBUid ?? (entrantBId.isNotEmpty ? entrantBId : 'entrant_b'),
+                  name: entrantBName.isNotEmpty ? entrantBName : 'Side B',
+                  uid: entrantBUid,
+                ),
+              ],
       );
 
   /// For knockout draws: where this match's winner advances to.
@@ -637,6 +721,46 @@ class Fixture {
   bool canBeScoredBy(String uid, {bool isOrgManager = false}) =>
       status.acceptsScoring && (scorerUids.contains(uid) || isOrgManager);
 
+  /// True when somebody has been handed the pen for this match.
+  bool get penIsHeld =>
+      activeScorerUid != null && activeScorerUid!.isNotEmpty;
+
+  /// True when [uid] is the person the pen was handed to.
+  ///
+  /// Says nothing about the device — see [penIsLiveOn]. An owner deciding
+  /// whether to show "reassign" wants this one; the pad deciding whether to
+  /// accept a tap wants that one.
+  bool penHeldBy(String uid) => penIsHeld && activeScorerUid == uid;
+
+  /// True when this exact device is the one the pen was claimed on.
+  ///
+  /// An unclaimed pen ([activeScorerDeviceId] null) is live on whichever
+  /// device the holder opens first — that is the claim. A pen already claimed
+  /// elsewhere is not live here, and the pad shows the live view with a
+  /// "take over on this device" path rather than a set of buttons whose taps
+  /// would lose every race they entered.
+  bool penIsLiveOn(String uid, String? deviceId) =>
+      penHeldBy(uid) &&
+      (activeScorerDeviceId == null ||
+          activeScorerDeviceId!.isEmpty ||
+          (deviceId != null && activeScorerDeviceId == deviceId));
+
+  /// Whether [uid] on [deviceId] may write a score right now.
+  ///
+  /// The single question the pad, the service and `firestore.rules` all ask,
+  /// so they cannot drift apart. An unheld pen falls back to [eligible] —
+  /// the older role-based test — because a match nobody was ever assigned to
+  /// still has to be scoreable by the organizer who walks up to it.
+  bool mayScoreNow({
+    required String uid,
+    String? deviceId,
+    required bool eligible,
+  }) {
+    if (!status.acceptsScoring) return false;
+    if (!penIsHeld) return eligible;
+    return penIsLiveOn(uid, deviceId);
+  }
+
   factory Fixture.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
     final d = doc.data() ?? const {};
     return Fixture(
@@ -656,6 +780,13 @@ class Fixture {
       scheduledAt: Fs.dateOrNull(d['scheduledAt']),
       venue: Fs.strOrNull(d['venue']),
       scorerUids: Fs.strList(d['scorerUids']),
+      activeScorerUid: Fs.strOrNull(d['activeScorerUid']),
+      activeScorerDeviceId: Fs.strOrNull(d['activeScorerDeviceId']),
+      penGrantedByUid: Fs.strOrNull(d['penGrantedByUid']),
+      penGrantedAt: Fs.dateOrNull(d['penGrantedAt']),
+      lastRestartSeq: d['lastRestartSeq'] is num
+          ? (d['lastRestartSeq'] as num).toInt()
+          : null,
       participantOrgIds: d['participantOrgIds'] is List
           ? Fs.strList(d['participantOrgIds'])
           : null,
@@ -729,6 +860,11 @@ class Fixture {
         'scheduledAt': Fs.ts(scheduledAt),
         'venue': venue,
         'scorerUids': scorerUids,
+        'activeScorerUid': activeScorerUid,
+        'activeScorerDeviceId': activeScorerDeviceId,
+        'penGrantedByUid': penGrantedByUid,
+        'penGrantedAt': Fs.ts(penGrantedAt),
+        'lastRestartSeq': null,
         'participantOrgIds': participantOrgIds,
         'officials': MatchOfficial.listTo(officials),
         'scoreState': scoreState,
@@ -784,6 +920,14 @@ class Fixture {
     bool clearWinner = false,
     bool? isDraw,
     List<String>? scorerUids,
+    String? activeScorerUid,
+    String? activeScorerDeviceId,
+    /// Same reason as [clearWinner]: `?? this.activeScorerUid` cannot say
+    /// "nobody holds the pen any more", and releasing it is the whole point
+    /// of the handover flow.
+    bool clearPen = false,
+    int? lastRestartSeq,
+    bool clearRestart = false,
     List<MatchOfficial>? officials,
     DateTime? scheduledAt,
     String? venue,
@@ -815,6 +959,15 @@ class Fixture {
       scheduledAt: scheduledAt ?? this.scheduledAt,
       venue: venue ?? this.venue,
       scorerUids: scorerUids ?? this.scorerUids,
+      activeScorerUid:
+          clearPen ? null : (activeScorerUid ?? this.activeScorerUid),
+      activeScorerDeviceId: clearPen
+          ? null
+          : (activeScorerDeviceId ?? this.activeScorerDeviceId),
+      penGrantedByUid: clearPen ? null : penGrantedByUid,
+      penGrantedAt: clearPen ? null : penGrantedAt,
+      lastRestartSeq:
+          clearRestart ? null : (lastRestartSeq ?? this.lastRestartSeq),
       // Not a parameter: which two clubs are contesting the match is fixed when
       // the challenge is accepted. It is carried through explicitly because
       // `copyWith` runs on every single score event, and dropping it there

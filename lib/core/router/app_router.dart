@@ -19,6 +19,7 @@ import '../../features/analytics/analytics_screen.dart';
 import '../../features/auth/profile_setup_screen.dart';
 import '../../features/auth/sign_in_screen.dart';
 import '../../features/community/looking_for_board_screen.dart';
+import '../../features/community/match_rsvp_screen.dart';
 import '../../features/competitions/global_events_screen.dart';
 import '../../features/competitions/challenges_screen.dart';
 import '../../features/competitions/competition_detail_screen.dart';
@@ -49,6 +50,17 @@ import '../../features/sponsor/sponsor_my_pledges_screen.dart';
 import '../../features/sponsor/sponsor_listing_detail_screen.dart';
 import '../../features/sponsor/sponsor_incoming_offers_screen.dart';
 import '../../features/scout/rising_talent_screen.dart';
+import '../../features/coaches/coach_detail_screen.dart';
+import '../../features/coaches/coach_profile_edit_screen.dart';
+import '../../features/coaches/coaches_screen.dart';
+import '../../features/medical/sports_emergency_screen.dart';
+import '../../features/medical/sports_injuries_screen.dart';
+import '../../features/medical/sports_medic_detail_screen.dart';
+import '../../features/medical/sports_medic_registration_screen.dart';
+import '../../features/medical/sports_medicine_screen.dart';
+import '../../features/medical/sports_medics_directory_screen.dart';
+import '../../features/medical/sports_warmups_screen.dart';
+import '../../features/sports/sport_hub_screen.dart';
 import '../../features/sports/sports_directory_screen.dart';
 import '../../features/scout/scout_search_screen.dart';
 import '../../features/ads/ad_console_screen.dart';
@@ -84,7 +96,9 @@ import '../../features/profile/player_sport_screen.dart';
 import '../../features/profile/player_stats_screen.dart';
 import '../../features/rules/sport_rules_screen.dart';
 import '../../features/teams/create_team_screen.dart';
+import '../../features/teams/create_standalone_team_screen.dart';
 import '../../features/teams/my_teams_screen.dart';
+import '../../features/teams/standalone_teams_screen.dart';
 import '../../features/teams/team_detail_screen.dart';
 import '../../features/scoring/live_matches_screen.dart';
 import '../../features/scoring/live_now_screen.dart';
@@ -223,6 +237,75 @@ class Routes {
   /// enforced per-profile by `firestore.rules`, not by who is allowed to ask.
   static const scoutSearch = '/scout/search';
 
+  /// The same search with a sport already picked — what a sport hub's "Find
+  /// players" opens. A query parameter rather than a path segment because the
+  /// sport is a starting filter the person can change on the screen, not the
+  /// identity of the page: `/scout/search` and `/scout/search?sport=cricket`
+  /// are the same screen, and back from either lands in the same place.
+  static String scoutSearchIn(String sportId) =>
+      '$scoutSearch?sport=${Uri.encodeComponent(sportId)}';
+
+  /// The coach directory — everyone who has listed themselves as teaching a
+  /// sport. Public and sign-in free, like the ground and sponsorship
+  /// directories: a parent looking for a coach has usually not made an
+  /// account yet, and asking them to before they can even look is how a
+  /// directory stays empty.
+  static const coaches = '/coaches';
+
+  /// The same directory with a sport already picked — what a sport hub's
+  /// "All coaches" opens. A query parameter for the same reason
+  /// [scoutSearchIn] uses one: the sport is a starting filter, not the
+  /// identity of the page.
+  static String coachesIn(String sportId) =>
+      '$coaches?sport=${Uri.encodeComponent(sportId)}';
+
+  /// One coach's page. Keyed by uid, because the listing is.
+  static String coach(String uid) => '$coaches/$uid';
+
+  /// The form behind "do you coach?" — creating a listing and editing one are
+  /// the same screen. Under `/me` rather than `/coaches/mine` so it sorts
+  /// with the other things that are about the signed-in person.
+  static const myCoachProfile = '/me/coach';
+
+  /// The Sports Medicine & Performance hub — practitioners, warm-ups,
+  /// injuries and on-field emergencies.
+  ///
+  /// Org-free, like [give] and [shop]. An injury belongs to a person, not to
+  /// whichever of their clubs they happened to have selected, and making
+  /// somebody pick a club before they can read what to do about a concussion
+  /// would be the worst possible place to ask that question.
+  static const sportsMedicine = '/medical';
+
+  /// The practitioner directory. Public and sign-in free, like [coaches]: a
+  /// parent looking for a physiotherapist for their daughter has usually not
+  /// made an account, and requiring one before they can look is how a
+  /// directory stays empty.
+  static const sportsMedics = '$sportsMedicine/find';
+
+  /// The directory with a sport already applied — what an injury page's
+  /// "find a physio" opens. A query parameter for the same reason
+  /// [coachesIn] uses one: the sport is a starting filter, not the identity
+  /// of the page.
+  static String sportsMedicsIn(String sportId) =>
+      '$sportsMedics?sport=${Uri.encodeComponent(sportId)}';
+
+  /// One practitioner's page. Keyed by uid, because the listing is.
+  static String sportsMedic(String uid) => '$sportsMedics/$uid';
+
+  /// The curated reference. All three read from the `const` library that
+  /// ships with the app, so they open on a ground with no signal.
+  static const sportsWarmups = '$sportsMedicine/warmups';
+  static String sportsWarmupsFor(String sportId) =>
+      '$sportsWarmups?sport=${Uri.encodeComponent(sportId)}';
+  static const sportsInjuries = '$sportsMedicine/injuries';
+  static String sportsInjuriesFor(String sportId) =>
+      '$sportsInjuries?sport=${Uri.encodeComponent(sportId)}';
+  static const sportsEmergency = '$sportsMedicine/emergency';
+
+  /// The form behind "are you a doctor or physiotherapist?". Under `/me`
+  /// for the same reason [myCoachProfile] is.
+  static const mySportsMedicProfile = '/me/sports-medic';
+
   /// Talent discovery's other half — the precomputed "who is improving"
   /// boards rather than a "who is good" search. Also role-free: the boards
   /// that include minors are a different set of documents, gated on the
@@ -238,6 +321,18 @@ class Routes {
   /// same reason as [globalEvents] — discovering a sport must not require
   /// already being in a club that plays it.
   static const sports = '/sports';
+
+  /// One sport's whole ecosystem — live matches, the clubs running it, the
+  /// grounds that have a pitch for it, the events open for entry.
+  ///
+  /// The nine sport tiles on the home screen used to build this id and then
+  /// discard it, pushing every one of them to the directory above. See
+  /// `SportHubScreen`.
+  static String sport(String sportId) => '/sports/$sportId';
+
+  /// Every match availability call across this person's clubs. Reached from
+  /// the RSVP counter on home, which is the only trace of it there.
+  static const matchRsvps = '/rsvp';
 
   /// The advertiser self-serve console. Org-free — an advertiser is a
   /// business acting for itself, not a club.
@@ -279,6 +374,16 @@ class Routes {
 
   /// One team's roster, live — see [TeamDetailScreen].
   static String team(String teamId) => '/teams/$teamId';
+
+  /// Teams with no club behind them — where you make one, find one, or join
+  /// one by code.
+  ///
+  /// Not under `/org/...`, unlike [createTeam], and that is the whole point:
+  /// a path with an org segment makes the club compulsory no matter how
+  /// nullable the field is. See `StandaloneTeamsScreen`.
+  static const standaloneTeams = '/teams';
+
+  static const createStandaloneTeam = '/teams/new';
 
   /// One player's record in one sport, sliced by where the matches came from
   /// — `docs/Heart_of_the_playsphere.md` §18. [highlight], when given, is a
@@ -747,15 +852,95 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: Routes.scoutSearch,
-        builder: (_, __) => const ScoutSearchScreen(),
+        builder: (_, state) => ScoutSearchScreen(
+          initialSportId: state.uri.queryParameters['sport'],
+        ),
       ),
       GoRoute(
         path: Routes.risingTalent,
         builder: (_, __) => const RisingTalentScreen(),
       ),
       GoRoute(
+        path: Routes.coaches,
+        builder: (_, state) => CoachesScreen(
+          initialSportId: state.uri.queryParameters['sport'],
+        ),
+        routes: [
+          // Nested, so the directory is a coach page's natural parent and
+          // the back arrow lands on the list they came from.
+          GoRoute(
+            path: ':uid',
+            builder: (_, state) =>
+                CoachDetailScreen(uid: state.pathParameters['uid']!),
+          ),
+        ],
+      ),
+      GoRoute(
+        path: Routes.myCoachProfile,
+        builder: (_, __) => const CoachProfileEditScreen(),
+      ),
+
+      // The Sports Medicine hub. Every screen is nested under `/medical` so
+      // the hub is each one's natural parent and a back arrow from a warm-up
+      // or an injury lands there rather than wherever the deep link came
+      // from.
+      GoRoute(
+        path: Routes.sportsMedicine,
+        builder: (_, __) => const SportsMedicineScreen(),
+        routes: [
+          GoRoute(
+            path: 'find',
+            builder: (_, state) => SportsMedicsDirectoryScreen(
+              initialSportId: state.uri.queryParameters['sport'],
+            ),
+            routes: [
+              GoRoute(
+                path: ':uid',
+                builder: (_, state) => SportsMedicDetailScreen(
+                  uid: state.pathParameters['uid']!,
+                ),
+              ),
+            ],
+          ),
+          GoRoute(
+            path: 'warmups',
+            builder: (_, state) => SportsWarmupsScreen(
+              initialSportId: state.uri.queryParameters['sport'],
+            ),
+          ),
+          GoRoute(
+            path: 'injuries',
+            builder: (_, state) => SportsInjuriesScreen(
+              initialSportId: state.uri.queryParameters['sport'],
+            ),
+          ),
+          GoRoute(
+            path: 'emergency',
+            builder: (_, __) => const SportsEmergencyScreen(),
+          ),
+        ],
+      ),
+      GoRoute(
+        path: Routes.mySportsMedicProfile,
+        builder: (_, __) => const SportsMedicRegistrationScreen(),
+      ),
+      GoRoute(
         path: Routes.sports,
         builder: (_, __) => const SportsDirectoryScreen(),
+        routes: [
+          // Nested, so the directory is this screen's natural parent and the
+          // back arrow goes where a person expects.
+          GoRoute(
+            path: ':sportId',
+            builder: (_, state) => SportHubScreen(
+              sportId: Uri.decodeComponent(state.pathParameters['sportId']!),
+            ),
+          ),
+        ],
+      ),
+      GoRoute(
+        path: Routes.matchRsvps,
+        builder: (_, __) => const MatchRsvpScreen(),
       ),
       GoRoute(
         path: '/leaderboard/:sportId/:statKey',
@@ -783,6 +968,16 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.mySports,
         builder: (_, __) => const _MyScopedScreen(_MyScope.sports),
+      ),
+      // Before the `:teamId` route below it. `/teams/new` would otherwise
+      // match the team page with an id of "new".
+      GoRoute(
+        path: Routes.createStandaloneTeam,
+        builder: (_, __) => const CreateStandaloneTeamScreen(),
+      ),
+      GoRoute(
+        path: Routes.standaloneTeams,
+        builder: (_, __) => const StandaloneTeamsScreen(),
       ),
       GoRoute(
         path: Routes.myTeams,

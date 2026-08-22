@@ -12,6 +12,7 @@ import 'plugins/goal_based_plugin.dart';
 import 'plugins/hockey_plugin.dart';
 import 'plugins/kabaddi_plugin.dart';
 import 'plugins/kho_kho_plugin.dart';
+import 'plugins/pickleball_plugin.dart';
 import 'plugins/set_based_plugin.dart';
 import 'plugins/volleyball_plugin.dart';
 import 'plugins/simple_points_plugin.dart';
@@ -107,6 +108,22 @@ class SideFormats {
     'badminton': racquet,
     'table_tennis': racquet,
     'tennis': racquet,
+    'pickleball': racquet,
+    'squash': racquet,
+    // Padel is a doubles game. Singles exists but is played on a different,
+    // narrower court and is rare enough that offering it as the default would
+    // mislead more organizers than it helped.
+    'padel': [
+      SideFormat(
+        id: 'doubles',
+        name: 'Doubles',
+        min: 2,
+        max: 2,
+        configOverrides: {'doubles': true},
+        isDefault: true,
+      ),
+      SideFormat(id: 'singles', name: 'Singles', min: 1, max: 1),
+    ],
     'carrom': [
       SideFormat(id: 'singles', name: 'Singles', min: 1, max: 1,
           isDefault: true),
@@ -239,6 +256,13 @@ class TossOptions {
     'badminton': _serveOrReceive,
     'table_tennis': _serveOrReceive,
     'tennis': [
+      TossChoice(id: 'serve', label: 'Serve'),
+      TossChoice(id: 'receive', label: 'Receive', givesFirstTurn: false),
+      TossChoice(id: 'ends', label: 'Choose ends', givesFirstTurn: false),
+    ],
+    'pickleball': _serveOrReceive,
+    'squash': _serveOrReceive,
+    'padel': [
       TossChoice(id: 'serve', label: 'Serve'),
       TossChoice(id: 'receive', label: 'Receive', givesFirstTurn: false),
       TossChoice(id: 'ends', label: 'Choose ends', givesFirstTurn: false),
@@ -379,6 +403,27 @@ class PreMatchChecks {
       PreMatchCheck(id: 'same_ball', label: 'Same ball type'),
       PreMatchCheck(id: 'court_ready', label: 'Court free and net set'),
     ],
+    'pickleball': [
+      PreMatchCheck(
+        id: 'same_ball',
+        label: 'Same ball type',
+        detail: 'Indoor and outdoor balls do not play the same.',
+      ),
+      PreMatchCheck(id: 'court_ready', label: 'Court free and net set'),
+    ],
+    'padel': [
+      PreMatchCheck(id: 'same_ball', label: 'Same ball type'),
+      PreMatchCheck(id: 'court_ready', label: 'Court booked and glass clear'),
+    ],
+    'squash': [
+      PreMatchCheck(
+        id: 'same_ball',
+        label: 'Agreed ball dot',
+        detail: 'A double-yellow and a red ball are different games.',
+      ),
+      PreMatchCheck(id: 'court_ready', label: 'Court booked'),
+      PreMatchCheck(id: 'eyewear', label: 'Eye protection where required'),
+    ],
     'football': [
       PreMatchCheck(id: 'referee_present', label: 'Referee present'),
       PreMatchCheck(
@@ -498,6 +543,23 @@ class SportSpec {
           CompetitionFormat.swiss,
           CompetitionFormat.leagueTable,
         ];
+
+  /// The format a newly-added season or tournament category starts on.
+  ///
+  /// Groups+Knockout rather than the list's first entry, and the difference is
+  /// not cosmetic. A season category was created on Round Robin with an empty
+  /// [DrawConfig], and `setUpWholeSeason` draws every event from exactly that
+  /// — so sixteen teams became one sixteen-way table of 120 matches with no
+  /// group stage anywhere, which is not the shape any organizer running a
+  /// school meet or a district tournament actually wants. Groups first, then
+  /// a knockout off the group tables, is what the draw generator has always
+  /// been able to build and what the format list buried in third place.
+  ///
+  /// Still only a starting point: every screen that uses it shows the full
+  /// [competitionFormats] dropdown next to it.
+  CompetitionFormat get defaultCompetitionFormat => isPerformance
+      ? CompetitionFormat.finalOnly
+      : CompetitionFormat.groupThenKnockout;
 }
 
 /// The curated sport catalogue.
@@ -551,6 +613,34 @@ class SportCatalog {
       id: 'tennis',
       name: 'Tennis',
       pluginKey: TennisPlugin.pluginKey,
+      archetype: CompetitionArchetype.versus,
+      icon: '\u{1F3BE}',
+    ),
+    SportSpec(
+      id: 'pickleball',
+      name: 'Pickleball',
+      pluginKey: PickleballPlugin.pluginKey,
+      archetype: CompetitionArchetype.versus,
+      icon: '\u{1F3D3}',
+    ),
+    // Padel is tennis scoring on a different court, so it reuses the tennis
+    // engine rather than duplicating the ladder. The court is a fact about
+    // the venue, not about the scoring, and the one thing that genuinely
+    // differs — golden point instead of advantage — is already a tennis
+    // config key.
+    SportSpec(
+      id: 'padel',
+      name: 'Padel',
+      pluginKey: TennisPlugin.pluginKey,
+      archetype: CompetitionArchetype.versus,
+      icon: '\u{1F3BE}',
+    ),
+    // Squash is point-a-rally to 11 with no service-based scoring left in the
+    // modern game, which is exactly what the generic set engine does.
+    SportSpec(
+      id: 'squash',
+      name: 'Squash',
+      pluginKey: SetBasedPlugin.pluginKey,
       archetype: CompetitionArchetype.versus,
       icon: '\u{1F3BE}',
     ),
@@ -696,6 +786,7 @@ class ScoringRegistry {
     KabaddiPlugin.pluginKey: KabaddiPlugin(),
     VolleyballPlugin.pluginKey: VolleyballPlugin(),
     KhoKhoPlugin.pluginKey: KhoKhoPlugin(),
+    PickleballPlugin.pluginKey: PickleballPlugin(),
     TennisPlugin.pluginKey: TennisPlugin(),
     TableTennisPlugin.pluginKey: TableTennisPlugin(),
     HockeyPlugin.pluginKey: HockeyPlugin(),

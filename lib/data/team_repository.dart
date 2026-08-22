@@ -1,9 +1,14 @@
+import 'dart:typed_data';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 
 import '../core/errors/app_exception.dart';
 import '../core/firebase/firestore_refs.dart';
 import '../core/models/enums.dart';
 import '../core/models/team.dart';
+import '../core/models/team_join_request.dart';
+import 'media_uploader.dart';
 import 'org_repository.dart' show guard, guardStream;
 
 /// Reads and writes for `teams/{teamId}`.
@@ -14,7 +19,12 @@ import 'org_repository.dart' show guard, guardStream;
 /// sentence back instead of a `permission-denied` can show it to the person
 /// who typed the form, and a rejected write costs no round trip.
 class TeamRepository {
-  const TeamRepository();
+  const TeamRepository({FirebaseStorage? storage}) : _storage = storage;
+
+  /// Injectable so a test can drive the crest upload against a fake bucket.
+  final FirebaseStorage? _storage;
+
+  MediaUploader get _media => MediaUploader(storage: _storage);
 
   // --- Reads ------------------------------------------------------------
 
@@ -75,6 +85,7 @@ class TeamRepository {
     String? competitionId,
     String? baseTeamId,
     String? homeArea,
+    String? joinCode,
   }) =>
       guard(() async {
         final roster = <String>{createdByUid, ...memberUids}.toList();
@@ -91,6 +102,7 @@ class TeamRepository {
           competitionId: competitionId,
           baseTeamId: baseTeamId,
           homeArea: homeArea,
+          joinCode: joinCode,
         );
         final problem = team.validationError;
         if (problem != null) throw ValidationException(problem);
@@ -126,6 +138,164 @@ class TeamRepository {
         memberUids: memberUids,
         competitionId: competitionId,
         baseTeamId: baseTeamId,
+      );
+
+  /// Raises a team that belongs to no club.
+  ///
+  /// The flow the club-scoped [createTeam] cannot serve: five friends from
+  /// five different clubs entering a tournament as one side. No capability is
+  /// checked and no org is named, because there is no org — Rule 4 says a
+  /// team does not need a club, and requiring one to create a team is the
+  /// exact constraint that rule forbids.
+  ///
+  /// The creator is the captain and the only member. Everybody else arrives
+  /// through [requestToJoin] and [approveJoinRequest], which is what makes
+  /// the roster consented at both ends rather than a list of uids somebody
+  /// typed in.
+  Future<String> createIndependentTeam({
+    required String name,
+    required String sportId,
+    required String createdByUid,
+    String? homeArea,
+  }) =>
+      createTeam(
+        name: name,
+        sportId: sportId,
+        createdByUid: createdByUid,
+        type: TeamType.independent,
+        captainUid: createdByUid,
+        homeArea: homeArea,
+        joinCode: Team.generateJoinCode(),
+      );
+
+  /// Independent teams playing one sport.
+  Stream<List<Team>> watchIndependentTeams(String sportId) => guardStream(
+        () => Refs.independentTeamsForSport(sportId)
+            .snapshots()
+            .map(_toSortedTeams),
+      );
+
+  /// The team a shared code points at, or null.
+  ///
+  /// Uppercased before the query for the same reason `findByInviteCode`
+  /// does it: codes get typed by hand off a phone screen and half of those
+  /// arrive lowercase.
+  Future<Team?> findByJoinCode(String code) => guard(() async {
+        if (code.trim().isEmpty) return null;
+        final snap = await Refs.teamsByJoinCode(code).get();
+        if (snap.docs.isEmpty) return null;
+        return Team.fromSnapshot(snap.docs.first);
+      });
+
+  // --- Crest --------------------------------------------------------------
+
+  /// Gives a team its own crest.
+  ///
+  /// `Team.photoUrl` has been read by the team list, the team page and the
+  /// career profile since teams were added, and written by nothing — three
+  /// screens rendering a field no form could set. This is that form's other
+  /// half.
+  ///
+  /// Deliberately not routed through [Team.validationError] and `updateTeam`:
+  /// that path rewrites the whole document, and a crest change must not be
+  /// able to disturb a roster. One field, one write.
+  ///
+  /// Authority is the same one that governs every other team edit —
+  /// `teamRuns()` in `firestore.rules`, meaning the captain, the manager or
+  /// the creator. The uid in the path is only what Cloud Storage can check.
+  Future<String> uploadTeamCrest({
+    required String teamId,
+    required String uid,
+    required Uint8List bytes,
+    required String contentType,
+  }) =>
+      guard(() async {
+        final url = await _media.putImage(
+          folder: 'teams/$teamId/logo',
+          uid: uid,
+          bytes: bytes,
+          contentType: contentType,
+        );
+        await Refs.team(teamId).update({'photoUrl': url});
+        return url;
+      });
+
+  /// Goes back to the generated crest.
+  Future<void> removeTeamCrest(String teamId) =>
+      guard(() => Refs.team(teamId).update({'photoUrl': null}));
+
+  // --- Joining ------------------------------------------------------------
+
+  /// Asks a team to be let on.
+  ///
+  /// Keyed by the requester's uid, so asking twice replaces rather than
+  /// queueing a second row for the captain to decline twice.
+  Future<void> requestToJoin({
+    required String teamId,
+    required String uid,
+    required String displayName,
+    String? photoUrl,
+    String? message,
+  }) =>
+      guard(
+        () => Refs.teamJoinRequest(teamId, uid).set(
+          TeamJoinRequest(
+            uid: uid,
+            displayName: displayName,
+            photoUrl: photoUrl,
+            message: message,
+          ).toCreate(),
+        ),
+      );
+
+  /// Withdraws a request, or declines one.
+  ///
+  /// The same call for both: a declined request and a withdrawn one leave the
+  /// database in the identical state, and keeping a tombstone would mean
+  /// storing "this captain said no to this player" — a record that helps
+  /// nobody and that the player can see.
+  Future<void> cancelJoinRequest({
+    required String teamId,
+    required String uid,
+  }) =>
+      guard(() => Refs.teamJoinRequest(teamId, uid).delete());
+
+  /// Lets somebody on, and clears their request, atomically.
+  ///
+  /// A batch because the two halves are one decision. Adding the player and
+  /// failing to clear the request leaves a captain approving somebody who is
+  /// already on the team; clearing the request and failing to add them loses
+  /// the ask entirely, and the player has no way to know it happened.
+  ///
+  /// `arrayUnion` rather than a read-modify-write for the roster, so two
+  /// captains approving two players in the same moment both land.
+  Future<void> approveJoinRequest({
+    required String teamId,
+    required String uid,
+  }) =>
+      guard(() async {
+        final batch = Refs.db.batch();
+        batch.update(Refs.team(teamId), {
+          'memberUids': FieldValue.arrayUnion([uid]),
+        });
+        batch.delete(Refs.teamJoinRequest(teamId, uid));
+        await batch.commit();
+      });
+
+  /// Who is waiting on this team's captain.
+  Stream<List<TeamJoinRequest>> watchJoinRequests(String teamId) => guardStream(
+        () => Refs.teamJoinRequests(teamId).snapshots().map(
+              (s) => s.docs.map(TeamJoinRequest.fromDoc).toList(),
+            ),
+      );
+
+  /// Whether this person has already asked to join this team.
+  Stream<bool> watchHasRequested({
+    required String teamId,
+    required String uid,
+  }) =>
+      guardStream(
+        () => Refs.teamJoinRequest(teamId, uid).snapshots().map((d) => d.exists),
       );
 
   /// Renames a team, or changes its captain, manager, photo or area.

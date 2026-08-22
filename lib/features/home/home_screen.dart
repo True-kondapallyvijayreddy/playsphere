@@ -1,89 +1,57 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:intl/intl.dart';
 
 import '../../core/ads/promo.dart';
 import '../../core/layout/responsive.dart';
-import '../../core/models/competition.dart';
-import '../../core/models/enums.dart';
-import '../../core/models/fixture.dart';
 import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
-import '../../core/theme/app_theme.dart';
-import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/confirm_exit.dart';
 import '../../shared/live_dot.dart';
-import '../../shared/promo_banner.dart';
-import '../../shared/section_header.dart';
-import '../community/widgets/match_rsvp_section.dart';
+import '../../shared/promo_strip.dart';
 import '../../shared/ui_kit.dart';
-import '../scoring/widgets/live_score_card.dart';
-import 'event_feed.dart';
 import 'home_providers.dart';
 
-/// How many live matches the home dashboard shows before it hands off to
-/// [Routes.liveNow] with a "More" button. Three, not the whole list: this is
-/// the top of a dashboard with clubs, events and the rest of the product
-/// still to come, not the live screen itself.
-const _liveHomePreviewCap = 3;
-
-/// How many open-for-entry events the home dashboard shows before it hands
-/// off to [Routes.myEvents] with a "More" button. Five: enough that a member
-/// in one or two clubs sees everything without scrolling, but a person in a
-/// busy multi-club season does not get their clubs and live matches pushed
-/// off the first screen by a long list of entry windows.
-const _eventsHomePreviewCap = 5;
-
-/// The screen a member lands on after signing in.
+/// The dashboard: what is happening in this person's sports world, in one
+/// screen they never have to scroll.
 ///
-/// It answers, in order: what is happening right now, what is waiting on me,
-/// which clubs am I in, and what is coming up — across every club at once,
-/// because a person is one player with several clubs rather than several
-/// separate accounts. Everything else the product does is one tap away in the
-/// module menu behind the three lines at the top left.
+/// ## What this replaced, and why
+///
+/// The previous home screen stacked seven full sections — greeting, search,
+/// live matches, upcoming events, my clubs, career stats, an explore grid —
+/// each with its own heading, its own empty state and its own list. It was
+/// two and a half screenfuls before a member reached anything they could act
+/// on, and it answered every question except the one they opened the app to
+/// ask: *what do I do now?*
+///
+/// The rule here is that **home holds counts, not lists**. A list belongs on
+/// the screen devoted to it, where it has room to be complete and sortable.
+/// A count belongs here, because a count is a question — "12 events, 3 this
+/// week" — and tapping it is how you get the answer. That collapses five
+/// sections into six tiles, and the whole dashboard fits above the fold.
+///
+/// The two big buttons underneath draw the one distinction the product turns
+/// on: **Play sport** is intent — I want a game, now — and **Explore sport**
+/// is discovery. Explore is not a second menu: it opens the sport directory,
+/// and picking a sport there scopes the whole of PlaySphere to it — clubs,
+/// teams, grounds, events, rankings, sponsorship. See `SportHubScreen`.
+/// Everything else lives in the short list below them.
 class HomeScreen extends ConsumerWidget {
   const HomeScreen({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-    final uid = ref.watch(currentUidProvider);
     final memberships = ref.watch(myActiveMembershipsProvider);
     final clubs = memberships.valueOrNull ?? const [];
 
-    final liveAsync = ref.watch(myLiveFixturesProvider);
-    final live = liveAsync.valueOrNull ?? const <Fixture>[];
-    // Deliberately tolerant of its own failure: this is a bonus section, and
-    // an error here must never take the club's own live list down with it.
-    final clubmateLive =
-        ref.watch(clubmateLiveFixturesProvider).valueOrNull ??
-            const <Fixture>[];
-    final liveFailures = ref.watch(myLiveFixtureFailuresProvider);
-    final eventsAsync = ref.watch(myUpcomingEventsProvider);
-    final events = eventsAsync.valueOrNull ?? const <Competition>[];
-    // The home dashboard only ever shows what a member can act on today —
-    // open for entries — not everything scheduled or already running.
-    // displayStatus(), not the stored status field: an event whose deadline
-    // has quietly passed must stop counting as open the moment it does,
-    // same derivation _ClubCard's "open" pill already uses.
-    final openEvents = events
-        .where((c) => c.displayStatus() == CompetitionStatus.registrationOpen)
-        .toList();
-    // A season's sports fold into one card here — see [groupEventFeed] — so a
-    // five-sport sports week takes one slot in this preview instead of five.
-    final openFeed = groupEventFeed(openEvents);
+    final rsvp = ref.watch(rsvpCountProvider);
+    final live = ref.watch(liveCountProvider);
 
-    final career = uid == null ? null : ref.watch(careerProvider(uid));
-    final lines = career?.valueOrNull ?? const [];
-    final matchesPlayed = lines.fold<int>(0, (s, l) => s + l.matchesPlayed);
-    final sportsPlayed = lines.where((l) => l.matchesPlayed > 0).length;
-
-    // The first club where this person could actually create something. Drives
-    // the quick action and the floating button: offering "New event" to a
-    // member who cannot create one is offering a permission error.
+    // The first club where this person could actually create something.
+    // Offering "New event" to a member who cannot create one is offering a
+    // permission error.
     final organizingOrgId = clubs
         .map((m) => m.orgId)
         .where(
@@ -93,354 +61,87 @@ class HomeScreen extends ConsumerWidget {
         )
         .firstOrNull;
 
+    // Quick match needs a club to hang the match off, but not the right to
+    // run events — a plain member starting a game between two people already
+    // on the ground is the commonest thing in the app. Prefer the club this
+    // person organizes for, so both buttons land in the same place, and fall
+    // back to any club they belong to.
+    final playOrgId = organizingOrgId ??
+        (clubs.isEmpty ? null : clubs.first.orgId);
+
     return ConfirmExit(
       child: AppScaffold(
-        title: 'Home',
-        subtitle: clubs.isEmpty
-            ? 'Your sports, in one place'
-            : '${clubs.length} ${clubs.length == 1 ? 'club' : 'clubs'}',
-        floatingActionButton: organizingOrgId == null
+        title: 'PlaySphere',
+        // The same pair the club home carries, for the same reason: the two
+        // things a person comes here to *start* should be reachable without
+        // first picking a club. Small button on top is quick match — play
+        // now — and the labelled one below runs the heavier event flow, which
+        // only an organizer sees.
+        floatingActionButton: (playOrgId == null && organizingOrgId == null)
             ? null
-            : FloatingActionButton.extended(
-                onPressed: () =>
-                    context.push(Routes.createCompetition(organizingOrgId)),
-                icon: const Icon(Icons.add),
-                label: const Text('New event'),
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  if (playOrgId != null)
+                    FloatingActionButton.small(
+                      heroTag: 'home-quick-match',
+                      tooltip: 'Quick match — play now',
+                      onPressed: () =>
+                          context.push(Routes.quickMatch(playOrgId)),
+                      child: const Icon(Icons.sports_score),
+                    ),
+                  if (playOrgId != null && organizingOrgId != null)
+                    const SizedBox(height: 12),
+                  if (organizingOrgId != null)
+                    FloatingActionButton.extended(
+                      heroTag: 'home-new-event',
+                      onPressed: () => context
+                          .push(Routes.createCompetition(organizingOrgId)),
+                      icon: const Icon(Icons.add),
+                      label: const Text('New event'),
+                    ),
+                ],
               ),
         body: AsyncView(
           value: memberships,
           onRetry: () => ref.invalidate(myMembershipsProvider),
-          builder: (activeClubs) {
+          builder: (_) {
             return ListView(
-              padding: const EdgeInsets.only(bottom: 96),
+              padding: const EdgeInsets.only(bottom: 88),
               children: [
                 ContentBounds(
-                  maxWidth: 1100,
+                  maxWidth: 900,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      _Greeting(
-                        clubCount: activeClubs.length,
-                        liveCount: live.length,
-                      ),
-                      const SizedBox(height: 14),
-
-                      // Directly under the banner, above everything else on
-                      // the dashboard — including the live ticker.
-                      //
-                      // Position is the feature here. Every other section
-                      // reports something that has already happened or is
-                      // happening without you; this one is a question
-                      // addressed to this person that expires. A member who
-                      // scrolls past it on Friday has not delayed a decision,
-                      // they have missed Sunday's game — which is precisely
-                      // the failure the WhatsApp poll it replaces does not
-                      // have, because a phone puts that at the top by itself.
-                      //
-                      // Draws nothing at all for a member whose clubs do not
-                      // use it, so the cost of the position is zero for
-                      // everybody it does not serve. See [MatchRsvpSection].
-                      const MatchRsvpSection(),
-
-                      // Points at the talent search rather than at a global
-                      // one. There is no index behind "matches, teams,
-                      // players and clubs" yet, and a box that accepts a
-                      // query and returns nothing is worse than a box that
-                      // says what it actually searches.
-                      PsSearchField(
-                        hint: 'Search players, teams and clubs...',
-                        readOnly: true,
-                        onTap: () => context.push(Routes.scoutSearch),
-                      ),
-                      const SizedBox(height: 4),
-
-                      // --- PS-007: Live Matches Ticker at top (Cricbuzz style) ---
-                      //
-                      // Capped at 3: a member in half a dozen clubs during a
-                      // busy weekend could otherwise push everything else on
-                      // this dashboard — clubs, events, the rest of the
-                      // product — below several screens of scorecards. The
-                      // "More" button is not a consolation prize for what got
-                      // cut; every match still live is one tap away on
-                      // Routes.liveNow, in full, grouped the same way.
-                      SectionHeader(
-                        icon: Icons.sensors,
-                        title: 'Live now',
-                        subtitle: 'Every match your clubs are playing, ball by ball',
-                        trailing: live.isEmpty ? null : const LiveDot(),
-                      ),
-                      AsyncErrorStrip(value: liveAsync, what: 'live matches'),
-                      // A club whose read was refused no longer blanks the
-                      // whole section (Bug #4) — but it must not vanish
-                      // either, or a player is told nothing is on at a club
-                      // where a match is being played.
-                      if (liveFailures > 0)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 10),
-                          child: QuietCard(
-                            icon: Icons.cloud_off_outlined,
-                            title: liveFailures == 1
-                                ? 'One club’s matches could not be loaded'
-                                : '$liveFailures clubs’ matches could not be '
-                                    'loaded',
-                            message: 'Everything below is up to date. If this '
-                                'keeps happening, please report it.',
-                          ),
-                        ),
-                      if (live.isEmpty)
-                        const QuietCard(
-                          icon: Icons.sensors_off_outlined,
-                          title: 'No live matches right now',
-                          message: 'Matches scored by your clubs appear here live for everyone.',
-                        )
-                      else ...[
-                        for (final f in live.take(_liveHomePreviewCap))
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 10),
-                            child: _LiveFixture(fixture: f),
-                          ),
-                        if (live.length > _liveHomePreviewCap)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 4),
-                            child: OutlinedButton.icon(
-                              onPressed: () => context.push(Routes.liveNow),
-                              icon: const Icon(Icons.sensors, size: 18),
-                              label: Text(
-                                'More · ${live.length - _liveHomePreviewCap} '
-                                'more live',
-                              ),
-                            ),
-                          ),
-                      ],
-
-                      // Below the live scores, never above them.
-                      //
-                      // The first thing on this screen has to be the person's
-                      // own sport. An advert that pushes a match somebody is
-                      // playing right now further down the page is not worth
-                      // whatever it earns — and the "More live" button ending
-                      // up below the fold because of a banner is exactly the
-                      // kind of harm that never shows up in ad revenue.
-                      //
-                      // Renders nothing at all for Premium members.
-                      const PromoBanner(
-                        slot: PromoSlot.home,
-                        margin: EdgeInsets.only(top: 4, bottom: 8),
-                      ),
-
-                      // Clubmates playing somewhere else — a member turning
-                      // out for a district side or a college team. Scoped by
-                      // who is on the team sheet rather than by whose
-                      // competition it is, which is the only way these ever
-                      // reach the people who know them.
-                      if (clubmateLive.isNotEmpty) ...[
-                        const SizedBox(height: 8),
-                        const SectionHeader(
-                          icon: Icons.groups_2_outlined,
-                          title: 'Your clubmates, elsewhere',
-                          subtitle: 'Playing for other clubs and teams '
-                              'right now',
-                          trailing: LiveDot(),
-                        ),
-                        for (final f in clubmateLive)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 10),
-                            child: _LiveFixture(fixture: f),
-                          ),
-                      ],
-
-                      // Below the live scores, deliberately — the same rule
-                      // the promo banner above follows. The sample design put
-                      // this grid directly under the banner, which on a 320pt
-                      // phone pushes a match being played right now off the
-                      // first screen. Browsing sports is something a member
-                      // does when nothing of theirs is on; it must not cost
-                      // them the thing they opened the app for.
-                      PsSectionHeader(
-                        title: 'Explore Sports',
-                        onAction: () => context.push(Routes.sports),
-                      ),
-                      const _ExploreSportsGrid(),
+                      const _Hero(),
                       const SizedBox(height: 16),
 
-                      // --- PS-006 & PS-009: Primary Hero Action CTA ("Play Match Now") ---
-                      //
-                      // No side icon: it was a fixed cricket bat-and-ball
-                      // glyph shown to every sport's players regardless of
-                      // what they actually play — wrong far more often than
-                      // right, and a decoration, not information. The text
-                      // and the button carry the card on their own.
-                      // The whole card is the target, not just the button on
-                      // its right. The tagline underneath — "Score a casual
-                      // match or tournament game in seconds" — is gone for the
-                      // same reason: `Play Match Now` beside a play glyph
-                      // already says it, and the sentence was the only thing
-                      // making the card tall enough to look like it needed a
-                      // separate button to act on.
-                      Builder(
-                        builder: (context) {
-                          void start() {
-                            final pId = ref.read(primaryOrgIdProvider);
-                            if (pId != null) {
-                              context.push(Routes.quickMatch(pId));
-                            } else if (activeClubs.isNotEmpty) {
-                              context.push(
-                                Routes.quickMatch(activeClubs.first.orgId),
-                              );
-                            } else {
-                              context.push(Routes.orgs);
-                            }
-                          }
+                      _Counters(
+                        rsvp: rsvp,
+                        live: live,
+                      ),
+                      const SizedBox(height: 18),
 
-                          return Material(
-                            color: theme.colorScheme.primaryContainer,
-                            borderRadius: BorderRadius.circular(12),
-                            child: InkWell(
-                              onTap: start,
-                              borderRadius: BorderRadius.circular(12),
-                              child: Padding(
-                                padding:
-                                    const EdgeInsets.fromLTRB(18, 16, 16, 16),
-                                child: Row(
-                                  children: [
-                                    Icon(
-                                      Icons.play_circle_fill,
-                                      size: 26,
-                                      color: theme
-                                          .colorScheme.onPrimaryContainer,
-                                    ),
-                                    const SizedBox(width: 12),
-                                    Expanded(
-                                      child: Text(
-                                        'Play Match Now',
-                                        style: theme.textTheme.titleMedium
-                                            ?.copyWith(
-                                          fontWeight: FontWeight.w800,
-                                          color: theme
-                                              .colorScheme.onPrimaryContainer,
-                                        ),
-                                      ),
-                                    ),
-                                    Icon(
-                                      Icons.chevron_right,
-                                      size: 20,
-                                      color: theme
-                                          .colorScheme.onPrimaryContainer,
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          );
-                        },
-                      ),
-                      const SizedBox(height: 16),
+                      _PrimaryActions(organizingOrgId: organizingOrgId),
+                      const SizedBox(height: 26),
 
-                      _StatTiles(
-                        clubs: activeClubs.length,
-                        live: live.length,
-                        events: events.length,
-                        matches: matchesPlayed,
-                        sports: sportsPlayed,
-                        primaryOrgId: ref.watch(primaryOrgIdProvider),
-                      ),
-                      const SizedBox(height: 24),
-
-                      // --- The clubs they belong to ---------------------------
-                      SectionHeader(
-                        icon: Icons.groups_2_outlined,
-                        title: 'My clubs',
-                        subtitle: 'Your record follows you across every one of '
-                            'them, for life',
-                        trailing: TextButton.icon(
-                          onPressed: () => context.push(Routes.joinOrg),
-                          icon: const Icon(Icons.add, size: 18),
-                          label: const Text('Join'),
-                        ),
-                      ),
-                      if (activeClubs.isEmpty)
-                        const _NoClubsCard()
-                      else
-                        for (final m in activeClubs)
-                          _ClubCard(orgId: m.orgId, role: m.role),
-                      const SizedBox(height: 24),
-
-                      // --- What is coming up ----------------------------------
-                      const SectionHeader(
-                        icon: Icons.emoji_events_outlined,
-                        title: 'Events & tournaments',
-                        subtitle: 'Open for entries, right now',
-                      ),
-                      AsyncErrorStrip(value: eventsAsync, what: 'events'),
-                      if (openEvents.isEmpty)
-                        QuietCard(
-                          icon: Icons.calendar_month_outlined,
-                          title: 'Nothing open for entries right now',
-                          message: organizingOrgId == null
-                              ? 'When your club opens entries for something, it '
-                                  'shows up here.'
-                              : 'Create one — pick a sport, set the age '
-                                  'category, and open entries.',
-                          action: organizingOrgId == null
-                              ? null
-                              : FilledButton.icon(
-                                  onPressed: () => context.push(
-                                    Routes.createCompetition(organizingOrgId),
-                                  ),
-                                  icon: const Icon(Icons.add),
-                                  label: const Text('Create an event'),
-                                ),
-                        )
-                      else ...[
-                        for (final item in openFeed.take(_eventsHomePreviewCap))
-                          switch (item) {
-                            EventFeedSingle(:final competition) =>
-                              EventCard(competition: competition),
-                            EventFeedSeason(
-                              :final orgId,
-                              :final tournamentId,
-                              :final competitions
-                            ) =>
-                              SeasonCard(
-                                orgId: orgId,
-                                tournamentId: tournamentId,
-                                competitions: competitions,
-                              ),
-                          },
-                        if (openFeed.length > _eventsHomePreviewCap)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 4),
-                            child: OutlinedButton.icon(
-                              onPressed: () => context.push(Routes.myEvents),
-                              icon: const Icon(Icons.emoji_events_outlined,
-                                  size: 18),
-                              label: Text(
-                                'More · ${openFeed.length - _eventsHomePreviewCap} '
-                                'more open',
-                              ),
-                            ),
-                          ),
-                      ],
-                      const SizedBox(height: 24),
-
-                      // --- Everything else the product does -------------------
-                      const SectionHeader(
-                        icon: Icons.explore_outlined,
-                        title: 'Explore',
-                        subtitle: 'The rest of PlaySphere — also in the menu, '
-                            'top left',
-                      ),
-                      _ExploreGrid(
-                        primaryOrgId: ref.watch(primaryOrgIdProvider),
-                        canSeeAnalytics: activeClubs.any(
-                          (m) => ref
-                              .watch(myCapabilitiesProvider(m.orgId))
-                              .contains(Capability.viewAnalytics),
-                        ),
-                      ),
+                      const _ExploreList(),
                     ],
                   ),
                 ),
+
+                // Bottom, and nowhere else on this screen.
+                //
+                // Everything above is the member's own business; this is
+                // somebody else's. Putting it last means the dashboard is
+                // read before an advertiser is, and a person who never
+                // scrolls this far is never interrupted — which is also why
+                // impressions bill per card built rather than per strip
+                // shown. See [PromoStrip].
+                const SizedBox(height: 26),
+                const PromoStrip(slot: PromoSlot.home),
               ],
             );
           },
@@ -451,193 +152,68 @@ class HomeScreen extends ConsumerWidget {
 }
 
 // ---------------------------------------------------------------------------
-// Header
+// Hero
 // ---------------------------------------------------------------------------
 
-/// The date and a one-line status — deliberately not a "Good evening, Name"
-/// salutation. That used to be the single largest thing on the dashboard
-/// (a headline-sized line plus a name that can run long) for a fact the
-/// member already knows: who they are. The date and what is live now are
-/// the two things actually worth the space.
-class _Greeting extends StatelessWidget {
-  const _Greeting({
-    required this.clubCount,
-    required this.liveCount,
-  });
-
-  final int clubCount;
-  final int liveCount;
+/// The date, and the product's one-line claim.
+///
+/// One line, on purpose. "All sports. One OS." wrapped to two lines on every
+/// phone narrower than a Pixel, which cost a whole line of vertical space at
+/// the very top of the screen for no information at all. It is auto-scaled to
+/// fit instead, so it holds its line on a 320pt phone.
+class _Hero extends ConsumerWidget {
+  const _Hero();
 
   @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+  Widget build(BuildContext context, WidgetRef ref) {
+    final now = DateTime.now();
+    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    ];
+    final date =
+        '${days[(now.weekday - 1) % 7]} ${now.day} ${months[now.month - 1]}';
 
     return Container(
-      padding: const EdgeInsets.fromLTRB(20, 18, 20, 18),
+      margin: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+      padding: const EdgeInsets.fromLTRB(18, 14, 18, 15),
       decoration: BoxDecoration(
-        gradient: AppTheme.brandGradient,
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF0F3D24), Color(0xFF157F3D)],
+        ),
         borderRadius: BorderRadius.circular(Ps.radius),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            DateFormat('EEEE, d MMMM').format(DateTime.now()),
-            style: theme.textTheme.labelMedium?.copyWith(
-              color: Colors.white.withValues(alpha: 0.85),
-              letterSpacing: 0.4,
-            ),
-          ),
-          const SizedBox(height: 8),
-          // The mockup's masthead line. Kept to two short words a line so it
-          // holds its shape at 320pt — the banner is the first thing on the
-          // screen, and a headline that reflows to four ragged lines on a
-          // small phone is the first thing anyone sees go wrong.
-          Text(
-            'ALL SPORTS\nONE SPACE',
-            style: theme.textTheme.headlineSmall?.copyWith(
-              color: Colors.white,
-              fontWeight: FontWeight.w800,
-              height: 1.1,
-              letterSpacing: 0.2,
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            'Play. Compete. Achieve.',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: Colors.white.withValues(alpha: 0.85),
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-          const SizedBox(height: 12),
-          // The status sentence stays. The mockup's banner is pure brand
-          // copy, but this line is the one piece of the old header that told
-          // a member something they did not already know — how many of their
-          // matches are being played right now.
-          Text(
-            clubCount == 0
-                ? 'Join a club with an invite code and everything you play '
-                    'starts counting.'
-                : liveCount > 0
-                    ? '$liveCount ${liveCount == 1 ? 'match is' : 'matches are'}'
-                        ' being played right now across your clubs.'
-                    : 'Nothing live at the moment. Your clubs, events and '
-                        'record are all below.',
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: Colors.white.withValues(alpha: 0.92),
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// The five-across run of sport tiles under the banner.
-///
-/// Nine sports and a "More", not the whole catalogue. The catalogue is
-/// fifteen entries and growing, and a grid that runs to three rows pushes the
-/// live scores — the thing a member opened the app for — off the first
-/// screen. "More" opens the full directory, where the counts and the filters
-/// live.
-class _ExploreSportsGrid extends StatelessWidget {
-  const _ExploreSportsGrid();
-
-  /// Deliberately hand-picked rather than `SportCatalog.all.take(9)`. The
-  /// catalogue is ordered by how the scoring engines group sports — bat and
-  /// ball, racquet, goal-scoring — so taking the first nine yields an
-  /// arbitrary set that changes whenever a sport is added. These are the nine
-  /// played most widely across Indian schools and clubs.
-  static const _featured = [
-    'cricket',
-    'football',
-    'badminton',
-    'volleyball',
-    'basketball',
-    'table_tennis',
-    'tennis',
-    'kabaddi',
-    'chess',
-  ];
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        // Five across on a phone, more on a tablet where the same tile size
-        // would otherwise leave half the row empty.
-        final columns = (constraints.maxWidth / 78).floor().clamp(4, 8);
-        return GridView.count(
-          crossAxisCount: columns,
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          mainAxisSpacing: 14,
-          crossAxisSpacing: 8,
-          childAspectRatio: 0.82,
-          children: [
-            for (final id in _featured)
-              _SportTile(
-                sportId: id,
-                label: SportCatalog.byId(id).name,
-                onTap: () => context.push(Routes.sports),
-              ),
-            _SportTile(
-              sportId: null,
-              label: 'More',
-              onTap: () => context.push(Routes.sports),
-            ),
-          ],
-        );
-      },
-    );
-  }
-}
-
-class _SportTile extends StatelessWidget {
-  const _SportTile({
-    required this.sportId,
-    required this.label,
-    required this.onTap,
-  });
-
-  /// Null renders the neutral "More" tile that opens the directory.
-  final String? sportId;
-  final String label;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final id = sportId;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(Ps.radiusSm),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (id == null)
-            Container(
-              width: 46,
-              height: 46,
-              decoration: BoxDecoration(
-                color: Ps.border,
-                borderRadius: BorderRadius.circular(13),
-              ),
-              child: const Icon(Icons.more_horiz, color: Ps.muted, size: 22),
-            )
-          else
-            SportBadge(sportId: id, size: 46),
-          const SizedBox(height: 6),
-          Text(
-            label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            textAlign: TextAlign.center,
-            style: const TextStyle(
+            date.toUpperCase(),
+            style: TextStyle(
               fontSize: 11,
-              fontWeight: FontWeight.w500,
-              color: Ps.ink,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.2,
+              color: Colors.white.withValues(alpha: 0.7),
+            ),
+          ),
+          const SizedBox(height: 6),
+          // Scaled down rather than wrapped. `FittedBox` keeps it on one line
+          // at any width the app supports.
+          const FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'ALL SPORTS. ONE OS.',
+              maxLines: 1,
+              style: TextStyle(
+                fontSize: 26,
+                height: 1.1,
+                fontWeight: FontWeight.w900,
+                letterSpacing: -0.5,
+                color: Colors.white,
+              ),
             ),
           ),
         ],
@@ -646,325 +222,199 @@ class _SportTile extends StatelessWidget {
   }
 }
 
-class _StatTiles extends StatelessWidget {
-  const _StatTiles({
-    required this.clubs,
-    required this.live,
-    required this.events,
-    required this.matches,
-    required this.sports,
-    required this.primaryOrgId,
-  });
+// ---------------------------------------------------------------------------
+// The six counters
+// ---------------------------------------------------------------------------
 
-  final int clubs;
-  final int live;
-  final int events;
-  final int matches;
-  final int sports;
-  final String? primaryOrgId;
+/// Six tiles: Clubs, Events, Live, Matches, Sports, RSVP.
+///
+/// Every one is a live number and a destination. Three across on a phone,
+/// which is the sketch's own grid and also the widest a 320pt screen holds
+/// without the numbers shrinking.
+class _Counters extends ConsumerWidget {
+  const _Counters({required this.rsvp, required this.live});
+
+  final HomeCount rsvp;
+  final HomeCount live;
 
   @override
-  Widget build(BuildContext context) {
-    final orgId = primaryOrgId;
-    return AdaptiveGrid(
-      // Three across on a phone rather than two, at a fixed height rather
-      // than an aspect ratio: five counters used to run to three rows and
-      // ~290px before the first piece of actual content.
-      minTileWidth: 116,
-      tileHeight: 82,
-      spacing: 10,
-      children: [
-        _Tile(
-          icon: Icons.groups_2_outlined,
-          value: '$clubs',
-          label: 'Clubs',
-          onTap: () => context.push(Routes.orgs),
+  Widget build(BuildContext context, WidgetRef ref) {
+    final clubs = ref.watch(clubCountProvider);
+    final events = ref.watch(eventCountProvider);
+    final matches = ref.watch(matchCountProvider);
+    final sports = ref.watch(sportCountProvider);
+    final uid = ref.watch(currentUidProvider);
+
+    // Events are read from the clubs this person is in or follows. With no
+    // club behind it the tile still shows its zero — a member deciding
+    // whether to join something should see that the number exists — but it
+    // has nowhere to go, and `/events/mine` on an empty feed is a blank
+    // screen reached by a tap that promised otherwise.
+    final hasFeed = ref.watch(myFeedOrgIdsProvider).isNotEmpty;
+
+    final tiles = <Widget>[
+      _CounterTile(
+        label: 'Clubs',
+        count: clubs,
+        icon: Icons.shield_outlined,
+        onTap: () => context.push(Routes.orgs),
+      ),
+      _CounterTile(
+        label: 'Events',
+        count: events,
+        icon: Icons.emoji_events_outlined,
+        onTap: hasFeed ? () => context.push(Routes.myEvents) : null,
+      ),
+      _CounterTile(
+        label: 'Live',
+        count: live,
+        icon: Icons.sensors,
+        accent: live.unknown ? null : (live.value > 0 ? Ps.live : null),
+        showLiveDot: !live.unknown && live.value > 0,
+        onTap: () => context.push(Routes.liveNow),
+      ),
+      _CounterTile(
+        label: 'Matches',
+        count: matches,
+        icon: Icons.sports_cricket_outlined,
+        onTap: () => context.push(Routes.myMatches),
+      ),
+      _CounterTile(
+        label: 'Sports',
+        count: sports,
+        icon: Icons.category_outlined,
+        onTap: () => context.push(uid == null ? Routes.sports : Routes.mySports),
+      ),
+      // Only when somebody is actually waiting on an answer.
+      //
+      // A tile permanently reading "0 RSVP" is a slot on the most valuable
+      // screen in the product spent saying nothing. When it appears it means
+      // something, which is what makes it worth looking at.
+      if (rsvp.value > 0)
+        _CounterTile(
+          label: 'RSVP',
+          count: rsvp,
+          icon: Icons.event_available_outlined,
+          accent: Ps.primary,
+          onTap: () => context.push(Routes.matchRsvps),
         ),
-        _Tile(
-          icon: Icons.sensors,
-          value: '$live',
-          label: 'Live now',
-          highlight: live > 0,
-          // Global, not the primary club's own live page: this counter is a
-          // sum across every club, so it must open the same cross-club list
-          // it is counting rather than just one of them.
-          onTap: () => context.push(Routes.liveNow),
-        ),
-        _Tile(
-          icon: Icons.emoji_events_outlined,
-          value: '$events',
-          label: 'Events',
-          onTap: orgId == null ? null : () => context.push(Routes.org(orgId)),
-        ),
-        // Two counters, two destinations. Both of these pushed `/me` — so a
-        // tile reading "31 Matches" and a tile reading "4 Sports" opened the
-        // same profile page and neither showed what it had just counted.
-        _Tile(
-          icon: Icons.sports_score,
-          value: '$matches',
-          label: 'Matches',
-          onTap: () => context.push(Routes.myMatches),
-        ),
-        _Tile(
-          icon: Icons.sports_handball_outlined,
-          value: '$sports',
-          label: sports == 1 ? 'Sport' : 'Sports',
-          onTap: () => context.push(Routes.mySports),
-        ),
-      ],
+    ];
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final columns = constraints.maxWidth > 640 ? 6 : 3;
+          const gap = 10.0;
+          final width =
+              (constraints.maxWidth - gap * (columns - 1)) / columns;
+          return Wrap(
+            spacing: gap,
+            runSpacing: gap,
+            children: [
+              for (final t in tiles) SizedBox(width: width, child: t),
+            ],
+          );
+        },
+      ),
     );
   }
 }
 
-class _Tile extends StatelessWidget {
-  const _Tile({
-    required this.icon,
-    required this.value,
+class _CounterTile extends StatelessWidget {
+  const _CounterTile({
     required this.label,
-    this.highlight = false,
-    this.onTap,
+    required this.count,
+    required this.icon,
+    required this.onTap,
+    this.accent,
+    this.showLiveDot = false,
   });
 
-  final IconData icon;
-  final String value;
   final String label;
-  final bool highlight;
+  final HomeCount count;
+  final IconData icon;
+
+  /// Null when this counter has nothing to open — see the Events tile.
   final VoidCallback? onTap;
+  final Color? accent;
+  final bool showLiveDot;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    final tint = highlight ? scheme.onErrorContainer : null;
-
-    return Card(
-      margin: EdgeInsets.zero,
-      clipBehavior: Clip.antiAlias,
-      color: highlight ? scheme.errorContainer : null,
+    final colour = accent ?? Ps.ink;
+    return Material(
+      color: Ps.surface,
+      borderRadius: BorderRadius.circular(Ps.radius),
       child: InkWell(
         onTap: onTap,
-        child: Semantics(
-          label: '$value $label',
-          button: onTap != null,
-          excludeSemantics: true,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
-            // The tile is a fixed height, so its contents must be prepared to
-            // be shrunk rather than to overflow. That is not only about
-            // getting the arithmetic right here: a player who has set their
-            // phone's font size to 1.5x — on a ₹8k device with a small screen,
-            // a common setting rather than an edge case — grows every line in
-            // this column and would otherwise strike out the whole row.
-            child: FittedBox(
-              fit: BoxFit.scaleDown,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(icon, size: 18, color: tint ?? theme.hintColor),
-                  const SizedBox(height: 2),
-                  Text(
-                    value,
-                    style: theme.textTheme.titleLarge?.copyWith(
-                      fontWeight: FontWeight.w800,
-                      color: tint,
-                      height: 1.1,
-                    ),
-                  ),
-                  Text(
-                    label,
-                    style: theme.textTheme.labelSmall?.copyWith(color: tint),
-                    maxLines: 1,
-                  ),
-                ],
-              ),
+        borderRadius: BorderRadius.circular(Ps.radius),
+        child: Container(
+          // Sized to the content, not to a ratio.
+          //
+          // The grid this replaced sized a tile by width:height, so dropping
+          // to one column on a phone made each one 162px tall and pushed the
+          // six counters over three rows. Every extent here is fixed, so the
+          // tile is the same compact height at 320pt as at 900.
+          padding: const EdgeInsets.fromLTRB(12, 9, 10, 9),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(Ps.radius),
+            border: Border.all(
+              color: accent == null ? Ps.border : accent!.withValues(alpha: 0.4),
             ),
           ),
-        ),
-      ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Sections
-// ---------------------------------------------------------------------------
-
-/// A live match with the club it belongs to named above it.
-///
-/// The club name is the part the shared org-scoped screens can leave out and
-/// this one cannot: on a dashboard spanning four clubs, a scoreline with no
-/// club attached is a scoreline you cannot place.
-class _LiveFixture extends ConsumerWidget {
-  const _LiveFixture({required this.fixture});
-
-  final Fixture fixture;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final org = ref.watch(organizationProvider(fixture.orgId)).valueOrNull;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        if (org != null)
-          Padding(
-            padding: const EdgeInsets.only(left: 4, bottom: 4),
-            child: Text(
-              org.name,
-              style: Theme.of(context).textTheme.labelSmall,
-            ),
-          ),
-        LiveScoreCard(
-          fixture: fixture,
-          onTap: () => context.push(
-            Routes.watch(fixture.orgId, fixture.compId, fixture.id),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-/// One club, with enough on it to be worth reading: what type it is, what this
-/// person is in it, how many people are in it, and what it has on right now.
-class _ClubCard extends ConsumerWidget {
-  const _ClubCard({required this.orgId, required this.role});
-
-  final String orgId;
-  final MembershipRole role;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-    final org = ref.watch(organizationProvider(orgId)).valueOrNull;
-    final live = ref.watch(liveFixturesProvider(orgId)).valueOrNull ?? const [];
-    final comps =
-        ref.watch(competitionsProvider(orgId)).valueOrNull ?? const [];
-    final caps = ref.watch(myCapabilitiesProvider(orgId));
-
-    final running =
-        comps.where((c) => c.status == CompetitionStatus.inProgress).length;
-    // Derived status, so an event whose deadline has passed stops being
-    // counted as open for entries the moment it passes (Bug #6).
-    final open = comps
-        .where((c) => c.displayStatus() == CompetitionStatus.registrationOpen)
-        .length;
-
-    final where = [
-      org?.geo.district ?? org?.district,
-      org?.geo.state,
-    ].whereType<String>().where((s) => s.isNotEmpty).join(', ');
-
-    return Card(
-      margin: const EdgeInsets.only(bottom: 10),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: () => context.push(Routes.org(orgId)),
-        child: Padding(
-          padding: const EdgeInsets.all(14),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
             children: [
               Row(
                 children: [
-                  CircleAvatar(
-                    radius: 22,
-                    backgroundImage: org?.logoUrl != null
-                        ? NetworkImage(org!.logoUrl!)
-                        : null,
-                    child: org?.logoUrl != null
-                        ? null
-                        : Text(
-                            (org?.name ?? '?').characters.first.toUpperCase(),
-                            style: theme.textTheme.titleMedium,
-                          ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          org?.name ?? 'Loading…',
-                          style: theme.textTheme.titleMedium,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        Text(
-                          [
-                            if (org != null) org.orgType.label,
-                            if (where.isNotEmpty) where,
-                          ].join(' · '),
-                          style: theme.textTheme.bodySmall,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (live.isNotEmpty)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFDC2626),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Text(
-                        '${live.length} LIVE',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                    ),
+                  Icon(icon, size: 15, color: accent ?? Ps.faint),
+                  const Spacer(),
+                  if (showLiveDot) const LiveDot(),
                 ],
               ),
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  _Pill(label: role.label, icon: Icons.badge_outlined),
-                  if (org != null)
-                    _Pill(
-                      label: '${org.memberCount} members',
-                      icon: Icons.people_outline,
-                    ),
-                  _Pill(
-                    label: '${comps.length} events',
-                    icon: Icons.emoji_events_outlined,
-                  ),
-                  if (running > 0)
-                    _Pill(label: '$running running', icon: Icons.play_arrow),
-                  if (open > 0)
-                    _Pill(
-                      label: '$open open for entries',
-                      icon: Icons.how_to_reg_outlined,
-                    ),
-                ],
+              const SizedBox(height: 4),
+              // An em dash, not a zero, when the number could not be read —
+              // see [HomeCount.unknown]. A tile that says "0 Live" because a
+              // club refused the read is worse than one that admits it does
+              // not know.
+              Text(
+                count.unknown ? '—' : '${count.value}',
+                style: TextStyle(
+                  fontSize: 23,
+                  height: 1.05,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -1,
+                  color: count.unknown ? Ps.faint : colour,
+                ),
               ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  TextButton.icon(
-                    onPressed: () => context.push(Routes.org(orgId)),
-                    icon: const Icon(Icons.arrow_forward, size: 18),
-                    label: const Text('Open club'),
-                  ),
-                  TextButton.icon(
-                    onPressed: () => context.push(Routes.live(orgId)),
-                    icon: const Icon(Icons.sensors, size: 18),
-                    label: const Text('Live'),
-                  ),
-                  if (caps.contains(Capability.manageMembers))
-                    TextButton.icon(
-                      onPressed: () => context.push(Routes.members(orgId)),
-                      icon: const Icon(Icons.people_outline, size: 18),
-                      label: const Text('Members'),
-                    ),
-                ],
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w700,
+                  color: Ps.ink,
+                ),
+              ),
+              // The line that turns a number into a reason to tap. Reserved
+              // even when empty so the six tiles stay the same height.
+              SizedBox(
+                height: 13,
+                child: count.detail == null
+                    ? null
+                    : Text(
+                        count.detail!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w600,
+                          color: accent ?? Ps.muted,
+                        ),
+                      ),
               ),
             ],
           ),
@@ -974,140 +424,52 @@ class _ClubCard extends ConsumerWidget {
   }
 }
 
-class _Pill extends StatelessWidget {
-  const _Pill({required this.label, required this.icon});
+// ---------------------------------------------------------------------------
+// The two doors
+// ---------------------------------------------------------------------------
 
-  final String label;
-  final IconData icon;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 14, color: theme.hintColor),
-          const SizedBox(width: 5),
-          Text(label, style: theme.textTheme.labelSmall),
-        ],
-      ),
-    );
-  }
-}
-
-/// An event or tournament card: sport, category, entry count and status.
+/// **Play** and **Explore** — the product's one real fork.
 ///
-/// Public — [MyEventsScreen] reuses it verbatim for the full cross-club list
-/// the home screen's "More" button opens, so the two never drift apart.
-class EventCard extends ConsumerWidget {
-  const EventCard({super.key, required this.competition});
+/// Play is intent: I want a game, now. It goes straight to starting one where
+/// the person can, and to finding one where they cannot.
+///
+/// Explore is discovery: I want to look around. It opens the sport directory,
+/// and from there a sport becomes a scope — every list on `SportHubScreen`
+/// means that one sport, and nothing on it is the whole platform filtered
+/// down to nothing.
+class _PrimaryActions extends StatelessWidget {
+  const _PrimaryActions({required this.organizingOrgId});
 
-  final Competition competition;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-    final c = competition;
-    final org = ref.watch(organizationProvider(c.orgId)).valueOrNull;
-
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: ListTile(
-        leading: CircleAvatar(
-          backgroundColor: theme.colorScheme.surfaceContainerHighest,
-          child: Text(
-            SportCatalog.byId(c.sportId).icon,
-            style: const TextStyle(fontSize: 18),
-          ),
-        ),
-        title: Text(c.name),
-        subtitle: Text(
-          [
-            if (org != null) org.name,
-            c.sportName,
-            c.category.label,
-            '${c.entrantCount} entered',
-            if (c.startDate != null) friendlyDate(c.startDate!),
-          ].join(' · '),
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-        ),
-        isThreeLine: true,
-        trailing: _StatusChip(status: c.displayStatus()),
-        onTap: () => context.push(Routes.competition(c.orgId, c.id)),
-      ),
-    );
-  }
-}
-
-class _StatusChip extends StatelessWidget {
-  const _StatusChip({required this.status});
-
-  final CompetitionStatus status;
+  final String? organizingOrgId;
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final (bg, fg) = switch (status) {
-      CompetitionStatus.registrationOpen => (
-          scheme.primaryContainer,
-          scheme.onPrimaryContainer
-        ),
-      CompetitionStatus.inProgress => (
-          scheme.tertiaryContainer,
-          scheme.onTertiaryContainer
-        ),
-      _ => (scheme.surfaceContainerHighest, scheme.onSurfaceVariant),
-    };
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Text(
-        status.label,
-        style: Theme.of(context)
-            .textTheme
-            .labelSmall
-            ?.copyWith(color: fg, fontWeight: FontWeight.w600),
-      ),
-    );
-  }
-}
-
-class _NoClubsCard extends StatelessWidget {
-  const _NoClubsCard();
-
-  @override
-  Widget build(BuildContext context) {
-    return QuietCard(
-      icon: Icons.groups_outlined,
-      title: 'You are not in a club yet',
-      message: 'Join your school, college, village or community with the '
-          'six-letter invite code — or create one and invite people with a '
-          'code of your own. Everything you play from then on is recorded '
-          'against your name for good.',
-      action: Wrap(
-        spacing: 12,
-        runSpacing: 12,
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      child: Row(
         children: [
-          FilledButton.icon(
-            onPressed: () => context.push(Routes.joinOrg),
-            icon: const Icon(Icons.vpn_key_outlined),
-            label: const Text('Join with a code'),
+          Expanded(
+            child: _BigButton(
+              icon: Icons.sports_handball_outlined,
+              label: 'Play sport',
+              hint: organizingOrgId == null ? 'Find a game' : 'Start a match',
+              filled: true,
+              onTap: () => context.push(
+                organizingOrgId == null
+                    ? Routes.lookingFor
+                    : Routes.quickMatch(organizingOrgId!),
+              ),
+            ),
           ),
-          OutlinedButton.icon(
-            onPressed: () => context.push(Routes.createOrg),
-            icon: const Icon(Icons.add),
-            label: const Text('Create a club'),
+          const SizedBox(width: 10),
+          Expanded(
+            child: _BigButton(
+              icon: Icons.travel_explore_outlined,
+              label: 'Explore sport',
+              hint: 'Pick a sport, see it all',
+              filled: false,
+              onTap: () => context.push(Routes.sports),
+            ),
           ),
         ],
       ),
@@ -1115,119 +477,60 @@ class _NoClubsCard extends StatelessWidget {
   }
 }
 
-/// A "nothing here yet" card that still says what would put something here.
-/// The modules that are not on the bar: what they are, and where they go.
-class _ExploreGrid extends StatelessWidget {
-  const _ExploreGrid({
-    required this.primaryOrgId,
-    required this.canSeeAnalytics,
-  });
-
-  final String? primaryOrgId;
-  final bool canSeeAnalytics;
-
-  @override
-  Widget build(BuildContext context) {
-    return AdaptiveGrid(
-      // A fixed 64 rather than a 2.4 ratio. One column on a phone meant a
-      // 388px-wide tile was 162px tall — six of them ran to a thousand
-      // pixels of near-empty card for what is a list of six links.
-      minTileWidth: 250,
-      tileHeight: 64,
-      spacing: 10,
-      children: [
-        if (canSeeAnalytics && primaryOrgId != null)
-          _ExploreTile(
-            icon: Icons.insights_outlined,
-            title: 'Analytics',
-            body: 'Who plays what, how often, and how your club is growing',
-            onTap: () => context.push(Routes.analytics(primaryOrgId!)),
-          ),
-        _ExploreTile(
-          icon: Icons.badge_outlined,
-          title: 'Career profile',
-          body: 'Every match, rating and memory — portable for life',
-          onTap: () => context.push(Routes.myProfile),
-        ),
-        _ExploreTile(
-          icon: Icons.campaign_outlined,
-          title: 'Looking for',
-          body: 'Find players, teams, scorers, umpires and grounds',
-          onTap: () => context.push(Routes.lookingFor),
-        ),
-        _ExploreTile(
-          icon: Icons.sports,
-          title: 'Officials registry',
-          body: 'Register as an umpire or scorer, or find one',
-          onTap: () => context.push(Routes.umpireRegistry),
-        ),
-        // Rules library is deliberately NOT here (Bug #7). It is reference
-        // material somebody consults once a season, not something a home
-        // screen should spend a tile on. It lives in the module menu behind
-        // the three lines, which is where the entry already was — this tile
-        // was a duplicate of it competing for the most valuable space in the
-        // app.
-        if (primaryOrgId != null)
-          _ExploreTile(
-            icon: Icons.sports_kabaddi_outlined,
-            title: 'Challenges',
-            body: 'Play another club — propose, accept, schedule',
-            onTap: () => context.push(Routes.challenges(primaryOrgId!)),
-          ),
-      ],
-    );
-  }
-}
-
-class _ExploreTile extends StatelessWidget {
-  const _ExploreTile({
+class _BigButton extends StatelessWidget {
+  const _BigButton({
     required this.icon,
-    required this.title,
-    required this.body,
+    required this.label,
+    required this.hint,
+    required this.filled,
     required this.onTap,
   });
 
   final IconData icon;
-  final String title;
-  final String body;
+  final String label;
+  final String hint;
+  final bool filled;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Card(
-      margin: EdgeInsets.zero,
-      clipBehavior: Clip.antiAlias,
+    return Material(
+      color: filled ? Ps.primary : Ps.surface,
+      borderRadius: BorderRadius.circular(Ps.radius),
       child: InkWell(
         onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),
-          child: Row(
+        borderRadius: BorderRadius.circular(Ps.radius),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(16, 15, 14, 15),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(Ps.radius),
+            border: Border.all(color: filled ? Colors.transparent : Ps.border),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, size: 20, color: theme.colorScheme.primary),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                      title,
-                      style: theme.textTheme.titleSmall,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    Text(
-                      body,
-                      style: theme.textTheme.bodySmall,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
+              Icon(icon, size: 22, color: filled ? Colors.white : Ps.primary),
+              const SizedBox(height: 10),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w800,
+                  color: filled ? Colors.white : Ps.ink,
                 ),
               ),
-              // Says "this opens something" without costing a line of text.
-              Icon(Icons.chevron_right, size: 20, color: theme.hintColor),
+              Text(
+                hint,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 11.5,
+                  color: filled
+                      ? Colors.white.withValues(alpha: 0.85)
+                      : Ps.muted,
+                ),
+              ),
             ],
           ),
         ),
@@ -1236,5 +539,91 @@ class _ExploreTile extends StatelessWidget {
   }
 }
 
-/// "Today", "Tomorrow", or a date — a scorer reading a fixture list at a
-/// ground cares which of those it is far more than the calendar date.
+// ---------------------------------------------------------------------------
+// Explore
+// ---------------------------------------------------------------------------
+
+/// The rest of the product, as a short labelled list rather than a 23-item
+/// drawer.
+///
+/// These are the destinations a member actually reaches for. Everything else
+/// the app can do is still in the module menu; what changed is that the six
+/// most-wanted are now on the screen instead of behind three lines nobody
+/// opens.
+class _ExploreList extends ConsumerWidget {
+  const _ExploreList();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final uid = ref.watch(currentUidProvider);
+
+    final entries = <(IconData, String, String, String)>[
+      (Icons.query_stats, 'Sports analytics', 'Numbers across the platform',
+          Routes.sports),
+      if (uid != null)
+        // `/me`, not `/player/$uid`. They resolve to the same profile, but
+        // the self route is the one that survives a sign-out and back in as
+        // somebody else — and it is what the rest of the app links to.
+        (Icons.badge_outlined, 'Career profile', 'Your record, every sport',
+            Routes.myProfile),
+      (Icons.person_search_outlined, 'Find players', 'Scout by sport and skill',
+          Routes.scoutSearch),
+      (Icons.school_outlined, 'Find coaches', 'Learn from someone nearby',
+          Routes.coaches),
+      (Icons.stadium_outlined, 'Find grounds', 'Book a pitch near you',
+          Routes.grounds),
+      (Icons.event_outlined, 'Find events', 'Open for entry now',
+          Routes.globalEvents),
+      (Icons.handshake_outlined, 'Sponsorship', 'Back a team, or find backing',
+          Routes.sponsor),
+    ];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Padding(
+          padding: EdgeInsets.fromLTRB(16, 0, 16, 10),
+          child: Text(
+            'EXPLORE',
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 1,
+              color: Ps.faint,
+            ),
+          ),
+        ),
+        Container(
+          margin: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: BoxDecoration(
+            color: Ps.surface,
+            borderRadius: BorderRadius.circular(Ps.radius),
+            border: Border.all(color: Ps.border),
+          ),
+          child: Column(
+            children: [
+              for (final (icon, title, subtitle, route) in entries)
+                ListTile(
+                  leading: Icon(icon, size: 20, color: Ps.primary),
+                  title: Text(
+                    title,
+                    style: const TextStyle(
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  subtitle: Text(
+                    subtitle,
+                    style: const TextStyle(fontSize: 12, color: Ps.muted),
+                  ),
+                  trailing:
+                      const Icon(Icons.chevron_right, size: 18, color: Ps.faint),
+                  onTap: () => context.push(route),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}

@@ -1,4 +1,7 @@
+import 'dart:typed_data';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 
 import '../core/errors/app_exception.dart';
 import '../core/firebase/firestore_refs.dart';
@@ -6,6 +9,7 @@ import '../core/models/app_user.dart';
 
 import '../core/models/ground.dart';
 import '../domain/geo/geohash.dart';
+import 'media_uploader.dart';
 import 'org_repository.dart' show guard, guardStream;
 
 /// One search hit with the distance that earned it a place in the list —
@@ -23,7 +27,43 @@ class GroundNearby {
 
 /// Listing grounds, finding them, and holding an hour on one.
 class GroundRepository {
-  const GroundRepository();
+  const GroundRepository({FirebaseStorage? storage}) : _storage = storage;
+
+  /// Injectable so a test can drive the photo upload against a fake bucket.
+  final FirebaseStorage? _storage;
+
+  MediaUploader get _media => MediaUploader(storage: _storage);
+
+  // --- Photo ------------------------------------------------------------
+
+  /// Gives a ground its picture.
+  ///
+  /// `Ground.photoUrl` has existed on the model since grounds were added and
+  /// was read by nothing and written by nothing. It matters more here than
+  /// anywhere else in the app: somebody choosing between two grounds an hour
+  /// apart is choosing on the strength of a photo, and a list of names tells
+  /// them nothing about which one has a covered pitch.
+  Future<String> uploadGroundPhoto({
+    required String groundId,
+    required String uid,
+    required Uint8List bytes,
+    required String contentType,
+  }) =>
+      guard(() async {
+        final url = await _media.putImage(
+          folder: 'grounds/$groundId/photo',
+          uid: uid,
+          bytes: bytes,
+          contentType: contentType,
+          maxMegabytes: 6,
+        );
+        await Refs.ground(groundId).update({'photoUrl': url});
+        return url;
+      });
+
+  /// Goes back to no photo.
+  Future<void> removeGroundPhoto(String groundId) =>
+      guard(() => Refs.ground(groundId).update({'photoUrl': null}));
 
   // --- Owner side -------------------------------------------------------
 
@@ -60,31 +100,122 @@ class GroundRepository {
   /// empty" — so a server-side sport filter would silently hide exactly the
   /// general-purpose grounds a village club is most likely to want. The city
   /// clause already bounds the result to something a client can filter.
-  Stream<List<Ground>> searchGrounds({
-    required String city,
+  /// Finds grounds by any words somebody might type — a ground's name, an
+  /// area, a city, a sport — narrowed by sport and by the hour they want.
+  ///
+  /// ## Why this is not "search by city" any more
+  ///
+  /// It was, and that made the only findable ground one whose city you had
+  /// already typed correctly and in full. Nobody looks for a pitch that way:
+  /// they know a name, or an area, or only the sport. "Gachibowli" returned
+  /// nothing, because Gachibowli is not a city.
+  ///
+  /// ## How the words are matched
+  ///
+  /// Firestore has no full-text index, so the words live on the document —
+  /// see [Ground.searchTokens]. One `array-contains` on the LONGEST word
+  /// typed does the narrowing, and every other word is checked in Dart
+  /// against whatever that returned. Longest as a proxy for rarest: "turf"
+  /// is on half the listings in a city and "gachibowli" on a handful, and
+  /// picking the wrong one of those two costs a read of every turf in
+  /// Telangana. It is a heuristic, and it is wrong occasionally and cheaply.
+  ///
+  /// ## Why the old city query still runs
+  ///
+  /// `searchTokens` is written on save, so a ground listed before this
+  /// existed does not carry one and cannot be found by the token query at
+  /// all. The `cityKey` equality it used to rely on runs alongside and its
+  /// results are merged in, which keeps every existing listing findable by
+  /// its city while the tokens fill in as owners edit. New listings are
+  /// findable by everything from the moment they are saved.
+  ///
+  /// A [Future] rather than a [Stream]: this is a merge of two queries, and
+  /// searching is something a person does once by pressing a button, not
+  /// something they sit watching. The availability grid behind a chosen
+  /// ground is the part that has to be live, and that still is.
+  Future<List<Ground>> searchGrounds({
+    String keywords = '',
     String? sportId,
+
+    /// Only grounds whose gates are open then. A ground that shuts at 18:00
+    /// is not an answer to "somewhere to play at 19:00", and offering it
+    /// means the person picks it and finds no slots.
+    int? openAtHour,
+    int limit = 100,
   }) =>
-      guardStream(
-        () => Refs.grounds
-            .where('cityKey', isEqualTo: city.trim().toLowerCase())
-            .where('isActive', isEqualTo: true)
-            .limit(100)
-            .snapshots()
-            .map((s) {
-          final all = s.docs.map(Ground.fromDoc);
-          final matching =
-              sportId == null ? all : all.where((g) => g.servesSport(sportId));
-          final list = matching.toList()
-            // Verified first, then the better-used grounds: a club picking a
-            // ground sight-unseen is relying on somebody else having been
-            // there before them.
-            ..sort((a, b) {
-              if (a.isVerified != b.isVerified) return a.isVerified ? -1 : 1;
-              return b.bookingCount.compareTo(a.bookingCount);
-            });
-          return list;
-        }),
-      );
+      guard(() async {
+        final words = Ground.tokenize([keywords]);
+
+        final results = <String, Ground>{};
+
+        if (words.isEmpty) {
+          // No words, but a sport — "show me the cricket grounds", which is
+          // where the flow now lands after asking which sport. Without this
+          // the search would open on an empty list and make the sport
+          // question look pointless.
+          if (sportId != null) {
+            final snap = await Refs.grounds
+                .where('isActive', isEqualTo: true)
+                .where('sportIds', arrayContains: sportId)
+                .limit(limit)
+                .get();
+            for (final doc in snap.docs) {
+              results[doc.id] = Ground.fromDoc(doc);
+            }
+          }
+        } else {
+          final anchor =
+              words.reduce((a, b) => b.length > a.length ? b : a);
+
+          final futures = <Future<QuerySnapshot<Map<String, dynamic>>>>[
+            Refs.grounds
+                .where('isActive', isEqualTo: true)
+                .where('searchTokens', arrayContains: anchor)
+                .limit(limit)
+                .get(),
+            // The legacy path, for listings written before searchTokens.
+            Refs.grounds
+                .where('isActive', isEqualTo: true)
+                .where('cityKey', isEqualTo: keywords.trim().toLowerCase())
+                .limit(limit)
+                .get(),
+          ];
+
+          for (final snap in await Future.wait(futures)) {
+            for (final doc in snap.docs) {
+              results[doc.id] = Ground.fromDoc(doc);
+            }
+          }
+        }
+
+        // Every word has to match, not just the anchor. `searchTokens` is
+        // recomputed here rather than read back from the document so a
+        // legacy listing — which has none stored — is still filtered on the
+        // same terms as a fresh one.
+        final matching = <Ground>[];
+        for (final g in results.values) {
+          final tokens = g.searchTokens.toSet();
+          // Whole words, the same test the `array-contains` anchor applies.
+          // A prefix match here would find grounds the anchor query could
+          // never have returned, so which half-typed words worked would
+          // depend on which one happened to be longest.
+          if (!words.every(tokens.contains)) continue;
+          if (sportId != null && !g.servesSport(sportId)) continue;
+          if (openAtHour != null && !g.isWithinHours(openAtHour, openAtHour + 1)) {
+            continue;
+          }
+          matching.add(g);
+        }
+
+        // Verified first, then the better-used grounds: a club picking a
+        // ground sight-unseen is relying on somebody else having been there
+        // before them.
+        matching.sort((a, b) {
+          if (a.isVerified != b.isVerified) return a.isVerified ? -1 : 1;
+          return b.bookingCount.compareTo(a.bookingCount);
+        });
+        return matching;
+      });
 
   /// Grounds within [radiusKm] of a point, nearest first.
   ///

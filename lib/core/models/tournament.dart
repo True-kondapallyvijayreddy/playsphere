@@ -93,6 +93,7 @@ class Tournament {
     required this.status,
     this.grade = TournamentGrade.club,
     this.description,
+    this.bannerUrl,
     this.venueIds = const [],
     this.startDate,
     this.endDate,
@@ -105,6 +106,10 @@ class Tournament {
     this.restGapMinutes = 20,
     this.isScheduleLocked = false,
     this.scheduleReleasedAt,
+    this.isSuspended = false,
+    this.suspendReason,
+    this.suspendedAt,
+    this.suspendedBy,
     this.createdBy,
     this.createdAt,
   });
@@ -115,6 +120,13 @@ class Tournament {
   final TournamentStatus status;
   final TournamentGrade grade;
   final String? description;
+
+  /// The artwork across the top of the season's page and its public link.
+  ///
+  /// Null is the normal state: `PsBanner` paints generated art from the
+  /// season's own colour when this is absent, so a tournament created in a
+  /// hurry still has a header worth sharing.
+  final String? bannerUrl;
 
   /// Whether the timetable has been published to participants.
   ///
@@ -135,6 +147,37 @@ class Tournament {
   /// non-null, because a season locked before this field existed has the flag
   /// and no date, and "published, date unknown" is the truth there.
   final DateTime? scheduleReleasedAt;
+
+  /// Whether the organizer has put this season on hold.
+  ///
+  /// ## Why this is a flag and not a status
+  ///
+  /// A suspension has to be undoable, and [status] is the one field that
+  /// cannot survive being overwritten: a season paused halfway through is
+  /// `in_progress`, one paused before the draw is `entries_open`, and a
+  /// `suspended` status would have to guess which to restore on the way back.
+  /// The guess is wrong exactly when it matters — a monsoon week in the
+  /// middle of a league — and it would reopen entries on a field that had
+  /// already closed.
+  ///
+  /// So this sits beside the lifecycle rather than inside it, the same shape
+  /// as [isScheduleLocked]: suspending sets it, resuming clears it, and the
+  /// status underneath is never touched by either. What it changes is what
+  /// the app will let happen while it is set — no new entries, no new
+  /// matches started — not what the season *is*.
+  final bool isSuspended;
+
+  /// Why it was paused, shown to everyone who entered.
+  ///
+  /// Required by `TournamentRepository.suspendTournament` for the same reason
+  /// `Competition.cancelReason` is: a season that goes quiet without one is
+  /// indistinguishable from the app being broken, and "Ground waterlogged —
+  /// back on the 14th" is the difference between a phone call to the
+  /// organizer and no phone call.
+  final String? suspendReason;
+
+  final DateTime? suspendedAt;
+  final String? suspendedBy;
 
   /// The venues this tournament runs across. Ids into `orgs/{orgId}/venues`,
   /// not names — see [Venue] for why the difference matters.
@@ -191,6 +234,7 @@ class Tournament {
       status: TournamentStatus.fromWire(Fs.strOrNull(d['status'])),
       grade: TournamentGrade.fromWire(Fs.strOrNull(d['grade'])),
       description: Fs.strOrNull(d['description']),
+      bannerUrl: Fs.strOrNull(d['bannerUrl']),
       venueIds: Fs.strList(d['venueIds']),
       startDate: Fs.dateOrNull(d['startDate']),
       endDate: Fs.dateOrNull(d['endDate']),
@@ -203,6 +247,10 @@ class Tournament {
       restGapMinutes: Fs.integer(d['restGapMinutes'], 20),
       isScheduleLocked: Fs.boolean(d['isScheduleLocked']),
       scheduleReleasedAt: Fs.dateOrNull(d['scheduleReleasedAt']),
+      isSuspended: Fs.boolean(d['isSuspended']),
+      suspendReason: Fs.strOrNull(d['suspendReason']),
+      suspendedAt: Fs.dateOrNull(d['suspendedAt']),
+      suspendedBy: Fs.strOrNull(d['suspendedBy']),
       createdBy: Fs.strOrNull(d['createdBy']),
       createdAt: Fs.dateOrNull(d['createdAt']),
     );
@@ -215,6 +263,7 @@ class Tournament {
         'status': status.wire,
         'grade': grade.wire,
         'description': description,
+        'bannerUrl': bannerUrl,
         'venueIds': venueIds,
         'startDate': Fs.ts(startDate),
         'endDate': Fs.ts(endDate),
@@ -246,12 +295,23 @@ class Tournament {
         'restGapMinutes': restGapMinutes,
         'updatedAt': FieldValue.serverTimestamp(),
       };
+  // `bannerUrl` is deliberately absent from `toUpdate` for the same reason
+  // the suspension fields are: the edit sheet does not show it, so writing it
+  // there would mean an organizer fixing a typo in the name silently erased
+  // the artwork somebody else uploaded. `TournamentRepository.uploadBanner`
+  // owns that field.
+  //
+  // The suspension fields are deliberately absent from both maps above.
+  // `TournamentRepository.suspendTournament` and `resumeTournament` own them,
+  // and an organizer opening the edit sheet to fix a typo in the name must not
+  // quietly bring a paused season back to life.
 
   Tournament copyWith({
     String? name,
     TournamentStatus? status,
     TournamentGrade? grade,
     String? description,
+    String? bannerUrl,
     List<String>? venueIds,
     DateTime? startDate,
     DateTime? endDate,
@@ -264,6 +324,10 @@ class Tournament {
     int? restGapMinutes,
     bool? isScheduleLocked,
     DateTime? scheduleReleasedAt,
+    bool? isSuspended,
+    String? suspendReason,
+    DateTime? suspendedAt,
+    String? suspendedBy,
   }) =>
       Tournament(
         id: id,
@@ -272,6 +336,7 @@ class Tournament {
         status: status ?? this.status,
         grade: grade ?? this.grade,
         description: description ?? this.description,
+        bannerUrl: bannerUrl ?? this.bannerUrl,
         venueIds: venueIds ?? this.venueIds,
         startDate: startDate ?? this.startDate,
         endDate: endDate ?? this.endDate,
@@ -284,6 +349,10 @@ class Tournament {
         restGapMinutes: restGapMinutes ?? this.restGapMinutes,
         isScheduleLocked: isScheduleLocked ?? this.isScheduleLocked,
         scheduleReleasedAt: scheduleReleasedAt ?? this.scheduleReleasedAt,
+        isSuspended: isSuspended ?? this.isSuspended,
+        suspendReason: suspendReason ?? this.suspendReason,
+        suspendedAt: suspendedAt ?? this.suspendedAt,
+        suspendedBy: suspendedBy ?? this.suspendedBy,
         createdBy: createdBy,
         createdAt: createdAt,
       );

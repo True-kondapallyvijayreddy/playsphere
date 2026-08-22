@@ -5,7 +5,10 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/layout/responsive.dart';
 import '../../core/providers.dart';
+import '../../data/image_composer.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/image_upload.dart';
+import '../../shared/ps_banner.dart';
 
 /// A single ground, previously a route that existed only as `Routes.ground`
 /// with nothing registered behind it — booking has always happened through
@@ -53,6 +56,32 @@ class GroundDetailScreen extends ConsumerWidget {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        // Somebody choosing between two grounds an hour apart
+                        // is choosing on the strength of a picture. `photoUrl`
+                        // had been on the model since grounds shipped and was
+                        // read by nothing.
+                        PsBanner(
+                          imageUrl: ground.photoUrl,
+                          sportId: ground.sportIds.length == 1
+                              ? ground.sportIds.first
+                              : null,
+                          seed: ground.id,
+                          fallbackIcon: Icons.stadium_outlined,
+                          fallbackColor: const Color(0xFF15803D),
+                          height: 168,
+                          trailing: isOwner
+                              ? _PhotoButton(
+                                  onTap: () => _changePhoto(
+                                    context,
+                                    ref,
+                                    groundId: ground.id,
+                                    ownerUid: ground.ownerUid,
+                                    hasPhoto: ground.photoUrl != null,
+                                  ),
+                                )
+                              : null,
+                        ),
+                        const SizedBox(height: 14),
                         Wrap(
                           spacing: 6,
                           runSpacing: 6,
@@ -104,6 +133,56 @@ class GroundDetailScreen extends ConsumerWidget {
                 ),
               ],
             ),
+    );
+  }
+}
+
+Future<void> _changePhoto(
+  BuildContext context,
+  WidgetRef ref, {
+  required String groundId,
+  required String ownerUid,
+  required bool hasPhoto,
+}) {
+  final repo = ref.read(groundRepositoryProvider);
+  return pickAndUploadImage(
+    context: context,
+    title: 'Ground photo',
+    shape: ImageShape.banner,
+    successMessage: 'Photo updated.',
+    removedMessage: 'Photo removed.',
+    onUpload: (image) => repo.uploadGroundPhoto(
+      groundId: groundId,
+      // The owner's own uid, which is both the Storage path segment and the
+      // Firestore gate on `grounds/{groundId}`.
+      uid: ownerUid,
+      bytes: image.bytes,
+      contentType: image.contentType,
+    ),
+    onRemove: hasPhoto ? () => repo.removeGroundPhoto(groundId) : null,
+  );
+}
+
+/// Filled circle so the control stays legible over a photograph of unknown
+/// brightness.
+class _PhotoButton extends StatelessWidget {
+  const _PhotoButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: const Color(0x8A000000),
+      shape: const CircleBorder(),
+      clipBehavior: Clip.antiAlias,
+      child: IconButton(
+        tooltip: 'Change the photo',
+        iconSize: 18,
+        visualDensity: VisualDensity.compact,
+        icon: const Icon(Icons.photo_camera_outlined, color: Colors.white),
+        onPressed: onTap,
+      ),
     );
   }
 }

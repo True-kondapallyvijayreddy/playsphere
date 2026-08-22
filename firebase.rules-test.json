@@ -1,0 +1,5 @@
+{
+  "_comment": "Emulator config for test/rules/pen_rules_test.py. Lives at the project root because firebase-tools refuses a rules path outside the config's directory, and uses port 8099 so it never collides with a dev emulator on 8080.",
+  "firestore": { "rules": "firestore.rules", "indexes": "firestore.indexes.json" },
+  "emulators": { "firestore": { "port": 8099 }, "ui": { "enabled": false }, "singleProjectMode": true }
+}

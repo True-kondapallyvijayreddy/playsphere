@@ -1,8 +1,12 @@
+import 'dart:typed_data';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 
 import '../core/ads/promo.dart';
 import '../core/firebase/firestore_refs.dart';
 import '../core/models/ad_campaign.dart';
+import 'media_uploader.dart';
 import 'org_repository.dart' show guard, guardStream;
 
 /// The advertiser side of `lib/core/ads/promo.dart`. Submission is
@@ -12,7 +16,37 @@ import 'org_repository.dart' show guard, guardStream;
 /// this product reviews trust-sensitive claims from the console, not from a
 /// screen inside the app that does not exist for Give either.
 class AdRepository {
-  const AdRepository();
+  const AdRepository({FirebaseStorage? storage}) : _storage = storage;
+
+  /// Injectable so a test can drive the creative upload against a fake bucket.
+  final FirebaseStorage? _storage;
+
+  MediaUploader get _media => MediaUploader(storage: _storage);
+
+  /// Uploads an advertiser's artwork and returns the URL to put on a campaign.
+  ///
+  /// Keyed on the advertiser's uid rather than a campaign id, because the
+  /// artwork is picked *while the campaign is being written* and has no id to
+  /// hang off yet. That is also the only shape `storage.rules` can gate here
+  /// — see the `adCreatives` block.
+  ///
+  /// Returns the URL rather than writing it anywhere: the editor sheet holds
+  /// it in state and it lands with the rest of the campaign on submit, so an
+  /// advertiser who changes their mind and closes the sheet has changed
+  /// nothing.
+  Future<String> uploadCreative({
+    required String advertiserUid,
+    required Uint8List bytes,
+    required String contentType,
+  }) =>
+      guard(
+        () => _media.putImage(
+          folder: 'adCreatives',
+          uid: advertiserUid,
+          bytes: bytes,
+          contentType: contentType,
+        ),
+      );
 
   /// Every campaign this advertiser has submitted, any status.
   Stream<List<AdCampaign>> watchMyCampaigns(String advertiserUid) =>

@@ -50,8 +50,17 @@ void main() {
     scoringPluginKey: 'badminton',
   );
 
+  /// The toss is recorded on purpose.
+  ///
+  /// The pad now puts an unrecorded toss in front of the scoring controls
+  /// (see `_TossGate`), so a fixture without one renders the pre-match step
+  /// and no pad at all. These tests are about the UNDO control, not about the
+  /// gate, so they start from a match whose toss has been taken — which is
+  /// also the state every real match reaches before its first event.
   Fixture fixtureWith({required int lastSeq, FixtureStatus? status}) => Fixture(
         id: fixtureId,
+        tossWonByEntrantId: 'a',
+        tossDecision: 'serve',
         orgId: orgId,
         compId: compId,
         entrantAId: 'a',

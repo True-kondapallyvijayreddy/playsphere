@@ -8,6 +8,7 @@ import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/identity.dart';
 
 /// One club's own storefront — its active products, buyable directly,
 /// distinct from the curated vendor catalog at [Routes.shop]. See
@@ -91,15 +92,16 @@ class _ProductCard extends StatelessWidget {
           children: [
             AspectRatio(
               aspectRatio: 1,
-              child: product.imageUrl != null
-                  ? Image.network(product.imageUrl!, fit: BoxFit.cover)
-                  : Container(
-                      color: theme.colorScheme.surfaceContainerHighest,
-                      child: Center(
-                        child: Text(product.category.emoji,
-                            style: const TextStyle(fontSize: 40)),
-                      ),
-                    ),
+              child: PsNetworkImage(
+                url: product.imageUrl,
+                fallback: Container(
+                  color: theme.colorScheme.surfaceContainerHighest,
+                  child: Center(
+                    child: Text(product.category.emoji,
+                        style: const TextStyle(fontSize: 40)),
+                  ),
+                ),
+              ),
             ),
             Padding(
               padding: const EdgeInsets.all(10),

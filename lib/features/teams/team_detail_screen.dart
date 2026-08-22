@@ -6,11 +6,15 @@ import '../../core/layout/responsive.dart';
 import '../../core/models/app_user.dart';
 import '../../core/models/organization.dart';
 import '../../core/models/team.dart';
+import '../../core/models/team_join_request.dart';
 import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
+import '../../data/image_composer.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/identity.dart';
+import '../../shared/image_upload.dart';
 
 /// One team's roster, live.
 ///
@@ -72,6 +76,29 @@ class _TeamBody extends ConsumerWidget {
         .contains(Capability.manageOrganization);
   }
 
+  /// `Team.photoUrl` was read by this screen, the team list and the career
+  /// profile, and written by nothing at all. This is the write.
+  Future<void> _changeCrest(BuildContext context, WidgetRef ref) {
+    final uid = ref.read(currentUidProvider);
+    if (uid == null) return Future.value();
+    final repo = ref.read(teamRepositoryProvider);
+    return pickAndUploadImage(
+      context: context,
+      title: 'Team crest',
+      shape: ImageShape.square,
+      successMessage: 'Crest updated.',
+      removedMessage: 'Crest removed.',
+      onUpload: (image) => repo.uploadTeamCrest(
+        teamId: team.id,
+        uid: uid,
+        bytes: image.bytes,
+        contentType: image.contentType,
+      ),
+      onRemove:
+          team.photoUrl == null ? null : () => repo.removeTeamCrest(team.id),
+    );
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final sport = SportCatalog.byId(team.sportId);
@@ -90,14 +117,19 @@ class _TeamBody extends ConsumerWidget {
             children: [
               Row(
                 children: [
-                  CircleAvatar(
-                    radius: 28,
-                    backgroundImage: team.photoUrl != null
-                        ? NetworkImage(team.photoUrl!)
-                        : null,
-                    child: team.photoUrl == null
-                        ? Text(sport.icon, style: const TextStyle(fontSize: 22))
-                        : null,
+                  EditableImage(
+                    tooltip: 'Change the team crest',
+                    badgeSize: 24,
+                    // Same authority as every other edit on this page:
+                    // the captain, the manager, the creator, or an admin of
+                    // the club the squad belongs to.
+                    onTap: canEdit ? () => _changeCrest(context, ref) : null,
+                    child: PsCrest(
+                      name: team.name,
+                      logoUrl: team.photoUrl,
+                      seed: team.id,
+                      size: 56,
+                    ),
                   ),
                   const SizedBox(width: 14),
                   Expanded(
@@ -122,6 +154,19 @@ class _TeamBody extends ConsumerWidget {
                 ],
               ),
               const SizedBox(height: 20),
+
+              // Independent teams only. A club squad is picked off the
+              // club's member list and has no use for either of these; an
+              // independent one has no list to be picked from, so the code
+              // and the requests ARE how it fills up.
+              if (team.isIndependent) ...[
+                if (canEdit && team.joinCode != null)
+                  _JoinCodeCard(code: team.joinCode!),
+                if (canEdit) _JoinRequests(team: team),
+                if (!canEdit) _AskToJoin(team: team),
+                const SizedBox(height: 12),
+              ],
+
               Row(
                 children: [
                   Expanded(
@@ -184,12 +229,10 @@ class _PlayerRow extends ConsumerWidget {
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
-        leading: CircleAvatar(
-          backgroundImage:
-              user?.photoUrl != null ? NetworkImage(user!.photoUrl!) : null,
-          child: user?.photoUrl == null
-              ? Text((user?.displayName ?? '?').characters.first.toUpperCase())
-              : null,
+        leading: PsAvatar(
+          name: user?.displayName ?? '?',
+          photoUrl: user?.photoUrl,
+          seed: uid,
         ),
         title: Text(user?.displayName ?? 'Loading…'),
         subtitle: isCaptain || isManager
@@ -293,13 +336,10 @@ class _AddPlayersSheetState extends ConsumerState<_AddPlayersSheet> {
                     itemBuilder: (context, i) {
                       final m = candidates[i];
                       return ListTile(
-                        leading: CircleAvatar(
-                          backgroundImage: m.photoUrl != null
-                              ? NetworkImage(m.photoUrl!)
-                              : null,
-                          child: m.photoUrl == null
-                              ? Text(m.displayName.characters.first.toUpperCase())
-                              : null,
+                        leading: PsAvatar(
+                          name: m.displayName,
+                          photoUrl: m.photoUrl,
+                          seed: m.uid,
                         ),
                         title: Text(m.displayName),
                         subtitle: Text(m.role.label),
@@ -334,5 +374,196 @@ class _AddPlayersSheetState extends ConsumerState<_AddPlayersSheet> {
         ),
       ),
     );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Independent teams: the code, the queue, and the way in
+// ---------------------------------------------------------------------------
+
+/// The code a captain reads out.
+///
+/// Shown only to the people who run the team, which is not a security
+/// boundary — any signed-in reader can read the field off the document — but
+/// is the honest presentation: the code is the captain's to give out, and
+/// putting it on a stranger's view of the page implies it does something it
+/// does not.
+class _JoinCodeCard extends StatelessWidget {
+  const _JoinCodeCard({required this.code});
+
+  final String code;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      color: theme.colorScheme.surfaceContainerHighest,
+      child: ListTile(
+        leading: const Icon(Icons.key_outlined),
+        title: Text(
+          code,
+          style: const TextStyle(
+            fontSize: 22,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 4,
+          ),
+        ),
+        subtitle: const Text(
+          'Give this to players you want. They enter it under '
+          '“Join with a code”, then ask — you decide who gets on.',
+        ),
+      ),
+    );
+  }
+}
+
+/// Everybody waiting on this captain to say yes.
+class _JoinRequests extends ConsumerWidget {
+  const _JoinRequests({required this.team});
+
+  final Team team;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final requests =
+        ref.watch(teamJoinRequestsProvider(team.id)).valueOrNull ??
+            const <TeamJoinRequest>[];
+    if (requests.isEmpty) return const SizedBox.shrink();
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        children: [
+          ListTile(
+            dense: true,
+            title: Text(
+              '${requests.length} '
+              '${requests.length == 1 ? 'player wants' : 'players want'} to '
+              'join',
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ),
+          for (final r in requests)
+            ListTile(
+              leading: PsAvatar(
+                name: r.displayName,
+                photoUrl: r.photoUrl,
+                seed: r.uid,
+              ),
+              title: Text(r.displayName),
+              subtitle: r.message == null ? null : Text(r.message!),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    tooltip: 'Decline',
+                    icon: const Icon(Icons.close),
+                    onPressed: () => ref
+                        .read(teamRepositoryProvider)
+                        .cancelJoinRequest(teamId: team.id, uid: r.uid),
+                  ),
+                  IconButton(
+                    tooltip: 'Let them in',
+                    icon: const Icon(Icons.check),
+                    onPressed: () => ref
+                        .read(teamRepositoryProvider)
+                        .approveJoinRequest(teamId: team.id, uid: r.uid),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The button somebody who is not on this team sees.
+class _AskToJoin extends ConsumerWidget {
+  const _AskToJoin({required this.team});
+
+  final Team team;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final me = ref.watch(currentUserProvider).valueOrNull;
+    if (me == null) return const SizedBox.shrink();
+    // Already on the roster: there is nothing to ask for.
+    if (team.memberUids.contains(me.uid)) return const SizedBox.shrink();
+
+    final asked = ref.watch(hasAskedToJoinProvider(team.id)).valueOrNull ?? false;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: asked
+          ? OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size.fromHeight(48),
+              ),
+              onPressed: () => ref
+                  .read(teamRepositoryProvider)
+                  .cancelJoinRequest(teamId: team.id, uid: me.uid),
+              icon: const Icon(Icons.hourglass_top_outlined),
+              label: const Text('Asked — tap to withdraw'),
+            )
+          : FilledButton.icon(
+              style: FilledButton.styleFrom(
+                minimumSize: const Size.fromHeight(48),
+              ),
+              onPressed: () => _ask(context, ref, me),
+              icon: const Icon(Icons.group_add_outlined),
+              label: const Text('Ask to join'),
+            ),
+    );
+  }
+
+  Future<void> _ask(BuildContext context, WidgetRef ref, AppUser me) async {
+    final controller = TextEditingController();
+    final message = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Ask to join ${team.name}'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 300,
+          maxLines: 3,
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(),
+            labelText: 'Say something (optional)',
+            hintText: 'I keep wicket — played for St Xavier’s last season.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(controller.text),
+            child: const Text('Send'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (message == null || !context.mounted) return;
+
+    try {
+      await ref.read(teamRepositoryProvider).requestToJoin(
+            teamId: team.id,
+            uid: me.uid,
+            displayName: me.displayName,
+            photoUrl: me.photoUrl,
+            message: message.trim().isEmpty ? null : message.trim(),
+          );
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Asked to join ${team.name}.')),
+      );
+    } catch (e) {
+      if (context.mounted) showError(context, e);
+    }
   }
 }

@@ -9,6 +9,7 @@ import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/identity.dart';
 
 /// Every active squad the signed-in person is on — a club's permanent side,
 /// an independent team of friends, or a squad raised for one tournament.
@@ -76,10 +77,13 @@ class _TeamRow extends ConsumerWidget {
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
-        leading: CircleAvatar(
-          backgroundImage:
-              team.photoUrl != null ? NetworkImage(team.photoUrl!) : null,
-          child: team.photoUrl == null ? Text(sport.icon) : null,
+        // A squad is an institution, so it gets the squircle rather than
+        // the round mark a person gets.
+        leading: PsCrest(
+          name: team.name,
+          logoUrl: team.photoUrl,
+          seed: team.id,
+          size: 40,
         ),
         title: Text(team.name),
         subtitle: Text(

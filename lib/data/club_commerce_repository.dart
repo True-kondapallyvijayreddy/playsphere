@@ -1,13 +1,36 @@
+import 'dart:typed_data';
+
 import '../core/firebase/firestore_refs.dart';
 import '../core/models/billing.dart';
 import '../core/models/club_product.dart';
 import 'billing_repository.dart' show PaymentGateway, FreeCheckout;
+import 'media_uploader.dart';
 import 'org_repository.dart' show guard, guardStream;
 
 /// Club Commerce: every club's own store — products the club sets a price
 /// on and fulfils itself, distinct from [ShopRepository]'s curated vendor
 /// link-out catalog. See `ClubProduct`'s class doc.
 class ClubCommerceRepository {
+  /// Uploads a product photo and returns its URL.
+  ///
+  /// Same shape as an ad creative and for the same reason: the picture is
+  /// chosen while the product is being written, before the document has an
+  /// id. `ClubProduct.imageUrl` was read by the store grid and written by
+  /// nothing, so every club shop rendered as a wall of category emoji.
+  Future<String> uploadProductImage({
+    required String orgId,
+    required String uid,
+    required Uint8List bytes,
+    required String contentType,
+  }) =>
+      guard(
+        () => const MediaUploader().putImage(
+          folder: 'clubProducts/$orgId',
+          uid: uid,
+          bytes: bytes,
+          contentType: contentType,
+        ),
+      );
   const ClubCommerceRepository({this.gateway = const FreeCheckout()});
 
   /// Same seam `BillingRepository` uses — see its doc. Injected here rather

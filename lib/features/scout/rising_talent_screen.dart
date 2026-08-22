@@ -8,6 +8,7 @@ import '../../core/router/app_router.dart';
 import '../../domain/gov/age_group.dart';
 import '../../domain/scout/talent_board.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/identity.dart';
 
 const _sports = [
   ('cricket', 'Cricket'),
@@ -362,7 +363,12 @@ class _PlayerRow extends StatelessWidget {
     return Card(
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
       child: ListTile(
-        leading: _RankAvatar(rank: entry.rank, photoUrl: entry.photoUrl),
+        leading: _RankAvatar(
+          rank: entry.rank,
+          name: entry.displayName,
+          imageUrl: entry.photoUrl,
+          seed: entry.uid,
+        ),
         title: Row(
           children: [
             Flexible(
@@ -415,7 +421,13 @@ class _TeamRow extends StatelessWidget {
     return Card(
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
       child: ListTile(
-        leading: _RankAvatar(rank: entry.rank, photoUrl: entry.logoUrl),
+        leading: _RankAvatar(
+          rank: entry.rank,
+          name: entry.orgName,
+          imageUrl: entry.logoUrl,
+          seed: entry.orgId,
+          isOrg: true,
+        ),
         title: Text(entry.orgName,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(fontWeight: FontWeight.w700)),
@@ -445,10 +457,19 @@ class _TeamRow extends StatelessWidget {
 }
 
 class _RankAvatar extends StatelessWidget {
-  const _RankAvatar({required this.rank, this.photoUrl});
+  const _RankAvatar({
+    required this.rank,
+    required this.name,
+    this.imageUrl,
+    this.seed,
+    this.isOrg = false,
+  });
 
   final int rank;
-  final String? photoUrl;
+  final String name;
+  final String? imageUrl;
+  final String? seed;
+  final bool isOrg;
 
   @override
   Widget build(BuildContext context) {
@@ -468,11 +489,13 @@ class _RankAvatar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 6),
-          CircleAvatar(
-            radius: 15,
-            backgroundImage: photoUrl != null ? NetworkImage(photoUrl!) : null,
-            child: photoUrl == null ? const Icon(Icons.person, size: 17) : null,
-          ),
+          // A club row gets the squircle and a player row gets the circle.
+          // Both used to get the same round mark with a generic person glyph
+          // in it, so a club with no logo was drawn as a faceless human.
+          if (isOrg)
+            PsCrest(name: name, logoUrl: imageUrl, seed: seed, size: 30)
+          else
+            PsAvatar(name: name, photoUrl: imageUrl, seed: seed, size: 30),
         ],
       ),
     );

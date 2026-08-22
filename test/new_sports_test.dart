@@ -54,6 +54,7 @@ void main() {
 
     const smith = MatchPlayer(id: 'p1', name: 'Smith', uid: 'u1');
     const jones = MatchPlayer(id: 'p2', name: 'Jones', uid: 'u2');
+    const pandey = MatchPlayer(id: 'p3', name: 'Pandey', uid: 'u3');
 
     ScoreAction rally(Side side, {String? by, bool ace = false}) => ScoreAction(
           type: 'rally',
@@ -122,17 +123,48 @@ void main() {
       expect(badminton.serviceCourt(s), 'right');
     });
 
-    test('service passes to the rally winner, and rotates within a pair', () {
-      final ctx = ctxFor('badminton', a: [smith, jones]);
+    test('a pair holding serve keeps the SAME server, and changes court', () {
+      // This test used to assert the opposite — that the partner served next
+      // — and the engine obliged. Both were wrong, and it is worth being
+      // precise about which law they broke, because the mistake is the reason
+      // the pad had to ask the scorer who won every rally in doubles.
+      //
+      // Law 10.4: when the serving side wins a rally, the server serves
+      // AGAIN, from the alternate service court. The pair swaps courts; it
+      // does not swap servers. A partner only comes to serve after a
+      // side-out, and then it is whoever the new score puts in the correct
+      // court. Rotating on every point held desynchronised the pad from the
+      // court within three rallies, so nothing derived from it — not the
+      // server, not the receiver, not the point credit — could be trusted.
+      final ctx = ctxFor('badminton', a: [smith, jones], b: [pandey]);
       var s = badminton.initialState(ctx);
       expect(badminton.serverName(s, ctx), 'Smith');
+      expect(badminton.serviceCourt(s), 'right', reason: 'A is on 0');
 
-      // A holds serve: the other member of the pair serves next.
       s = play(badminton, ctx, [rally(Side.a)], from: s);
-      expect(badminton.serverName(s, ctx), 'Jones');
+      expect(badminton.serverName(s, ctx), 'Smith',
+          reason: 'holding serve does not hand it to the partner');
+      expect(badminton.serviceCourt(s), 'left', reason: 'A is on 1');
 
       s = play(badminton, ctx, [rally(Side.a)], from: s);
       expect(badminton.serverName(s, ctx), 'Smith');
+      expect(badminton.serviceCourt(s), 'right');
+    });
+
+    test('the partner comes to serve after the pair wins the serve back', () {
+      final ctx = ctxFor('badminton', a: [smith, jones], b: [pandey]);
+      // A serves and wins one, loses the serve, then breaks straight back.
+      final s = play(badminton, ctx, [
+        rally(Side.a),
+        rally(Side.b),
+        rally(Side.a),
+      ]);
+
+      expect(badminton.serverFor(s), Side.a);
+      // A is on 2 — even — so the right service court serves, and the pair
+      // last swapped courts on the point they won at 0. That puts Jones
+      // there. Nobody was asked; the score and the laws settle it.
+      expect(badminton.serverName(s, ctx), 'Jones');
     });
 
     test('the BWF 3x15 preset plays to 15, capped at 21, best of five', () {
