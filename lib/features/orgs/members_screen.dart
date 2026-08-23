@@ -11,6 +11,7 @@ import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/club_context_banner.dart';
 import '../../shared/identity.dart';
 import '../../shared/ui_kit.dart';
 import '../../shared/invite_card.dart';
@@ -55,6 +56,12 @@ class MembersScreen extends ConsumerWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    // Whose roster this is. The screen is reached from the
+                    // club and from the module menu, and the menu points at
+                    // whichever club was most recently joined — so "Members"
+                    // alone is not enough to know whose members are being
+                    // promoted, demoted or removed here.
+                    ClubContextBanner(orgId: orgId, label: 'Managing'),
                     if (org != null && canManage) InviteCard(org: org),
                     const SizedBox(height: 20),
                     _TeamsSection(

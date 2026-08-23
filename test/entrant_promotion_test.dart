@@ -282,4 +282,79 @@ void main() {
       expect(result.isReady, isFalse);
     });
   });
+
+  group('EntrantPromoter - teams that entered as teams', () {
+    Registration teamReg(
+      String teamId, {
+      required String name,
+      List<String> squad = const ['a', 'b'],
+    }) =>
+        Registration(
+          uid: teamId,
+          displayName: name,
+          status: RegistrationStatus.confirmed,
+          teamName: name,
+          teamId: teamId,
+          memberUids: squad,
+        );
+
+    test('one entrant per team, carrying the squad and the team link', () {
+      final result = promoter.promote(
+        // The mode an event created from the ordinary form carries. A team
+        // entry must not be re-derived from it.
+        mode: TeamEntryMode.individual,
+        confirmed: [
+          teamReg('t1', name: 'Hyderabad CC A', squad: ['p1', 'p2', 'p3']),
+          teamReg('t2', name: 'Hyderabad CC B', squad: ['p4', 'p5']),
+        ],
+      );
+
+      expect(result.isReady, isTrue);
+      expect(result.entrants.length, 2);
+
+      final a = result.entrants.firstWhere((e) => e.id == 't1');
+      expect(a.displayName, 'Hyderabad CC A');
+      expect(a.entrantType, EntrantType.team);
+      expect(a.teamId, 't1');
+      expect(a.memberUids, ['p1', 'p2', 'p3']);
+      // A side is not a person, however few people are in it.
+      expect(a.soloUid, isNull);
+    });
+
+    test('does not silently draw individuals alongside teams', () {
+      final result = promoter.promote(
+        mode: TeamEntryMode.preformedTeam,
+        confirmed: [
+          teamReg('t1', name: 'Sunrise A'),
+          teamReg('t2', name: 'Sunrise B'),
+          reg('stray'),
+        ],
+      );
+
+      expect(result.isReady, isFalse);
+      expect(result.problems.single, contains('individual player'));
+    });
+
+    test('refuses a team whose squad was emptied after it entered', () {
+      final result = promoter.promote(
+        mode: TeamEntryMode.preformedTeam,
+        confirmed: [
+          teamReg('t1', name: 'Sunrise A'),
+          teamReg('t2', name: 'Sunrise B', squad: const []),
+        ],
+      );
+
+      expect(result.isReady, isFalse);
+      expect(result.problems.single, contains('Sunrise B'));
+    });
+
+    test('one team is not a field', () {
+      final result = promoter.promote(
+        mode: TeamEntryMode.preformedTeam,
+        confirmed: [teamReg('t1', name: 'Sunrise A')],
+      );
+
+      expect(result.isReady, isFalse);
+    });
+  });
 }

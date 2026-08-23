@@ -7,11 +7,13 @@ import '../../core/layout/responsive.dart';
 import '../../core/models/billing.dart';
 import '../../core/models/competition.dart';
 import '../../core/models/enums.dart';
+import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../data/ground_repository.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/club_context_banner.dart';
 import '../grounds/ground_booking_flow.dart';
 
 /// Event creation.
@@ -32,6 +34,17 @@ class CreateCompetitionScreen extends ConsumerStatefulWidget {
 
 class _CreateCompetitionScreenState
     extends ConsumerState<CreateCompetitionScreen> {
+  /// The club this event will belong to — state, not the route parameter it
+  /// starts as.
+  ///
+  /// A person in three clubs reaches this form from whichever club page they
+  /// happened to be on, and "wrong club" is only discoverable after the event
+  /// has been created and announced. Holding it here lets the banner at the
+  /// top of the form both *say* which club is creating and let it be changed
+  /// before anything is written — after which the org is fixed, because a
+  /// created event is a document in one club's collection.
+  late String _orgId = widget.orgId;
+
   final _formKey = GlobalKey<FormState>();
   final _name = TextEditingController();
   final _venue = TextEditingController();
@@ -116,14 +129,14 @@ class _CreateCompetitionScreenState
   /// right here, and asking for them a second time inside the sheet is how a
   /// booking flow gets abandoned halfway.
   Future<void> _openGroundSearch() async {
-    final org = ref.read(organizationProvider(widget.orgId)).valueOrNull;
+    final org = ref.read(organizationProvider(_orgId)).valueOrNull;
 
     final result = await showGroundBookingSheet(
       context,
       sportId: _sport.id,
       initialCity: org?.city,
       initialDate: _startDate,
-      orgId: widget.orgId,
+      orgId: _orgId,
     );
     if (result == null || !mounted) return;
 
@@ -160,7 +173,7 @@ class _CreateCompetitionScreenState
     if (_format.isSingleMatch) {
       context.push(
         Routes.quickMatch(
-          widget.orgId,
+          _orgId,
           name: _name.text.trim(),
           sportId: _sport.id,
           venue: _venue.text.trim(),
@@ -176,12 +189,21 @@ class _CreateCompetitionScreenState
           .createCompetition(
             Competition(
               id: '',
-              orgId: widget.orgId,
+              orgId: _orgId,
               name: _name.text.trim(),
               sportId: _sport.id,
               sportName: _sport.name,
               archetype: _sport.archetype,
               entrantType: _sport.defaultEntrantType,
+              // A group sport's field is a list of SIDES, and until this was
+              // set every cricket, football and kabaddi event created from
+              // this form carried `TeamEntryMode.individual` — the default —
+              // so its entries screen offered each player a personal Register
+              // button and closing the field produced a singles bracket of
+              // however many people had pressed it.
+              teamEntryMode: _sport.defaultEntrantType == EntrantType.team
+                  ? TeamEntryMode.preformedTeam
+                  : TeamEntryMode.individual,
               format: _format,
               status: CompetitionStatus.registrationOpen,
               category: _category,
@@ -203,7 +225,7 @@ class _CreateCompetitionScreenState
         // Replace rather than push: the event now exists, and a back press
         // from it should return to the club, not to a creation form that
         // would make a second copy if it were submitted again.
-        context.pushReplacement(Routes.competition(widget.orgId, compId));
+        context.pushReplacement(Routes.competition(_orgId, compId));
       }
     } catch (e) {
       if (mounted) showError(context, e);
@@ -239,7 +261,7 @@ class _CreateCompetitionScreenState
     final presets = CompetitionCategory.presets(cutOff: _startDate);
 
     return AppScaffold(
-      orgId: widget.orgId,
+      orgId: _orgId,
       title: 'New event',
       body: ListView(
         children: [
@@ -250,6 +272,21 @@ class _CreateCompetitionScreenState
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
+                  // Who is creating this, before anything is filled in.
+                  ClubContextBanner(
+                    orgId: _orgId,
+                    onChanged: (id) => setState(() {
+                      _orgId = id;
+                      // The held ground belongs to the club that booked it.
+                      // Carrying it to another club would leave a booking
+                      // nobody can find and an event pointing at a slot it
+                      // does not own.
+                      _booked = null;
+                      _wantsGroundBooking = false;
+                      _venue.clear();
+                    }),
+                    requires: Capability.manageCompetitions,
+                  ),
                   TextFormField(
                     controller: _name,
                     textCapitalization: TextCapitalization.words,

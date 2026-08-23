@@ -50,6 +50,23 @@ class EntrantPromoter {
     required TeamEntryMode mode,
     required List<Registration> confirmed,
   }) {
+    // A TEAM entry is already a side. It carries its own id, its name and the
+    // squad that entered under it, so there is nothing to infer and nothing
+    // to group — and every mode below infers or groups, which is exactly what
+    // must not happen to a row that has already answered the question.
+    //
+    // Checked before the mode rather than inside `preformedTeam` because a
+    // team can enter an event whose mode was left at the default: the mode
+    // describes how the organizer expects the field to be ASSEMBLED, and a
+    // side that turned up whole did not go through that.
+    final teamEntries = [
+      for (final reg in confirmed)
+        if (reg.isTeamEntry) reg,
+    ];
+    if (teamEntries.isNotEmpty) {
+      return _teams(teamEntries, others: confirmed.length - teamEntries.length);
+    }
+
     switch (mode) {
       case TeamEntryMode.houseBatch:
         return _byBucket(
@@ -87,6 +104,63 @@ class EntrantPromoter {
       case TeamEntryMode.individual:
         return _individual(confirmed);
     }
+  }
+
+  // --- Teams that entered as teams ----------------------------------------
+
+  /// One entrant per registered team, with the squad it entered with.
+  ///
+  /// [others] is how many individual rows sit alongside them. Mixing the two
+  /// is not silently resolved: a field of 30 teams and 4 loose players is
+  /// either four people who registered before the organizer switched the
+  /// event to team entry, or four who should be in a squad and are not. Both
+  /// need a human, and drawing 34 entrants where four of them are one player
+  /// each is the outcome nobody wants.
+  PromotionResult _teams(List<Registration> teams, {required int others}) {
+    final problems = <String>[];
+    if (others > 0) {
+      problems.add(
+        '$others confirmed ${others == 1 ? "entry is" : "entries are"} an '
+        'individual player in a team event. Withdraw them, or put them in a '
+        'squad and enter that.',
+      );
+    }
+    if (teams.length < 2) {
+      problems.add(
+        'At least two teams are needed before you can close entries and make '
+        'a draw.',
+      );
+    }
+    // A side with nobody in it cannot play, and the roster is snapshotted at
+    // entry time — so an empty one means the team was emptied after entering,
+    // which the organizer has to see rather than discover at the toss.
+    final empty = [
+      for (final t in teams)
+        if (t.memberUids.isEmpty) t.displayName,
+    ];
+    if (empty.isNotEmpty) {
+      problems.add(
+        '${empty.join(", ")} entered with nobody in the squad.',
+      );
+    }
+    if (problems.isNotEmpty) return PromotionResult.blocked(problems);
+
+    return PromotionResult(
+      entrants: [
+        for (final t in teams)
+          Entrant(
+            id: t.teamId!,
+            displayName: t.teamName ?? t.displayName,
+            entrantType: EntrantType.team,
+            memberUids: t.memberUids,
+            photoUrl: t.photoUrl,
+            // The link back to `teams/{teamId}`, which is what lets a team
+            // page list every competition it ever played. Nothing wrote this
+            // before, because nothing could: there was no team to point at.
+            teamId: t.teamId,
+          ),
+      ],
+    );
   }
 
   // --- Houses and captain-led squads --------------------------------------

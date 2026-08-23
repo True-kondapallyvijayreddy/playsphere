@@ -11,6 +11,7 @@ import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../core/models/draw_slot.dart';
+import '../../domain/draw/group_bounds.dart';
 import '../../domain/draw/seeding.dart';
 import '../../domain/draw/swiss_pairing.dart';
 import '../../domain/tournament/house_roster.dart';
@@ -27,7 +28,9 @@ import 'widgets/competition_rule_editor.dart';
 import 'widgets/houses_editor_sheet.dart';
 import 'widgets/draw_setup_sheet.dart';
 import 'widgets/group_entry_sheet.dart';
+import 'widgets/group_stage_fields.dart';
 import 'widgets/move_match_sheet.dart';
+import 'widgets/register_team_sheet.dart';
 import 'widgets/team_builder_sheet.dart';
 import '../tournaments/widgets/running_late_card.dart';
 import 'widgets/squad_call_card.dart';
@@ -664,7 +667,7 @@ class _DraftScheduleCard extends ConsumerWidget {
           await ref.read(competitionRepositoryProvider).generateDraftSchedule(
                 competition: competition,
                 teamCount: plan.teamCount,
-                teamsPerGroup: plan.teamsPerGroup,
+                numGroups: plan.numGroups,
                 seedWith: registered,
               );
       if (context.mounted) {
@@ -747,12 +750,12 @@ class _DraftScheduleSheet extends StatefulWidget {
   /// a schedule, it is a mistake waiting to be found on the day.
   final int registeredCount;
 
-  static Future<({int teamCount, int? teamsPerGroup})?> show(
+  static Future<({int teamCount, int? numGroups})?> show(
     BuildContext context, {
     required Competition competition,
     int registeredCount = 0,
   }) =>
-      showModalBottomSheet<({int teamCount, int? teamsPerGroup})>(
+      showModalBottomSheet<({int teamCount, int? numGroups})>(
         context: context,
         isScrollControlled: true,
         showDragHandle: true,
@@ -780,9 +783,36 @@ class _DraftScheduleSheetState extends State<_DraftScheduleSheet> {
   // stepper below.
   late int _teamCount =
       (widget.competition.maxEntrants ?? 8).clamp(_minTeams, 64);
-  int _teamsPerGroup = 4;
+
+  /// How many GROUPS, which is the question the organizer is answering.
+  ///
+  /// Null until they touch the stepper, so the number shown tracks the field
+  /// size as they change it rather than freezing at whatever was legal for
+  /// the first value they saw. Once set it is theirs, re-clamped only when
+  /// the field size makes it illegal.
+  int? _numGroups;
 
   bool get _isGroups => widget.competition.hasGroupStage;
+
+  /// Qualifiers matter to the bounds only when the groups feed a knockout —
+  /// a pool promotes nobody, so the only floor on it is what makes a group a
+  /// group. Same rule [GroupStageFields] applies, deliberately.
+  int get _qualifierFloor => widget.competition.groupsFeedKnockout
+      ? widget.competition.drawConfig.qualifiersPerGroup
+      : 1;
+
+  int get _minGroups => GroupBounds.minGroups(_teamCount);
+
+  int get _maxGroups =>
+      GroupBounds.maxGroups(_teamCount, qualifiersPerGroup: _qualifierFloor);
+
+  /// The group count the draw will actually use, so nothing on this sheet can
+  /// promise a shape the generator will not produce.
+  int get _resolvedGroups => GroupBounds.resolve(
+        entrants: _teamCount,
+        requested: _numGroups,
+        qualifiersPerGroup: _qualifierFloor,
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -813,7 +843,7 @@ class _DraftScheduleSheetState extends State<_DraftScheduleSheet> {
                   ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
             ),
             const SizedBox(height: 16),
-            _CountStepper(
+            CountStepper(
               label: 'Teams to plan for',
               value: _teamCount,
               min: _minTeams,
@@ -834,19 +864,48 @@ class _DraftScheduleSheetState extends State<_DraftScheduleSheet> {
               ),
             if (_isGroups) ...[
               const SizedBox(height: 4),
-              _CountStepper(
-                label: 'Teams per group',
-                value: _teamsPerGroup,
-                min: 2,
-                max: 4,
-                onChanged: (v) => setState(() => _teamsPerGroup = v),
+              // The number of GROUPS, not the number of teams in one.
+              //
+              // This asked for "Teams per group", capped at 4, and the two
+              // mistakes compounded: an organizer with 32 teams who wanted
+              // four groups typed 4 and got eight groups of four, and four
+              // groups of eight was not reachable from this sheet at all
+              // because a group of eight was over the cap. Groups is also
+              // the number they are choosing between — two or four or eight —
+              // while the size is what falls out of it, which is why the
+              // size now lives in the read-only summary below.
+              CountStepper(
+                label: 'Number of groups',
+                value: _resolvedGroups,
+                min: _minGroups,
+                max: _maxGroups,
+                onChanged: (v) => setState(() => _numGroups = v),
+              ),
+              // Why the stepper stops where it does. An organizer who cannot
+              // reach the number they wanted deserves the reason rather than
+              // a greyed-out button: a group of one advances unplayed, and a
+              // group of nine is a longer phase than the knockout it feeds.
+              Text(
+                'Between $_minGroups and $_maxGroups groups for $_teamCount '
+                'teams — no group smaller than ${GroupBounds.minPerGroup} or '
+                'bigger than ${GroupBounds.maxPerGroup}.',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              ),
+              const SizedBox(height: 8),
+              _GroupSplit(
+                groups: _resolvedGroups,
+                teams: _teamCount,
+                qualifiersPerGroup: widget.competition.groupsFeedKnockout
+                    ? widget.competition.drawConfig.qualifiersPerGroup
+                    : null,
               ),
             ],
             const SizedBox(height: 20),
             FilledButton(
               onPressed: () => Navigator.of(context).pop((
                 teamCount: _teamCount,
-                teamsPerGroup: _isGroups ? _teamsPerGroup : null,
+                numGroups: _isGroups ? _resolvedGroups : null,
               )),
               style:
                   FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
@@ -859,43 +918,92 @@ class _DraftScheduleSheetState extends State<_DraftScheduleSheet> {
   }
 }
 
-class _CountStepper extends StatelessWidget {
-  const _CountStepper({
-    required this.label,
-    required this.value,
-    required this.min,
-    required this.max,
-    required this.onChanged,
+/// What "4 groups" actually produces, spelled out before the button is
+/// pressed.
+///
+/// The organizer's input and the tournament they get are two different
+/// numbers — pick four groups from a field of 32 and eight-team groups are
+/// the consequence — and a stepper alone shows only the input. Every argument
+/// about a group stage is really an argument about the arithmetic nobody was
+/// shown, so it is shown.
+class _GroupSplit extends StatelessWidget {
+  const _GroupSplit({
+    required this.groups,
+    required this.teams,
+    required this.qualifiersPerGroup,
   });
 
-  final String label;
-  final int value;
-  final int min;
-  final int max;
-  final ValueChanged<int> onChanged;
+  final int groups;
+  final int teams;
+
+  /// Null for pools, which promote nobody and so have no knockout line.
+  final int? qualifiersPerGroup;
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final smallest = GroupBounds.smallestGroupSize(teams, groups);
+    final largest = GroupBounds.largestGroupSize(teams, groups);
+    // An uneven split is said out loud rather than averaged away. Somebody
+    // has to explain to the group of five why they play an extra match, and
+    // they can only do that if the app told them it was happening.
+    final even = smallest == largest;
+    final perGroup = even ? '$smallest' : '$smallest\u2013$largest';
+    final qualifiers = qualifiersPerGroup;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Result', style: theme.textTheme.labelMedium),
+          const SizedBox(height: 6),
+          _SplitRow(label: 'Groups', value: '$groups'),
+          _SplitRow(
+            label: 'Teams per group',
+            value: even ? perGroup : '$perGroup (uneven)',
+          ),
+          _SplitRow(label: 'Teams total', value: '$teams'),
+          if (qualifiers != null)
+            _SplitRow(
+              label: 'Into the knockout',
+              value: '${groups * qualifiers} '
+                  '(top $qualifiers of each)',
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SplitRow extends StatelessWidget {
+  const _SplitRow({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
+      padding: const EdgeInsets.symmetric(vertical: 1),
       child: Row(
         children: [
-          Expanded(child: Text(label)),
-          IconButton(
-            icon: const Icon(Icons.remove_circle_outline),
-            onPressed: value > min ? () => onChanged(value - 1) : null,
-          ),
-          SizedBox(
-            width: 32,
+          Expanded(
             child: Text(
-              '$value',
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.titleMedium,
+              label,
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
             ),
           ),
-          IconButton(
-            icon: const Icon(Icons.add_circle_outline),
-            onPressed: value < max ? () => onChanged(value + 1) : null,
+          Text(
+            value,
+            style: theme.textTheme.bodyMedium
+                ?.copyWith(fontWeight: FontWeight.w600),
           ),
         ],
       ),
@@ -1140,6 +1248,21 @@ class _Entries extends ConsumerWidget {
         me == null ? null : c.category.check(me, competitionStart: c.startDate);
     final theme = Theme.of(context);
 
+    // Whether the thing that enters this event is a TEAM DOCUMENT.
+    //
+    // Not simply `entrantType == team`: houses, a doubles draw and a player
+    // pool all produce team-shaped entrants and all three are assembled from
+    // registrations that individual people make, which is correct and stays.
+    // What is left — a pre-formed side, and the default an organizer never
+    // changed — is the case where a person registering themselves produces
+    // nothing that can play. `individual` is included deliberately: it is the
+    // value a cricket event created from the ordinary "New event" form used
+    // to carry, and reading it as "one player, one entry" is precisely how a
+    // 32-team tournament ended up with a bracket of individuals.
+    final teamIsTheEntrant = c.entrantType == EntrantType.team &&
+        (c.teamEntryMode == TeamEntryMode.preformedTeam ||
+            c.teamEntryMode == TeamEntryMode.individual);
+
     // What used to be implicit in whether the Enter/Apply button happened to
     // be showing — an organizer or a spectator had to infer "closed" from a
     // missing button, and nothing at all said how the field currently splits
@@ -1193,13 +1316,19 @@ class _Entries extends ConsumerWidget {
                   Wrap(
                     spacing: 6,
                     children: [
-                      FilledButton.tonal(
-                        onPressed:
-                            eligibility?.isEligible == true ? enter : null,
-                        child: Text(actionLabel),
-                      ),
-                      if (c.teamEntryMode == TeamEntryMode.preformedTeam ||
-                          c.entrantType == EntrantType.team)
+                      if (teamIsTheEntrant) ...[
+                        // The entry unit is a side, so this is the only
+                        // primary action. A personal "Register" here was the
+                        // bug: on a 32-team cricket tournament it invited
+                        // three hundred and fifty people to enter singly, and
+                        // the field that produced could not be drawn.
+                        FilledButton.tonal(
+                          onPressed: () => RegisterTeamSheet.show(
+                            context,
+                            competition: c,
+                          ),
+                          child: const Text('Enter a team'),
+                        ),
                         OutlinedButton.icon(
                           onPressed: eligibility?.isEligible == true
                               ? () => GroupEntrySheet.show(
@@ -1208,8 +1337,30 @@ class _Entries extends ConsumerWidget {
                                   )
                               : null,
                           icon: const Icon(Icons.groups_outlined, size: 16),
-                          label: const Text('Enter Team / Group'),
+                          // Distinct from the button beside it, because they
+                          // are different things: this assembles a squad for
+                          // this event alone, with an accept from each person
+                          // named, and it disappears when the event does.
+                          label: const Text('One-off squad'),
                         ),
+                      ] else ...[
+                        FilledButton.tonal(
+                          onPressed:
+                              eligibility?.isEligible == true ? enter : null,
+                          child: Text(actionLabel),
+                        ),
+                        if (c.entrantType == EntrantType.team)
+                          OutlinedButton.icon(
+                            onPressed: eligibility?.isEligible == true
+                                ? () => GroupEntrySheet.show(
+                                      context,
+                                      competition: c,
+                                    )
+                                : null,
+                            icon: const Icon(Icons.groups_outlined, size: 16),
+                            label: const Text('Enter Team / Group'),
+                          ),
+                      ],
                     ],
                   ),
               ],
@@ -1275,12 +1426,22 @@ class _Entries extends ConsumerWidget {
                 ListTile(
                   dense: true,
                   contentPadding: EdgeInsets.zero,
-                  leading: PsAvatar(
-                    name: r.displayName,
-                    photoUrl: r.photoUrl,
-                    seed: r.uid,
-                    size: 32,
-                  ),
+                  // A side gets a crest and a person gets a face. They are
+                  // in one list and a round photo frame on a club reads as a
+                  // person, which on a team event is every row.
+                  leading: r.isTeamEntry
+                      ? PsCrest(
+                          name: r.displayName,
+                          logoUrl: r.photoUrl,
+                          seed: r.uid,
+                          size: 32,
+                        )
+                      : PsAvatar(
+                          name: r.displayName,
+                          photoUrl: r.photoUrl,
+                          seed: r.uid,
+                          size: 32,
+                        ),
                   title: Text(r.displayName),
                   subtitle: Text(
                     [
@@ -1289,6 +1450,13 @@ class _Entries extends ConsumerWidget {
                         'Waitlist #${r.waitlistPosition}'
                       else
                         r.status.label,
+                      // How many are in the squad that entered. The one
+                      // number an organizer checks a team entry against, and
+                      // the one a captain needs to see is wrong before the
+                      // draw rather than at the toss.
+                      if (r.isTeamEntry)
+                        '${r.memberUids.length} '
+                            '${r.memberUids.length == 1 ? 'player' : 'players'}',
                       // The house is the whole point of a school event —
                       // an entries list that does not show it cannot be
                       // checked against the roster, and the organizer has no

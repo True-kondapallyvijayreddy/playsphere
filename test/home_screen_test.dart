@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:playsphere/core/errors/app_exception.dart';
+import 'package:playsphere/core/models/announcement.dart';
 import 'package:playsphere/core/models/app_user.dart';
 import 'package:playsphere/core/models/challenge.dart';
 import 'package:playsphere/core/models/competition.dart';
@@ -11,10 +12,13 @@ import 'package:playsphere/core/models/enums.dart';
 import 'package:playsphere/core/models/fixture.dart';
 import 'package:playsphere/core/models/organization.dart';
 import 'package:playsphere/core/models/scoring_request.dart';
+import 'package:playsphere/core/models/tournament_invite.dart';
 import 'package:playsphere/core/notifications/notification_model.dart';
 import 'package:playsphere/core/permissions/capability.dart';
 import 'package:playsphere/core/providers.dart';
 import 'package:playsphere/data/career_repository.dart';
+import 'package:playsphere/core/models/group_entry.dart';
+import 'package:playsphere/features/home/home_providers.dart';
 import 'package:playsphere/features/home/home_screen.dart';
 import 'package:playsphere/features/notifications/notifications_screen.dart';
 import 'package:playsphere/shared/account_button.dart';
@@ -100,6 +104,8 @@ void main() {
     List<ScoringRequest> scoringRequests = const [],
     /// Clubs whose live-fixtures read is refused, to exercise Bug #4.
     Set<String> liveReadFailsFor = const {},
+    /// Match availability calls, keyed by club — what the RSVP counter counts.
+    Map<String, List<Announcement>> rsvps = const {},
   }) {
     final router = GoRouter(
       initialLocation: '/home',
@@ -190,6 +196,18 @@ void main() {
         // real Firestore, which is not initialised under `flutter test`.
         myNotificationFeedProvider.overrideWith(
           (ref) => Stream.value(const <AppNotification>[]),
+        ),
+        matchRsvpsProvider.overrideWith(
+          (ref, orgId) => Stream.value(rsvps[orgId] ?? const <Announcement>[]),
+        ),
+        // Both feed the RSVP counter alongside the match calls, and both
+        // reach Firestore if left alone — the squad list through a
+        // collection-group query, the invitations through one query per club.
+        mySquadInvitesProvider.overrideWith(
+          (ref) => Stream.value(const <GroupEntry>[]),
+        ),
+        incomingTournamentInvitesProvider.overrideWith(
+          (ref, id) => Stream.value(const <TournamentInvite>[]),
         ),
       ],
       child: MaterialApp.router(routerConfig: router),

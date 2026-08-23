@@ -208,9 +208,19 @@ class TeamPartitioner {
       }
     }
 
-    // Check for unresolved pool registrations
+    // Check for unresolved pool registrations.
+    //
+    // "Resolved" means the registration is accounted for somewhere in the
+    // field, and a registration is not always a person: a TEAM entry's
+    // document id is the team's id, and it is represented by an entrant whose
+    // own id is that same team id rather than by anybody's uid. Matching on
+    // uids alone reported every entered team as a player still sitting in the
+    // draft pool, which blocked the draw of exactly the events this check was
+    // least needed for.
     final entrantUids = <String>{
       for (final e in field) ...[
+        e.id,
+        if (e.teamId != null) e.teamId!,
         if (e.uid != null) e.uid!,
         ...e.memberUids,
       ],

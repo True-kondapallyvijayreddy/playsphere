@@ -11,6 +11,7 @@ import '../../core/models/venue.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
+import '../../shared/club_context_banner.dart';
 import '../../shared/ui_kit.dart';
 import '../../shared/wizard.dart';
 import 'widgets/daily_hours_field.dart';
@@ -376,6 +377,7 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              ClubContextBanner(orgId: widget.orgId),
               WizardField(
                 label: 'Season Name',
                 required: true,

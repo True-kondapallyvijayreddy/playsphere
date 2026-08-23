@@ -192,6 +192,15 @@ class GroupStageFields extends StatelessWidget {
             ),
           ),
         if (grouped) ...[
+          // The field the arithmetic is against, said before the stepper
+          // rather than left for the organizer to remember. "Number of
+          // groups: 4" means nothing without it, and it is the number they
+          // are dividing.
+          Text(
+            'Splitting $entrantCount ${entrantCount == 1 ? 'entrant' : 'entrants'}',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
           CountStepper(
             label: 'Number of groups',
             // Bounded so the organizer cannot choose a group size the draw is

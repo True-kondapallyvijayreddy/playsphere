@@ -9,6 +9,7 @@ import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/club_context_banner.dart';
 import '../../shared/ui_kit.dart';
 
 /// Ten people turned up for badminton. Make it a tournament, now.
@@ -216,6 +217,7 @@ class _QuickTournamentScreenState
       body: ListView(
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
         children: [
+          ClubContextBanner(orgId: widget.orgId),
           TextField(
             controller: _name,
             decoration: const InputDecoration(

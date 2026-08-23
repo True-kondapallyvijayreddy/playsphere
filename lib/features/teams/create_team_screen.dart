@@ -3,13 +3,16 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/layout/responsive.dart';
+import '../../core/models/announcement.dart';
 import '../../core/models/enums.dart';
 import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/club_context_banner.dart';
 import '../../shared/identity.dart';
+import '../home/home_providers.dart';
 
 /// Raising a squad out of a club's members list.
 ///
@@ -34,11 +37,45 @@ class _CreateTeamScreenState extends ConsumerState<CreateTeamScreen> {
   final Set<String> _picked = {};
   bool _busy = false;
 
+  /// Narrow the roster to the people who have said they are free.
+  ///
+  /// The step the product asks a club to take before picking a side — put out
+  /// a match call, see who answers — produced an answer nobody could act on:
+  /// the responses sat on the availability screen, and this screen, where the
+  /// side is actually chosen, showed all 140 members in alphabetical order.
+  /// So an admin read one screen and ticked names on another. This closes
+  /// that: on, the list is whoever said "In" to a live call for this sport.
+  bool _availableOnly = false;
+
   @override
   void dispose() {
     _name.dispose();
     _search.dispose();
     super.dispose();
+  }
+
+  /// Everyone who answered "In" to a live availability call for the chosen
+  /// sport, or null before a sport has been chosen — there is no such thing
+  /// as "available" until the question names a game.
+  ///
+  /// Maybes are not included. A squad picked from people who said maybe is a
+  /// squad the captain has to chase, and the person who said "In" is the one
+  /// who committed.
+  Set<String>? _availableUids() {
+    final sportId = _sportId;
+    if (sportId == null) return null;
+    final calls =
+        ref.watch(matchRsvpsProvider(widget.orgId)).valueOrNull ?? const [];
+    final uids = <String>{};
+    for (final call in calls) {
+      if (call.match?.sportId != sportId) continue;
+      final poll = call.poll;
+      if (poll == null) continue;
+      for (final entry in poll.votes.entries) {
+        if (entry.value == Rsvp.yes) uids.add(entry.key);
+      }
+    }
+    return uids;
   }
 
   Future<void> _create() async {
@@ -87,6 +124,7 @@ class _CreateTeamScreenState extends ConsumerState<CreateTeamScreen> {
     }
 
     final members = ref.watch(orgMembersProvider(widget.orgId));
+    final available = _availableUids();
     final query = _search.text.trim().toLowerCase();
     final canSubmit = !_busy &&
         _name.text.trim().isNotEmpty &&
@@ -99,9 +137,15 @@ class _CreateTeamScreenState extends ConsumerState<CreateTeamScreen> {
         value: members,
         builder: (all) {
           final active = all.where((m) => m.isActive).toList();
-          final candidates = query.isEmpty
+          final shortlist = available == null || !_availableOnly
               ? active
-              : active
+              : [
+                  for (final m in active)
+                    if (available.contains(m.uid)) m,
+                ];
+          final candidates = query.isEmpty
+              ? shortlist
+              : shortlist
                   .where((m) => m.displayName.toLowerCase().contains(query))
                   .toList();
 
@@ -113,6 +157,11 @@ class _CreateTeamScreenState extends ConsumerState<CreateTeamScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    // A team belongs to the club that raised it, and the
+                    // roster below is drawn from that club's members — so the
+                    // club is named before the first field rather than left
+                    // to be inferred from whose faces are in the picker.
+                    ClubContextBanner(orgId: widget.orgId),
                     TextField(
                       controller: _name,
                       decoration: const InputDecoration(
@@ -154,11 +203,33 @@ class _CreateTeamScreenState extends ConsumerState<CreateTeamScreen> {
                       ),
                       onChanged: (_) => setState(() {}),
                     ),
+                    if (available != null)
+                      CheckboxListTile(
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                        controlAffinity: ListTileControlAffinity.leading,
+                        value: _availableOnly,
+                        title: Text(
+                          'Only who said they are free '
+                          '(${available.length})',
+                        ),
+                        subtitle: const Text(
+                          'From the live match calls for this sport.',
+                        ),
+                        onChanged: (v) =>
+                            setState(() => _availableOnly = v ?? false),
+                      ),
                     const SizedBox(height: 8),
                     if (candidates.isEmpty)
-                      const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 24),
-                        child: Center(child: Text('No members match.')),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 24),
+                        child: Center(
+                          child: Text(
+                            _availableOnly
+                                ? 'Nobody has said they are free yet.'
+                                : 'No members match.',
+                          ),
+                        ),
                       )
                     else
                       for (final m in candidates)

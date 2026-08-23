@@ -6,6 +6,7 @@ import '../../core/models/announcement.dart';
 import '../../core/models/competition.dart';
 import '../../core/models/enums.dart';
 import '../../core/models/fixture.dart';
+import '../../core/models/group_entry.dart';
 import '../../core/models/organization.dart';
 import '../../core/models/scoring_request.dart';
 import '../../core/models/tournament_invite.dart';
@@ -249,6 +250,21 @@ final myScoringRequestsProvider =
   return combineAsyncAll([
     for (final id in orgIds) ref.watch(pendingScoringRequestsProvider(id)),
   ]);
+});
+
+/// Squads this person has been named in and has not yet answered.
+///
+/// Unlike every other list on this screen this is NOT fanned out per club: a
+/// squad invitation reaches its members through a collection-group query, for
+/// the reason [GroupEntry.orgId] gives — the invitation lives on an event page
+/// the invited person has no reason to open, so nothing else can find it.
+///
+/// No capability gate either, and that is the point: this is addressed to the
+/// player, not to an organizer.
+final mySquadInvitesProvider = StreamProvider<List<GroupEntry>>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(const <GroupEntry>[]);
+  return ref.watch(competitionRepositoryProvider).watchSquadInvites(uid);
 });
 
 /// How many things are waiting on this person, for the badge on the bell.
@@ -533,12 +549,28 @@ final rsvpCountProvider = Provider<HomeCount>((ref) {
   if (uid == null) return (value: 0, unknown: false, detail: null);
   final waiting = calls.where((a) => a.poll?.voteOf(uid) == null).length;
   final clashes = ref.watch(myRsvpClashesProvider).length;
+
+  // Everything the RSVP screen puts a yes/no in front of, not only the match
+  // calls. The tile is a door, and a door whose number counts one of the four
+  // things behind it teaches people that the number is not the whole story —
+  // after which they stop opening it.
+  final squads = ref.watch(mySquadInvitesProvider).valueOrNull ?? const [];
+  final invites = ref.watch(myTournamentInvitesProvider).valueOrNull ?? const [];
+  final challenges =
+      ref.watch(myIncomingChallengesProvider).valueOrNull ?? const [];
+  final total = waiting + squads.length + invites.length + challenges.length;
+
   return (
-    value: waiting,
+    value: total,
     unknown: false,
+    // The most specific true thing, in the order that decides fastest: a
+    // clash is a promise already broken, a squad is a person waiting on you
+    // by name, and "waiting on you" is the general case.
     detail: clashes > 0
         ? '$clashes clash${clashes == 1 ? '' : 'es'}'
-        : (waiting == 0 ? null : 'waiting on you'),
+        : squads.isNotEmpty
+            ? '${squads.length} squad${squads.length == 1 ? '' : 's'}'
+            : (total == 0 ? null : 'waiting on you'),
   );
 });
 

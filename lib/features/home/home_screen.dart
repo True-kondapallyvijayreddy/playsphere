@@ -12,6 +12,7 @@ import '../../shared/confirm_exit.dart';
 import '../../shared/live_dot.dart';
 import '../../shared/promo_strip.dart';
 import '../../shared/ui_kit.dart';
+import '../community/widgets/match_rsvp_section.dart';
 import 'home_providers.dart';
 
 /// The dashboard: what is happening in this person's sports world, in one
@@ -252,6 +253,18 @@ class _Counters extends ConsumerWidget {
     // screen reached by a tap that promised otherwise.
     final hasFeed = ref.watch(myFeedOrgIdsProvider).isNotEmpty;
 
+    // Every club this person can call a match for. Same capability pair
+    // `MatchRsvpScreen` uses for its FAB, so the "+" here and the button
+    // there are never offered to different people.
+    final organizingOrgIds = <String>[
+      for (final m in ref.watch(myActiveMembershipsProvider).valueOrNull ??
+          const [])
+        if (ref.watch(myCapabilitiesProvider(m.orgId)).any((c) =>
+            c == Capability.manageCompetitions ||
+            c == Capability.manageOrganization))
+          m.orgId,
+    ];
+
     final tiles = <Widget>[
       _CounterTile(
         label: 'Clubs',
@@ -285,19 +298,37 @@ class _Counters extends ConsumerWidget {
         icon: Icons.category_outlined,
         onTap: () => context.push(uid == null ? Routes.sports : Routes.mySports),
       ),
-      // Only when somebody is actually waiting on an answer.
+      // Always here, like the five above it.
       //
-      // A tile permanently reading "0 RSVP" is a slot on the most valuable
-      // screen in the product spent saying nothing. When it appears it means
-      // something, which is what makes it worth looking at.
-      if (rsvp.value > 0)
-        _CounterTile(
-          label: 'RSVP',
-          count: rsvp,
-          icon: Icons.event_available_outlined,
-          accent: Ps.primary,
-          onTap: () => context.push(Routes.matchRsvps),
-        ),
+      // It used to appear only when the count was above zero, on the argument
+      // that a tile reading "0 RSVP" is a slot on the most valuable screen in
+      // the product spent saying nothing. That argument is wrong twice over.
+      //
+      // A tile that comes and goes is a tile nobody learns the position of —
+      // the six counters are a fixed grid people reach into by muscle memory,
+      // and one of them blinking in and out relocates the other five. Worse,
+      // a disappearing door means the screen behind it is unreachable exactly
+      // when somebody wants to go looking: an organizer with nothing pending
+      // could not get to the screen that holds "Call a match", and a member
+      // could not check what they had already answered.
+      //
+      // The "+" stays organizer-only, because asking is a thing only they can
+      // do.
+      _CounterTile(
+        label: 'RSVP',
+        count: rsvp,
+        icon: Icons.event_available_outlined,
+        accent: Ps.primary,
+        onTap: () => context.push(Routes.matchRsvps),
+        onAdd: organizingOrgIds.isEmpty
+            ? null
+            : () => showCreateMatchRsvpSheet(
+                  context: context,
+                  ref: ref,
+                  orgIds: organizingOrgIds,
+                ),
+        addTooltip: 'Call a match',
+      ),
     ];
 
     return Padding(
@@ -329,6 +360,8 @@ class _CounterTile extends StatelessWidget {
     required this.onTap,
     this.accent,
     this.showLiveDot = false,
+    this.onAdd,
+    this.addTooltip,
   });
 
   final String label;
@@ -340,6 +373,11 @@ class _CounterTile extends StatelessWidget {
   final Color? accent;
   final bool showLiveDot;
 
+  /// A second, smaller action in the tile's top-right: *create one of these*.
+  /// Null on every tile whose count this person can only read.
+  final VoidCallback? onAdd;
+  final String? addTooltip;
+
   @override
   Widget build(BuildContext context) {
     final colour = accent ?? Ps.ink;
@@ -350,13 +388,16 @@ class _CounterTile extends StatelessWidget {
         onTap: onTap,
         borderRadius: BorderRadius.circular(Ps.radius),
         child: Container(
-          // Sized to the content, not to a ratio.
+          // Sized to the content, not to a ratio. The 7pt vertical padding
+          // pays for the 20pt header row above, which is sized for the "+"
+          // the RSVP tile carries — the six tiles stay inside the compactness
+          // budget `home_screen_test` holds them to.
           //
           // The grid this replaced sized a tile by width:height, so dropping
           // to one column on a phone made each one 162px tall and pushed the
           // six counters over three rows. Every extent here is fixed, so the
           // tile is the same compact height at 320pt as at 900.
-          padding: const EdgeInsets.fromLTRB(12, 9, 10, 9),
+          padding: const EdgeInsets.fromLTRB(12, 7, 10, 7),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(Ps.radius),
             border: Border.all(
@@ -367,12 +408,33 @@ class _CounterTile extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Row(
-                children: [
-                  Icon(icon, size: 15, color: accent ?? Ps.faint),
-                  const Spacer(),
-                  if (showLiveDot) const LiveDot(),
-                ],
+              // Fixed height, so the "+" the RSVP tile carries cannot make
+              // that one tile taller than the other five.
+              SizedBox(
+                height: 20,
+                child: Row(
+                  children: [
+                    Icon(icon, size: 15, color: accent ?? Ps.faint),
+                    const Spacer(),
+                    if (showLiveDot) const LiveDot(),
+                    if (onAdd != null)
+                      Tooltip(
+                        message: addTooltip ?? 'Add',
+                        child: InkResponse(
+                          onTap: onAdd,
+                          radius: 18,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 3),
+                            child: Icon(
+                              Icons.add,
+                              size: 17,
+                              color: accent ?? Ps.ink,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
               ),
               const SizedBox(height: 4),
               // An em dash, not a zero, when the number could not be read —

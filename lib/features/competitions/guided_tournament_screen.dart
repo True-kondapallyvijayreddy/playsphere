@@ -9,6 +9,7 @@ import '../../core/models/enums.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
+import '../../shared/club_context_banner.dart';
 import '../../shared/ui_kit.dart';
 import '../../shared/wizard.dart';
 import 'widgets/daily_hours_field.dart';
@@ -233,6 +234,11 @@ class _GuidedTournamentScreenState
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // Whose tournament this is, on the first step, where the decision
+          // is still reversible. Read-only: this wizard is opened from one
+          // club's pages and half its later steps (venues, members) are that
+          // club's, so switching here would invalidate them silently.
+          ClubContextBanner(orgId: widget.orgId),
           WizardField(
             label: 'Tournament Name',
             required: true,

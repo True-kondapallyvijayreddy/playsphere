@@ -63,6 +63,9 @@ class GroupEntry {
     required this.leaderName,
     required this.memberUids,
     required this.status,
+    this.orgId = '',
+    this.compId = '',
+    this.competitionName = '',
     this.memberNames = const {},
     this.acceptedUids = const [],
     this.declinedUids = const [],
@@ -72,6 +75,30 @@ class GroupEntry {
   });
 
   final String id;
+
+  /// Where this group lives, copied onto the document from its own path.
+  ///
+  /// ## Why a document repeats its own address
+  ///
+  /// Because a person named in a squad has to be able to FIND it. The path is
+  /// `orgs/{orgId}/competitions/{compId}/groupEntries/{groupId}`, and the only
+  /// query that answers "which squads is this person being asked to join" is a
+  /// collection-group query across every club and every event — which returns
+  /// documents whose parents the client would then have to walk back up, one
+  /// read at a time, before it could render a single row or write a single
+  /// answer.
+  ///
+  /// Without these, a named member had no notification and no screen: the
+  /// invitation existed only on the event page of an event they had no reason
+  /// to open. [competitionName] is here for the same reason — the row has to
+  /// say what they are being invited to play in.
+  ///
+  /// Empty on documents written before this existed. Those keep working
+  /// exactly as they did (the event page reads them by path) and simply do not
+  /// appear in the cross-event list.
+  final String orgId;
+  final String compId;
+  final String competitionName;
 
   /// What the group calls itself. Becomes the entrant name in the draw, so it
   /// is what appears on the scoreboard.
@@ -135,6 +162,9 @@ class GroupEntry {
     final d = doc.data() ?? const {};
     return GroupEntry(
       id: doc.id,
+      orgId: Fs.str(d['orgId']),
+      compId: Fs.str(d['compId']),
+      competitionName: Fs.str(d['competitionName']),
       name: Fs.str(d['name'], 'Group'),
       leaderUid: Fs.str(d['leaderUid']),
       leaderName: Fs.str(d['leaderName'], 'Leader'),
@@ -153,6 +183,9 @@ class GroupEntry {
   }
 
   Map<String, Object?> toCreate() => {
+        'orgId': orgId,
+        'compId': compId,
+        'competitionName': competitionName,
         'name': name,
         'leaderUid': leaderUid,
         'leaderName': leaderName,

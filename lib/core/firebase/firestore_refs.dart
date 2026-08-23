@@ -331,6 +331,17 @@ class Refs {
   ) =>
       competition(orgId, compId).collection('groupEntries');
 
+  /// Every squad invitation across every club and event, for the one screen
+  /// that can answer "who is asking me to play for them".
+  ///
+  /// Needs the collection-group index on (`memberUids` array-contains,
+  /// `status`) and the `{path=**}/groupEntries` read rule — see
+  /// firestore.indexes.json and firestore.rules. A group entry only reaches
+  /// the person it names through this query: the invitation lives on an event
+  /// page they have no reason to open.
+  static Query<Map<String, dynamic>> get allGroupEntriesQuery =>
+      db.collectionGroup('groupEntries');
+
   static DocumentReference<Map<String, dynamic>> groupEntry(
     String orgId,
     String compId,

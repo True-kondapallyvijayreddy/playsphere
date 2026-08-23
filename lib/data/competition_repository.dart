@@ -18,6 +18,7 @@ import '../core/models/group_entry.dart';
 import '../core/models/match_player.dart';
 import '../core/models/scoring_request.dart';
 import '../core/models/squad_entry.dart';
+import '../core/models/team.dart';
 import '../core/models/venue.dart' as venue_model;
 import '../core/sync/uuid_v7.dart';
 import '../domain/draw/fixture_generator.dart';
@@ -591,6 +592,35 @@ class CompetitionRepository {
             ),
       );
 
+  /// Every squad still waiting on [uid] to answer, across every club.
+  ///
+  /// The other half of a group entry, and the half that was missing: the
+  /// leader proposes and the app told the people they named nothing at all.
+  /// The invitation sat on the event's own page, which is a page somebody who
+  /// has not entered has no reason to open — so a group could sit in
+  /// `forming` forever while five people waited for each other.
+  ///
+  /// Filtered to `forming` in the query rather than in Dart because the read
+  /// rule and the index are both keyed on it, and because a settled group is
+  /// not a question. Documents written before [GroupEntry.orgId] existed carry
+  /// no path on them and are skipped: a row that cannot be opened or answered
+  /// is worse than a row that is not shown.
+  Stream<List<GroupEntry>> watchSquadInvites(String uid) => guardStream(
+        () => Refs.allGroupEntriesQuery
+            .where('memberUids', arrayContains: uid)
+            .where('status', isEqualTo: GroupEntryStatus.forming.wire)
+            .snapshots()
+            .map(
+              (s) => [
+                for (final doc in s.docs)
+                  if (GroupEntry.fromDoc(doc) case final g
+                      when g.orgId.isNotEmpty && g.compId.isNotEmpty && g.awaits(uid))
+                    g,
+              ]..sort((a, b) => (b.createdAt ?? DateTime(0))
+                  .compareTo(a.createdAt ?? DateTime(0))),
+            ),
+      );
+
   /// Proposes a group entry. Everyone named still has to agree.
   ///
   /// Deliberately does NOT create any registrations. A group that reaches the
@@ -604,6 +634,11 @@ class CompetitionRepository {
     required String leaderUid,
     required String leaderName,
     required Map<String, String> members,
+
+    /// What the group is entering. Copied onto the document so the people
+    /// being invited can see what they are being asked to play in without
+    /// first reading the competition — see [GroupEntry.orgId].
+    String competitionName = '',
   }) =>
       guard(() async {
         final groupName = name.trim();
@@ -626,6 +661,9 @@ class CompetitionRepository {
         await ref.set(
           GroupEntry(
             id: ref.id,
+            orgId: orgId,
+            compId: compId,
+            competitionName: competitionName,
             name: groupName,
             leaderUid: leaderUid,
             leaderName: leaderName,
@@ -919,6 +957,125 @@ class CompetitionRepository {
             return outcome;
           },
         );
+      });
+
+  /// Enters a whole TEAM into an event, as one entry.
+  ///
+  /// ## Why this is not [register] with a team name typed into it
+  ///
+  /// [register] enters the person who pressed the button. For a group sport
+  /// that is the wrong unit and has always been: a cricket tournament's field
+  /// is a list of sides, and the eleven people in one of them are not eleven
+  /// entries competing against each other. The product could already express
+  /// a side (`TeamEntryMode.preformedTeam` groups confirmed registrations by
+  /// a typed `teamName`) and the cost of doing it that way is everything a
+  /// string costs: two members of one club spelling it differently field two
+  /// teams, nobody can answer "have Hyderabad CC entered?" with a single
+  /// read, and a squad has to be reassembled by hand for every event it plays.
+  ///
+  /// So the entry is the team document. One write, keyed on the team's id, so
+  /// entering twice is idempotent rather than duplicating the side; the roster
+  /// is snapshotted onto it, because who was registered is a fact about this
+  /// event and the team's own roster will keep moving.
+  ///
+  /// ## What it deliberately does not check
+  ///
+  /// Age and gender categories. [Competition.category] is a rule about a
+  /// PERSON, and applying it to a team means either refusing the whole side
+  /// because one player is a year too old — with no way to substitute them —
+  /// or silently entering an ineligible player. Both are worse than the
+  /// organizer checking a squad list, which is what happens at a real event.
+  /// The squad is written onto the entry precisely so they can.
+  Future<RegistrationStatus> registerTeam({
+    required Competition competition,
+    required Team team,
+    required String byUid,
+  }) =>
+      guard(() async {
+        if (competition.isSuspended) {
+          throw ValidationException(
+            'This event is on hold'
+            '${competition.suspendReason == null ? '' : ' — ${competition.suspendReason}'}'
+            '. Entries reopen when the organizer resumes it.',
+          );
+        }
+        if (!competition.registrationIsOpen) {
+          throw const ValidationException(
+            'Entries are closed for this competition.',
+          );
+        }
+        if (team.sportId != competition.sportId) {
+          throw ValidationException(
+            '${team.name} is a ${SportCatalog.byId(team.sportId).name} team '
+            'and this is a ${competition.sportName} event.',
+          );
+        }
+        if (team.memberUids.isEmpty) {
+          throw ValidationException(
+            '${team.name} has nobody in it yet. Add the squad before '
+            'entering them.',
+          );
+        }
+
+        final compRef = Refs.competition(competition.orgId, competition.id);
+        final regRef =
+            Refs.registration(competition.orgId, competition.id, team.id);
+
+        return Refs.db.runTransaction<RegistrationStatus>((tx) async {
+          // Same re-read as [register], for the same reason: the last slot is
+          // decided by what is true at commit time, not by what the caller's
+          // snapshot said.
+          final compSnap = await tx.get(compRef);
+          if (!compSnap.exists) {
+            throw const ValidationException('That event no longer exists.');
+          }
+          final fresh = Competition.fromDoc(compSnap);
+          if (!fresh.registrationIsOpen) {
+            throw const ValidationException(
+              'Entries closed while you were registering.',
+            );
+          }
+
+          final existing = await tx.get(regRef);
+          if (existing.exists &&
+              Registration.fromDoc(existing).status.occupiesSlot) {
+            throw ValidationException(
+              '${team.name} is already entered in this event.',
+            );
+          }
+
+          final outcome = fresh.outcomeOfRegisteringNow;
+          if (outcome == RegistrationStatus.waitlisted &&
+              !fresh.waitlistEnabled) {
+            throw const ValidationException('This event is full.');
+          }
+          final position = outcome == RegistrationStatus.waitlisted
+              ? fresh.waitlistCount + 1
+              : null;
+
+          tx.set(
+            regRef,
+            Registration(
+              // The doc id, and on a team row that is the team's id. See
+              // [Registration.teamId].
+              uid: team.id,
+              displayName: team.name,
+              photoUrl: team.photoUrl,
+              status: outcome,
+              teamName: team.name,
+              teamId: team.id,
+              memberUids: team.memberUids,
+              registeredByUid: byUid,
+            ).toCreate(status: outcome, waitlistPosition: position),
+          );
+
+          if (outcome == RegistrationStatus.confirmed) {
+            tx.update(compRef, {'confirmedCount': FieldValue.increment(1)});
+          } else if (outcome == RegistrationStatus.waitlisted) {
+            tx.update(compRef, {'waitlistCount': FieldValue.increment(1)});
+          }
+          return outcome;
+        });
       });
 
   /// Puts members into the field directly — the organizer's picks in a hybrid
@@ -2349,7 +2506,22 @@ class CompetitionRepository {
  Future<DrawOutcome> generateDraftSchedule({
     required Competition competition,
     required int teamCount,
-    int? teamsPerGroup,
+
+    /// How many GROUPS the field is split into — not how many teams are in
+    /// each one.
+    ///
+    /// It used to be the other way round, and the two are not interchangeable
+    /// from the organizer's chair. "32 teams, 4" has to mean four groups of
+    /// eight, because four is the number of tables that appear on the wall;
+    /// read as a group *size* the same input silently produced eight groups of
+    /// four, which is a different tournament with twice as many standings to
+    /// follow. The count is also the number the organizer is actually choosing
+    /// between — two groups or four — while the size is the consequence, so it
+    /// is the count that belongs in the parameter and the size that belongs in
+    /// the summary line.
+    ///
+    /// Null lets [GroupBounds] pick. Ignored unless the draw is grouped.
+    int? numGroups,
 
     /// Entrants who have actually registered, placed into the draw ahead of
     /// any placeholder.
@@ -2494,11 +2666,21 @@ class CompetitionRepository {
         /// the organizer is still waiting to fill.
         final enteredIds = {for (final e in entered) e.id};
 
+        // The competition's own draw settings, not a fresh set of defaults.
+        //
+        // This call used to hardcode two qualifiers and never pass
+        // `useGroups` at all, so a knockout that an organizer had explicitly
+        // split into groups came back as a flat bracket: the sheet asked them
+        // about groups, and the generator was never told there were any.
+        final draw = competition.drawConfig;
         final planned = const FixtureGenerator().generate(
           format: competition.format,
           entrants: placeholders,
-          groupSize: teamsPerGroup,
-          qualifiersPerGroup: 2,
+          useGroups: draw.useGroups,
+          numGroups: numGroups ?? draw.numGroups,
+          groupSize: numGroups == null ? draw.groupSize : null,
+          qualifiersPerGroup: draw.qualifiersPerGroup,
+          doubleRoundRobin: draw.doubleRoundRobin,
         );
         final kept = <PlannedFixture>[
           for (final p in planned)

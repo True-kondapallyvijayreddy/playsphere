@@ -51,6 +51,19 @@ void main() {
       expect(GroupBounds.resolve(entrants: 24, requested: 6), 6);
     });
 
+    test('32 teams in 4 groups is four groups of eight, not eight of four', () {
+      // The number an organizer types is the number of TABLES on the wall.
+      // Read as a group size instead, the same input produces eight groups —
+      // a different tournament with twice as many standings to follow.
+      expect(GroupBounds.resolve(entrants: 32, requested: 4), 4);
+      expect(GroupBounds.smallestGroupSize(32, 4), 8);
+      expect(GroupBounds.largestGroupSize(32, 4), 8);
+
+      // And the other legal shape of the same field.
+      expect(GroupBounds.resolve(entrants: 32, requested: 8), 8);
+      expect(GroupBounds.largestGroupSize(32, 8), 4);
+    });
+
     test('the default aims at five a group, not ten', () {
       expect(GroupBounds.resolve(entrants: 20), 4);
       expect(GroupBounds.largestGroupSize(20, 4), 5);

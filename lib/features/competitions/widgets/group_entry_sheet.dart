@@ -62,6 +62,7 @@ class _GroupEntrySheetState extends ConsumerState<GroupEntrySheet> {
             leaderUid: me.uid,
             leaderName: me.displayName,
             members: _picked,
+            competitionName: c.name,
           );
       if (!mounted) return;
       Navigator.of(context).pop();

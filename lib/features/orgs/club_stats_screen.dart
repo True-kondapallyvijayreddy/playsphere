@@ -8,6 +8,7 @@ import '../../core/router/app_router.dart';
 import '../../domain/career/club_stats.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/club_context_banner.dart';
 import '../../shared/ui_kit.dart';
 
 /// A club's record, one row per sport it has played — the club-scoped
@@ -51,6 +52,10 @@ class ClubStatsScreen extends ConsumerWidget {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     const SizedBox(height: 8),
+                    // The app bar carries the club's name; this carries its
+                    // id. A district with two "Sunrise" clubs is exactly
+                    // where somebody screenshots the wrong one's numbers.
+                    ClubContextBanner(orgId: orgId, label: 'Analytics for'),
                     for (final row in rows)
                       _ClubSportRow(orgId: orgId, stats: row),
                   ],

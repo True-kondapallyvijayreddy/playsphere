@@ -994,6 +994,9 @@ class Registration {
     this.createdAt,
     this.waitlistPosition,
     this.preselected = false,
+    this.teamId,
+    this.memberUids = const [],
+    this.registeredByUid,
   });
 
   final String uid;
@@ -1001,6 +1004,41 @@ class Registration {
   final RegistrationStatus status;
   final String? photoUrl;
   final String? teamName;
+
+  /// The `teams/{teamId}` document that entered, when the entry IS a team.
+  ///
+  /// ## Why a team entry is a registration and not a special case
+  ///
+  /// For a group sport the competing unit is the side, not the player. A
+  /// cricket tournament with 32 teams has 32 entries, and asking three
+  /// hundred and fifty individual players to each register — which is what
+  /// this collection could express before — produces a field of three hundred
+  /// and fifty singles competitors that no draw can use, and no way to answer
+  /// "have Hyderabad CC entered?" without reading every row and grouping by a
+  /// typed-in name.
+  ///
+  /// So a team entry is one document, its id is the team's id (one entry per
+  /// team, and a second tap overwrites rather than fielding the same squad
+  /// twice), and [uid] — the doc id — is therefore the team id on these rows.
+  /// [registeredByUid] is the person who submitted it.
+  ///
+  /// Null on every individual entry, which is what the doubles, house and
+  /// player-pool modes keep writing.
+  final String? teamId;
+
+  /// The squad as it stood when the team entered.
+  ///
+  /// A snapshot, deliberately, for the same reason [Entrant.memberUids] is
+  /// one: the roster on the team document keeps changing, and who was
+  /// registered for this event is a fact about this event.
+  final List<String> memberUids;
+
+  /// Who submitted a team entry — a captain, a manager, or a club organizer.
+  /// Null on a self-registration, where [uid] already answers it.
+  final String? registeredByUid;
+
+  /// Whether this row is a side rather than a person.
+  bool get isTeamEntry => teamId != null && teamId!.isNotEmpty;
   final String? houseName;
   final String? partnerUid;
   final String? partnerName;
@@ -1038,6 +1076,9 @@ class Registration {
       waitlistPosition:
           d['waitlistPosition'] == null ? null : Fs.integer(d['waitlistPosition']),
       preselected: Fs.boolean(d['preselected']),
+      teamId: Fs.strOrNull(d['teamId']),
+      memberUids: Fs.strList(d['memberUids']),
+      registeredByUid: Fs.strOrNull(d['registeredByUid']),
     );
   }
 
@@ -1063,6 +1104,9 @@ class Registration {
         'waitlistPosition': waitlistPosition,
         'preselected': preselected,
         'eligibilityNote': eligibilityNote,
+        'teamId': teamId,
+        'memberUids': memberUids,
+        'registeredByUid': registeredByUid,
         'createdAt': FieldValue.serverTimestamp(),
       };
 }

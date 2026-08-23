@@ -12,6 +12,7 @@ import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/club_context_banner.dart';
 import '../tournaments/widgets/venue_selector_dialog.dart'
     show showQuickAddVenueDialog;
 import 'widgets/bulk_category_selector_sheet.dart';
@@ -368,6 +369,7 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   const SizedBox(height: 8),
+                  ClubContextBanner(orgId: widget.orgId),
                   TextFormField(
                     controller: _name,
                     textCapitalization: TextCapitalization.words,

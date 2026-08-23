@@ -1504,6 +1504,38 @@ service cloud.firestore {
                  orgId, compId, request.resource.data.status
                );
 
+          // A TEAM entering, as one entry.
+          //
+          // The unit a group sport competes as. The document id is the team's id, so
+          // one team is one entry however many people are in it and entering twice
+          // overwrites rather than fielding the same side against itself — see
+          // `Registration.teamId`.
+          //
+          // Written by somebody who actually runs that team: `teamRuns` is the same
+          // authority that lets them edit its roster, and a club's organizers are
+          // inside it via `canManageOrg`. Anything less would let a stranger enter a
+          // squad they have no part in, and the eleven names on it would have no idea.
+          //
+          // Everything the self-registration clause checks about the SLOT is checked
+          // here too and for the same reasons: the status has to be one the event's
+          // model allows, and it has to be paid for by the same write.
+          allow create: if (isActive(orgId)
+                             || compDoc(orgId, compId).get('openToNonMembers', false) == true)
+            && request.resource.data.get('teamId', '') == regId
+            && teamRuns(get(/databases/$(database)/documents/teams/$(regId)).data)
+            && request.resource.data.uid == regId
+            && request.resource.data.get('registeredByUid', '') == uid()
+            && request.resource.data.get('preselected', false) == false
+            && serverTimed('createdAt')
+            && compDoc(orgId, compId).status == 'registration_open'
+            && selfRegistrationStatusValid(
+                 compDoc(orgId, compId),
+                 request.resource.data.status
+               )
+            && registrationClaimsItsSlot(
+                 orgId, compId, request.resource.data.status
+               );
+
           // An organizer putting someone in the field directly — the preselected block
           // of a hybrid event, or a late change at the ground.
           allow create: if canManageCompetitions(orgId)
@@ -1519,6 +1551,17 @@ service cloud.firestore {
               && unchanged('createdAt')
             ) || (
               regId == uid()
+              && request.resource.data.status == 'withdrawn'
+              && resource.data.status != 'rejected'
+              && unchanged('uid')
+              && unchanged('createdAt')
+            ) || (
+              // A team pulling out. Same right as entering them: whoever runs
+              // the team. Without this a captain could enter a side and then
+              // have to ask the host club to withdraw it, because the id on the
+              // document is the team's and never matches their own uid.
+              resource.data.get('teamId', '') == regId
+              && teamRuns(get(/databases/$(database)/documents/teams/$(regId)).data)
               && request.resource.data.status == 'withdrawn'
               && resource.data.status != 'rejected'
               && unchanged('uid')
@@ -2178,6 +2221,19 @@ service cloud.firestore {
     // -------------------------------------------------------------------
     match /{path=**}/scoringRequests/{requesterUid} {
       allow read: if canManageCompetitions(resource.data.orgId);
+    }
+
+    // -------------------------------------------------------------------
+    // Collection-group query over squad invitations, powering the one screen that can
+    // tell somebody they have been named in a team.
+    //
+    // Scoped to the people the group NAMES, which is narrower than the per-event rule
+    // above it (`isActive(orgId)`, because a club's members can all see who is
+    // entering). A cross-club query has no club to be a member of, so the only
+    // defensible reader is somebody the document is about.
+    // -------------------------------------------------------------------
+    match /{path=**}/groupEntries/{groupId} {
+      allow read: if isSignedIn() && uid() in resource.data.memberUids;
     }
 
     // -------------------------------------------------------------------
