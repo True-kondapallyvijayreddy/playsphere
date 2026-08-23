@@ -9,6 +9,7 @@ import '../../../core/permissions/capability.dart';
 import '../../../core/providers.dart';
 import '../../../shared/app_scaffold.dart';
 import '../../../shared/identity.dart';
+import 'side_team_picker.dart';
 
 /// One club's side of a challenge, and how it is being filled.
 ///
@@ -58,8 +59,14 @@ class SquadCallCard extends ConsumerWidget {
             ),
             const SizedBox(height: 4),
             Text(
-              'Each club picks its own side.',
-              style: Theme.of(context).textTheme.bodySmall,
+              _readiness(fixture),
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: fixture.bothTeamsNamed
+                        ? Theme.of(context).colorScheme.primary
+                        : null,
+                    fontWeight:
+                        fixture.bothTeamsNamed ? FontWeight.w600 : null,
+                  ),
             ),
             const SizedBox(height: 16),
             _SideBlock(
@@ -81,6 +88,27 @@ class SquadCallCard extends ConsumerWidget {
         ),
       ),
     );
+  }
+
+  /// Where this match has got to, in one line.
+  ///
+  /// The two clubs name their sides independently and at whatever moment
+  /// suits them, which means the interesting question on this card is not
+  /// "how many have said yes" but "are we waiting on the other club". Saying
+  /// so plainly is what stops an organizer opening the match on the morning
+  /// to discover the visitors never named anyone.
+  ///
+  /// Naming a team is optional, so a match where neither club uses one is not
+  /// unready — it falls back to the sentence this line has always carried.
+  String _readiness(Fixture fixture) {
+    if (fixture.bothTeamsNamed) {
+      return 'Both teams are named. This match is ready to play.';
+    }
+    if (!fixture.anyTeamNamed) return 'Each club picks its own side.';
+    final waitingOn = fixture.teamAId == null
+        ? fixture.entrantAName
+        : fixture.entrantBName;
+    return 'Waiting on $waitingOn to name a team.';
   }
 
   /// The contesting club this user actually belongs to, if either.
@@ -113,6 +141,7 @@ class _SideBlock extends ConsumerWidget {
       side == 'a' ? fixture.entrantAName : fixture.entrantBName;
   bool get _locked =>
       side == 'a' ? fixture.squadLockedA : fixture.squadLockedB;
+  String? get _teamName => fixture.teamNameForSide(side);
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -153,6 +182,30 @@ class _SideBlock extends ConsumerWidget {
           ],
         ),
         const SizedBox(height: 4),
+        // The named team, before the count. Which side a club is fielding is
+        // the first thing the other club wants to know, and it is the answer
+        // to "who are we actually playing" in a way the club name is not —
+        // one club may field four teams in the same sport.
+        if (_teamName != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Row(
+              children: [
+                Icon(Icons.shield_outlined,
+                    size: 14, color: theme.colorScheme.primary),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    'Fielding $_teamName',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.primary,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
         Text(_statusLine(call, entries.length), style: theme.textTheme.bodySmall),
         const SizedBox(height: 10),
 
@@ -189,6 +242,23 @@ class _SideBlock extends ConsumerWidget {
         // team sheet — visible, not editable.
         if (isMine && !_locked) ...[
           const SizedBox(height: 8),
+          // Naming the team is an organizer's call, like opening the squad —
+          // it commits the club to fielding a particular side. A member
+          // putting their own hand up is the button below.
+          if (canManage)
+            OutlinedButton.icon(
+              onPressed: () => SideTeamPicker.show(
+                context,
+                fixture: fixture,
+                orgId: _orgId,
+                side: side,
+              ),
+              icon: const Icon(Icons.shield_outlined, size: 18),
+              label: Text(
+                _teamName == null ? 'Name your team' : 'Change team',
+              ),
+            ),
+          if (canManage) const SizedBox(height: 8),
           if (mine == null && call.acceptsEntries)
             FilledButton.tonal(
               onPressed: () => _join(context, ref),
