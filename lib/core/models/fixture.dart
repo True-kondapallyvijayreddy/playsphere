@@ -63,10 +63,6 @@ class Fixture {
     this.mvp,
     this.squadCallA = const SquadCall(),
     this.squadCallB = const SquadCall(),
-    this.teamAId,
-    this.teamAName,
-    this.teamBId,
-    this.teamBName,
     this.tossWonByEntrantId,
     this.tossDecision,
     this.feedsWinnerToFixtureId,
@@ -319,62 +315,6 @@ class Fixture {
   /// per-player statistics, or a match where nobody's tally moved.
   final MatchAward? mvp;
 
-  // --- The named team on each side -----------------------------------------
-  //
-  // ## Why a challenge match needed to name teams
-  //
-  // An inter-club fixture puts the two CLUBS in `entrantAId`/`entrantBId`,
-  // and each club then fills its side with a [SquadCall] — a list of uids
-  // hanging off this document. That works, and it stays: a club that wants to
-  // open its side to its whole membership still can.
-  //
-  // What it could not express is the thing clubs actually do. The product's
-  // participation rule is Player -> Team -> Club, and everywhere else — a
-  // tournament, a league, a season — the TEAM is what plays. Only here was a
-  // side still an anonymous list of names, which meant the team a club had
-  // just built off an availability call could not be used, and the match
-  // never landed on that team's record.
-  //
-  // So each club may name one of its teams as its side of this fixture.
-  //
-  // ## Why here and not on the challenge
-  //
-  // Because a club is asked to nominate a side for a match that does not
-  // exist yet. The order that matches how this happens on the ground is:
-  // challenge -> agree a date -> *now* work out who is playing. Putting the
-  // team on the challenge would demand eleven names before anyone had said
-  // yes, and would leave the challenged club — which never sees the challenge
-  // form at all — no place to name its own.
-  //
-  // ## Why they stay editable
-  //
-  // A team named here is a POINTER, not a copy. The roster lives on the
-  // `teams/{id}` document, so adding a player to the team adds them to this
-  // match, up until the side is locked — which is what [squadLockedA] has
-  // always meant and is deliberately unchanged. A club may also swap the
-  // whole team for a different one while its side is unlocked; the B team
-  // turning up instead of the A team is an ordinary Saturday.
-  //
-  // Null on both sides for every fixture created before this existed, and for
-  // every ordinary competition fixture, where the entrant already IS the team
-  // and there is nothing to point at.
-
-  final String? teamAId;
-  final String? teamAName;
-  final String? teamBId;
-  final String? teamBName;
-
-  String? teamIdForSide(String side) => side == 'a' ? teamAId : teamBId;
-  String? teamNameForSide(String side) => side == 'a' ? teamAName : teamBName;
-
-  /// True once both clubs have named a side, which is the point an organizer
-  /// is waiting for before starting an inter-club match.
-  bool get bothTeamsNamed => teamAId != null && teamBId != null;
-
-  /// True when either club has named one. A half-named match is worth showing
-  /// differently from one where nobody has started.
-  bool get anyTeamNamed => teamAId != null || teamBId != null;
-
   /// How each club is filling its own side — whether registration is open to
   /// its members, how many places there are, and how many are taken.
   ///
@@ -563,16 +503,11 @@ class Fixture {
 
   /// What to show on a side with no entrant yet — the qualifier it is waiting
   /// on, if it is waiting on one, rather than a bare "To be decided".
-  ///
-  /// A named team wins over the entrant's own name: in a challenge the
-  /// entrant is the CLUB, and once that club has said "our under-19s are
-  /// playing this one" the scoreboard should say so rather than repeating the
-  /// club name that is already above it.
-  String displayNameA() => teamAName ??
-      (entrantAId.isNotEmpty ? entrantAName : (qualifierA?.label ?? entrantAName));
+  String displayNameA() =>
+      entrantAId.isNotEmpty ? entrantAName : (qualifierA?.label ?? entrantAName);
 
-  String displayNameB() => teamBName ??
-      (entrantBId.isNotEmpty ? entrantBName : (qualifierB?.label ?? entrantBName));
+  String displayNameB() =>
+      entrantBId.isNotEmpty ? entrantBName : (qualifierB?.label ?? entrantBName);
 
   /// Whether both sides are known, so this match can actually be played.
   /// A knockout placeholder still waiting on a feeder is not playable, and
@@ -869,10 +804,6 @@ class Fixture {
       lineupB: MatchPlayer.listFrom(d['lineupB']),
       squadLockedA: Fs.boolean(d['squadLockedA']),
       squadLockedB: Fs.boolean(d['squadLockedB']),
-      teamAId: Fs.strOrNull(d['teamAId']),
-      teamAName: Fs.strOrNull(d['teamAName']),
-      teamBId: Fs.strOrNull(d['teamBId']),
-      teamBName: Fs.strOrNull(d['teamBName']),
       squadCallA: SquadCall.fromMap(
         d['squadCallA'] is Map
             ? Map<String, dynamic>.from(d['squadCallA'] as Map)
@@ -949,10 +880,6 @@ class Fixture {
         'lineupB': MatchPlayer.listTo(lineupB),
         'squadLockedA': squadLockedA,
         'squadLockedB': squadLockedB,
-        'teamAId': teamAId,
-        'teamAName': teamAName,
-        'teamBId': teamBId,
-        'teamBName': teamBName,
         'mvp': mvp?.toMap(),
         'squadCallA': squadCallA.toMap(),
         'squadCallB': squadCallB.toMap(),
@@ -1102,14 +1029,6 @@ class Fixture {
       // through here without them.
       sourceType: sourceType,
       sourceId: sourceId,
-      // Not parameters either. Which team a club has named is that club's
-      // decision, written by `setFixtureTeam` alone; a scoring event carrying
-      // a stale Fixture through here must not be able to un-name a side
-      // between two deliveries.
-      teamAId: teamAId,
-      teamAName: teamAName,
-      teamBId: teamBId,
-      teamBName: teamBName,
     );
   }
 }

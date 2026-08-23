@@ -174,18 +174,10 @@ service cloud.firestore {
     // -------------------------------------------------------------------
 
     // The fields one club may write for its own side, and nothing else.
-    //
-    // `teamAId`/`teamAName` are in here for the same reason `lineupA` is: naming
-    // which of its teams is playing is that club's own decision about its own side,
-    // and the guard that matters is that it cannot reach the OTHER side's pair. The
-    // team is a pointer at `teams/{id}` and carries no authority of its own — the
-    // roster behind it stays governed by `teamRuns()` on the team document.
     function squadFieldsFor(side) {
       return side == 'a'
-        ? ['lineupA', 'squadLockedA', 'squadCallA', 'playerUids',
-           'teamAId', 'teamAName']
-        : ['lineupB', 'squadLockedB', 'squadCallB', 'playerUids',
-           'teamBId', 'teamBName'];
+        ? ['lineupA', 'squadLockedA', 'squadCallA', 'playerUids']
+        : ['lineupB', 'squadLockedB', 'squadCallB', 'playerUids'];
     }
 
     // True when this write only touches [side]'s squad fields.
@@ -291,20 +283,11 @@ service cloud.firestore {
 
     // A squad the other club has locked is frozen to everyone but them — including the
     // hosting club's organizers, who otherwise have broad authority over a fixture.
-    //
-    // The named team is frozen with it. A lock means "this is our side, we have
-    // finished picking"; a host that could still swap which TEAM the visitors are
-    // fielding would have unpicked it by another name, and the visiting club would
-    // arrive to find its locked eleven attached to a different squad.
     function lockedSquadsRespected() {
       return (!('squadLockedA' in resource.data) || resource.data.squadLockedA != true
-              || (unchanged('lineupA') && unchanged('squadLockedA')
-                  && unchangedIfPresent('teamAId')
-                  && unchangedIfPresent('teamAName')))
+              || (unchanged('lineupA') && unchanged('squadLockedA')))
         && (!('squadLockedB' in resource.data) || resource.data.squadLockedB != true
-            || (unchanged('lineupB') && unchanged('squadLockedB')
-                && unchangedIfPresent('teamBId')
-                && unchangedIfPresent('teamBName')));
+            || (unchanged('lineupB') && unchanged('squadLockedB')));
     }
 
     // Written shape check for creates: exactly two distinct clubs, one of which must
