@@ -1903,7 +1903,17 @@ service cloud.firestore {
               )
               && request.resource.data.uid == memberUid
               && request.resource.data.addedByAdmin == true
-              && request.resource.data.status == 'confirmed'
+              // Confirmed, or on the bench where the club set a capacity and has
+              // already filled it. An organizer adding twelve to an eleven-place
+              // side seats eleven and benches one, exactly as twelve volunteers
+              // would — the alternative is refusing the twelfth outright, which
+              // sends the organizer back to picking names one at a time.
+              && (request.resource.data.status == 'confirmed'
+                  || (request.resource.data.status == 'waitlisted'
+                      && callOf(
+                           fixtureDoc(orgId, compId, fixtureId),
+                           request.resource.data.side
+                         ).get('waitlistEnabled', true) == true))
               && request.resource.data.side
                    == sideOfOrg(
                         fixtureDoc(orgId, compId, fixtureId),

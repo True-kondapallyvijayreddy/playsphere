@@ -9,6 +9,7 @@ import '../../../core/permissions/capability.dart';
 import '../../../core/providers.dart';
 import '../../../shared/app_scaffold.dart';
 import '../../../shared/identity.dart';
+import 'squad_rsvp_actions.dart';
 
 /// One club's side of a challenge, and how it is being filled.
 ///
@@ -58,8 +59,14 @@ class SquadCallCard extends ConsumerWidget {
             ),
             const SizedBox(height: 4),
             Text(
-              'Each club picks its own side.',
-              style: Theme.of(context).textTheme.bodySmall,
+              _readiness(fixture),
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: fixture.bothSquadsLocked
+                        ? Theme.of(context).colorScheme.primary
+                        : null,
+                    fontWeight:
+                        fixture.bothSquadsLocked ? FontWeight.w600 : null,
+                  ),
             ),
             const SizedBox(height: 16),
             _SideBlock(
@@ -81,6 +88,29 @@ class SquadCallCard extends ConsumerWidget {
         ),
       ),
     );
+  }
+
+  /// Where this match has got to, in one line.
+  ///
+  /// The two clubs pick independently and at whatever moment suits them, so
+  /// the interesting question on this card is not "how many have said yes"
+  /// but "are we waiting on the other club". Saying so plainly is what stops
+  /// an organizer arriving on the morning to find the visitors never picked
+  /// anybody.
+  ///
+  /// A locked squad is what "ready" means — it is the existing statement that
+  /// a club has finished picking, and inventing a second flag beside it would
+  /// give a side two ways to be done and no way to reconcile them.
+  String _readiness(Fixture fixture) {
+    if (fixture.bothSquadsLocked) {
+      return 'Both squads are locked. This match is ready to start.';
+    }
+    if (!fixture.squadLockedA && !fixture.squadLockedB) {
+      return 'Each club picks its own side.';
+    }
+    final waitingOn =
+        fixture.squadLockedA ? fixture.entrantBName : fixture.entrantAName;
+    return 'Waiting on $waitingOn to lock their squad.';
   }
 
   /// The contesting club this user actually belongs to, if either.
@@ -189,6 +219,18 @@ class _SideBlock extends ConsumerWidget {
         // team sheet — visible, not editable.
         if (isMine && !_locked) ...[
           const SizedBox(height: 8),
+          // The organizer's route: ask the club, then move the yeses onto the
+          // sheet. Above the member's own button because filling the side is
+          // what the club is here to do; putting your own hand up is the
+          // thing you do to a call that already exists.
+          if (canManage)
+            SquadRsvpActions(
+              fixture: fixture,
+              orgId: _orgId,
+              side: side,
+              entries: entries,
+            ),
+          if (canManage) const SizedBox(height: 8),
           if (mine == null && call.acceptsEntries)
             FilledButton.tonal(
               onPressed: () => _join(context, ref),

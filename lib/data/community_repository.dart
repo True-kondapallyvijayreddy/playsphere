@@ -116,6 +116,52 @@ class CommunityRepository {
         ),
       );
 
+  /// Asks a club who is free for a match that already EXISTS.
+  ///
+  /// ## Why this is not just [createMatchRsvp] with more arguments
+  ///
+  /// It is, mechanically — and that is the point. A club call and a squad
+  /// call are the same question ("who is free on Sunday?") asked about two
+  /// different things, and making them two document shapes would mean two
+  /// feeds, two cards and two places for a member to answer. So this posts an
+  /// ordinary availability call onto the club's own board, carrying a
+  /// [FixtureCallTarget] that says which match and which side the answers are
+  /// for.
+  ///
+  /// Everything a member sees is unchanged: the call appears on their feed
+  /// and they tap "In". What changes is that the organizer can then move the
+  /// yeses onto the team sheet in one action instead of retyping twelve
+  /// names — which is the whole reason the availability call exists and the
+  /// step that was missing for inter-club matches.
+  ///
+  /// Posted on [orgId]'s board — the club ASKING — while the fixture it
+  /// points at lives under whichever club is hosting. A visiting club polls
+  /// its own members about a match at somebody else's ground, which is the
+  /// ordinary case and the reason the target carries all four ids.
+  Future<void> createSquadCallRsvp({
+    required String orgId,
+    required String authorUid,
+    required String authorName,
+    required String title,
+    required String content,
+    required MatchCall match,
+    required FixtureCallTarget target,
+  }) =>
+      createMatchRsvp(
+        orgId: orgId,
+        authorUid: authorUid,
+        authorName: authorName,
+        title: title,
+        content: content,
+        match: MatchCall(
+          sportId: match.sportId,
+          matchDate: match.matchDate,
+          venue: match.venue,
+          maxPlayers: match.maxPlayers,
+          forFixture: target,
+        ),
+      );
+
   /// The club's match calls, newest first, with the ones already played
   /// dropped.
   ///

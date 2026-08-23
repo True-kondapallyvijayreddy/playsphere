@@ -3833,6 +3833,142 @@ class CompetitionRepository {
         });
       });
 
+  /// The club putting players into its own side directly.
+  ///
+  /// ## Why this exists next to [joinSquad]
+  ///
+  /// [joinSquad] is a member volunteering. That covers the club whose members
+  /// all have the app open on a Friday night, and no other club. In practice
+  /// an organizer knows who is coming — they asked on the availability call,
+  /// or in person, or on WhatsApp — and needed a way to say so. Without it
+  /// the only route was the line-up editor, which writes `lineupA`/`lineupB`
+  /// and never touches `squadEntries`, so the two records of "who is playing"
+  /// drifted apart: the squad said five and the team sheet said eleven.
+  ///
+  /// `addedByAdmin` is the flag that keeps the difference legible afterwards.
+  /// It has been on [SquadEntry] since the model was written and nothing ever
+  /// set it, which is why the card could render "picked by the club" for a
+  /// state that could not arise.
+  ///
+  /// ## Why it does not respect the call being closed
+  ///
+  /// Because the call is a door for MEMBERS, and this is the club acting on
+  /// its own side. A club that never opened registration at all still has to
+  /// be able to name its eleven — that is the ordinary case, not an edge
+  /// one. The squad LOCK is respected, because that is the statement that
+  /// picking has finished.
+  ///
+  /// Capacity is respected where one was set, so an organizer cannot quietly
+  /// seat thirteen in an eleven-a-side match; the surplus lands on the
+  /// reserves exactly as a volunteer would.
+  ///
+  /// Returns how many were actually added — people already in the squad are
+  /// skipped rather than counted twice, so adding "everyone who said In" a
+  /// second time after two more replies adds the two.
+  Future<int> addToSquad({
+    required Fixture fixture,
+    required String forOrgId,
+    required List<({String uid, String displayName, String? photoUrl})> players,
+  }) =>
+      guard(() async {
+        final side = fixture.sideForOrg(forOrgId);
+        if (side == null) {
+          throw const ValidationException(
+            'This club is not one of the two contesting this match.',
+          );
+        }
+        if (players.isEmpty) return 0;
+
+        final fixRef = Refs.fixture(fixture.orgId, fixture.compId, fixture.id);
+
+        return Refs.db.runTransaction<int>((tx) async {
+          final fixSnap = await tx.get(fixRef);
+          if (!fixSnap.exists) {
+            throw const ValidationException('That match no longer exists.');
+          }
+          final fresh = Fixture.fromDoc(fixSnap);
+
+          if (fresh.squadLockedFor(
+            side == 'a' ? fresh.entrantAId : fresh.entrantBId,
+          )) {
+            throw const ValidationException(
+              'That squad is locked. Reopen it before adding anybody.',
+            );
+          }
+
+          // Every read before the first write: a Firestore transaction
+          // refuses a read that follows a write, and this one reads as many
+          // documents as there are players.
+          final refs = {
+            for (final p in players)
+              p.uid: Refs.squadEntry(
+                fixture.orgId,
+                fixture.compId,
+                fixture.id,
+                p.uid,
+              ),
+          };
+          final existing = <String, bool>{};
+          for (final p in players) {
+            final snap = await tx.get(refs[p.uid]!);
+            existing[p.uid] = snap.exists &&
+                SquadEntry.fromDoc(snap).status.occupiesSlot;
+          }
+
+          final call = fresh.squadCallFor(side);
+          var confirmed = call.confirmed;
+          var waitlisted = call.waitlisted;
+          final capacity = call.capacity;
+          var added = 0;
+
+          for (final p in players) {
+            if (existing[p.uid] == true) continue;
+
+            // Counted against the running totals rather than the snapshot's,
+            // so adding twelve people to an eleven-place side seats eleven
+            // and puts one on the bench — instead of seating all twelve
+            // because each one checked the same original number.
+            final room = capacity == null || confirmed < capacity;
+            if (!room && !call.waitlistEnabled) break;
+            final status = room
+                ? RegistrationStatus.confirmed
+                : RegistrationStatus.waitlisted;
+
+            tx.set(
+              refs[p.uid]!,
+              SquadEntry(
+                uid: p.uid,
+                displayName: p.displayName,
+                photoUrl: p.photoUrl,
+                side: side,
+                orgId: forOrgId,
+                status: status,
+                waitlistPosition: status == RegistrationStatus.waitlisted
+                    ? waitlisted + 1
+                    : null,
+                addedByAdmin: true,
+              ).toCreate(),
+            );
+
+            if (status == RegistrationStatus.confirmed) {
+              confirmed++;
+            } else {
+              waitlisted++;
+            }
+            added++;
+          }
+
+          if (added > 0) {
+            final field = side == 'a' ? 'squadCallA' : 'squadCallB';
+            tx.update(fixRef, {
+              '$field.confirmed': confirmed,
+              '$field.waitlisted': waitlisted,
+            });
+          }
+          return added;
+        });
+      });
+
   /// A member pulling out of a squad they had registered for.
   ///
   /// Frees the place, then promotes the first reserve in a second

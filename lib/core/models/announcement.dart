@@ -201,6 +201,7 @@ class MatchCall {
     required this.matchDate,
     this.venue = '',
     this.maxPlayers = 0,
+    this.forFixture,
   });
 
   /// The sport, by catalogue id. Drives the icon, the squad arithmetic and
@@ -226,6 +227,24 @@ class MatchCall {
   /// turnout fills one match or wants a mini-tournament.
   final int maxPlayers;
 
+  /// The match this call is asking about, when it is asking about a real one.
+  ///
+  /// ## Why a call needed to know
+  ///
+  /// A club poll — "who is free Sunday at 6?" — and a fixture that exists and
+  /// needs eleven names were two unconnected things. The organizer of a
+  /// challenge match read the poll with their eyes and retyped every name
+  /// into the team sheet, which is the manual step the availability call was
+  /// supposed to remove. Worse, the two lists then drifted: somebody who
+  /// pulled out of the poll stayed on the sheet, because nothing joined them.
+  ///
+  /// Null for an ordinary club call, which is still the common case — plenty
+  /// of clubs poll availability BEFORE there is a match to attach it to, and
+  /// requiring a fixture first would forbid the order most clubs work in.
+  final FixtureCallTarget? forFixture;
+
+  bool get isForFixture => forFixture != null;
+
   /// Whether more people have said yes than this match can seat.
   ///
   /// False whenever no target was set: without a number there is no such
@@ -245,6 +264,11 @@ class MatchCall {
       matchDate: when,
       venue: Fs.str(d['venue']),
       maxPlayers: Fs.integer(d['maxPlayers']),
+      forFixture: FixtureCallTarget.fromMap(
+        d['forFixture'] is Map
+            ? Map<String, dynamic>.from(d['forFixture'] as Map)
+            : null,
+      ),
     );
   }
 
@@ -253,6 +277,56 @@ class MatchCall {
         'matchDate': Timestamp.fromDate(matchDate),
         'venue': venue,
         'maxPlayers': maxPlayers,
+        'forFixture': forFixture?.toMap(),
+      };
+}
+
+/// Which match, and whose side of it, an availability call is filling.
+///
+/// All four ids, because a fixture is not addressable with fewer: it lives at
+/// `orgs/{orgId}/competitions/{compId}/fixtures/{fixtureId}`, and in an
+/// inter-club match that path is under the HOSTING club — so the visiting
+/// club's own call points at a document outside its own org. [side] is what
+/// makes the answers land on the right half of the team sheet, and it is
+/// derived from the club when the call is created rather than being anything
+/// an organizer can type.
+class FixtureCallTarget {
+  const FixtureCallTarget({
+    required this.orgId,
+    required this.compId,
+    required this.fixtureId,
+    required this.side,
+  });
+
+  /// The club that HOSTS the fixture — not necessarily the club whose notice
+  /// board this call is on.
+  final String orgId;
+  final String compId;
+  final String fixtureId;
+
+  /// 'a' or 'b'.
+  final String side;
+
+  static FixtureCallTarget? fromMap(Map<String, dynamic>? d) {
+    if (d == null) return null;
+    final fixtureId = Fs.str(d['fixtureId']);
+    // A target that cannot address a fixture is not a target. Degrading to
+    // null makes the call an ordinary poll rather than one that renders a
+    // "add them to the squad" button leading nowhere.
+    if (fixtureId.isEmpty) return null;
+    return FixtureCallTarget(
+      orgId: Fs.str(d['orgId']),
+      compId: Fs.str(d['compId']),
+      fixtureId: fixtureId,
+      side: Fs.str(d['side'], 'a'),
+    );
+  }
+
+  Map<String, Object?> toMap() => {
+        'orgId': orgId,
+        'compId': compId,
+        'fixtureId': fixtureId,
+        'side': side,
       };
 }
 
