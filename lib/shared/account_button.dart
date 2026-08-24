@@ -136,6 +136,18 @@ class _AccountPanel extends ConsumerWidget {
                   context.push(Routes.profileSetup);
                 },
               ),
+              // Right beside the name rather than buried in the list below —
+              // onboarding a child with no device of their own yet is a task
+              // a guardian starts the moment they open their own profile, not
+              // something they should have to scroll to find.
+              IconButton(
+                tooltip: 'Add a child',
+                icon: const Icon(Icons.person_add_alt_1),
+                onPressed: () {
+                  Navigator.of(context).pop();
+                  context.push(Routes.addChild);
+                },
+              ),
             ],
           ),
           const SizedBox(height: 12),
