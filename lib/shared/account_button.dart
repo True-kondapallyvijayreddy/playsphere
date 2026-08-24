@@ -243,6 +243,15 @@ class _AccountPanel extends ConsumerWidget {
           ),
           ListTile(
             contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.family_restroom),
+            title: const Text('My children'),
+            onTap: () {
+              Navigator.of(context).pop();
+              context.push(Routes.myChildren);
+            },
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
             leading: const Icon(Icons.logout),
             title: const Text('Sign out'),
             onTap: () async {

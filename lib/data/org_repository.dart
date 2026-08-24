@@ -1,6 +1,8 @@
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 
 import '../core/errors/app_exception.dart';
@@ -302,6 +304,146 @@ class UserRepository {
           photoUrl: Fs.strOrNull(data['photoUrl']),
         );
       });
+
+  // -----------------------------------------------------------------------
+  // Guardian-managed children — see functions/family.js for why the two
+  // Admin-privileged steps (minting the auth user, minting the custom
+  // token) have to be callables while everything else here is a plain
+  // rules-governed write, same split as [ensureCode] above.
+  // -----------------------------------------------------------------------
+
+  FirebaseFunctions get _functions =>
+      FirebaseFunctions.instanceFor(region: 'asia-south1');
+
+  /// A guardian creates a profile for a child with no device or Google
+  /// account of their own yet. Throws [ValidationException] with a message
+  /// safe to show directly.
+  Future<ManagedChild> createManagedChild({
+    required String displayName,
+    required DateTime dateOfBirth,
+    required Gender gender,
+  }) =>
+      guard(() async {
+        try {
+          final callable =
+              _functions.httpsCallable('createManagedChildProfile');
+          final result = await callable.call<Map<String, dynamic>>({
+            'displayName': displayName,
+            'dateOfBirth': dateOfBirth.toIso8601String(),
+            'gender': gender.wire,
+          });
+          final data = result.data;
+          return ManagedChild(
+            uid: data['childUid'] as String,
+            playerCode: data['playerCode'] as String?,
+          );
+        } on FirebaseFunctionsException catch (e) {
+          throw ValidationException(
+            e.message ?? 'Could not create that profile. Try again.',
+          );
+        }
+      });
+
+  /// Every child this guardian has created, most-recently-added first —
+  /// both still-managed and already-claimed, so a claimed child does not
+  /// simply vanish from the list the moment they get their own phone.
+  Stream<List<AppUser>> watchManagedChildren(String guardianUid) =>
+      guardStream(
+        () => Refs.users
+            .where('custodianUid', isEqualTo: guardianUid)
+            .orderBy('createdAt', descending: true)
+            .snapshots()
+            .map((s) => s.docs.map(AppUser.fromDoc).toList()),
+      );
+
+  /// Generates a fresh, short-lived code for `childUid` and claims it,
+  /// retrying on collision exactly like [ensureCode] does for player codes.
+  /// `firestore.rules` bounds the expiry to 30 minutes regardless of what is
+  /// requested here; 25 leaves headroom for clock skew between this device
+  /// and the server deciding the write's actual timestamp.
+  Future<String> createClaimCode({
+    required String childUid,
+    required String guardianUid,
+  }) =>
+      guard(() async {
+        for (var attempt = 0; attempt < 5; attempt++) {
+          final candidate = _generateClaimCode();
+          try {
+            await Refs.claimCode(candidate).set({
+              'code': candidate,
+              'childUid': childUid,
+              'guardianUid': guardianUid,
+              'createdAt': FieldValue.serverTimestamp(),
+              'expiresAt': Timestamp.fromDate(
+                DateTime.now().add(const Duration(minutes: 25)),
+              ),
+            });
+            return candidate;
+          } on FirebaseException catch (e) {
+            // Same ALREADY_EXISTS-as-permission-denied shape as
+            // [ensureCode] — the create rule requires the doc not to exist
+            // yet, so a collision surfaces as a rejected write.
+            if (e.code != 'permission-denied') rethrow;
+          }
+        }
+        throw const ValidationException(
+          'Could not generate a code right now. Try again.',
+        );
+      });
+
+  /// The child's half of the handoff: exchanges a code for the custom token
+  /// that signs them into the exact uid the guardian's profile named. See
+  /// `AuthService.linkGoogleAccount` for what happens right after.
+  Future<ClaimedToken> redeemClaimCode(String code) => guard(() async {
+        try {
+          final callable = _functions.httpsCallable('redeemClaimCode');
+          final result =
+              await callable.call<Map<String, dynamic>>({'code': code});
+          final data = result.data;
+          return ClaimedToken(
+            customToken: data['customToken'] as String,
+            displayName: data['displayName'] as String?,
+          );
+        } on FirebaseFunctionsException catch (e) {
+          throw ValidationException(
+            e.message ?? 'This code is invalid or has expired.',
+          );
+        }
+      });
+
+  /// Marks the claim complete. Only ever called from the child's own
+  /// session, immediately after [AuthService.linkGoogleAccount] succeeds —
+  /// `settableOnce('claimedAt')` in `firestore.rules` is what makes this a
+  /// one-way door, not this call site.
+  Future<void> completeClaim(String childUid) => guard(
+        () => Refs.user(childUid).update({
+          'claimedAt': FieldValue.serverTimestamp(),
+        }),
+      );
+}
+
+/// Six digits, easy to read aloud over a shared village phone — unlike
+/// [PlayerCode], this never has to survive being typed back in by a
+/// stranger from memory, so there's no need for the letters-that-read-wrong
+/// alphabet trick; it only has to survive one immediate, supervised handoff.
+String _generateClaimCode() {
+  final n = Random.secure().nextInt(900000) + 100000;
+  return '$n';
+}
+
+/// What `createManagedChildProfile` hands back.
+class ManagedChild {
+  const ManagedChild({required this.uid, this.playerCode});
+  final String uid;
+  final String? playerCode;
+}
+
+/// What `redeemClaimCode` hands back: enough to sign in as the claimed
+/// profile and greet the child by name before they've done anything else.
+class ClaimedToken {
+  const ClaimedToken({required this.customToken, this.displayName});
+  final String customToken;
+  final String? displayName;
 }
 
 /// What a code lookup returns: enough to put somebody on a team sheet, and

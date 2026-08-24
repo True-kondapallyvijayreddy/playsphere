@@ -28,6 +28,8 @@ class AppUser {
     this.playerCode,
     this.plan = MemberPlan.free,
     this.planState = PlanState.none,
+    this.custodianUid,
+    this.claimedAt,
     this.createdAt,
     this.updatedAt,
   });
@@ -90,8 +92,34 @@ class AppUser {
   /// When Premium was activated and when it lapses.
   final PlanState planState;
 
+  /// The guardian's uid, for a profile a guardian created on behalf of a
+  /// child with no device or Google account of their own yet.
+  ///
+  /// Deliberately distinct from [GuardianConsent]'s guardian/minor
+  /// relationship (see `lib/core/models/guardian_consent.dart`), which
+  /// exists for a completely different purpose — scout-visibility consent —
+  /// and stays self-declared and optional even for an adult-created account.
+  /// This field, by contrast, is set exactly once, server-side, by the
+  /// `createManagedChildProfile` Cloud Function at the moment the profile is
+  /// created, and `firestore.rules` refuses any client write that changes
+  /// it. It is never null-to-non-null on an existing document, and never
+  /// edited afterward by anyone, guardian included.
+  final String? custodianUid;
+
+  /// Null while this profile is guardian-managed and has no login of its
+  /// own. Set exactly once — by the CHILD's own newly-linked session, never
+  /// by the guardian — the moment they finish linking their own Google
+  /// account via a claim code. See [isManaged].
+  final DateTime? claimedAt;
+
   final DateTime? createdAt;
   final DateTime? updatedAt;
+
+  /// True while a profile has a custodian and has not yet been claimed by
+  /// the child themselves. A claimed profile keeps [custodianUid] — the
+  /// guardian retains read access — but [isManaged] goes false, because the
+  /// guardian can no longer write to it.
+  bool get isManaged => custodianUid != null && claimedAt == null;
 
   /// Whether this player's Premium entitlement is live at [asOf].
   ///
@@ -134,6 +162,8 @@ class AppUser {
         validUntilKey: 'planValidUntil',
         lastPaymentKey: 'planPaymentId',
       ),
+      custodianUid: Fs.strOrNull(d['custodianUid']),
+      claimedAt: Fs.dateOrNull(d['claimedAt']),
       createdAt: Fs.dateOrNull(d['createdAt']),
       updatedAt: Fs.dateOrNull(d['updatedAt']),
     );
@@ -157,6 +187,12 @@ class AppUser {
         'playerCode': playerCode,
         'plan': plan.wire,
         'isMinor': isMinor,
+        // Explicit null on an ordinary self-signup, same as [photoUrl] and
+        // [phone] above — a managed child's document gets a real value here
+        // instead, but only ever via `createManagedChildProfile` (Admin
+        // SDK), never through this method.
+        'custodianUid': custodianUid,
+        'claimedAt': claimedAt == null ? null : Fs.ts(claimedAt!),
         'createdAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
       };
@@ -221,6 +257,11 @@ class AppUser {
       // a screen holding a modified copy of the profile.
       plan: plan,
       planState: planState,
+      // Not copyWith parameters. custodianUid is set once, server-side, at
+      // creation; claimedAt is set once, by the child's own session, on
+      // claim. Neither is ever the product of a profile-edit form.
+      custodianUid: custodianUid,
+      claimedAt: claimedAt,
       createdAt: createdAt,
       updatedAt: updatedAt,
     );

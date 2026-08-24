@@ -81,6 +81,59 @@ class AuthService {
     }
   }
 
+  /// Signs in as the exact uid a custom token was minted for.
+  ///
+  /// The one caller is the first half of a managed-profile claim
+  /// (`UserRepository.redeemClaimCode`, `functions/family.js`): the token
+  /// proves the child's device presented a code only their guardian could
+  /// have generated, and this is what turns that proof into an actual
+  /// session — the same uid the guardian's managed profile always was, with
+  /// every match, every player code, everything already on it.
+  Future<UserCredential> signInWithCustomToken(String token) async {
+    try {
+      return await _auth.signInWithCustomToken(token);
+    } on FirebaseAuthException catch (e) {
+      throw _translate(e);
+    }
+  }
+
+  /// Attaches the caller's own Google account to whichever uid they are
+  /// CURRENTLY signed in as, rather than signing into a new one.
+  ///
+  /// The one caller today is the child's half of a managed-profile claim
+  /// (`ClaimEntryScreen`): they've just signed in with a custom token minted
+  /// for their existing profile's uid (`UserRepository.redeemClaimCode`),
+  /// and this is what turns that one-shot token into a durable login they
+  /// can use again tomorrow. Everything about the platform split above
+  /// applies identically here — same popup-vs-native reasoning — so this
+  /// mirrors [signInWithGoogle] almost exactly; the only real difference is
+  /// `linkWithCredential` instead of `signInWithCredential`.
+  Future<UserCredential> linkGoogleAccount() async {
+    final current = _auth.currentUser;
+    if (current == null) throw const UnauthorizedException();
+    try {
+      if (kIsWeb) {
+        final provider = GoogleAuthProvider()
+          ..addScope('email')
+          ..setCustomParameters({'prompt': 'select_account'});
+        return await current.linkWithPopup(provider);
+      }
+
+      final googleUser = await _googleSignIn.signIn();
+      if (googleUser == null) {
+        throw const AuthCancelledException();
+      }
+      final googleAuth = await googleUser.authentication;
+      final credential = GoogleAuthProvider.credential(
+        accessToken: googleAuth.accessToken,
+        idToken: googleAuth.idToken,
+      );
+      return await current.linkWithCredential(credential);
+    } on FirebaseAuthException catch (e) {
+      throw _translate(e);
+    }
+  }
+
   Future<void> signOut() async {
     // Sign out of Google as well as Firebase on mobile, otherwise the next
     // sign-in silently reuses the same account and "switch user" appears
@@ -127,6 +180,14 @@ class AuthService {
       'account-exists-with-different-credential' => const AuthException(
           'An account already exists with this email using a different '
           'sign-in method.',
+        ),
+      'credential-already-in-use' => const AuthException(
+          'This Google account is already linked to another PlaySphere '
+          'profile. Sign in with a different Google account to claim this '
+          'one.',
+        ),
+      'provider-already-linked' => const AuthException(
+          'This profile already has a Google account linked to it.',
         ),
       'user-disabled' => const AuthException(
           'This account has been disabled. Contact your organization admin.',

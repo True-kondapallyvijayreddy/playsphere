@@ -815,6 +815,14 @@ final profileIsCompleteProvider = Provider<bool>((ref) {
   return ref.watch(currentUserProvider).valueOrNull?.profileComplete ?? false;
 });
 
+/// Every child profile the signed-in user has created — both still-managed
+/// and already claimed. See `ManagedChildrenScreen`.
+final myManagedChildrenProvider = StreamProvider<List<AppUser>>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(const []);
+  return ref.watch(userRepositoryProvider).watchManagedChildren(uid);
+});
+
 // ---------------------------------------------------------------------------
 // Organizations
 // ---------------------------------------------------------------------------

@@ -48,6 +48,7 @@ export { backfillMatchSource } from './matchsource.js';
 export { backfillFixtureParticipants } from './participants.js';
 export { rebuildPlayerCareerStats } from './careerrebuild.js';
 export { computeLeaderboards, rebuildLeaderboards } from './leaderboard.js';
+export { createManagedChildProfile, redeemClaimCode } from './family.js';
 
 initializeApp();
 const db = getFirestore();

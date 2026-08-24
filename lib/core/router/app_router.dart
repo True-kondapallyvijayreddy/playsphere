@@ -18,6 +18,10 @@ import '../../features/tournaments/tournament_detail_screen.dart';
 import '../../features/analytics/analytics_screen.dart';
 import '../../features/auth/profile_setup_screen.dart';
 import '../../features/auth/sign_in_screen.dart';
+import '../../features/family/add_child_screen.dart';
+import '../../features/family/claim_code_screen.dart';
+import '../../features/family/claim_entry_screen.dart';
+import '../../features/family/managed_children_screen.dart';
 import '../../features/community/looking_for_board_screen.dart';
 import '../../features/community/match_rsvp_screen.dart';
 import '../../features/competitions/global_events_screen.dart';
@@ -194,6 +198,18 @@ class Routes {
 
   static const myProfile = '/me';
   static String profile(String uid) => '/player/$uid';
+
+  /// A guardian's list of children they manage, and the entry point for
+  /// adding one.
+  static const myChildren = '/children';
+  static const addChild = '/children/new';
+  static String claimCodeFor(String childUid) => '/children/$childUid/claim';
+
+  /// Where a child without their own login yet redeems the code their
+  /// guardian generated. Deliberately public — see [_isPublicRoute] — there
+  /// is no Firebase Auth session at all until this screen's flow creates
+  /// one.
+  static const claim = '/claim';
 
   /// What a player can buy for themselves. Deliberately org-free — Premium is
   /// bought by a person and travels with them between clubs, exactly like the
@@ -586,6 +602,9 @@ class Routes {
 /// in to watch would defeat it.
 bool _isPublicRoute(String location) {
   if (location.startsWith(Routes.signIn)) return true;
+  // A child claiming a managed profile has no Firebase Auth session at all
+  // until partway through that screen's own flow — see ClaimEntryScreen.
+  if (location.startsWith(Routes.claim)) return true;
   if (RegExp(r'^/org/[^/]+/live-tournament/').hasMatch(location)) return true;
   return RegExp(r'^/org/[^/]+/event/[^/]+/watch/').hasMatch(location);
 }
@@ -652,6 +671,10 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.signIn,
         builder: (_, __) => const SignInScreen(),
+      ),
+      GoRoute(
+        path: Routes.claim,
+        builder: (_, __) => const ClaimEntryScreen(),
       ),
       GoRoute(
         path: Routes.home,
@@ -723,6 +746,22 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.myProfile,
         builder: (_, __) => const _MyProfileScreen(),
+      ),
+      GoRoute(
+        path: Routes.myChildren,
+        builder: (_, __) => const ManagedChildrenScreen(),
+        routes: [
+          GoRoute(
+            path: 'new',
+            builder: (_, __) => const AddChildScreen(),
+          ),
+          GoRoute(
+            path: ':childUid/claim',
+            builder: (_, state) => ClaimCodeScreen(
+              childUid: state.pathParameters['childUid']!,
+            ),
+          ),
+        ],
       ),
       GoRoute(
         path: Routes.premium,

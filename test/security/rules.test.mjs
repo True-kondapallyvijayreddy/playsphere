@@ -1152,6 +1152,215 @@ describe('user profiles', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Guardian-managed child profiles — a guardian operates a child's profile
+// (see functions/family.js) until the child claims it themselves, at which
+// point write access moves to the child and read access stays with the
+// guardian permanently.
+// ---------------------------------------------------------------------------
+describe('guardian-managed child profiles', () => {
+  const FAMILY_GUARDIAN = 'uid_family_guardian';
+  const MANAGED_CHILD = 'uid_managed_child';
+
+  const managedChild = (claimedAt = null, overrides = {}) => ({
+    uid: MANAGED_CHILD,
+    displayName: 'Managed Child',
+    email: '',
+    dateOfBirth: new Date('2015-01-01'),
+    gender: 'male',
+    photoUrl: null,
+    phone: null,
+    profileVisibility: 'private',
+    profileComplete: true,
+    isMinor: true,
+    orgIds: [],
+    playerCode: null,
+    custodianUid: FAMILY_GUARDIAN,
+    claimedAt,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  it('lets a custodian edit their own unclaimed child\'s profile', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', MANAGED_CHILD), managedChild());
+    });
+    const db = testEnv.authenticatedContext(FAMILY_GUARDIAN).firestore();
+    await assertSucceeds(
+      updateDoc(doc(db, 'users', MANAGED_CHILD), {
+        displayName: 'Renamed Child',
+        updatedAt: serverTimestamp(),
+      }),
+    );
+  });
+
+  it('refuses a custodian setting claimedAt themselves', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', MANAGED_CHILD), managedChild());
+    });
+    const db = testEnv.authenticatedContext(FAMILY_GUARDIAN).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'users', MANAGED_CHILD), { claimedAt: serverTimestamp() }),
+    );
+  });
+
+  it('refuses a custodian reassigning custodianUid', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', MANAGED_CHILD), managedChild());
+    });
+    const db = testEnv.authenticatedContext(FAMILY_GUARDIAN).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'users', MANAGED_CHILD), { custodianUid: OUTSIDER }),
+    );
+  });
+
+  it('lets the child\'s own session claim the profile exactly once', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', MANAGED_CHILD), managedChild());
+    });
+    const db = testEnv.authenticatedContext(MANAGED_CHILD).firestore();
+    await assertSucceeds(
+      updateDoc(doc(db, 'users', MANAGED_CHILD), { claimedAt: serverTimestamp() }),
+    );
+  });
+
+  it('refuses claiming a second time', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'users', MANAGED_CHILD),
+        managedChild(new Date('2026-01-01')),
+      );
+    });
+    const db = testEnv.authenticatedContext(MANAGED_CHILD).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'users', MANAGED_CHILD), { claimedAt: serverTimestamp() }),
+    );
+  });
+
+  it('ends the custodian\'s write access the moment the profile is claimed', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'users', MANAGED_CHILD),
+        managedChild(new Date('2026-01-01')),
+      );
+    });
+    const db = testEnv.authenticatedContext(FAMILY_GUARDIAN).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'users', MANAGED_CHILD), { displayName: 'Still trying' }),
+    );
+  });
+
+  it('keeps the custodian\'s read access even after the profile is claimed', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'users', MANAGED_CHILD),
+        managedChild(new Date('2026-01-01')),
+      );
+    });
+    const db = testEnv.authenticatedContext(FAMILY_GUARDIAN).firestore();
+    await assertSucceeds(getDoc(doc(db, 'users', MANAGED_CHILD)));
+  });
+
+  it('refuses a stranger any read or write of an unclaimed child\'s private profile', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', MANAGED_CHILD), managedChild());
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(getDoc(doc(db, 'users', MANAGED_CHILD)));
+    await assertFails(
+      updateDoc(doc(db, 'users', MANAGED_CHILD), { displayName: 'Hijacked' }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Claim codes — the one-time handoff from a guardian's device to a child's.
+// Nothing here is readable back by any client; only `redeemClaimCode`
+// (functions/family.js, Admin SDK) ever consumes one.
+// ---------------------------------------------------------------------------
+describe('claim codes', () => {
+  const FAMILY_GUARDIAN = 'uid_claim_guardian';
+  const MANAGED_CHILD = 'uid_claim_child';
+  const CODE = '482913';
+
+  const claimCode = (overrides = {}) => ({
+    code: CODE,
+    childUid: MANAGED_CHILD,
+    guardianUid: FAMILY_GUARDIAN,
+    createdAt: serverTimestamp(),
+    expiresAt: new Date(Date.now() + 20 * 60 * 1000),
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'users', MANAGED_CHILD), {
+        uid: MANAGED_CHILD,
+        displayName: 'Claim Child',
+        email: '',
+        dateOfBirth: new Date('2015-01-01'),
+        gender: 'male',
+        photoUrl: null,
+        phone: null,
+        profileVisibility: 'private',
+        profileComplete: true,
+        isMinor: true,
+        orgIds: [],
+        playerCode: null,
+        custodianUid: FAMILY_GUARDIAN,
+        claimedAt: null,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    });
+  });
+
+  it('lets a custodian generate a code for their own unclaimed child', async () => {
+    const db = testEnv.authenticatedContext(FAMILY_GUARDIAN).firestore();
+    await assertSucceeds(setDoc(doc(db, 'claimCodes', CODE), claimCode()));
+  });
+
+  it('refuses anyone who is not the child\'s custodian', async () => {
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'claimCodes', CODE),
+        claimCode({ guardianUid: OUTSIDER }),
+      ),
+    );
+  });
+
+  it('refuses an expiry beyond the 30-minute ceiling', async () => {
+    const db = testEnv.authenticatedContext(FAMILY_GUARDIAN).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'claimCodes', CODE),
+        claimCode({ expiresAt: new Date(Date.now() + 40 * 60 * 1000) }),
+      ),
+    );
+  });
+
+  it('is not readable by anyone, custodian included', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'claimCodes', CODE), claimCode());
+    });
+    const db = testEnv.authenticatedContext(FAMILY_GUARDIAN).firestore();
+    await assertFails(getDoc(doc(db, 'claimCodes', CODE)));
+  });
+
+  it('cannot be updated or deleted by any client', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'claimCodes', CODE), claimCode());
+    });
+    const db = testEnv.authenticatedContext(FAMILY_GUARDIAN).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'claimCodes', CODE), { usedAt: serverTimestamp() }),
+    );
+    await assertFails(deleteDoc(doc(db, 'claimCodes', CODE)));
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Minor safety — profile visibility MUST derive from the immutable
 // dateOfBirth, never from the client-mirrored `isMinor` boolean.
 // ---------------------------------------------------------------------------

@@ -35,6 +35,16 @@ class Refs {
   static DocumentReference<Map<String, dynamic>> playerCode(String code) =>
       playerCodes.doc(code);
 
+  /// A guardian's one-time handoff of a managed child's profile onto the
+  /// child's own device — id = the short code itself, same uniqueness trick
+  /// as [playerCode]. See `functions/family.js`'s `redeemClaimCode`, the
+  /// only thing that ever reads one back.
+  static CollectionReference<Map<String, dynamic>> get claimCodes =>
+      db.collection('claimCodes');
+
+  static DocumentReference<Map<String, dynamic>> claimCode(String code) =>
+      claimCodes.doc(code);
+
   /// Devices a user has signed in on, so the server can reach them.
   ///
   /// One document per token rather than a single field on the user: a player
