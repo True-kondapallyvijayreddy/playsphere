@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/layout/responsive.dart';
@@ -7,6 +8,7 @@ import '../../core/errors/app_exception.dart';
 import '../../core/models/app_user.dart';
 import '../../core/models/enums.dart';
 import '../../core/providers.dart';
+import '../../core/router/app_router.dart';
 import '../../l10n/app_localizations.dart';
 import '../../shared/app_scaffold.dart';
 
@@ -26,6 +28,7 @@ class ProfileSetupScreen extends ConsumerStatefulWidget {
 class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
   final _formKey = GlobalKey<FormState>();
   final _nameController = TextEditingController();
+  final _phoneController = TextEditingController();
   DateTime? _dateOfBirth;
   Gender _gender = Gender.preferNotToSay;
   ProfileVisibility _visibility = ProfileVisibility.community;
@@ -35,6 +38,7 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
   @override
   void dispose() {
     _nameController.dispose();
+    _phoneController.dispose();
     super.dispose();
   }
 
@@ -67,12 +71,15 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
     setState(() => _busy = true);
     try {
       final existing = ref.read(currentUserProvider).valueOrNull;
+      final phone =
+          _phoneController.text.trim().isEmpty ? null : _phoneController.text.trim();
       // Edits build on the stored profile rather than on a fresh object, so
-      // fields this form does not show — the location that feeds the
-      // government aggregates, a phone number — survive a name change.
+      // a field this form still does not show — the location that feeds
+      // the government aggregates — survives a name change.
       final profile = existing?.copyWith(
             displayName: _nameController.text.trim(),
             gender: _gender,
+            phone: phone,
             photoUrl: authUser.photoURL,
             profileVisibility: _visibility,
             profileComplete: true,
@@ -83,6 +90,7 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
             email: authUser.email ?? '',
             dateOfBirth: _dateOfBirth!,
             gender: _gender,
+            phone: phone,
             photoUrl: authUser.photoURL,
             profileVisibility: _visibility,
             profileComplete: true,
@@ -94,8 +102,17 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
       } else {
         await repo.updateProfile(profile);
       }
-      // The router redirect moves us on as soon as the profile stream
-      // reports complete.
+      if (!mounted) return;
+      // The router no longer moves a completed profile off this screen on
+      // its own — see the redirect's comment in app_router.dart — because
+      // this screen is also where a complete profile is deliberately
+      // EDITED. A pop returns an editor to wherever they opened it from;
+      // first-time setup has nothing to pop to, so it lands on home.
+      if (context.canPop()) {
+        context.pop();
+      } else {
+        context.go(Routes.home);
+      }
     } catch (e) {
       if (mounted) showError(context, e);
     } finally {
@@ -117,6 +134,7 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
     final existing = profileAsync.valueOrNull;
     if (!_prefilled && authUser != null && !profileAsync.isLoading) {
       _nameController.text = existing?.displayName ?? authUser.displayName ?? '';
+      _phoneController.text = existing?.phone ?? '';
       _visibility = existing?.profileVisibility ?? _visibility;
       _dateOfBirth ??= existing?.dateOfBirth;
       _gender = existing?.gender ?? _gender;
@@ -169,6 +187,16 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
                   validator: (v) => (v == null || v.trim().length < 2)
                       ? 'Enter your name'
                       : null,
+                ),
+                const SizedBox(height: 20),
+                TextFormField(
+                  controller: _phoneController,
+                  keyboardType: TextInputType.phone,
+                  decoration: const InputDecoration(
+                    labelText: 'Phone (optional)',
+                    helperText: 'Visible to whoever can already see your profile',
+                    border: OutlineInputBorder(),
+                  ),
                 ),
                 const SizedBox(height: 20),
                 InkWell(

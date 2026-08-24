@@ -657,9 +657,13 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       if (!complete && location != Routes.profileSetup) {
         return Routes.profileSetup;
       }
-      if (complete && location == Routes.profileSetup) {
-        return Routes.home;
-      }
+      // Deliberately no "complete && at profileSetup -> home" rule here.
+      // ProfileSetupScreen is also the edit-your-details screen a complete
+      // profile reaches deliberately (the account panel's pencil icon) —
+      // a blanket redirect away the instant it landed on a complete profile
+      // bounced that tap straight back to home before the screen ever
+      // rendered. The first-time setup flow instead navigates itself, in
+      // _save(), the moment its own write succeeds.
       if (location == Routes.signIn) return Routes.home;
 
       return null;

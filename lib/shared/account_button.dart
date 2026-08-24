@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../core/errors/app_exception.dart';
 import '../core/models/app_user.dart';
 import '../core/models/enums.dart';
 import '../core/models/organization.dart';
@@ -128,7 +129,13 @@ class _AccountPanel extends ConsumerWidget {
                   ],
                 ),
               ),
-              IconButton(
+              // `.filledTonal` rather than a bare IconButton: a bare one
+              // takes its color from the ambient IconTheme, which in this
+              // sheet resolves to something barely distinguishable from the
+              // sheet's own white background. The tonal variant carries its
+              // own container color from the scheme, so it reads clearly
+              // regardless of what's behind it.
+              IconButton.filledTonal(
                 tooltip: 'Edit your details',
                 icon: const Icon(Icons.edit_outlined),
                 onPressed: () {
@@ -136,11 +143,12 @@ class _AccountPanel extends ConsumerWidget {
                   context.push(Routes.profileSetup);
                 },
               ),
+              const SizedBox(width: 8),
               // Right beside the name rather than buried in the list below —
               // onboarding a child with no device of their own yet is a task
               // a guardian starts the moment they open their own profile, not
               // something they should have to scroll to find.
-              IconButton(
+              IconButton.filledTonal(
                 tooltip: 'Add a child',
                 icon: const Icon(Icons.person_add_alt_1),
                 onPressed: () {
@@ -271,11 +279,86 @@ class _AccountPanel extends ConsumerWidget {
               await ref.read(authServiceProvider).signOut();
             },
           ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.delete_forever_outlined,
+                color: theme.colorScheme.error),
+            title: Text('Delete account',
+                style: TextStyle(color: theme.colorScheme.error)),
+            onTap: () async {
+              Navigator.of(context).pop();
+              await _confirmAndDeleteAccount(context, ref);
+            },
+          ),
           const SizedBox(height: 12),
           const Center(child: PlaySphereLogo(markSize: 20, fontSize: 13)),
         ],
       ),
     );
+  }
+}
+
+/// Confirms, then deletes the caller's own sign-in — [AuthService.
+/// deleteAccount] — retrying once through a fresh Google sign-in if
+/// Firebase refuses because the session isn't recent enough.
+///
+/// Deliberately does not attempt to delete the `users/{uid}` document
+/// itself: `firestore.rules` refuses that unconditionally
+/// (`allow delete: if false`) for every account, by design — match results
+/// and club records stay intact for everyone else's history even after a
+/// player's own login is gone. This is why the confirmation copy below says
+/// so plainly, rather than implying the account vanishes without a trace.
+Future<void> _confirmAndDeleteAccount(BuildContext context, WidgetRef ref) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Delete your account?'),
+      content: const Text(
+        "This removes your PlaySphere sign-in for good — you won't be able "
+        'to open this account again, and signing in again with the same '
+        'Google account starts a brand new, empty profile. Your existing '
+        "matches, stats and club records stay on file (they're part of "
+        "other people's history too), just no longer reachable from any "
+        'account of yours.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            backgroundColor: Theme.of(dialogContext).colorScheme.error,
+          ),
+          onPressed: () => Navigator.of(dialogContext).pop(true),
+          child: const Text('Delete account'),
+        ),
+      ],
+    ),
+  );
+  if (confirmed != true || !context.mounted) return;
+
+  final auth = ref.read(authServiceProvider);
+  try {
+    await auth.deleteAccount();
+    // Nothing to navigate here — authStateProvider goes null the instant
+    // this succeeds, and the router's own redirect sends the (now
+    // signed-out) session to Routes.signIn on its own.
+  } on ReauthenticationRequiredException {
+    if (!context.mounted) return;
+    showError(context, const ReauthenticationRequiredException());
+    try {
+      // The Google chooser IS the "sign in again" Firebase is asking for —
+      // a fresh credential resets what "recent" means for this session.
+      await auth.signInWithGoogle();
+      await auth.deleteAccount();
+    } on AuthCancelledException {
+      // Backed out of the chooser; the account is untouched, say nothing.
+    } catch (e) {
+      if (context.mounted) showError(context, e);
+    }
+  } catch (e) {
+    if (context.mounted) showError(context, e);
   }
 }
 
