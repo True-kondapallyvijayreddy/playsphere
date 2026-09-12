@@ -30,6 +30,8 @@
 
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
+
+import { CALLABLE_OPTS } from './app_check.js';
 import { logger } from 'firebase-functions';
 
 function db() {
@@ -83,28 +85,33 @@ export async function computeGovAggregatesByScan() {
   }
 
   // ---- Pass 2: every competition, attributed to its org's district. ----
-  const compsSnap = await db().collectionGroup('competitions').get();
-  for (const doc of compsSnap.docs) {
-    const orgId = doc.ref.parent.parent?.id;
-    const key = orgId ? orgDistrict.get(orgId) : null;
-    if (!key) continue; // org deleted, or predates this org's own row
-    rows.get(key).competitionCount += 1;
-  }
+  // Paged rather than read whole — see functions/paged_scan.js.
+  await forEachPaged(
+    db().collectionGroup('competitions'),
+    (doc) => {
+        const orgId = doc.ref.parent.parent?.id;
+        const key = orgId ? orgDistrict.get(orgId) : null;
+        if (!key) return; // org deleted, or predates this org's own row
+        rows.get(key).competitionCount += 1;
+    },
+    { label: 'gov competitions' },
+  );
 
   // ---- Pass 3: completed fixtures, same attribution. ----
   // Bounded to what a `where` can push down — everything else about "did
   // this match count" (a walkover, a dispute) lives on the same field, so
   // one query answers "how many matches actually happened".
-  const fixturesSnap = await db()
-    .collectionGroup('fixtures')
-    .where('status', '==', 'completed')
-    .get();
-  for (const doc of fixturesSnap.docs) {
-    const orgId = doc.ref.parent.parent?.parent?.parent?.id;
-    const key = orgId ? orgDistrict.get(orgId) : null;
-    if (!key) continue;
-    rows.get(key).completedMatchCount += 1;
-  }
+  // Paged rather than read whole — see functions/paged_scan.js.
+  await forEachPaged(
+    db().collectionGroup('fixtures').where('status', '==', 'completed'),
+    (doc) => {
+        const orgId = doc.ref.parent.parent?.parent?.parent?.id;
+        const key = orgId ? orgDistrict.get(orgId) : null;
+        if (!key) return;
+        rows.get(key).completedMatchCount += 1;
+    },
+    { label: 'gov fixtures' },
+  );
 
   await writeGovAggregates([...rows.values()], 'firestore-scan');
   return { districtCount: rows.size, source: 'firestore-scan' };
@@ -132,8 +139,8 @@ export async function writeGovAggregates(rows, source) {
   logger.info(`gov_aggregates: wrote ${rows.length} district rows via ${source}`);
 }
 
-export const computeGovAggregates = onCall(
-  { region: 'asia-south1', timeoutSeconds: 300, memory: '512MiB' },
+export const computeGovAggregates = onCall({
+    ...CALLABLE_OPTS, region: 'asia-south1', timeoutSeconds: 300, memory: '512MiB' },
   async (request) => {
     if (request.auth?.token?.admin !== true) {
       throw new HttpsError(

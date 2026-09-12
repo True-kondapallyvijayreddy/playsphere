@@ -340,6 +340,9 @@ class _Composer extends StatelessWidget {
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.send),
+                // Announced even while it is a spinner, because that is when
+                // somebody most needs to know what they pressed.
+                tooltip: sending ? 'Sending' : 'Send',
                 onPressed: sending ? null : onSend,
               ),
             ],

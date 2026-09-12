@@ -37,6 +37,8 @@
 
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
+
+import { CALLABLE_OPTS } from './app_check.js';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { logger } from 'firebase-functions';
 
@@ -74,20 +76,24 @@ export async function loadLeaderboardCandidates() {
   }
 
   const candidates = [];
-  const statsSnap = await db().collectionGroup('career_stats').get();
-  for (const doc of statsSnap.docs) {
-    const c = doc.data();
-    if (typeof c.uid !== 'string' || typeof c.sportId !== 'string') continue;
-    const profile = profiles.get(c.uid);
-    if (!profile || !profile.eligible) continue;
-    candidates.push({
-      uid: c.uid,
-      displayName: profile.displayName,
-      photoUrl: profile.photoUrl,
-      sportId: c.sportId,
-      tally: c.tally && typeof c.tally === 'object' ? c.tally : {},
-    });
-  }
+  // Paged rather than read whole — see functions/paged_scan.js.
+  await forEachPaged(
+    db().collectionGroup('career_stats'),
+    (doc) => {
+        const c = doc.data();
+        if (typeof c.uid !== 'string' || typeof c.sportId !== 'string') return;
+        const profile = profiles.get(c.uid);
+        if (!profile || !profile.eligible) return;
+        candidates.push({
+          uid: c.uid,
+          displayName: profile.displayName,
+          photoUrl: profile.photoUrl,
+          sportId: c.sportId,
+          tally: c.tally && typeof c.tally === 'object' ? c.tally : {},
+        });
+    },
+    { label: 'leaderboard career_stats' },
+  );
   return candidates;
 }
 
@@ -201,8 +207,8 @@ export const computeLeaderboards = onSchedule(
 );
 
 /** Staff-only manual rebuild, for after a data fix or a new sport's launch. */
-export const rebuildLeaderboards = onCall(
-  { region: 'asia-south1', timeoutSeconds: 300, memory: '512MiB' },
+export const rebuildLeaderboards = onCall({
+    ...CALLABLE_OPTS, region: 'asia-south1', timeoutSeconds: 300, memory: '512MiB' },
   async (request) => {
     if (request.auth?.token?.admin !== true) {
       throw new HttpsError(

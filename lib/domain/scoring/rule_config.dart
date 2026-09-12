@@ -671,9 +671,6 @@ class RulePresets {
         'allowDraw': true,
         'extraTime': false,
         'shootoutBestOf': 5,
-        'pointsWin': 3,
-        'pointsDraw': 1,
-        'pointsLoss': 0,
       },
     ),
     RulePreset(
@@ -690,9 +687,6 @@ class RulePresets {
         'allowDraw': true,
         'extraTime': false,
         'shootoutBestOf': 3,
-        'pointsWin': 3,
-        'pointsDraw': 1,
-        'pointsLoss': 0,
       },
     ),
     RulePreset(
@@ -709,9 +703,6 @@ class RulePresets {
         'allowDraw': true,
         'extraTime': false,
         'shootoutBestOf': 3,
-        'pointsWin': 3,
-        'pointsDraw': 1,
-        'pointsLoss': 0,
       },
     ),
 
@@ -925,8 +916,92 @@ class RulePresets {
 /// unknown key, so adding a value to a preset makes it editable in the same
 /// commit, with no screen to update. [order] only decides what a scorer sees
 /// FIRST — the things that change most often, per sport.
+///
+/// ## Enforced and advisory settings
+///
+/// "Everything in a preset is editable" was true and hid something: some of
+/// those settings were read by no engine at all. The review found
+/// twenty-four of them — most sharply `maxOversPerBowler`, offered as the
+/// fourth field in the cricket sheet and enforced nowhere, so a T20 innings
+/// could legally be bowled by two bowlers and still feed Glicko and the
+/// bowling leaderboards. Three more (`pointsWin`, `pointsDraw`,
+/// `pointsLoss`) duplicated `Competition.pointsForWin`, which is the field
+/// `StandingsCalculator` actually reads — so a league that set two points a
+/// win here silently kept scoring three.
+///
+/// The quota is now enforced and the duplicates are gone. The ten that remain
+/// genuinely are not enforced, because enforcing them needs data the pad does
+/// not capture — a running shot clock, per-ball fielding positions, an
+/// extra-time phase the engines have no concept of. Pretending otherwise is
+/// what the old state did; deleting them would throw away a real record of
+/// what a competition agreed to play under.
+///
+/// So they are declared [advisory] instead, with the reason each one is,
+/// [isAdvisory] lets the Rules sheet label them honestly, and
+/// `test/rule_config_coverage_test.dart` fails when a preset gains a key that
+/// is neither read by an engine nor listed here. A new unenforced setting can
+/// no longer arrive silently.
 class RuleFields {
   const RuleFields._();
+
+  /// Settings recorded as part of what a competition agreed, and enforced by
+  /// no engine — mapped to why not.
+  ///
+  /// Each is a real rule of its sport that the app cannot police with the
+  /// information a scorer gives it. Recording an organizer's answer is still
+  /// worth doing: "we agreed 24-second shot clock" settles an argument three
+  /// weeks later even though nothing counted the seconds.
+  static const advisory = <String, String>{
+    'powerplayOvers':
+        'Needs per-ball fielding positions, which the pad does not collect. '
+            'The over count is recorded; the fielding restriction is the '
+            "umpire's to apply.",
+    'shotClockSeconds':
+        'Needs a running clock. The pad records events, not elapsed time, so '
+            'nothing here can know when 24 seconds have passed.',
+    'bonusFoulsPerPeriod':
+        'Needs team fouls tracked per period. Individual fouls are recorded '
+            'and `foulOutAt` is enforced; the team total is not.',
+    'extraTime':
+        'The engines have no extra-time phase — a drawn knockout is resolved '
+            'by the organizer recording the outcome, not by the pad playing '
+            'on.',
+    'shootoutBestOf':
+        'A shootout is recorded as an outcome rather than scored kick by '
+            'kick — the engines have no shootout phase, so the number of '
+            'kicks agreed is a note on the fixture and not a thing that '
+            'counts down.',
+    'qualifiersPerHeat':
+        'Heat-to-final progression is not computed from marks. The draw '
+            'generator builds heats and a final; who advances is the '
+            "organizer's entry.",
+    'fastestLosers':
+        'The non-automatic qualifiers — the quickest athletes who did not win '
+            'a heat. Working them out means ranking marks across heats, which '
+            'is the progression the athletics engine does not compute.',
+    'finalists':
+        'How many reach the final. Recorded so the programme is right; who '
+            'they are is the organizer\'s entry, for the same reason '
+            'qualifiersPerHeat is.',
+    'finalistsAfterAttempt':
+        'Field-event cut-downs need per-attempt progression the athletics '
+            'engine does not model.',
+    'threeMode':
+        '3x3 basketball scores 1s and 2s rather than 2s and 3s. The engine '
+            'takes the point value from the action, so the variant is scored '
+            'correctly by pressing the right button; this flag would only '
+            'relabel them.',
+  };
+
+  /// Whether [key] is recorded but not enforced.
+  ///
+  /// The Rules sheet asks this so it can say so beside the field. An
+  /// organizer who sets a shot clock the app will not count should know that
+  /// before the match, not discover it during one.
+  static bool isAdvisory(String key) => advisory.containsKey(key);
+
+  /// Why [key] is not enforced, or null when it is.
+  static String? advisoryReason(String key) => advisory[key];
 
   /// Hand-written labels for the keys worth phrasing properly. Anything
   /// missing is derived from the key itself.

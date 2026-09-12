@@ -1606,6 +1606,7 @@ class _EditEventDialogState extends State<_EditEventDialog> {
                       ),
                     ),
                     IconButton(
+                      tooltip: 'Close',
                       icon: const Icon(Icons.close),
                       onPressed: () => Navigator.of(context).pop(),
                     ),

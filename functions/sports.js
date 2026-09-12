@@ -35,6 +35,8 @@
 
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
+
+import { CALLABLE_OPTS } from './app_check.js';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { logger } from 'firebase-functions';
 
@@ -82,35 +84,43 @@ export async function computeSportStatsByScan() {
   // document does not carry its own sport — it inherits it from the
   // competition it sits under.
   const compSport = new Map();
-  const compsSnap = await db().collectionGroup('competitions').get();
-  for (const doc of compsSnap.docs) {
-    const orgId = doc.ref.parent.parent?.id;
-    if (!orgId || !liveOrgs.has(orgId)) continue;
-    const sportId = doc.data().sportId;
-    if (!sportId) continue; // predates the field; not attributable to a sport
-    compSport.set(`${orgId}/${doc.id}`, sportId);
-    rowFor(sportId).tournamentCount += 1;
-  }
+  // Paged rather than read whole — see functions/paged_scan.js.
+  await forEachPaged(
+    db().collectionGroup('competitions'),
+    (doc) => {
+        const orgId = doc.ref.parent.parent?.id;
+        if (!orgId || !liveOrgs.has(orgId)) return;
+        const sportId = doc.data().sportId;
+        if (!sportId) return; // predates the field; not attributable to a sport
+        compSport.set(`${orgId}/${doc.id}`, sportId);
+        rowFor(sportId).tournamentCount += 1;
+    },
+    { label: 'sportStats competitions' },
+  );
 
   // ---- Pass 3: entrants, attributed through their competition. ----
-  const entrantsSnap = await db().collectionGroup('entrants').get();
-  for (const doc of entrantsSnap.docs) {
-    const compRef = doc.ref.parent.parent;
-    const orgId = compRef?.parent.parent?.id;
-    if (!orgId || !compRef) continue;
-    const sportId = compSport.get(`${orgId}/${compRef.id}`);
-    if (!sportId) continue; // deleted club, or a competition with no sport
+  // Paged rather than read whole — see functions/paged_scan.js.
+  await forEachPaged(
+    db().collectionGroup('entrants'),
+    (doc) => {
+        const compRef = doc.ref.parent.parent;
+        const orgId = compRef?.parent.parent?.id;
+        if (!orgId || !compRef) return;
+        const sportId = compSport.get(`${orgId}/${compRef.id}`);
+        if (!sportId) return; // deleted club, or a competition with no sport
 
-    const entrant = doc.data();
-    // `withdrawn`, not a status enum — an entrant document is created only
-    // once someone is a *starter* (see `Entrant`'s doc comment on why that is
-    // separate from a registration), so the only way to stop counting is to
-    // have pulled out afterwards.
-    if (entrant.withdrawn === true) continue;
-    const row = rowFor(sportId);
-    if (entrant.entrantType === 'team') row.teamCount += 1;
-    else row.playerCount += 1;
-  }
+        const entrant = doc.data();
+        // `withdrawn`, not a status enum — an entrant document is created only
+        // once someone is a *starter* (see `Entrant`'s doc comment on why that is
+        // separate from a registration), so the only way to stop counting is to
+        // have pulled out afterwards.
+        if (entrant.withdrawn === true) return;
+        const row = rowFor(sportId);
+        if (entrant.entrantType === 'team') row.teamCount += 1;
+        else row.playerCount += 1;
+    },
+    { label: 'sportStats entrants' },
+  );
 
   await writeSportStats([...rows.values()]);
   return { sportCount: rows.size };
@@ -153,8 +163,8 @@ export const computeSportStats = onSchedule(
 );
 
 /** Staff-only manual rebuild, for a backfill or after a data fix. */
-export const rebuildSportStats = onCall(
-  { region: 'asia-south1', timeoutSeconds: 540, memory: '1GiB' },
+export const rebuildSportStats = onCall({
+    ...CALLABLE_OPTS, region: 'asia-south1', timeoutSeconds: 540, memory: '1GiB' },
   async (request) => {
     if (request.auth?.token?.admin !== true) {
       throw new HttpsError(

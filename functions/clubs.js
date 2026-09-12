@@ -41,7 +41,11 @@
 
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
+
+import { CALLABLE_OPTS } from './app_check.js';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
+
+import { forEachPaged } from './paged_scan.js';
 import { logger } from 'firebase-functions';
 
 function db() {
@@ -167,55 +171,63 @@ export async function computeClubStandingsByScan({ now = new Date() } = {}) {
   // index for one nightly job; filtering here costs reads and no schema.
   let scanned = 0;
   let counted = 0;
-  const fixturesSnap = await db().collectionGroup('fixtures').get();
-  for (const doc of fixturesSnap.docs) {
-    scanned += 1;
-    const f = doc.data();
+  // Paged, not slurped. This read EVERY fixture ever played into one
+  // 1 GiB instance — see functions/paged_scan.js for why that stops working
+  // long before the platform does, and why the fix is a cursor rather than
+  // more memory. The accumulator below is a tally per club, so the working
+  // set stays small however many matches there are.
+  await forEachPaged(
+    db().collectionGroup('fixtures'),
+    (doc) => {
+      scanned += 1;
+      const f = doc.data();
 
-    // Walkovers count here, and deliberately NOT on the tournament
-    // leaderboard, which drops them because "turning up is not a good
-    // tournament". The two boards answer different questions: that one is
-    // evidence a player played well, this one is a league table, and every
-    // league in the world awards a forfeit as a win with full points. A club
-    // that failed to field a side lost the fixture.
-    if (f.status !== 'completed' && f.status !== 'walkover') continue;
-    // The marker of an inter-club match. Without it the entrant ids are
-    // players or club teams rather than clubs, and nothing here applies.
-    if (!Array.isArray(f.participantOrgIds) || f.participantOrgIds.length < 2) {
-      continue;
-    }
+      // Walkovers count here, and deliberately NOT on the tournament
+      // leaderboard, which drops them because "turning up is not a good
+      // tournament". The two boards answer different questions: that one is
+      // evidence a player played well, this one is a league table, and every
+      // league in the world awards a forfeit as a win with full points. A club
+      // that failed to field a side lost the fixture.
+      if (f.status !== 'completed' && f.status !== 'walkover') return;
+      // The marker of an inter-club match. Without it the entrant ids are
+      // players or club teams rather than clubs, and nothing here applies.
+      if (!Array.isArray(f.participantOrgIds) || f.participantOrgIds.length < 2) {
+        return;
+      }
 
-    const a = f.entrantAId;
-    const b = f.entrantBId;
-    if (!a || !b || a === b) continue;
-    // Both sides must still be clubs that exist. A club that leaves the
-    // platform must stop appearing in the ladder it left, and must not leave
-    // its opponents' wins pointing at nothing either.
-    if (!liveOrgs.has(a) || !liveOrgs.has(b)) continue;
+      const a = f.entrantAId;
+      const b = f.entrantBId;
+      if (!a || !b || a === b) return;
+      // Both sides must still be clubs that exist. A club that leaves the
+      // platform must stop appearing in the ladder it left, and must not leave
+      // its opponents' wins pointing at nothing either.
+      if (!liveOrgs.has(a) || !liveOrgs.has(b)) return;
 
-    const sportId = sportOf(f);
-    if (!sportId) continue;
+      const sportId = sportOf(f);
+      if (!sportId) return;
 
-    const at = dateOf(f.completedAt) ?? dateOf(f.scheduledAt);
-    const windows = windowsFor(at, now);
+      const at = dateOf(f.completedAt) ?? dateOf(f.scheduledAt);
+      const windows = windowsFor(at, now);
 
-    const isDraw = f.isDraw === true;
-    const winner = f.winnerEntrantId;
-    // Compared explicitly rather than by absence: a fixture that recorded
-    // neither a winner nor a draw is an unfinished result, not a shared point.
-    if (!isDraw && winner !== a && winner !== b) continue;
+      const isDraw = f.isDraw === true;
+      const winner = f.winnerEntrantId;
+      // Compared explicitly rather than by absence: a fixture that recorded
+      // neither a winner nor a draw is an unfinished result, not a shared point.
+      if (!isDraw && winner !== a && winner !== b) return;
 
-    const rowA = rowFor(sportId, a);
-    const rowB = rowFor(sportId, b);
-    if (isDraw) {
-      credit(rowA, windows, 'drawn');
-      credit(rowB, windows, 'drawn');
-    } else {
-      credit(rowA, windows, winner === a ? 'won' : 'lost');
-      credit(rowB, windows, winner === b ? 'won' : 'lost');
-    }
-    counted += 1;
-  }
+      const rowA = rowFor(sportId, a);
+      const rowB = rowFor(sportId, b);
+      if (isDraw) {
+        credit(rowA, windows, 'drawn');
+        credit(rowB, windows, 'drawn');
+      } else {
+        credit(rowA, windows, winner === a ? 'won' : 'lost');
+        credit(rowB, windows, winner === b ? 'won' : 'lost');
+      }
+      counted += 1;
+    },
+    { label: 'clubStandings fixtures' },
+  );
 
   await writeClubStandings(bySport);
   return { scanned, counted, sportCount: bySport.size };
@@ -274,8 +286,8 @@ export const computeClubStandings = onSchedule(
 );
 
 /** Staff-only manual rebuild, for after a backfill or a rules change. */
-export const rebuildClubStandings = onCall(
-  { region: 'asia-south1', timeoutSeconds: 540, memory: '1GiB' },
+export const rebuildClubStandings = onCall({
+    ...CALLABLE_OPTS, region: 'asia-south1', timeoutSeconds: 540, memory: '1GiB' },
   async (request) => {
     if (request.auth?.token?.admin !== true) {
       throw new HttpsError(

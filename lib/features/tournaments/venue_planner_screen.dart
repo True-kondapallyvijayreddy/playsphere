@@ -1004,6 +1004,7 @@ Future<List<DaySession>?> _editSessions(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         IconButton(
+                          tooltip: 'Edit',
                           icon: const Icon(Icons.edit_outlined, size: 18),
                           onPressed: () async {
                             final edited = await _editOneSession(
@@ -1015,6 +1016,7 @@ Future<List<DaySession>?> _editSessions(
                           },
                         ),
                         IconButton(
+                          tooltip: 'Delete',
                           icon: const Icon(Icons.delete_outline, size: 18),
                           onPressed: sessions.length > 1
                               ? () => setDialogState(() => sessions.removeAt(i))
@@ -1182,6 +1184,7 @@ Future<List<VenueBlackout>?> _editBlackouts(
                         ? null
                         : Text(partial[i].reason!),
                     trailing: IconButton(
+                      tooltip: 'Delete',
                       icon: const Icon(Icons.delete_outline, size: 18),
                       onPressed: () =>
                           setDialogState(() => partial.removeAt(i)),

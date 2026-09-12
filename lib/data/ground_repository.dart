@@ -441,9 +441,16 @@ class GroundRepository {
 
           tx.set(bookingRef, booking.toCreate());
 
-          tx.update(Refs.ground(ground.id), {
-            'bookingCount': FieldValue.increment(1),
-          });
+          // `bookingCount` is deliberately NOT written here any more.
+          //
+          // It used to be incremented in this transaction, under a rule that
+          // let any signed-in caller bump it by one with nothing limiting
+          // repetition — so the one number on a public listing that a customer
+          // reads as social proof was the one number anybody could run up
+          // without booking anything. `onGroundBooked`
+          // (functions/grounds.js) recomputes it from the bookings themselves,
+          // which also means a cancelled booking takes its contribution back
+          // instead of leaving the count permanently high.
         });
 
         return booking;

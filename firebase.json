@@ -54,6 +54,15 @@
           ]
         },
         {
+          "source": "/main.*.dart.js",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "public, max-age=31536000, immutable"
+            }
+          ]
+        },
+        {
           "source": "/flutter.js",
           "headers": [
             {
@@ -139,6 +148,7 @@
       "appAssociation": "NONE",
       "predeploy": [
         "sh scripts/check_web_build.sh",
+        "sh scripts/hash_web_bundle.sh",
         "cp web/sw_selfdestruct.js build/web/flutter_service_worker.js"
       ]
     },

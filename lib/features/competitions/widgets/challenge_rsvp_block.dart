@@ -725,6 +725,7 @@ class _AskMembersSheetState extends ConsumerState<_AskMembersSheet> {
               children: [
                 const Expanded(child: Text('Players needed')),
                 IconButton(
+                  tooltip: 'Remove one',
                   onPressed: _playersNeeded == 0
                       ? null
                       : () => setState(() => _playersNeeded -= 1),
@@ -735,6 +736,7 @@ class _AskMembersSheetState extends ConsumerState<_AskMembersSheet> {
                   style: const TextStyle(fontWeight: FontWeight.w800),
                 ),
                 IconButton(
+                  tooltip: 'Add one',
                   onPressed: () => setState(() => _playersNeeded += 1),
                   icon: const Icon(Icons.add_circle_outline),
                 ),

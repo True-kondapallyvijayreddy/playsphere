@@ -339,6 +339,7 @@ class _HousesEditorSheetState extends ConsumerState<HousesEditorSheet> {
                 ),
               ),
               IconButton(
+                tooltip: 'Close',
                 icon: const Icon(Icons.close),
                 onPressed: () => Navigator.of(context).pop(),
               ),

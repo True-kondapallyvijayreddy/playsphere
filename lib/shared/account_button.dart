@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../core/l10n/locale_controller.dart';
 import '../core/models/app_user.dart';
 import '../core/providers.dart';
 import '../core/router/app_router.dart';
@@ -9,6 +10,7 @@ import '../features/family/profile_switcher.dart';
 import '../features/profile/widgets/level_board.dart';
 import '../features/settings/language_picker.dart';
 import 'app_scaffold.dart';
+import 'file_download.dart';
 import 'identity.dart';
 import 'playsphere_logo.dart';
 
@@ -200,15 +202,25 @@ class _AccountPanel extends ConsumerWidget {
 
           // --- Everything else ----------------------------------------------
           const Divider(),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.translate),
-            title: const Text('Language / భాష / भाषा'),
-            onTap: () async {
-              Navigator.of(context).pop();
-              await showLanguagePicker(context);
-            },
-          ),
+          // The language row only exists when there is a choice to make.
+          //
+          // It used to be unconditional, offering తెలుగు and हिंदी on the
+          // strength of seventy translated keys that reached three of two
+          // hundred and thirty-three feature screens. Somebody picked Telugu,
+          // saw the sign-in screen change, and then used an English app.
+          // `supportedLocales` is English-only until the strings are actually
+          // extracted; when a second locale returns, so does this row, with
+          // no change here.
+          if (supportedLocales.length > 1)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.translate),
+              title: const Text('Language / భాష / भाषा'),
+              onTap: () async {
+                Navigator.of(context).pop();
+                await showLanguagePicker(context);
+              },
+            ),
           ListTile(
             contentPadding: EdgeInsets.zero,
             leading: const Icon(Icons.swap_horiz),
@@ -261,12 +273,61 @@ class _AccountPanel extends ConsumerWidget {
                 await _confirmAndDeleteAccount(context, ref);
               },
             ),
+            // Above the delete row on purpose. Somebody who has decided to
+            // leave should be offered their record on the way out, next to the
+            // button that destroys it, rather than having to find it in a
+            // different menu after the fact.
+            ListTile(
+              leading: const Icon(Icons.download_outlined),
+              title: const Text('Download my data'),
+              subtitle: const Text('Everything PlaySphere holds, as a file'),
+              onTap: () async {
+                Navigator.of(context).pop();
+                await _exportMyData(context, ref);
+              },
+            ),
           ],
           const SizedBox(height: 12),
           const Center(child: PlaySphereLogo(markSize: 20, fontSize: 13)),
         ],
       ),
     );
+  }
+}
+
+/// Produces the account's data export and hands it to the share sheet.
+///
+/// The right of access, self-service. The privacy policy promised a
+/// machine-readable copy on request and nothing implemented it, so the promise
+/// rested on somebody running queries against production by hand.
+///
+/// Deliberately blocking with a visible spinner rather than optimistic: the
+/// server walks a dozen collections and collection-group queries, which takes
+/// a second or two, and a share sheet that appears with no warning after an
+/// unexplained pause reads as a bug.
+Future<void> _exportMyData(BuildContext context, WidgetRef ref) async {
+  final messenger = ScaffoldMessenger.of(context);
+  messenger.showSnackBar(
+    const SnackBar(
+      content: Text('Gathering your data…'),
+      duration: Duration(seconds: 8),
+    ),
+  );
+  try {
+    final bytes = await ref.read(authServiceProvider).exportMyData();
+    messenger.hideCurrentSnackBar();
+    await saveFileBytes(
+      bytes: bytes,
+      // Dated, because somebody who asks twice wants to be able to tell the
+      // two files apart.
+      filename: 'playsphere-my-data-'
+          '${DateTime.now().toIso8601String().split('T').first}.json',
+      mimeType: 'application/json',
+      shareText: 'My PlaySphere data',
+    );
+  } catch (e) {
+    messenger.hideCurrentSnackBar();
+    if (context.mounted) showError(context, e);
   }
 }
 
@@ -291,10 +352,16 @@ Future<void> _confirmAndDeleteAccount(BuildContext context, WidgetRef ref) async
         "This removes your PlaySphere sign-in for good — you won't be able "
         'to open this account again, and signing in again with the same '
         'Google account starts a brand new, empty profile.\n\n'
-        'Your name, email, phone number, photo and location are erased. Your '
-        "past matches, stats and club records stay on file (they're part of "
-        "other people's history too), with your name removed from the profile "
-        'behind them.',
+        'Erased: your name, email, phone number, photo and location; your '
+        'notification tokens; your entry in the player directory; any coach, '
+        'practitioner, shop or official listing you published; your ground '
+        'check-ins; the photos you uploaded; and the documents you sent us to '
+        'verify a ground.\n\n'
+        "Kept: your past matches, stats and club records — they're part of "
+        "other people's history too — with your name removed from the "
+        'profile behind them. Payment receipts are kept as a financial '
+        'record.\n\n'
+        'Want a copy first? Close this and tap “Download my data”.',
       ),
       actions: [
         TextButton(

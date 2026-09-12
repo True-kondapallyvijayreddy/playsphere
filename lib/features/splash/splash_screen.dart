@@ -19,7 +19,18 @@ class SplashScreen extends StatelessWidget {
   const SplashScreen({super.key});
 
   static const _brandBlack = Color(0xFF0A0A0A);
-  static const _asset = 'assets/branding/splash.png';
+  /// WebP, not the PNG the generators read.
+  ///
+  /// The poster is the first image the app draws and it blocks nothing else
+  /// from being looked at, so its download sits squarely on the start-up path.
+  /// As a PNG it was 1.9MB — larger than the entire compiled app — for artwork
+  /// the viewer sees for under a second. The same image as WebP is 228KB and
+  /// visually identical at this size.
+  ///
+  /// `assets/branding/splash.png` still exists and is still what
+  /// `flutter_native_splash` reads in pubspec.yaml; it is a build-time source
+  /// now rather than something shipped in the bundle.
+  static const _asset = 'assets/branding/splash.webp';
 
   /// The poster's own pixel dimensions. Locking the image to this ratio,
   /// rather than letting it stretch to whatever the device's aspect ratio

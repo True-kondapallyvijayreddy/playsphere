@@ -2,10 +2,40 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// The locales PlaySphere ships. Telugu first after English, because the
-/// pilot is Telangana and the spec calls for a Telugu-first UX review.
+/// The locales PlaySphere OFFERS.
+///
+/// English only, for now, and that is a correction rather than a retreat.
+///
+/// ## Why the other two are not here
+///
+/// `app_te.arb` and `app_hi.arb` are complete: seventy keys each, translated.
+/// The problem was never the translations, it was their reach — exactly three
+/// of two hundred and thirty-three feature files call `AppLocalizations`
+/// (sign-in, profile setup, and the picker itself), and roughly two thousand
+/// two hundred user-facing strings are English literals in the widget tree.
+///
+/// So the picker worked and the product did not. A user in a Telangana school
+/// selected తెలుగు, watched the sign-in screen change, and then used an
+/// English app — including every error message, the whole scoring pad, and the
+/// season planner. Offering a language a product does not speak is worse than
+/// offering one, because it is a promise broken in front of the person it was
+/// made to.
+///
+/// Nothing is deleted. The delegates, the .arb files, the translations and
+/// [labelFor] all stay, so restoring a locale is adding one line here — and
+/// the honest precondition for adding it is that the strings have been
+/// extracted, not that the file exists. `test/localization_reach_test.dart`
+/// measures how far off that is.
 const supportedLocales = <Locale>[
   Locale('en'),
+];
+
+/// The locales PlaySphere has translations for but does not yet offer.
+///
+/// Kept as a named list rather than as a comment so the gap is measurable:
+/// the reach test asserts these stay out of [supportedLocales] until the UI
+/// actually speaks them.
+const translatedButNotShipped = <Locale>[
   Locale('te'),
   Locale('hi'),
 ];

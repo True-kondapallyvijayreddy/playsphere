@@ -1209,6 +1209,7 @@ class _TimingStepper extends StatelessWidget {
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           IconButton(
+            tooltip: 'Remove',
             icon: const Icon(Icons.remove, size: 16),
             onPressed: value > min ? () => onChanged(value - step) : null,
             visualDensity: VisualDensity.compact,
@@ -1222,6 +1223,7 @@ class _TimingStepper extends StatelessWidget {
             ),
           ),
           IconButton(
+            tooltip: 'Add',
             icon: const Icon(Icons.add, size: 16),
             onPressed: value < max ? () => onChanged(value + step) : null,
             visualDensity: VisualDensity.compact,

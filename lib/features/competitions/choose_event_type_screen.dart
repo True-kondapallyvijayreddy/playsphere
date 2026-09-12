@@ -170,6 +170,7 @@ class _TypeCard extends StatelessWidget {
               Tooltip(
                 message: secondaryLabel!,
                 child: IconButton(
+                  tooltip: 'Quick actions',
                   onPressed: secondary,
                   visualDensity: VisualDensity.compact,
                   icon: const Icon(Icons.bolt_outlined, size: 20),

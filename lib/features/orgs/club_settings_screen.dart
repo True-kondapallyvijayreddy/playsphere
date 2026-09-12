@@ -255,6 +255,7 @@ class _HomeGroundPickerState extends ConsumerState<_HomeGroundPicker> {
                 child: Text('Home ground', style: theme.textTheme.titleLarge),
               ),
               IconButton(
+                tooltip: 'Close',
                 icon: const Icon(Icons.close),
                 onPressed: () => Navigator.of(context).pop(),
               ),
@@ -279,6 +280,7 @@ class _HomeGroundPickerState extends ConsumerState<_HomeGroundPicker> {
                   prefixIcon: const Icon(Icons.location_on_outlined),
                   border: const OutlineInputBorder(),
                   suffixIcon: IconButton(
+                    tooltip: 'Search',
                     icon: const Icon(Icons.search),
                     onPressed: () =>
                         setState(() => _searchedCity = _city.text.trim()),

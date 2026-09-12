@@ -211,6 +211,27 @@ class Refs {
   static DocumentReference<Map<String, dynamic>> team(String teamId) =>
       teams.doc(teamId);
 
+  /// The ceiling every unbounded team listener carries.
+  ///
+  /// ## Why a cap and not "all of them"
+  ///
+  /// These are `.snapshots()` listeners, which means the client holds the
+  /// whole result in memory and is re-billed for the whole result whenever any
+  /// document in it changes. Uncapped, the cost of opening a team picker grows
+  /// with the size of the thing being picked from — and the worst case is not
+  /// a person's own teams (a handful) but `independentTeamsForSport`, which is
+  /// every club-less squad in one sport across the entire platform.
+  ///
+  /// The number is chosen to be past the point of usefulness rather than at
+  /// it: nobody scrolls to the 200th team in a picker, and a list that long is
+  /// a signal the screen needs a search box rather than a longer list. Every
+  /// caller either builds a picker or draws a profile section, and both are
+  /// better served by a bounded list than by a complete one.
+  ///
+  /// Deliberately NOT applied to `teamsByJoinCode`, which already takes one,
+  /// or to single-document listeners, which cannot grow.
+  static const teamQueryLimit = 200;
+
   /// Every team a person is on the roster of.
   ///
   /// Filtered to active teams, because the caller is always building a picker
@@ -219,15 +240,18 @@ class Refs {
   /// is where somebody looking for it is actually looking.
   static Query<Map<String, dynamic>> teamsForMember(String uid) => teams
       .where('memberUids', arrayContains: uid)
-      .where('status', isEqualTo: 'active');
+      .where('status', isEqualTo: 'active')
+      .limit(teamQueryLimit);
 
   /// A club's teams, permanent and event alike.
-  static Query<Map<String, dynamic>> teamsForClub(String orgId) =>
-      teams.where('clubId', isEqualTo: orgId).where('status', isEqualTo: 'active');
+  static Query<Map<String, dynamic>> teamsForClub(String orgId) => teams
+      .where('clubId', isEqualTo: orgId)
+      .where('status', isEqualTo: 'active')
+      .limit(teamQueryLimit);
 
   /// The event teams raised for one competition.
   static Query<Map<String, dynamic>> teamsForCompetition(String compId) =>
-      teams.where('competitionId', isEqualTo: compId);
+      teams.where('competitionId', isEqualTo: compId).limit(teamQueryLimit);
 
   /// Independent teams in one sport — the squads with no club behind them.
   ///
@@ -241,7 +265,10 @@ class Refs {
       teams
           .where('type', isEqualTo: 'independent')
           .where('sportId', isEqualTo: sportId)
-          .where('status', isEqualTo: 'active');
+          .where('status', isEqualTo: 'active')
+          // The widest of these by far: every club-less squad in one sport,
+          // platform-wide. The cap matters most here.
+          .limit(teamQueryLimit);
 
   /// The team a shared code points at. See `Team.joinCode` for why finding a
   /// team is all a code does.

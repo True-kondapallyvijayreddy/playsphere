@@ -11,6 +11,7 @@ import '../../features/arena/arena_home_screen.dart';
 import '../../features/arena/arena_leaderboard_screen.dart';
 import '../../features/venues/venues_screen.dart';
 import '../../features/rankings/rankings_screen.dart';
+import '../../features/tournaments/certificate_verify_screen.dart';
 import '../../features/tournaments/certificates_screen.dart';
 import '../../features/tournaments/tournament_schedule_screen.dart';
 import '../../features/tournaments/officials_screen.dart';
@@ -315,6 +316,21 @@ class Routes {
   /// is no Firebase Auth session at all until this screen's flow creates
   /// one.
   static const claim = '/claim';
+
+  /// Checking a certificate, from the QR code or the short code printed on it.
+  ///
+  /// Deliberately public — see [_isPublicRoute]. A certificate is shown to a
+  /// selector, an employer or an admissions office, and a verification page
+  /// that demands an account is a page nobody ever checks. Everything it reads
+  /// is already world-readable for a public club, and it says so plainly when
+  /// the club is not.
+  static String verifyCertificate({
+    required String orgId,
+    required String tournamentId,
+    required String compId,
+    required String entrantId,
+  }) =>
+      '/verify/$orgId/$tournamentId/$compId/$entrantId';
 
   /// What a player can buy for themselves. Deliberately org-free — Premium is
   /// bought by a person and travels with them between clubs, exactly like the
@@ -891,6 +907,9 @@ bool _isPublicRoute(String location) {
   // A child claiming a managed profile has no Firebase Auth session at all
   // until partway through that screen's own flow — see ClaimEntryScreen.
   if (location.startsWith(Routes.claim)) return true;
+  // A certificate is checked by whoever was handed it, who is by definition
+  // not a PlaySphere user — see `Routes.verifyCertificate`.
+  if (location.startsWith('/verify/')) return true;
   if (RegExp(r'^/org/[^/]+/live-tournament/').hasMatch(location)) return true;
   return RegExp(r'^/org/[^/]+/event/[^/]+/watch/').hasMatch(location);
 }
@@ -999,6 +1018,15 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.claim,
         builder: (_, __) => const ClaimEntryScreen(),
+      ),
+      GoRoute(
+        path: '/verify/:orgId/:tournamentId/:compId/:entrantId',
+        builder: (_, state) => CertificateVerifyScreen(
+          orgId: state.pathParameters['orgId']!,
+          tournamentId: state.pathParameters['tournamentId']!,
+          compId: state.pathParameters['compId']!,
+          entrantId: state.pathParameters['entrantId']!,
+        ),
       ),
       GoRoute(
         path: Routes.home,

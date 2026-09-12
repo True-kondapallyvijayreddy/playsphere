@@ -515,3 +515,49 @@ export const flagUnvisitedGround = onDocumentWritten('grounds/{groundId}', async
     groundId: event.params.groundId, suspicious, bookings, arrivals,
   });
 });
+
+/**
+ * Keeps `grounds/{id}.bookingCount` honest.
+ *
+ * ## Why this is a trigger now
+ *
+ * The counter used to be bumped by the client, under a rule that asked for a
+ * signed-in caller and a `+1` and nothing else — with no limit on repetition.
+ * So the one number on a public listing that a customer reads as social proof
+ * was the one number anybody could run up, indefinitely, without booking
+ * anything. It sat directly beside `checkInCount`, `reportScore` and
+ * `riskFlags`, every one of which is frozen against even the owner.
+ *
+ * Rules cannot fix it: the honest version of the client rule has to tie the
+ * increment to the booking created in the same batch, which means naming that
+ * booking's id in a field on the ground — and the same rule's `affectedKeys`
+ * allowlist then refuses the field, because allowing it would reopen the door
+ * it was closing. A rule that contradicts itself denies every legitimate
+ * write, which is exactly what the first attempt did.
+ *
+ * So the counter moves to where `checkInCount` already lives. Derived from the
+ * bookings themselves rather than incremented, for the same reason the arrivals
+ * count is: a number recomputed from its own source cannot drift, and a
+ * cancelled booking takes its contribution back with it.
+ */
+export const onGroundBooked = onDocumentWritten(
+  'grounds/{groundId}/bookings/{bookingId}',
+  async (event) => {
+    const groundId = event.params.groundId;
+    const groundRef = db().collection('grounds').doc(groundId);
+    if (!(await groundRef.get()).exists) return;
+
+    // Counted, not incremented. `confirmed` and `completed` are bookings that
+    // happened; `cancelled` is one that did not, and a listing should not keep
+    // credit for it.
+    const all = await groundRef.collection('bookings').get();
+    let held = 0;
+    for (const doc of all.docs) {
+      const status = doc.data()?.status;
+      if (status === 'confirmed' || status === 'completed') held += 1;
+    }
+
+    await groundRef.update({ bookingCount: held });
+    logger.info('bookingCount recomputed', { groundId, bookingCount: held });
+  },
+);

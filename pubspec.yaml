@@ -37,9 +37,12 @@ dependencies:
   firebase_storage: ^12.3.0
 
   # Push notifications (CLAUDE.md §6 Module A / §3): event reminders, match
-  # start, results, membership approvals, challenges. WhatsApp/SMS fallback
-  # is a separate abstraction in core/notifications — this package only
-  # carries the FCM leg.
+  # start, results, membership approvals, challenges.
+  #
+  # This is the ONLY delivery channel the product has. A WhatsApp/SMS
+  # fallback was described in core/notifications as though it existed and
+  # never did — see docs/NOTIFICATION_FALLBACK.md for what building it takes
+  # and why it matters on the handsets this is aimed at.
   firebase_messaging: ^15.1.3
 
   # Google Sign-In. On the web `firebase_auth` handles the popup itself, so
@@ -88,6 +91,7 @@ dependencies:
   qr_flutter: ^4.1.0
   geolocator: ^13.0.0
   cloud_functions: ^5.6.2
+  firebase_app_check: ^0.3.2+10
 
 dev_dependencies:
   flutter_test:
@@ -114,7 +118,11 @@ flutter:
   # again here.
   assets:
     - assets/branding/mark.png
-    - assets/branding/splash.png
+    # The WebP, not the PNG below: same poster, 228KB instead of 1.9MB, and it
+    # is fetched on every cold start before the app can paint. The PNG stays in
+    # the repo because `flutter_native_splash` reads it, but it is a generator
+    # source and must not ship in the bundle. See [SplashScreen].
+    - assets/branding/splash.webp
 
 # -----------------------------------------------------------------------------
 # App icon.

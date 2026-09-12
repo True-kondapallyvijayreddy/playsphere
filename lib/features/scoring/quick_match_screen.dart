@@ -873,6 +873,12 @@ class _RulesetCard extends StatelessWidget {
             _RuleFieldRow(
               label: RuleFields.labelFor(key),
               value: config[key],
+              // Some of these are recorded rather than enforced — a shot
+              // clock nothing counts down, a powerplay nothing polices. The
+              // sheet used to present all of them identically, which is how a
+              // setting that did nothing looked exactly like one that decided
+              // the result. See `RuleFields.advisory`.
+              advisoryNote: RuleFields.advisoryReason(key),
               onChanged: (v) => onChanged(key, v),
             ),
         ],
@@ -892,21 +898,37 @@ class _RuleFieldRow extends StatelessWidget {
     required this.label,
     required this.value,
     required this.onChanged,
+    this.advisoryNote,
   });
 
   final String label;
   final Object? value;
   final void Function(Object) onChanged;
 
+  /// Why this setting is recorded but not enforced, or null when the engine
+  /// does enforce it.
+  ///
+  /// Shown as a note under the field rather than hidden behind an icon: an
+  /// organizer setting a 24-second shot clock the app will not count needs to
+  /// know that while they are setting it, not during the match.
+  final String? advisoryNote;
+
   @override
   Widget build(BuildContext context) {
     final v = value;
+
+    // "Recorded, not enforced" is a real distinction and it belongs next to
+    // the field. Kept as a suffix on the label rather than a separate row so
+    // it survives whichever input type the value resolves to below.
+    final displayLabel = advisoryNote == null ? label : '$label  ·  recorded only';
 
     if (v is bool) {
       return SwitchListTile(
         dense: true,
         contentPadding: EdgeInsets.zero,
-        title: Text(label),
+        title: Text(displayLabel),
+        subtitle: advisoryNote == null ? null : Text(advisoryNote!),
+        isThreeLine: advisoryNote != null,
         value: v,
         onChanged: onChanged,
       );
@@ -921,7 +943,12 @@ class _RuleFieldRow extends StatelessWidget {
           inputFormatters: [
             FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
           ],
-          decoration: InputDecoration(labelText: label, isDense: true),
+          decoration: InputDecoration(
+            labelText: displayLabel,
+            isDense: true,
+            helperText: advisoryNote,
+            helperMaxLines: 3,
+          ),
           // Parsed on every keystroke, and a half-typed value is simply not
           // committed. Committing on submit instead would lose the edit of
           // anyone who taps straight from the field to Start.
@@ -938,7 +965,7 @@ class _RuleFieldRow extends StatelessWidget {
         padding: const EdgeInsets.only(bottom: 12),
         child: TextFormField(
           initialValue: v,
-          decoration: InputDecoration(labelText: label, isDense: true),
+          decoration: InputDecoration(labelText: displayLabel, isDense: true, helperText: advisoryNote, helperMaxLines: 3),
           onChanged: onChanged,
         ),
       );
@@ -1031,6 +1058,7 @@ class _FindPlayerDialogState extends ConsumerState<_FindPlayerDialog> {
                 labelText: 'Player code',
                 hintText: 'PSOS-4K7M2',
                 suffixIcon: IconButton(
+                  tooltip: 'Search',
                   icon: const Icon(Icons.search),
                   onPressed: _searching ? null : _search,
                 ),

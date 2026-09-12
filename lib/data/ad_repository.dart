@@ -134,13 +134,65 @@ class AdRepository {
         }),
       );
 
-  /// Fire-and-forget impression/click counters. Rules permit exactly a
-  /// same-request +1 to one of these two fields and nothing else — see the
-  /// `adCampaigns` update rule. Errors are swallowed: a missed impression
-  /// count is not worth surfacing to the viewer it was measuring.
-  Future<void> recordImpression(String campaignId) => Refs.adCampaign(campaignId)
-      .update({'impressions': FieldValue.increment(1)}).catchError((_) {});
+  /// Fire-and-forget reach counters.
+  ///
+  /// ## What these measure, and why it changed
+  ///
+  /// They used to be a bare `+1`, which rules permitted from any signed-in
+  /// caller with no limit on repetition — so one account could run either
+  /// counter up indefinitely. With campaigns billed against `budgetPaise`
+  /// that is a route to charging an advertiser for traffic that never
+  /// happened, and to draining a competitor's budget.
+  ///
+  /// So an increment now has to file a receipt for itself:
+  /// `adCampaigns/{id}/counted/{uid}_{kind}`, written in the same batch. The
+  /// document id is what enforces it — a second attempt collides with a
+  /// document that already exists and the whole batch is refused, which is
+  /// the same structural trick `groundReports/{reporterUid}_{groundId}` uses
+  /// to make "one person, one report" true without counting anything.
+  ///
+  /// The consequence is that these count UNIQUE ACCOUNTS, not events: how
+  /// many different people saw the banner and how many tapped it. Narrower
+  /// than the field names suggest, and the only version of the number that
+  /// means anything, since the repeat half was exactly the forgeable half.
+  ///
+  /// Errors stay swallowed. The commonest one is now the expected one — this
+  /// viewer has already been counted — and a viewer must never see a failure
+  /// from the machinery that was measuring them.
+  /// [viewerUid] is passed in rather than read from auth, the same way every
+  /// other method here takes the account it acts for — a repository that
+  /// reaches for the current session cannot be tested without one, and on a
+  /// shared phone "the current session" is whichever profile is open.
+  Future<void> recordImpression(String campaignId, String? viewerUid) =>
+      _count(campaignId, viewerUid, 'impression', 'impressions');
 
-  Future<void> recordClick(String campaignId) => Refs.adCampaign(campaignId)
-      .update({'clicks': FieldValue.increment(1)}).catchError((_) {});
+  Future<void> recordClick(String campaignId, String? viewerUid) =>
+      _count(campaignId, viewerUid, 'click', 'clicks');
+
+  Future<void> _count(
+    String campaignId,
+    String? uid,
+    String kind,
+    String field,
+  ) async {
+    // Signed out there is nobody to be unique, and the rule would refuse it.
+    if (uid == null || uid.isEmpty) return;
+    try {
+      final batch = Refs.db.batch();
+      batch.update(Refs.adCampaign(campaignId), {
+        field: FieldValue.increment(1),
+      });
+      batch.set(
+        Refs.adCampaign(campaignId).collection('counted').doc('${uid}_$kind'),
+        {
+          'uid': uid,
+          'kind': kind,
+          'at': FieldValue.serverTimestamp(),
+        },
+      );
+      await batch.commit();
+    } catch (_) {
+      // Already counted, or offline. Neither is worth a word to the viewer.
+    }
+  }
 }

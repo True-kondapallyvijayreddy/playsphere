@@ -177,6 +177,7 @@ class _BulkCategorySelectorSheetState extends State<BulkCategorySelectorSheet> {
                       ),
                     ),
                     IconButton(
+                      tooltip: 'Close',
                       icon: const Icon(Icons.close),
                       onPressed: () => Navigator.of(context).pop(),
                     ),

@@ -36,6 +36,8 @@ import crypto from 'node:crypto';
 
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
+
+import { CALLABLE_OPTS } from './app_check.js';
 import { onRequest } from 'firebase-functions/v2/https';
 import { defineSecret } from 'firebase-functions/params';
 import { logger } from 'firebase-functions';
@@ -76,8 +78,8 @@ function priceFor(kind, planWire) {
  * rule on `payments/` only has to hold a client-initiated write to
  * `amountPaise == 0`, because this path never goes through that rule at all.
  */
-export const createPaymentLink = onCall(
-  { region: 'asia-south1', secrets: [RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET] },
+export const createPaymentLink = onCall({
+    ...CALLABLE_OPTS, region: 'asia-south1', secrets: [RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET] },
   async (request) => {
     const uid = request.auth?.uid;
     if (!uid) {
@@ -265,6 +267,30 @@ export const razorpayWebhook = onRequest(
         // than a double-granted entitlement or a plan extended twice.
         if (data.status === 'paid') return;
 
+        // The money that arrived has to be the money that was asked for.
+        //
+        // The signature proves Razorpay sent this, and that is not the same
+        // as proving it paid for THIS plan. Payment links support partial
+        // payment (`accept_partial`), a link can be created outside this
+        // function, and a future change to how links are made is exactly the
+        // kind of thing that quietly turns a ₹999 club plan into a ₹1 one.
+        // Comparing the amount costs nothing and closes the class.
+        const paid = Number(
+          paymentLink.amount_paid ?? paymentLink.amount ?? 0,
+        );
+        if (paid < Number(data.amountPaise ?? 0)) {
+          logger.error(
+            `Webhook for ${paymentId} paid ${paid} against ` +
+              `${data.amountPaise}; entitlement withheld.`,
+          );
+          tx.update(paymentRef, {
+            status: 'underpaid',
+            amountPaidPaise: paid,
+            paidAt: FieldValue.serverTimestamp(),
+          });
+          return;
+        }
+
         const gatewayRef =
           paymentLink.payments?.[paymentLink.payments.length - 1]
             ?.payment_id ?? paymentLink.id;
@@ -275,22 +301,49 @@ export const razorpayWebhook = onRequest(
           paidAt: FieldValue.serverTimestamp(),
         });
 
-        const validUntil = data.validUntil;
-        if (data.kind === 'org_plan') {
-          tx.update(db().doc(`orgs/${data.subjectId}`), {
-            plan: data.plan,
-            planActivatedAt: FieldValue.serverTimestamp(),
-            planValidUntil: validUntil,
-            planPaymentId: paymentId,
-          });
-        } else if (data.kind === 'member_plan') {
-          tx.update(db().doc(`users/${data.subjectId}`), {
-            plan: data.plan,
-            planActivatedAt: FieldValue.serverTimestamp(),
-            planValidUntil: validUntil,
-            planPaymentId: paymentId,
-          });
-        }
+        // A renewal EXTENDS the term; it does not restart it.
+        //
+        // `validUntil` was computed when the link was created — now plus a
+        // year — and written straight onto the subject. So somebody who
+        // renewed two months early paid for twelve months and received ten,
+        // and the two months they had already bought were silently discarded.
+        // That is the shape of billing complaint that costs more to answer
+        // than the plan cost to sell.
+        //
+        // Read inside the transaction so two deliveries racing cannot both
+        // extend from the same starting point — though the `status === 'paid'`
+        // guard above already makes the second a no-op.
+        const subjectRef =
+          data.kind === 'org_plan'
+            ? db().doc(`orgs/${data.subjectId}`)
+            : data.kind === 'member_plan'
+              ? db().doc(`users/${data.subjectId}`)
+              : null;
+        if (!subjectRef) return;
+
+        const subjectSnap = await tx.get(subjectRef);
+        const existing = subjectSnap.exists
+          ? subjectSnap.data().planValidUntil
+          : null;
+        const existingMs = existing?.toMillis?.() ?? 0;
+        const now = Date.now();
+        // Extend from whichever is later: the end of the term they are still
+        // inside, or today. An expired plan renews from today rather than
+        // back-dating the new year onto a lapse.
+        const from = existingMs > now ? existingMs : now;
+        const validUntil = new Date(
+          from + TERM_DAYS * 24 * 60 * 60 * 1000,
+        );
+
+        tx.update(subjectRef, {
+          plan: data.plan,
+          planActivatedAt: FieldValue.serverTimestamp(),
+          planValidUntil: validUntil,
+          planPaymentId: paymentId,
+        });
+        // Recorded on the ledger row too, so a receipt says what it bought
+        // rather than what the link guessed at creation time.
+        tx.update(paymentRef, { validUntil });
       });
     } catch (err) {
       logger.error('Razorpay webhook processing failed', err);

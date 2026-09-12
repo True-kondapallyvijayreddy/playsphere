@@ -177,6 +177,39 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/orgs/$(orgId)).data;
     }
 
+    // WHY THERE IS NO FIXTURE-LEVEL CHECK ON `entrantAUid` HERE
+    //
+    // The obvious third layer — "the uid on the fixture must be the uid on its
+    // entrant document" — was written, tested, and removed, and the reason is
+    // worth recording so nobody spends the afternoon rediscovering it.
+    //
+    // Firestore caps a single request at 1000 evaluated expressions. The
+    // fixtures block already carries eight `allow update` statements, every
+    // one of which is evaluated on every update, and it sits close enough to
+    // that ceiling that adding two `exists()`/`get()` path constructions to
+    // the advancement branch tipped it over: writes started failing with
+    // "Unable to evaluate the expression as the maximum of 1000 expressions
+    // has been reached", which surfaces as a flat permission denial on a
+    // legitimate scoring write. `test/security/rules.test.mjs` catches it —
+    // "lets a scorer carry the account and playerUids with an advancing
+    // winner".
+    //
+    // The guarantee is not lost, it is enforced one layer out and one layer
+    // in:
+    //
+    //   * the `entrants` rule above refuses to put an ACCOUNT in the draw
+    //     unless it has a registration on this competition or an active
+    //     membership of this club, so a stranger cannot become an entrant; and
+    //   * `functions/participant_trust.js` refuses to move a rating for any
+    //     participant whose relationship to the competition it cannot verify,
+    //     which is the check that actually protects the rating whatever a
+    //     fixture document claims.
+    //
+    // A uid written straight onto a fixture therefore still reaches nothing:
+    // no rating, no career credit, no ranking entry. What it can do is appear
+    // on a scorecard in that club's own event, which is the same thing typing
+    // a name into a line-up has always been able to do.
+
     // The parent fixture of an event.
     function fixtureDoc(orgId, compId, fixtureId) {
       return get(/databases/$(database)/documents/orgs/$(orgId)/competitions/$(compId)/fixtures/$(fixtureId)).data;
@@ -204,6 +237,27 @@ service cloud.firestore {
                     && request.resource.data.application.note.size() <= 400)));
     }
 
+    // The clubs mirror. Bounded at 50 because that is a sane ceiling on a
+    // document, NOT because 50 are consulted.
+    //
+    // `sharesActiveOrgWith` below reads the first FOUR and no more, and the
+    // limit is Firestore's rather than a choice: a single-document read may
+    // make ten document lookups in total, each `isActive()` costs one, and the
+    // rule shares that budget with everything else the read evaluates. Rules
+    // cannot loop, so four unrolled comparisons is what fits.
+    //
+    // The consequence, stated plainly because it used to be invisible: a
+    // player active in six clubs has `profileVisibility: 'community'` honoured
+    // for the four most recent and silently not for the other two. No error,
+    // nothing in any log — the profile simply does not open for a club-mate
+    // who joined through the fifth club.
+    //
+    // What makes that tolerable is the ORDER, which is the client's job and
+    // not decoration: `profileOrgMirrorProvider` sorts by `joinedAt`
+    // descending, so the four that are checked are the four a person is most
+    // likely to be recognised through. `AppUser.communityVisibilityDepth`
+    // mirrors this number on the Dart side and
+    // `test/cross_language_mirrors_test.dart` holds the two together.
     function orgMirrorBounded() {
       return !('orgIds' in request.resource.data)
         || (request.resource.data.orgIds is list
@@ -891,11 +945,30 @@ service cloud.firestore {
     // -------------------------------------------------------------------
     match /playerDirectory/{listedUid} {
 
-      // Signed-in, and no finer. The document holds a display name, a photo,
-      // a district and a set of sports — the same things a club roster shows
-      // a fellow member — and gating a directory on membership of something
-      // would make it useless to the people it exists for.
-      allow read: if isSignedIn();
+      // `get` and `list` are split, and the split IS the Premium entitlement.
+      //
+      // Opening ONE listing stays free forever. Somebody who was sent a link,
+      // or who tapped a name on a team sheet, is not using the discovery
+      // feature — and a paywall there would be a paywall on a shared link,
+      // which is the kind of gate that makes a product feel hostile rather
+      // than paid-for.
+      //
+      // BROWSING the directory is the paid move: it is the only thing in the
+      // product that hands somebody a stranger they would otherwise never have
+      // found, which is exactly how `canOpenStrangerProfilesProvider`
+      // describes what Premium buys. That provider was the whole enforcement —
+      // a client-side boolean — so a modified client had it for nothing.
+      // Rules can tell a query from a document fetch, so this is the one place
+      // the entitlement can actually be held.
+      //
+      // Inert during the launch offer, deliberately. Plans are free until the
+      // app goes public, so `introOfferActive()` keeps the directory open to
+      // everyone until the day prices start; on that day this becomes the gate
+      // without another deploy. See `introOfferActive` for why all three
+      // mirrors of that flag move together.
+      allow get: if isSignedIn();
+      allow list: if isSignedIn()
+        && (listedUid == uid() || introOfferActive() || memberPlanActive());
 
       allow create, update: if isSignedIn()
         && listedUid == uid()
@@ -1365,6 +1438,26 @@ service cloud.firestore {
     // message disappear.
     // -------------------------------------------------------------------
 
+    // Whether a PERSON's paid entitlement is live right now.
+    //
+    // The rules mirror of `AppUser.hasPremiumAt`, and the thing Premium was
+    // missing: both of its benefits — ads suppressed, stranger profiles
+    // openable — were client-side providers (`promo_banner.dart`,
+    // `canOpenStrangerProfilesProvider`), and the read rule that would have to
+    // enforce the second admitted every signed-in caller. A modified client
+    // had Premium for free, which is a ₹99 tier with nothing behind it.
+    //
+    // Read off the account's own document, never off a claim: a claim is
+    // minted at sign-in and a plan that lapses mid-session has lapsed.
+    function memberPlanActive() {
+      let path = /databases/$(database)/documents/users/$(uid());
+      return isSignedIn()
+        && exists(path)
+        && get(path).data.get('plan', 'free') == 'premium'
+        && get(path).data.get('planValidUntil', null) is timestamp
+        && get(path).data.planValidUntil > request.time;
+    }
+
     // Whether a club's paid entitlement is live right now. The rules mirror
     // of `Organization.hasPaidPlanAt`; change them together.
     function clubPlanActive(orgId) {
@@ -1617,7 +1710,18 @@ service cloud.firestore {
           : resource.data.status == 'active'
             ? (
               // A move, by the player whose turn the document says it is.
-              (appendsOneMove() && resource.data.turnUid == uid())
+              //
+              // `lastMoveAt` must be the SERVER's clock. It is the timestamp
+              // `idleSince()` measures a timeout claim from, so a player who
+              // could write it could move, back-date the move an hour, and
+              // claim their opponent had abandoned the game — which is
+              // `timedOut()` passing on evidence the claimant manufactured.
+              // The comment on that rule already promises the ten minutes are
+              // measured against the server's own timestamps; this is what
+              // makes it true.
+              (appendsOneMove()
+                && resource.data.turnUid == uid()
+                && serverTimed('lastMoveAt'))
               // Ending it without a move. Three ways, and each has to be
               // checked separately — an earlier version of this rule allowed
               // any player to write any finished result, which let a losing
@@ -1639,8 +1743,38 @@ service cloud.firestore {
                     || timedOut()
                   ))
               // Offering or withdrawing a draw, which changes nothing else.
+              //
+              // "Nothing else" is now enforced rather than described. This
+              // branch used to constrain only `movesUnchanged()` and the
+              // status, which left `turnUid`, `lastMoveAt` and `drawOfferBy`
+              // freely writable while a game was in play — and each of those
+              // is a precondition of something two lines above:
+              //
+              //   * write `drawOfferBy` to your OPPONENT, then accept it, and
+              //     `agreedDraw()` passes. A unilateral draw, in two writes,
+              //     past the check whose comment says it cannot happen.
+              //   * back-date `lastMoveAt` and set `turnUid` to your opponent,
+              //     then claim a win: `timedOut()` passes, because the ten
+              //     minutes it measures are now measured from a timestamp the
+              //     claimant wrote.
+              //   * set `turnUid` to yourself, then append a move, and you have
+              //     moved twice.
+              //
+              // Nothing here is rated, but `onArenaMatchFinished` writes the
+              // result into the public `arenaStats` ladder, so a fabricated win
+              // is a fabricated standing.
+              //
+              // An allowlist, not a blocklist: a field added to an arena match
+              // later is not writable here by default.
               || (movesUnchanged()
-                  && request.resource.data.status == 'active')
+                  && request.resource.data.status == 'active'
+                  && request.resource.data.diff(resource.data).affectedKeys()
+                       .hasOnly(['drawOfferBy', 'updatedAt'])
+                  // A draw is OFFERED by the person offering it, and withdrawn
+                  // by the same person. Neither player may put the other's name
+                  // on an offer they did not make.
+                  && (request.resource.data.get('drawOfferBy', null) == uid()
+                      || request.resource.data.get('drawOfferBy', null) == null))
             )
           // A finished, declined or withdrawn game is a matter of record.
           : false
@@ -2048,9 +2182,18 @@ service cloud.firestore {
       // Claimed by the auction's creator as part of the create batch. The
       // create fails if the code is taken, which is the whole uniqueness
       // mechanism — same as playerCodes.
+      // Claimed by the auction's own creator, checked the same way
+      // `inviteCodes` checks it twenty lines up: through `getAfter`, because
+      // the code and the auction are written in one batch. This used to ask
+      // only that `createdByUid` was the caller and that `auctionId` was a
+      // string — so anybody could squat memorable codes and point them at
+      // auctions they had nothing to do with, which is a code that leads
+      // somebody holding it to the wrong room.
       allow create: if isSignedIn()
         && request.resource.data.auctionId is string
-        && request.resource.data.createdByUid == uid();
+        && request.resource.data.createdByUid == uid()
+        && getAfter(/databases/$(database)/documents/auctions/$(request.resource.data.auctionId))
+             .data.createdByUid == uid();
       allow update: if false;
       allow delete: if isSignedIn() && resource.data.createdByUid == uid();
     }
@@ -2630,7 +2773,26 @@ service cloud.firestore {
       // Club Feed & Announcements
       match /announcements/{announcementId} {
         allow read: if orgIsReadable(orgId);
-        allow create: if canManageCompetitions(orgId) || canManageComms(orgId);
+
+        // Every other writable document in this file is bounded and says who
+        // wrote it. This one asked for a role and nothing else — no
+        // `authorUid == uid()`, no length caps on any field.
+        //
+        // The author check is not cosmetic. The update rule below makes the
+        // AUTHOR the only person who may edit or cancel a match call, so an
+        // organizer could post a fixture request in a colleague's name that
+        // the colleague was then the only one able to take down — and that
+        // colleague could not, because they never wrote it. A notice board
+        // where anybody with the role can sign somebody else's name is also
+        // simply not a record of who asked the club to keep a Saturday free.
+        allow create: if (canManageCompetitions(orgId) || canManageComms(orgId))
+          && request.resource.data.get('authorUid', uid()) == uid()
+          && request.resource.data.get('title', '') is string
+          && request.resource.data.get('title', '').size() <= 200
+          && request.resource.data.get('body', '') is string
+          && request.resource.data.get('body', '').size() <= 4000
+          && request.resource.data.get('authorName', '') is string
+          && request.resource.data.get('authorName', '').size() <= 120;
 
         // Changing or removing one that is already out.
         //
@@ -2874,10 +3036,24 @@ service cloud.firestore {
         // counters, and only those.
         allow update: if (isActive(orgId)
                            || resource.data.get('openToNonMembers', false) == true)
-          && (isRegistrationCounterBump()
-              || isWithdrawalCounterDrop()
-              || isWaitlistPromotionCounterMove())
-          && resource.data.status == 'registration_open';
+          && (
+            // Joining and being promoted only happen while entries are open.
+            ((isRegistrationCounterBump() || isWaitlistPromotionCounterMove())
+              && resource.data.status == 'registration_open')
+            // Withdrawing does not, and pinning it to `registration_open` was
+            // a slow data leak rather than a safety measure. A member may
+            // withdraw at any time — the registration update rule has no
+            // status gate, deliberately, because somebody who cannot play on
+            // Saturday cannot play on Saturday. But the matching decrement was
+            // refused the moment entries closed, so every late withdrawal left
+            // `confirmedCount` permanently one too high and the number the
+            // organizer plans a draw around drifted away from the truth.
+            //
+            // Bounded by the same `>= 0` floors as before, and refused on a
+            // completed event, whose counts are part of its record.
+            || (isWithdrawalCounterDrop()
+              && resource.data.status != 'completed')
+          );
 
         allow update: if canManageCompetitions(orgId)
           && unchanged('orgId')
@@ -3125,7 +3301,41 @@ service cloud.firestore {
         // ---------------------------------------------------------------
         match /entrants/{entrantId} {
           allow read: if orgIsReadable(orgId);
-          allow create, update: if canManageCompetitions(orgId);
+
+          // An entrant that names an ACCOUNT must name one with some real
+          // connection to this competition.
+          //
+          // `uid` is the field that decides whose rating a finished match
+          // moves — `Entrant.soloUid` feeds `Fixture.entrantAUid`, which
+          // `onMatchSettled` settles against. It used to be unchecked here and
+          // unchecked on the fixture, so an organizer could put any account id
+          // in the country into their own draw and rate it. See
+          // functions/participant_trust.js for the full attack.
+          //
+          // Two ways to qualify, and they are the same two the server's own
+          // check accepts, deliberately — one concept stated in both places
+          // rather than two that can drift:
+          //
+          //   * they have a registration on this competition, which is the
+          //     tournament path; or
+          //   * they are an active member of this club, which is the club
+          //     path — `seedEntrants` writes a field straight from a match
+          //     availability call with no registration anywhere, and those ten
+          //     people are members who said they were free.
+          //
+          // Deliberately NOT a proof of consent, which rules cannot establish:
+          // an organizer may still enter a member who did not ask to play.
+          // What it removes is the ability to name a stranger.
+          function entrantAccountIsConnected() {
+            return !('uid' in request.resource.data)
+              || request.resource.data.uid == null
+              || exists(/databases/$(database)/documents/orgs/$(orgId)/competitions/$(compId)/registrations/$(request.resource.data.uid))
+              || isActiveAs(request.resource.data.uid, orgId);
+          }
+
+          allow create, update: if canManageCompetitions(orgId)
+            && entrantAccountIsConnected();
+
           allow delete: if canManageCompetitions(orgId)
             && get(/databases/$(database)/documents/orgs/$(orgId)/competitions/$(compId))
                  .data.status != 'in_progress';
@@ -3525,6 +3735,9 @@ service cloud.firestore {
                 || (
                   request.resource.data.keys().hasOnly(['cheer', 'side', 'at'])
                   && request.resource.data.cheer is string
+                  // The one world-readable, client-written string in this file
+                  // with no ceiling on it. A cheer is an emoji and a word.
+                  && request.resource.data.cheer.size() <= 40
                   && request.resource.data.side in ['a', 'b']
                   && serverTimed('at')
                 )
@@ -4201,25 +4414,61 @@ service cloud.firestore {
           || request.resource.data.destination.matches('^/.*')
         );
 
-      // Staff move status; anyone signed in may ping exactly one impression or click
-      // counter by exactly one, and nothing else in the same write — see
-      // `AdRepository.recordImpression`/`recordClick`.
+      // Staff move status; anyone signed in may ping a counter by one, ONCE
+      // per campaign, ever.
+      //
+      // The +1 bound was already here and it was not the protection it looked
+      // like: nothing limited how many times one account could apply it, so
+      // any signed-in caller could run either counter up indefinitely. With
+      // campaigns billed against `budgetPaise` that is a route to charging an
+      // advertiser for traffic that never happened, and to exhausting a
+      // competitor's budget before lunch.
+      //
+      // The fix is a receipt. An increment must create its own
+      // `adCampaigns/{id}/counted/{uid}_{kind}` document in the same batch, and
+      // that document's id makes every later attempt fail on existence rather
+      // than on a rule — the same structural trick
+      // `groundReports/{reporterUid}_{groundId}` uses to make "one person, one
+      // report" true without counting anything.
+      //
+      // What this measures is therefore UNIQUE REACH — how many different
+      // accounts saw the banner and how many tapped it — not raw impressions.
+      // A narrower number than the field name suggests, and a considerably
+      // more honest one to put in front of an advertiser than a figure any
+      // account could run up on its own.
       allow update: if isGiveStaff()
         || (
           isSignedIn()
+          && resource.data.status == 'approved'
           && (
             (
               request.resource.data.diff(resource.data).affectedKeys().hasOnly(['impressions'])
               && request.resource.data.impressions == resource.data.impressions + 1
+              && countedReceiptExists(campaignId, 'impression')
             )
             || (
               request.resource.data.diff(resource.data).affectedKeys().hasOnly(['clicks'])
               && request.resource.data.clicks == resource.data.clicks + 1
+              && countedReceiptExists(campaignId, 'click')
             )
           )
         );
 
       allow delete: if false;
+
+      // The receipt itself. Write-once by its own subject, never readable by
+      // anyone — an advertiser must not be able to enumerate who saw their
+      // banner, which is the whole reason the aggregate is the only thing
+      // exposed.
+      match /counted/{receiptId} {
+        allow read: if false;
+        allow create: if isSignedIn()
+          && receiptId == uid() + '_' + request.resource.data.get('kind', '')
+          && request.resource.data.get('kind', '') in ['impression', 'click']
+          && request.resource.data.uid == uid()
+          && serverTimed('at');
+        allow update, delete: if false;
+      }
     }
 
     // -------------------------------------------------------------------
@@ -4227,6 +4476,28 @@ service cloud.firestore {
     // -------------------------------------------------------------------
     function isGiveStaff() {
       return isSignedIn() && request.auth.token.admin == true;
+    }
+
+    // Whether this same batch is filing the caller's own receipt for counting
+    // `kind` against `campaignId`.
+    //
+    // One receipt per account per campaign per kind, for the life of the
+    // campaign — so the counters measure UNIQUE REACH rather than raw
+    // impressions. That is a deliberate narrowing of what the number means and
+    // it is the honest version of it: repeat impressions were precisely the
+    // forgeable part, since nothing stopped one account applying the old +1
+    // indefinitely.
+    //
+    // No day dimension, and no input from the client at all. A per-day receipt
+    // needs a date in the document id, rules cannot format `request.time`, and
+    // taking the date from the client meant the campaign document had to carry
+    // a field the update's own `affectedKeys` allowlist then refused — a rule
+    // that contradicted itself and denied every honest increment. Unique reach
+    // needs nothing but the caller's own uid, which is the one thing here that
+    // cannot be forged.
+    function countedReceiptExists(campaignId, kind) {
+      return getAfter(/databases/$(database)/documents/adCampaigns/$(campaignId)/counted/$(uid() + '_' + kind))
+             .data.uid == uid();
     }
 
     // -------------------------------------------------------------------
@@ -4733,18 +5004,16 @@ service cloud.firestore {
         )
         && request.resource.data.hourlyRatePaise >= 0
         && request.resource.data.openHour < request.resource.data.closeHour
-        // `bookingCount` is maintained by the booking transaction, which increments
-        // it.
-        && (
-          unchanged('bookingCount')
-          || request.resource.data.bookingCount == resource.data.bookingCount + 1
-        );
+        // `bookingCount` is the SERVER's, like `checkInCount` beside it.
+        //
+        // It used to be bumped by the client — by any signed-in client, by one,
+        // with nothing limiting repetition — which made the one number a
+        // customer reads as social proof the one number anybody could inflate
+        // without booking anything. `onGroundBooked` in functions/grounds.js
+        // now recomputes it from the bookings themselves, so it cannot drift
+        // and a cancelled booking takes its contribution back.
+        && frozen('bookingCount');
 
-      // The counter bump, by whoever is doing the booking.
-      allow update: if isSignedIn()
-        && request.resource.data.diff(resource.data).affectedKeys()
-             .hasOnly(['bookingCount'])
-        && request.resource.data.bookingCount == resource.data.bookingCount + 1;
 
       // Review and enforcement. Deliberately unrestricted in WHICH fields it may
       // touch: a reviewer approving a listing, suspending one, or correcting a
@@ -4760,7 +5029,22 @@ service cloud.firestore {
       // Bookings against one ground.
       // -----------------------------------------------------------------
       match /bookings/{bookingId} {
-        allow read: if isSignedIn();
+        // The booker, the ground's owner, and staff. It used to be any
+        // signed-in account, which exposed `bookedByUid`, the day and the hour
+        // of every booking on the platform.
+        //
+        // The sibling `checkIns` collection is deliberately private, with a
+        // comment explaining that it records where a named person stood at a
+        // named time. A booking records where a named person INTENDS to stand,
+        // which for a stalking risk is the more useful half, and it was open.
+        //
+        // Slot occupancy is what a person browsing a calendar actually needs,
+        // and that is `hourHolds` — readable by any signed-in caller, carrying
+        // only a day and an hour. See its own rule for why.
+        allow read: if isSignedIn()
+          && (resource.data.bookedByUid == uid()
+              || groundOwnerUid(groundId) == uid()
+              || isTrustStaff());
 
         allow create: if isSignedIn()
           && request.resource.data.bookedByUid == uid()

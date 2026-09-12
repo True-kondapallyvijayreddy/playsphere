@@ -7723,23 +7723,132 @@ describe('ad campaigns: self-serve submission, staff-only review', () => {
     );
   });
 
-  it('lets any signed-in viewer bump impressions or clicks by exactly one, nothing else', async () => {
+  // -------------------------------------------------------------------
+  // The counters, and why they are counters of PEOPLE.
+  //
+  // The +1 bound was here from the start and it was not the protection it
+  // looked like: nothing limited how many times one account could apply it,
+  // so any signed-in caller could run either counter up indefinitely. With
+  // campaigns billed against `budgetPaise` that is a route to charging an
+  // advertiser for traffic that never happened, and to exhausting a
+  // competitor's budget before lunch.
+  //
+  // An increment now has to file its own receipt in the same batch, and the
+  // receipt's document id is what makes the second attempt impossible. The
+  // number therefore measures unique reach rather than raw impressions —
+  // narrower, and the only version of it that could not be forged.
+  // -------------------------------------------------------------------
+  const countOnce = (db, campaignId, uid, kind, field, by) => {
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'adCampaigns', campaignId), { [field]: by });
+    batch.set(
+      doc(db, 'adCampaigns', campaignId, 'counted', `${uid}_${kind}`),
+      { uid, kind, at: serverTimestamp() },
+    );
+    return batch.commit();
+  };
+
+  it('counts a viewer once, with a receipt', async () => {
     await seed(async (db) => {
       await setDoc(doc(db, 'adCampaigns', 'camp_1'), campaign({ status: 'approved' }));
     });
     const db = testEnv.authenticatedContext(OUTSIDER).firestore();
     await assertSucceeds(
-      updateDoc(doc(db, 'adCampaigns', 'camp_1'), { impressions: 1 }),
+      countOnce(db, 'camp_1', OUTSIDER, 'impression', 'impressions', 1),
     );
     await assertSucceeds(
-      updateDoc(doc(db, 'adCampaigns', 'camp_1'), { clicks: 1 }),
+      countOnce(db, 'camp_1', OUTSIDER, 'click', 'clicks', 1),
     );
-    // Not by two at once, and not alongside another field.
+  });
+
+  it('refuses the same viewer counting twice', async () => {
+    // The whole point. The receipt already exists, so the batch is refused —
+    // which is what turns "impressions" into a number nobody can inflate.
+    await seed(async (db) => {
+      await setDoc(doc(db, 'adCampaigns', 'camp_1'), campaign({ status: 'approved' }));
+      await setDoc(
+        doc(db, 'adCampaigns', 'camp_1', 'counted', `${OUTSIDER}_impression`),
+        { uid: OUTSIDER, kind: 'impression', at: serverTimestamp() },
+      );
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
     await assertFails(
-      updateDoc(doc(db, 'adCampaigns', 'camp_1'), { impressions: 3 }),
+      countOnce(db, 'camp_1', OUTSIDER, 'impression', 'impressions', 2),
     );
+  });
+
+  it('refuses an increment with no receipt at all', async () => {
+    // The old shape: a bare +1. This is the write that used to be allowed
+    // without limit.
+    await seed(async (db) => {
+      await setDoc(doc(db, 'adCampaigns', 'camp_1'), campaign({ status: 'approved' }));
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
     await assertFails(
-      updateDoc(doc(db, 'adCampaigns', 'camp_1'), { impressions: 2, headline: 'Hijacked' }),
+      updateDoc(doc(db, 'adCampaigns', 'camp_1'), { impressions: 1 }),
+    );
+  });
+
+  it('refuses a receipt filed in somebody else\'s name', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'adCampaigns', 'camp_1'), campaign({ status: 'approved' }));
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      countOnce(db, 'camp_1', 'somebody_else', 'impression', 'impressions', 1),
+    );
+  });
+
+  it('still refuses a jump of two, or a field smuggled alongside', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'adCampaigns', 'camp_1'), campaign({ status: 'approved' }));
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      countOnce(db, 'camp_1', OUTSIDER, 'impression', 'impressions', 3),
+    );
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'adCampaigns', 'camp_1'), {
+      impressions: 1,
+      headline: 'Hijacked',
+    });
+    batch.set(
+      doc(db, 'adCampaigns', 'camp_1', 'counted', `${OUTSIDER}_impression`),
+      { uid: OUTSIDER, kind: 'impression', at: serverTimestamp() },
+    );
+    await assertFails(batch.commit());
+  });
+
+  it('refuses counting a campaign that is not approved', async () => {
+    // A pending campaign is not in front of anybody, so an impression on it
+    // is either a bug or an attempt to bill for one.
+    await seed(async (db) => {
+      await setDoc(doc(db, 'adCampaigns', 'camp_1'), campaign());
+    });
+    const db = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      countOnce(db, 'camp_1', OUTSIDER, 'impression', 'impressions', 1),
+    );
+  });
+
+  it('keeps the receipts unreadable, even by the advertiser', async () => {
+    // An advertiser who could enumerate these would know exactly who saw
+    // their banner, which is the reason the aggregate is the only thing
+    // exposed.
+    await seed(async (db) => {
+      await setDoc(doc(db, 'adCampaigns', 'camp_1'), campaign({ status: 'approved' }));
+      await setDoc(
+        doc(db, 'adCampaigns', 'camp_1', 'counted', `${OUTSIDER}_impression`),
+        { uid: OUTSIDER, kind: 'impression', at: serverTimestamp() },
+      );
+    });
+    const asAdvertiser = testEnv.authenticatedContext(ADVERTISER).firestore();
+    await assertFails(
+      getDoc(doc(asAdvertiser, 'adCampaigns', 'camp_1', 'counted', `${OUTSIDER}_impression`)),
+    );
+    const asSelf = testEnv.authenticatedContext(OUTSIDER).firestore();
+    await assertFails(
+      getDoc(doc(asSelf, 'adCampaigns', 'camp_1', 'counted', `${OUTSIDER}_impression`)),
     );
   });
 });
@@ -8177,9 +8286,17 @@ describe('ground bookings: price derived server-side, hourHolds are the real '
   //
   // This test is the shape of the real transaction, run as a stranger,
   // because that is the only shape that could have caught it.
+  //
+  // The transaction no longer touches the GROUND at all. `bookingCount` used
+  // to be bumped here under a rule that let any signed-in caller add one, with
+  // nothing limiting repetition — so the number a customer reads as social
+  // proof was the number anybody could run up without booking anything. It is
+  // now recomputed by `onGroundBooked` from the bookings themselves, which is
+  // where `checkInCount` already lived, and the ground document is fully the
+  // owner's again.
   // -------------------------------------------------------------------
-  it('lets a stranger complete a whole booking: doc, holds and the '
-    + "ground's own bookingCount", async () => {
+  it('lets a stranger complete a whole booking: the doc and its holds',
+    async () => {
     const db = testEnv.authenticatedContext(BOOKER).firestore();
     const batch = writeBatch(db);
     batch.set(doc(db, 'grounds', GROUND, 'bookings', 'bk_1'), booking());
@@ -8191,18 +8308,17 @@ describe('ground bookings: price derived server-side, hourHolds are the real '
       doc(db, 'grounds', GROUND, 'hourHolds', '2026-08-10_19'),
       hold({ hour: 19 }),
     );
-    batch.update(doc(db, 'grounds', GROUND), {
-      bookingCount: increment(1),
-    });
     await assertSucceeds(batch.commit());
   });
 
-  it('refuses a stranger touching anything on the ground except the '
-    + 'counter', async () => {
-    // The counter bump is the one write a non-owner may make to a ground.
-    // Opening it must not have opened the listing itself — the price, the
-    // hours and the verified badge are still the owner's alone.
+  it('refuses a stranger touching the ground document at all', async () => {
+    // There is no longer any write a non-owner may make to a ground. The
+    // price, the hours, the verified badge and now the booking count are all
+    // either the owner's or the server's.
     const db = testEnv.authenticatedContext(BOOKER).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'grounds', GROUND), { bookingCount: increment(1) }),
+    );
     await assertFails(
       updateDoc(doc(db, 'grounds', GROUND), {
         bookingCount: increment(1),
@@ -8214,16 +8330,16 @@ describe('ground bookings: price derived server-side, hourHolds are the real '
     );
   });
 
-  it('refuses a stranger inflating the counter by more than one', async () => {
-    // One booking, one increment. A ground's booking count is the closest
-    // thing it has to a reputation, and a stranger who could add 500 to it
-    // could sell that.
-    const db = testEnv.authenticatedContext(BOOKER).firestore();
+  it('refuses even the OWNER writing the booking count', async () => {
+    // A ground's booking count is the closest thing it has to a reputation.
+    // An owner who could set it could sell that, and the owner is the person
+    // with the motive.
+    const asOwner = testEnv.authenticatedContext(GROUND_OWNER).firestore();
     await assertFails(
-      updateDoc(doc(db, 'grounds', GROUND), { bookingCount: increment(50) }),
+      updateDoc(doc(asOwner, 'grounds', GROUND), { bookingCount: 999 }),
     );
     await assertFails(
-      updateDoc(doc(db, 'grounds', GROUND), { bookingCount: 999 }),
+      updateDoc(doc(asOwner, 'grounds', GROUND), { bookingCount: increment(1) }),
     );
   });
 
@@ -8330,7 +8446,7 @@ describe('ground bookings: price derived server-side, hourHolds are the real '
       tx.set(doc(db, 'grounds', GROUND, 'bookings', 'bk_1'), booking());
       tx.set(h18, hold({ hour: 18 }));
       tx.set(h19, hold({ hour: 19 }));
-      tx.update(doc(db, 'grounds', GROUND), { bookingCount: increment(1) });
+      // No ground write: `onGroundBooked` owns `bookingCount` now.
     }));
   });
 

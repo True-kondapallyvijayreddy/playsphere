@@ -262,6 +262,7 @@ class _TeamBuilderSheetState extends ConsumerState<TeamBuilderSheet> {
                 ),
               ),
               IconButton(
+                tooltip: 'Close',
                 icon: const Icon(Icons.close),
                 onPressed: () => Navigator.of(context).pop(),
               ),
@@ -385,6 +386,7 @@ class _TeamBuilderSheetState extends ConsumerState<TeamBuilderSheet> {
                               backgroundColor: theme.colorScheme.primaryContainer,
                             ),
                             IconButton(
+                              tooltip: 'Delete',
                               icon: const Icon(Icons.delete_outline, size: 20),
                               onPressed: () {
                                 setState(() {

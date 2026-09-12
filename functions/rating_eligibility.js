@@ -82,3 +82,81 @@ export function ratingWithheldReason(fixture) {
 export function isRated(fixture) {
   return ratingWithheldReason(fixture) === null;
 }
+
+/**
+ * The smallest field a rating may come out of.
+ *
+ * ## Why a floor at all
+ *
+ * `RATED_SOURCE_TYPES` above rests on an argument about who organised the
+ * match — "a draw, an organiser who did not want either side to win,
+ * confirmation from the other end". That argument is sound and it does not
+ * survive a club the winner founded five minutes earlier.
+ *
+ * Anyone signed in may create an organization (`allow create: if isSignedIn()`
+ * in firestore.rules, deliberately — a village side should not need permission
+ * to exist). Its founder is its owner, so they may open a competition, stamp
+ * it `tournament`, enter two accounts they control, and score it. Every check
+ * in this file passes: the source type is rated, the result type is normal.
+ * The rating that came out travelled onto rosters, ranking boards, talent
+ * boards and scout searches exactly like one from a district championship.
+ *
+ * Four entrants is not a strong claim about legitimacy and is not meant to be.
+ * It is the point at which a forged event stops being two accounts and a
+ * fixture, and starts being a draw with byes, rounds and a bracket the forger
+ * has to keep consistent — which is a great deal of work for one rating and,
+ * unlike the two-account version, leaves a shape somebody reviewing the club
+ * can recognise.
+ *
+ * The real defences are the two this sits between: `participant_trust.js`
+ * refuses to rate a player with no verifiable relationship to the
+ * competition, and nothing here can be reached without an organiser role in
+ * the club that owns it.
+ */
+export const MIN_RATED_ENTRANTS = 4;
+
+/**
+ * Why the COMPETITION this fixture belongs to may not carry a rating, or null
+ * when it may.
+ *
+ * Separate from `ratingWithheldReason` because it asks about a different
+ * document, and kept pure for the same reason everything else here is: the
+ * rule should be checkable without a database.
+ *
+ * `entrantCount` is the field `seedEntrants` and `_closeEntries` write when a
+ * field is locked, so it is the organiser's own statement of how many sides
+ * were in the draw. A competition with no count at all is withheld rather than
+ * waved through — an unstamped field is the same unknown provenance an
+ * unstamped `sourceType` is, and the honest answer to an unknown is not to
+ * rate it.
+ */
+export function competitionRatingWithheldReason(competition) {
+  if (!competition) return 'no_competition';
+  const entrants = Number(competition.entrantCount);
+  if (!Number.isFinite(entrants)) return 'entrant_count_missing';
+  if (entrants < MIN_RATED_ENTRANTS) return `field_of_${entrants}`;
+  return null;
+}
+
+/**
+ * Whether the two sides of a match are actually two different people.
+ *
+ * A side rating itself is not a contest, and it is the cheapest forgery there
+ * is: one account on both team sheets, a result, and a rating that moved
+ * against an opponent who was the same person. Nothing checked it —
+ * `interClubShapeValid` requires two distinct CLUBS but says nothing about
+ * accounts, and an individual event has no clubs to compare.
+ *
+ * Takes the two already-verified squads, so a guardian playing a match
+ * "against" a child whose profile they manage is caught by the same test: both
+ * uids are real and distinct accounts, but a shared custodian is passed in as
+ * `custodianByUid` and collapses them.
+ */
+export function sidesAreDistinct(sideA, sideB, custodianByUid = {}) {
+  const identity = (uid) => custodianByUid[uid] ?? uid;
+  const a = new Set(sideA.map(identity));
+  for (const uid of sideB) {
+    if (a.has(identity(uid))) return false;
+  }
+  return sideA.length > 0 && sideB.length > 0;
+}

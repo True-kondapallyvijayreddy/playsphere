@@ -46,6 +46,8 @@
 
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
+
+import { CALLABLE_OPTS } from './app_check.js';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { logger } from 'firebase-functions';
 
@@ -299,45 +301,49 @@ async function loadPlayerCandidates(now, { requireTrail = true } = {}) {
   }
 
   const candidates = [];
-  const ratingsSnap = await db().collectionGroup('ratings').get();
-  for (const doc of ratingsSnap.docs) {
-    const uid = doc.ref.parent.parent?.id;
-    const profile = uid ? profiles.get(uid) : null;
-    if (!profile) continue;
-    const d = doc.data();
-    // With the warehouse supplying trends, a rating whose local trail is
-    // empty is still a candidate — the changelog remembers movements that
-    // predate the trail being introduced, and dropping those rows would make
-    // the warehouse path see *less* history than the fallback.
-    if (requireTrail && (!Array.isArray(d.trail) || d.trail.length === 0)) {
-      continue;
-    }
+  // Paged rather than read whole — see functions/paged_scan.js.
+  await forEachPaged(
+    db().collectionGroup('ratings'),
+    (doc) => {
+        const uid = doc.ref.parent.parent?.id;
+        const profile = uid ? profiles.get(uid) : null;
+        if (!profile) return;
+        const d = doc.data();
+        // With the warehouse supplying trends, a rating whose local trail is
+        // empty is still a candidate — the changelog remembers movements that
+        // predate the trail being introduced, and dropping those rows would make
+        // the warehouse path see *less* history than the fallback.
+        if (requireTrail && (!Array.isArray(d.trail) || d.trail.length === 0)) {
+          return;
+        }
 
-    // The document id is the rating key, which for chess is `chess:blitz`
-    // rather than the bare sport (see `ratingKeyFor`). Boards are per sport,
-    // so the time control is trimmed back off here.
-    //
-    // Split on the COLON, and only the colon. This used to split on `_`,
-    // which was wrong in both directions at once: `chess:blitz` contains no
-    // underscore, so the time control was never actually trimmed and chess
-    // rows landed on a `chess-blitz` board no client ever asks for — while
-    // every sport whose id genuinely contains an underscore was truncated,
-    // putting table tennis on a `table` board, kho-kho on a `kho` board, and
-    // merging `athletics_sprint` with `athletics_field`.
-    //
-    // Board ids therefore change for those sports. `publishBoards` deletes
-    // the documents it no longer writes, so one run repairs it.
-    const sportId = baseSportId(doc.id);
+        // The document id is the rating key, which for chess is `chess:blitz`
+        // rather than the bare sport (see `ratingKeyFor`). Boards are per sport,
+        // so the time control is trimmed back off here.
+        //
+        // Split on the COLON, and only the colon. This used to split on `_`,
+        // which was wrong in both directions at once: `chess:blitz` contains no
+        // underscore, so the time control was never actually trimmed and chess
+        // rows landed on a `chess-blitz` board no client ever asks for — while
+        // every sport whose id genuinely contains an underscore was truncated,
+        // putting table tennis on a `table` board, kho-kho on a `kho` board, and
+        // merging `athletics_sprint` with `athletics_field`.
+        //
+        // Board ids therefore change for those sports. `publishBoards` deletes
+        // the documents it no longer writes, so one run repairs it.
+        const sportId = baseSportId(doc.id);
 
-    candidates.push({
-      ...profile,
-      sportId,
-      ratingKey: doc.id,
-      trail: d.trail,
-      deviation: typeof d.deviation === 'number' ? d.deviation : 350,
-      isMinor: ageOnDate(profile.dob, now) < 18,
-    });
-  }
+        candidates.push({
+          ...profile,
+          sportId,
+          ratingKey: doc.id,
+          trail: d.trail,
+          deviation: typeof d.deviation === 'number' ? d.deviation : 350,
+          isMinor: ageOnDate(profile.dob, now) < 18,
+        });
+    },
+    { label: 'talent ratings' },
+  );
   return candidates;
 }
 
@@ -392,35 +398,35 @@ async function loadTeamCandidates(now) {
     return rec;
   };
 
-  const fixturesSnap = await db()
-    .collectionGroup('fixtures')
-    .where('status', '==', 'completed')
-    .get();
+  // Paged rather than read whole — see functions/paged_scan.js.
+  await forEachPaged(
+    db().collectionGroup('fixtures').where('status', '==', 'completed'),
+    (doc) => {
+        const f = doc.data();
+        const a = f.entrantAId;
+        const b = f.entrantBId;
+        if (typeof a !== 'string' || typeof b !== 'string') return;
+        // Both sides must be clubs, and different ones.
+        if (a === b || !orgs.has(a) || !orgs.has(b)) return;
 
-  for (const doc of fixturesSnap.docs) {
-    const f = doc.data();
-    const a = f.entrantAId;
-    const b = f.entrantBId;
-    if (typeof a !== 'string' || typeof b !== 'string') continue;
-    // Both sides must be clubs, and different ones.
-    if (a === b || !orgs.has(a) || !orgs.has(b)) continue;
+        const sportId = f.sportId || 'unknown';
+        const playedRaw = f.completedAt ?? f.ratingSettledAt ?? f.scheduledAt;
+        const playedAt = playedRaw?.toDate ? playedRaw.toDate() : null;
+        const inWindow = playedAt !== null && playedAt > cutoff;
 
-    const sportId = f.sportId || 'unknown';
-    const playedRaw = f.completedAt ?? f.ratingSettledAt ?? f.scheduledAt;
-    const playedAt = playedRaw?.toDate ? playedRaw.toDate() : null;
-    const inWindow = playedAt !== null && playedAt > cutoff;
-
-    for (const orgId of [a, b]) {
-      const rec = recordFor(orgId, sportId);
-      const won = f.isDraw !== true && f.winnerEntrantId === orgId;
-      rec.lifetimeMatches += 1;
-      if (won) rec.lifetimeWins += 1;
-      if (inWindow) {
-        rec.matchesInWindow += 1;
-        if (won) rec.winsInWindow += 1;
-      }
-    }
-  }
+        for (const orgId of [a, b]) {
+          const rec = recordFor(orgId, sportId);
+          const won = f.isDraw !== true && f.winnerEntrantId === orgId;
+          rec.lifetimeMatches += 1;
+          if (won) rec.lifetimeWins += 1;
+          if (inWindow) {
+            rec.matchesInWindow += 1;
+            if (won) rec.winsInWindow += 1;
+          }
+        }
+    },
+    { label: 'talent club form fixtures' },
+  );
 
   // Tournament titles inside the window, shown alongside the form rather than
   // scored into it — see `RisingTeamEntry.tournamentWins`.
@@ -698,8 +704,8 @@ export const computeTalentBoards = onSchedule(
 );
 
 /** Staff-only manual rebuild, for after a data fix or a formula change. */
-export const rebuildTalentBoards = onCall(
-  { region: 'asia-south1', timeoutSeconds: 540, memory: '1GiB' },
+export const rebuildTalentBoards = onCall({
+    ...CALLABLE_OPTS, region: 'asia-south1', timeoutSeconds: 540, memory: '1GiB' },
   async (request) => {
     if (request.auth?.token?.admin !== true) {
       throw new HttpsError(

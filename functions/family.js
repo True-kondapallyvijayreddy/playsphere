@@ -53,6 +53,8 @@ import { getAuth } from 'firebase-admin/auth';
 import { FieldValue, Timestamp, getFirestore } from 'firebase-admin/firestore';
 import { onDocumentUpdated } from 'firebase-functions/v2/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
+
+import { CALLABLE_OPTS } from './app_check.js';
 import { logger } from 'firebase-functions';
 
 function db() {
@@ -313,7 +315,7 @@ export function guardianRefusalReason(guardianData, now, { cap = MAX_MANAGED_CHI
  * `userUpdateInvariantsHold`/`isCustodianOfUnclaimed` there.
  */
 export const createManagedChildProfile = onCall(
-  { region: 'asia-south1' },
+  { ...CALLABLE_OPTS },
   async (request) => {
     const guardianUid = request.auth?.uid;
     if (!guardianUid) {
@@ -408,9 +410,8 @@ export const createManagedChildProfile = onCall(
  * the claim (`AuthService.linkGoogleAccount`, client-side; this function
  * has no part in that step).
  */
-export const redeemClaimCode = onCall(
-  {
-    region: 'asia-south1',
+export const redeemClaimCode = onCall({
+    ...CALLABLE_OPTS,
     // A ceiling on how fast anybody can guess, and on what guessing costs the
     // project. Claims are a handful a day, which two instances serve with room
     // to spare; a script hammering this is queued by the platform instead of

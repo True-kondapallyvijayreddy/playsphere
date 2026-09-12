@@ -54,6 +54,22 @@ enum Capability {
   manageOfficials,
 
   /// Physios, injury records and emergency contacts.
+  ///
+  /// ## The one capability with no server counterpart
+  ///
+  /// `firestore.rules` deliberately has no `canManageMedical`, and says so in
+  /// a comment: nothing in Firestore is club-scoped medical data yet.
+  /// `sportsMedics` is a practitioner's own public listing keyed by their own
+  /// uid, which that person governs; the club's medical brief names its
+  /// welfare contact and gates nothing but what the staff screen displays.
+  ///
+  /// So this is presently a DISPLAY capability, and that is fine as long as it
+  /// stays true. The moment a collection appears that holds a club's injury
+  /// records or a player's emergency contact, the rules need the matching
+  /// helper in the same change — otherwise this enum will be greying in a
+  /// button for a write the database allows anybody with the club's id to make.
+  /// Every other entry here mirrors a real rule; this one is the exception and
+  /// is written down as one rather than left to be discovered.
   manageMedical,
 
   /// Announcements, the club gallery and the club's files.
@@ -139,6 +155,9 @@ class PermissionMatrix {
       Capability.manageOfficials,
       Capability.scoreMatches,
     },
+    // Display only, today. See [Capability.manageMedical] — there is no
+    // `canManageMedical` in firestore.rules because there is no club-scoped
+    // medical data for it to guard.
     ClubPortfolio.medical: {Capability.manageMedical},
     ClubPortfolio.communications: {Capability.manageCommunications},
   };

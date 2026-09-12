@@ -43,6 +43,8 @@
 
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
+
+import { CALLABLE_OPTS } from './app_check.js';
 import { logger } from 'firebase-functions';
 
 function db() {
@@ -123,78 +125,82 @@ export async function backfillParticipants({ dryRun = false } = {}) {
   let batch = db().batch();
   let pending = 0;
 
-  const fixturesSnap = await db().collectionGroup('fixtures').get();
-  for (const doc of fixturesSnap.docs) {
-    scanned += 1;
-    const fixture = doc.data();
+  // Paged rather than read whole — see functions/paged_scan.js.
+  await forEachPaged(
+    db().collectionGroup('fixtures'),
+    async (doc) => {
+        scanned += 1;
+        const fixture = doc.data();
 
-    const compRef = doc.ref.parent.parent;
-    if (!compRef) continue; // orphaned fixture, nothing to resolve against
+        const compRef = doc.ref.parent.parent;
+        if (!compRef) return; // orphaned fixture, nothing to resolve against
 
-    const byEntrant = await soloUidsFor(compRef);
-    // A challenge names clubs and a quick match names sides, so neither has
-    // entrant documents to find — `byEntrant` is empty and both of these stay
-    // null, which is correct: those shapes carry real line-ups.
-    const soloA = byEntrant.get(fixture.entrantAId) ?? null;
-    const soloB = byEntrant.get(fixture.entrantBId) ?? null;
+        const byEntrant = await soloUidsFor(compRef);
+        // A challenge names clubs and a quick match names sides, so neither has
+        // entrant documents to find — `byEntrant` is empty and both of these stay
+        // null, which is correct: those shapes carry real line-ups.
+        const soloA = byEntrant.get(fixture.entrantAId) ?? null;
+        const soloB = byEntrant.get(fixture.entrantBId) ?? null;
 
-    const update = {};
+        const update = {};
 
-    // Written even when null is already the answer ONLY if the field is
-    // absent, so a re-run does not rewrite every fixture in the database to
-    // the value it already holds.
-    if (soloA !== (fixture.entrantAUid ?? null)) update.entrantAUid = soloA;
-    if (soloB !== (fixture.entrantBUid ?? null)) update.entrantBUid = soloB;
-    if (update.entrantAUid !== undefined || update.entrantBUid !== undefined) {
-      entrantUidsWritten += 1;
-    }
+        // Written even when null is already the answer ONLY if the field is
+        // absent, so a re-run does not rewrite every fixture in the database to
+        // the value it already holds.
+        if (soloA !== (fixture.entrantAUid ?? null)) update.entrantAUid = soloA;
+        if (soloB !== (fixture.entrantBUid ?? null)) update.entrantBUid = soloB;
+        if (update.entrantAUid !== undefined || update.entrantBUid !== undefined) {
+          entrantUidsWritten += 1;
+        }
 
-    // `isDraft` on every fixture that predates the field.
-    //
-    // Folded into this sweep rather than given its own because it is the same
-    // collection-group scan over the same documents, and running two of them
-    // over every historical match costs twice for no benefit.
-    //
-    // It is not cosmetic. `firestore.rules` gates a fixture on
-    // `resource.data.isDraft == false`, a STRICT comparison — the defaulting
-    // form is vacuously true when Firestore evaluates a list against a query
-    // rather than a document, which is exactly how the first version of that
-    // rule passed its tests and still served drafts. Strict means a document
-    // missing the field is denied to everyone who cannot manage the
-    // competition, so a match written before the field existed becomes
-    // invisible until this runs. `false` is always right for them: `isDraft`
-    // marks placeholders, and placeholders are younger than the flag.
-    if (fixture.isDraft === undefined) {
-      update.isDraft = false;
-      isDraftWritten += 1;
-    }
+        // `isDraft` on every fixture that predates the field.
+        //
+        // Folded into this sweep rather than given its own because it is the same
+        // collection-group scan over the same documents, and running two of them
+        // over every historical match costs twice for no benefit.
+        //
+        // It is not cosmetic. `firestore.rules` gates a fixture on
+        // `resource.data.isDraft == false`, a STRICT comparison — the defaulting
+        // form is vacuously true when Firestore evaluates a list against a query
+        // rather than a document, which is exactly how the first version of that
+        // rule passed its tests and still served drafts. Strict means a document
+        // missing the field is denied to everyone who cannot manage the
+        // competition, so a match written before the field existed becomes
+        // invisible until this runs. `false` is always right for them: `isDraft`
+        // marks placeholders, and placeholders are younger than the flag.
+        if (fixture.isDraft === undefined) {
+          update.isDraft = false;
+          isDraftWritten += 1;
+        }
 
-    // Additions only, and via arrayUnion rather than a computed list.
-    //
-    // A line-up that was edited and a player who was later removed are the
-    // organizer's business; this function exists to add the people an
-    // individual event never recorded, not to re-adjudicate who played a team
-    // match years ago from whatever the roster says today.
-    const participants = participantsOf(fixture, soloA, soloB);
-    if (addsAnything(fixture.playerUids, participants)) {
-      update.playerUids = FieldValue.arrayUnion(...participants);
-      playerUidsRepaired += 1;
-    }
+        // Additions only, and via arrayUnion rather than a computed list.
+        //
+        // A line-up that was edited and a player who was later removed are the
+        // organizer's business; this function exists to add the people an
+        // individual event never recorded, not to re-adjudicate who played a team
+        // match years ago from whatever the roster says today.
+        const participants = participantsOf(fixture, soloA, soloB);
+        if (addsAnything(fixture.playerUids, participants)) {
+          update.playerUids = FieldValue.arrayUnion(...participants);
+          playerUidsRepaired += 1;
+        }
 
-    if (Object.keys(update).length === 0) continue;
-    updated += 1;
+        if (Object.keys(update).length === 0) return;
+        updated += 1;
 
-    if (!dryRun) {
-      update.participantsBackfilledAt = FieldValue.serverTimestamp();
-      batch.update(doc.ref, update);
-      pending += 1;
-      if (pending >= 400) {
-        await batch.commit();
-        batch = db().batch();
-        pending = 0;
-      }
-    }
-  }
+        if (!dryRun) {
+          update.participantsBackfilledAt = FieldValue.serverTimestamp();
+          batch.update(doc.ref, update);
+          pending += 1;
+          if (pending >= 400) {
+            await batch.commit();
+            batch = db().batch();
+            pending = 0;
+          }
+        }
+    },
+    { label: 'backfillParticipants fixtures' },
+  );
 
   if (!dryRun && pending > 0) await batch.commit();
 
@@ -221,8 +227,8 @@ export async function backfillParticipants({ dryRun = false } = {}) {
  * settlement rules authorize against. Being able to see what it *would* do, on
  * real data, before it does it is worth the few lines it costs.
  */
-export const backfillFixtureParticipants = onCall(
-  { region: 'asia-south1', timeoutSeconds: 540, memory: '1GiB' },
+export const backfillFixtureParticipants = onCall({
+    ...CALLABLE_OPTS, region: 'asia-south1', timeoutSeconds: 540, memory: '1GiB' },
   async (request) => {
     if (request.auth?.token?.admin !== true) {
       throw new HttpsError(

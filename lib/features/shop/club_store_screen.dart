@@ -248,11 +248,13 @@ class _BuySheetState extends ConsumerState<_BuySheet> {
               const Text('Quantity'),
               const Spacer(),
               IconButton(
+                tooltip: 'Remove one',
                 icon: const Icon(Icons.remove_circle_outline),
                 onPressed: _quantity > 1 ? () => setState(() => _quantity--) : null,
               ),
               Text('$_quantity'),
               IconButton(
+                tooltip: 'Add one',
                 icon: const Icon(Icons.add_circle_outline),
                 onPressed: () => setState(() => _quantity++),
               ),

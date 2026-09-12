@@ -917,6 +917,7 @@ class _ChatSection extends ConsumerWidget {
                   ),
                 ),
                 IconButton(
+                  tooltip: 'Send',
                   onPressed: onSend,
                   icon: const Icon(Icons.send_rounded),
                   color: Ps.primary,
@@ -1367,6 +1368,7 @@ class _EditCallSheetState extends State<_EditCallSheet> {
               children: [
                 const Expanded(child: Text('Players needed')),
                 IconButton(
+                  tooltip: 'Remove one',
                   onPressed:
                       _players == 0 ? null : () => setState(() => _players -= 1),
                   icon: const Icon(Icons.remove_circle_outline),
@@ -1376,6 +1378,7 @@ class _EditCallSheetState extends State<_EditCallSheet> {
                   style: const TextStyle(fontWeight: FontWeight.w800),
                 ),
                 IconButton(
+                  tooltip: 'Add one',
                   onPressed: () => setState(() => _players += 1),
                   icon: const Icon(Icons.add_circle_outline),
                 ),

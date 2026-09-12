@@ -1720,6 +1720,7 @@ class _MinutesField extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               IconButton(
+                tooltip: 'Remove',
                 icon: const Icon(Icons.remove, size: 16),
                 visualDensity: VisualDensity.compact,
                 onPressed: value > min ? () => onChanged(value - step) : null,
@@ -1730,6 +1731,7 @@ class _MinutesField extends StatelessWidget {
                     ?.copyWith(fontWeight: FontWeight.w700),
               ),
               IconButton(
+                tooltip: 'Add',
                 icon: const Icon(Icons.add, size: 16),
                 visualDensity: VisualDensity.compact,
                 onPressed: value < max ? () => onChanged(value + step) : null,

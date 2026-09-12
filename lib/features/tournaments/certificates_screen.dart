@@ -140,6 +140,14 @@ class CertificatesScreen extends ConsumerWidget {
               sportName: event.sportName,
               categoryLabel: event.category.label,
               date: tournament.endDate ?? tournament.startDate ?? DateTime.now(),
+              // What makes the certificate checkable rather than a picture.
+              // The verify page re-derives the award from these three ids and
+              // the event's own fixtures, so a certificate with a different
+              // name on it fails against the same data that produced this one.
+              orgId: event.orgId,
+              tournamentId: tournament.id,
+              compId: event.id,
+              entrantId: a.entrantId,
             ),
         ],
       ));

@@ -261,6 +261,7 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
                   child: const Text('Change'),
                 ),
               IconButton(
+                tooltip: 'Close',
                 icon: const Icon(Icons.close),
                 onPressed: () => Navigator.of(context).pop(),
               ),
@@ -353,6 +354,7 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
             prefixIcon: const Icon(Icons.search),
             border: const OutlineInputBorder(),
             suffixIcon: IconButton(
+              tooltip: 'Next',
               icon: const Icon(Icons.arrow_forward),
               onPressed: _runSearch,
             ),

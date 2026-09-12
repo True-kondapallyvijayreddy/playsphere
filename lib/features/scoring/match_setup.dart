@@ -356,6 +356,7 @@ class _LineupEditorState extends ConsumerState<LineupEditor> {
                       title: Text(g.name),
                       subtitle: const Text('Guest'),
                       trailing: IconButton(
+                        tooltip: 'Close',
                         icon: const Icon(Icons.close),
                         onPressed: canEditThisSide
                             ? () => setState(

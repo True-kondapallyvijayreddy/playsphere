@@ -58,6 +58,7 @@ class _GiveCollectionCentersScreenState
                         suffixIcon: _cityController.text.isEmpty
                             ? null
                             : IconButton(
+                              tooltip: 'Clear',
                                 icon: const Icon(Icons.clear),
                                 onPressed: () => setState(() {
                                   _cityController.clear();

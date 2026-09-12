@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
@@ -188,6 +190,61 @@ class AuthService {
     } on FirebaseAuthException catch (e) {
       throw _translate(e);
     }
+  }
+
+  /// Everything PlaySphere holds about this account, as JSON bytes ready to
+  /// be written out.
+  ///
+  /// The privacy policy has always promised "ask, and we will send you your
+  /// account data in a machine-readable file", and nothing implemented it —
+  /// there was no automated path and no tooling to produce one by hand either,
+  /// so the promise rested on somebody writing ad-hoc queries against
+  /// production. India's DPDP Act gives a person the right to a summary of
+  /// what is processed about them; this is that right, self-service.
+  ///
+  /// The server walks the same declared inventory `deleteMyAccount` erases
+  /// (`functions/subject_data.js`), so the export cannot come to disagree with
+  /// the deletion about which collections exist.
+  ///
+  /// Returns bytes rather than writing the file, because where a file goes is
+  /// the caller's decision — `saveFileBytes` opens a share sheet on a phone
+  /// and downloads on the web, and a service should not be reaching for either.
+  Future<Uint8List> exportMyData() async {
+    if (_auth.currentUser == null) throw const UnauthorizedException();
+    try {
+      final result = await FirebaseFunctions.instanceFor(region: 'asia-south1')
+          .httpsCallable('exportMyData')
+          .call<Map<Object?, Object?>>();
+      // Pretty-printed on purpose. The person receiving this is more likely to
+      // open it in a text editor than to feed it to a parser, and a single
+      // 40KB line is not a machine-readable file in any useful sense.
+      final json = const JsonEncoder.withIndent('  ').convert(
+        _plainMap(result.data),
+      );
+      return Uint8List.fromList(utf8.encode(json));
+    } on FirebaseFunctionsException catch (e) {
+      throw ValidationException(
+        e.message ?? 'Your data could not be exported. Please try again.',
+      );
+    }
+  }
+
+  /// Recursively rebuilds the callable's result as plain Dart collections.
+  ///
+  /// `httpsCallable` hands back `Map<Object?, Object?>` and `List<Object?>` at
+  /// every level, which `jsonEncode` refuses — it wants `Map<String, dynamic>`.
+  /// Encoding the top level alone is not enough, because the failure is at
+  /// whatever depth the first nested map sits, and an export is nested
+  /// several deep.
+  static Object? _plainMap(Object? value) {
+    if (value is Map) {
+      return {
+        for (final entry in value.entries)
+          entry.key.toString(): _plainMap(entry.value),
+      };
+    }
+    if (value is List) return value.map(_plainMap).toList();
+    return value;
   }
 
   /// Failures raised by the native Google Sign-In SDK, before Firebase is

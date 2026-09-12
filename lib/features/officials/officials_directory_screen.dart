@@ -263,6 +263,7 @@ class _FiltersState extends ConsumerState<_Filters> {
                       suffixIcon: query.district == null
                           ? const Icon(Icons.search, size: 18)
                           : IconButton(
+                            tooltip: 'Clear',
                               icon: const Icon(Icons.clear, size: 18),
                               onPressed: () {
                                 _district.clear();

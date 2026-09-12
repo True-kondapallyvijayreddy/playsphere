@@ -99,6 +99,37 @@ class CricketPlugin extends ScoringPlugin {
     return bySquad < configured ? bySquad : configured;
   }
 
+  /// The bowlers who may take the next over.
+  ///
+  /// The fielding side, minus whoever bowled the last over, minus anyone who
+  /// has completed their quota. An empty result is a real state and the pad
+  /// shows it as one rather than offering a choice that cannot be made — a
+  /// side with two bowlers left and a two-over cap genuinely cannot bowl the
+  /// next over, and the honest answer is to say so rather than to accept a
+  /// delivery that breaks the format.
+  List<String> _eligibleBowlers(
+    Map<String, dynamic> cur,
+    ScoringContext ctx,
+    Side battingSide,
+    String? lastBowler,
+  ) {
+    final bowling = (cur['bowling'] as Map?) ?? const {};
+    final cap = _maxOversPerBowler(ctx);
+    return ctx
+        .lineupFor(battingSide.opposite)
+        .map((p) => p.id)
+        .where((id) =>
+            id != lastBowler &&
+            (cap <= 0 ||
+                _oversCompletedBy(
+                      Map<String, dynamic>.from(bowling),
+                      id,
+                      ctx,
+                    ) <
+                    cap))
+        .toList();
+  }
+
   /// The batters who can still come in: named for the batting side, not
   /// already out, and not already standing at the other end.
   List<String> _availableBatters(
@@ -135,6 +166,58 @@ class CricketPlugin extends ScoringPlugin {
   /// scorer should be able to switch it off to save a tap.
   bool _enforceBowlerChange(ScoringContext ctx) =>
       ctx.boolConfig('bowlerMustChangeEachOver', true);
+
+  /// How many overs one bowler may bowl in an innings. Zero means no limit.
+  ///
+  /// Every limited-overs format has one and it is not a detail: four in a T20,
+  /// ten in a fifty-over game, two in the eight-over tennis-ball preset. It is
+  /// the rule that stops a side bowling its best two bowlers at both ends for
+  /// the whole innings, which is the difference between a T20 and a different
+  /// sport.
+  ///
+  /// It was offered to organizers as the fourth field in the cricket Rules
+  /// sheet — directly under overs, balls per over and players per side — and
+  /// read by nothing. `bowlerMustChangeEachOver` stopped consecutive overs, so
+  /// two bowlers could alternate through all twenty and the pad would take
+  /// every ball. The innings that came out was not legal under any playing
+  /// condition, and it fed Glicko, career bowling figures and the wicket
+  /// leaderboards exactly like a real one.
+  ///
+  /// Zero rather than a default of four, because the presets already state the
+  /// real number for every format and a hard-coded fallback would impose a T20
+  /// limit on a format that has no limit at all.
+  int _maxOversPerBowler(ScoringContext ctx) =>
+      ctx.intConfig('maxOversPerBowler', 0);
+
+  /// The overs [bowlerId] has already completed, as a whole number.
+  ///
+  /// Part-overs do not count against the cap: a bowler three balls into their
+  /// fourth over has bowled three, and the law limits completed overs. The
+  /// count is derived from the bowling record rather than tracked separately,
+  /// so an undo or a rebuild-from-events cannot leave it disagreeing with the
+  /// scorecard.
+  int _oversCompletedBy(
+    Map<String, dynamic> bowling,
+    String bowlerId,
+    ScoringContext ctx,
+  ) {
+    final balls =
+        ((bowling[bowlerId] as Map?)?['balls'] as num?)?.toInt() ?? 0;
+    return balls ~/ _ballsPerOver(ctx);
+  }
+
+  /// Whether a scoring shot reached the rope, rather than being run.
+  ///
+  /// Defaults to true, which is the honest default: the overwhelming majority
+  /// of fours are hit to the boundary and a six essentially always is. What it
+  /// buys is the ability to say otherwise — four runs run, or four off an
+  /// overthrow — so the fours column counts boundaries and not four-run shots.
+  ///
+  /// A payload flag rather than a separate action, because it changes one
+  /// tally and nothing else about the delivery: the runs, the ball, the
+  /// strike rotation and the bowler's figures are all identical either way.
+  bool _isBoundary(ScoreAction action, int runs) =>
+      action.payload['boundary'] as bool? ?? true;
 
   int _boundaryFour(ScoringContext ctx) => ctx.intConfig('boundaryFour', 4);
   int _boundarySix(ScoringContext ctx) => ctx.intConfig('boundarySix', 6);
@@ -407,6 +490,18 @@ class CricketPlugin extends ScoringPlugin {
             'Somebody else has to bowl this one.',
           );
         }
+        // The innings quota. Checked when a bowler is NAMED rather than when
+        // their last legal ball lands, because the scorer is choosing from a
+        // list and the useful moment to be told is before the choice, not
+        // after a delivery has to be undone.
+        final cap = _maxOversPerBowler(ctx);
+        if (cap > 0 && _oversCompletedBy(bowling, who, ctx) >= cap) {
+          return ScoringResult.rejected(
+            '${ctx.playerName(who, 'That bowler')} has bowled their '
+            '$cap ${cap == 1 ? 'over' : 'overs'}. '
+            'Pick somebody else, or raise the limit in Rules.',
+          );
+        }
         bowling[who] = bowling[who] ?? _newBowling();
         cur
           ..['bowler'] = who
@@ -454,6 +549,26 @@ class CricketPlugin extends ScoringPlugin {
     final bat = Map<String, dynamic>.from(batting[striker] as Map? ?? _newBatting());
     final bowl = Map<String, dynamic>.from(bowling[bowler] as Map? ?? _newBowling());
 
+    // The quota, enforced on the delivery as well as on the choice of bowler.
+    //
+    // Both are needed. `new_bowler` is only reached when the bowler has been
+    // cleared, which happens at the end of an over and only while
+    // `bowlerMustChangeEachOver` is on — so in a format that drops that rule,
+    // the same bowler stays named and the cap would never be consulted again.
+    // Checked at the over boundary so a bowler mid-over always finishes it:
+    // the law limits completed overs, and stopping somebody after four balls
+    // would leave an over that cannot be finished by anybody.
+    final quota = _maxOversPerBowler(ctx);
+    if (quota > 0 &&
+        i(bowl['balls']) % perOver == 0 &&
+        _oversCompletedBy(bowling, bowler, ctx) >= quota) {
+      return ScoringResult.rejected(
+        '${ctx.playerName(bowler, 'That bowler')} has bowled their '
+        '$quota ${quota == 1 ? 'over' : 'overs'}. '
+        'Choose another bowler before the next ball.',
+      );
+    }
+
     var legalDelivery = false;
     var runsThisBall = 0; // for strike rotation
     var nextFreeHit = false;
@@ -474,8 +589,18 @@ class CricketPlugin extends ScoringPlugin {
         cur['runs'] = i(cur['runs']) + r;
         bat['runs'] = i(bat['runs']) + r;
         bat['balls'] = i(bat['balls']) + 1;
-        if (r == _boundaryFour(ctx)) bat['fours'] = i(bat['fours']) + 1;
-        if (r == _boundarySix(ctx)) bat['sixes'] = i(bat['sixes']) + 1;
+        // Four RUN is not a four.
+        //
+        // The fours and sixes columns count boundaries, and a scorecard that
+        // counts every four-run scoring shot as one overstates them — which
+        // then overstates the boundary percentage a batting card shows and a
+        // scout reads. Rare for a four and effectively impossible for a six,
+        // so the default is that it WAS a boundary and the pad says otherwise
+        // when the scorer says so.
+        if (_isBoundary(action, r)) {
+          if (r == _boundaryFour(ctx)) bat['fours'] = i(bat['fours']) + 1;
+          if (r == _boundarySix(ctx)) bat['sixes'] = i(bat['sixes']) + 1;
+        }
         bowl['runs'] = i(bowl['runs']) + r;
         cur['overRuns'] = i(cur['overRuns']) + r;
         legalDelivery = true;
@@ -504,8 +629,10 @@ class CricketPlugin extends ScoringPlugin {
         extras['noBall'] = i(extras['noBall']) + penalty;
         bat['runs'] = i(bat['runs']) + offBat;
         bat['balls'] = i(bat['balls']) + 1;
-        if (offBat == _boundaryFour(ctx)) bat['fours'] = i(bat['fours']) + 1;
-        if (offBat == _boundarySix(ctx)) bat['sixes'] = i(bat['sixes']) + 1;
+        if (_isBoundary(action, offBat)) {
+          if (offBat == _boundaryFour(ctx)) bat['fours'] = i(bat['fours']) + 1;
+          if (offBat == _boundarySix(ctx)) bat['sixes'] = i(bat['sixes']) + 1;
+        }
         bowl['runs'] = i(bowl['runs']) + penalty + offBat;
         bowl['noBalls'] = i(bowl['noBalls']) + 1;
         cur['overRuns'] = i(cur['overRuns']) + penalty + offBat;
@@ -1374,6 +1501,16 @@ class CricketPlugin extends ScoringPlugin {
     if (cur['bowler'] == null &&
         (cur['striker'] != null || cur['nonStriker'] != null)) {
       final last = cur['lastBowler'] as String?;
+      // Who is actually allowed to bowl the next over: the fielding side,
+      // minus whoever bowled the last one, minus anyone who has used up their
+      // innings quota.
+      //
+      // Offered as a restricted pool rather than left to the rejection in
+      // `apply`. The engine refuses an ineligible bowler either way, but a
+      // scorer standing at the boundary should not have to discover the quota
+      // by being told no — the list they are choosing from is the right place
+      // for the rule to live.
+      final eligibleBowlers = _eligibleBowlers(cur, ctx, battingSide, last);
       return [
         ScoreControlGroup(
           title: 'End of over',
@@ -1387,11 +1524,12 @@ class CricketPlugin extends ScoringPlugin {
                   ? null
                   : '${ctx.playerName(last, 'The last bowler')} cannot bowl '
                       'two overs in a row.',
-              prompts: const [
+              prompts: [
                 PlayerPrompt(
                   key: 'playerId',
                   label: 'Next bowler',
                   from: PromptSource.opposingSide,
+                  only: eligibleBowlers,
                 ),
               ],
             ),
@@ -1505,6 +1643,20 @@ class CricketPlugin extends ScoringPlugin {
           ScoreControl(action: 'runs', label: '3', payload: {'runs': 3}, shortcut: '3'),
           ScoreControl(action: 'runs', label: '4', payload: {'runs': 4}, style: ControlStyle.primary, shortcut: '4'),
           ScoreControl(action: 'runs', label: '6', payload: {'runs': 6}, style: ControlStyle.primary, shortcut: '6'),
+          // Four RUN, which is not a four.
+          //
+          // Kept in the same group and styled down, because it is the rare
+          // case: a scorer reaches for it a handful of times a season, and
+          // putting it anywhere else would mean hunting for it while the
+          // bowler walks back. Everything about the delivery is identical to
+          // the button beside it — the only difference is that the batting
+          // card's fours column stays honest.
+          ScoreControl(
+            action: 'runs',
+            label: '4 run',
+            payload: {'runs': 4, 'boundary': false},
+            style: ControlStyle.subtle,
+          ),
         ],
       ),
       const ScoreControlGroup(

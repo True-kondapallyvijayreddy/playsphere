@@ -82,6 +82,23 @@ class AppUser {
   /// Kept in step by `UserRepository.mirrorOrgIds`.
   final List<String> orgIds;
 
+  /// How many of [orgIds] the server actually consults for
+  /// `profileVisibility: 'community'`.
+  ///
+  /// Four, and it is Firestore's limit rather than a preference: a
+  /// single-document read may make ten document lookups, `sharesActiveOrgWith`
+  /// in firestore.rules spends one per club, and rules cannot loop — so four
+  /// unrolled comparisons is what fits alongside everything else that read
+  /// evaluates.
+  ///
+  /// Named here so the number is visible from the Dart side and so the
+  /// consequence is too: a player active in more clubs than this has community
+  /// visibility honoured for the most recent four and silently not for the
+  /// rest. `profileOrgMirrorProvider` sorts the mirror `joinedAt` descending
+  /// for exactly that reason, and `test/cross_language_mirrors_test.dart`
+  /// asserts this constant and the rule agree.
+  static const communityVisibilityDepth = 4;
+
   /// The clubs this person has an OUTSTANDING application to, most-recently-
   /// applied first. The same kind of mirror as [orgIds], for the same kind of
   /// reason, but pointing the other way.

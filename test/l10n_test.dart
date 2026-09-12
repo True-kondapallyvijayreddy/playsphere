@@ -126,12 +126,32 @@ void main() {
   });
 
   group('AppLocalizations', () {
-    test('ships exactly the locales the app advertises', () {
+    test('the app never advertises a locale the delegate cannot serve', () {
+      // This used to assert the two sets were EQUAL, and equality was the
+      // wrong relation — it just happened to hold while the app offered every
+      // locale it had translations for.
+      //
+      // The two directions are not symmetric. Advertising a locale the
+      // delegate cannot load is a crash or a silent fallback, and must never
+      // happen. Serving one the app does not offer is merely unused capacity,
+      // and it is currently deliberate: `app_te.arb` and `app_hi.arb` are
+      // complete, and `supportedLocales` is English-only because the
+      // translations reach three of two hundred and thirty-three feature
+      // screens — so somebody picking తెలుగు changed the sign-in screen and
+      // then used an English app. See `supportedLocales` and
+      // `test/localization_reach_test.dart`.
       final generated =
           AppLocalizations.supportedLocales.map((l) => l.languageCode).toSet();
       final advertised = supportedLocales.map((l) => l.languageCode).toSet();
-      expect(generated, advertised);
-      expect(advertised, {'en', 'te', 'hi'});
+
+      expect(
+        advertised.difference(generated),
+        isEmpty,
+        reason: 'the app offers a language AppLocalizations cannot load',
+      );
+      // The translations themselves stay in the build. A cleanup that dropped
+      // them would turn a deferred decision into a permanent one.
+      expect(generated, containsAll({'en', 'te', 'hi'}));
     });
 
     test('resolves a real string in each language', () async {

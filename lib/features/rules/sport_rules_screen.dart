@@ -59,6 +59,7 @@ class _SportRulesScreenState extends ConsumerState<SportRulesScreen> {
         title: const Text('Official Rules & Regulations'),
         actions: [
           IconButton(
+            tooltip: 'Help',
             icon: const Icon(Icons.help_outline),
             onPressed: () {
               ScaffoldMessenger.of(context).showSnackBar(
@@ -83,6 +84,7 @@ class _SportRulesScreenState extends ConsumerState<SportRulesScreen> {
                 prefixIcon: const Icon(Icons.search),
                 suffixIcon: _searchQuery.isNotEmpty
                     ? IconButton(
+                      tooltip: 'Clear',
                         icon: const Icon(Icons.clear),
                         onPressed: () => _searchCtrl.clear(),
                       )

@@ -168,11 +168,13 @@ class _MenuItemTile extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   IconButton(
+                    tooltip: 'Remove one',
                     icon: const Icon(Icons.remove_circle_outline),
                     onPressed: () => onChanged(quantity - 1),
                   ),
                   Text('$quantity'),
                   IconButton(
+                    tooltip: 'Add one',
                     icon: const Icon(Icons.add_circle_outline),
                     onPressed: () => onChanged(quantity + 1),
                   ),

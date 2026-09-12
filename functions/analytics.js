@@ -50,6 +50,8 @@
 
 import { BigQuery } from '@google-cloud/bigquery';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
+
+import { CALLABLE_OPTS } from './app_check.js';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { logger } from 'firebase-functions';
 
@@ -193,8 +195,8 @@ export async function playerTrendsFromWarehouse() {
 }
 
 /** Staff-only manual run, for after a backfill or a view change. */
-export const runAnalyticsSync = onCall(
-  { region: LOCATION, timeoutSeconds: 540, memory: '512MiB' },
+export const runAnalyticsSync = onCall({
+    ...CALLABLE_OPTS, region: LOCATION, timeoutSeconds: 540, memory: '512MiB' },
   async (request) => {
     if (request.auth?.token?.admin !== true) {
       throw new HttpsError(

@@ -46,6 +46,8 @@
 
 import { FieldValue, Timestamp, getFirestore } from 'firebase-admin/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
+
+import { CALLABLE_OPTS } from './app_check.js';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { logger } from 'firebase-functions';
 
@@ -178,7 +180,7 @@ function toMillis(value) {
  * no-op delta and leaves `amountSetAt` alone, so a retried call cannot cost
  * somebody their tie-break seniority.
  */
-export const placeAuctionBid = onCall(async (request) => {
+export const placeAuctionBid = onCall(CALLABLE_OPTS, async (request) => {
   const uid = requireAuth(request);
   const auctionId = requireString(request.data?.auctionId, 'auctionId');
   const lotId = requireString(request.data?.lotId, 'lotId');
@@ -324,7 +326,7 @@ export const placeAuctionBid = onCall(async (request) => {
  * length of the window, only that there is one and that it is announced
  * before the first bid.
  */
-export const openAuctionBidding = onCall(async (request) => {
+export const openAuctionBidding = onCall(CALLABLE_OPTS, async (request) => {
   const uid = requireAuth(request);
   const auctionId = requireString(request.data?.auctionId, 'auctionId');
   const closesAtMs = Number(request.data?.bidsCloseAtMs);
@@ -615,7 +617,7 @@ async function notifyReveal(auctionRef, auction, sales, round) {
  * should not have to explain a five-minute wait to them. Same code path,
  * same result — it only skips the clock.
  */
-export const revealAuctionNow = onCall(async (request) => {
+export const revealAuctionNow = onCall(CALLABLE_OPTS, async (request) => {
   const uid = requireAuth(request);
   const auctionId = requireString(request.data?.auctionId, 'auctionId');
   await requireOrganizer(auctionId, uid);
@@ -683,7 +685,7 @@ export const revealDueAuctions = onSchedule(
  * event that starts early should not have to wait for a date the organizer
  * set optimistically a fortnight ago.
  */
-export const lockAuctionSquads = onCall(async (request) => {
+export const lockAuctionSquads = onCall(CALLABLE_OPTS, async (request) => {
   const uid = requireAuth(request);
   const auctionId = requireString(request.data?.auctionId, 'auctionId');
   await requireOrganizer(auctionId, uid);
@@ -739,7 +741,7 @@ export const lockAuctionSquads = onCall(async (request) => {
  * having already moved in a different trade. The rules cannot see any of
  * that, because a rule may not read the eleven lot documents an offer names.
  */
-export const executeAuctionTrade = onCall(async (request) => {
+export const executeAuctionTrade = onCall(CALLABLE_OPTS, async (request) => {
   const uid = requireAuth(request);
   const auctionId = requireString(request.data?.auctionId, 'auctionId');
   const tradeId = requireString(request.data?.tradeId, 'tradeId');
@@ -893,7 +895,7 @@ export const executeAuctionTrade = onCall(async (request) => {
  * succeeds — which is why the client does not await it before updating the
  * screen.
  */
-export const notifyAuctionDecision = onCall(async (request) => {
+export const notifyAuctionDecision = onCall(CALLABLE_OPTS, async (request) => {
   const uid = requireAuth(request);
   const auctionId = requireString(request.data?.auctionId, 'auctionId');
   const targetUid = requireString(request.data?.targetUid, 'targetUid');
@@ -930,7 +932,7 @@ export const notifyAuctionDecision = onCall(async (request) => {
 /** "Somebody has offered you a trade." Same shape and same reasoning as
  * [notifyAuctionDecision] — the proposal is the Firestore write, this is only
  * the tap on the shoulder. */
-export const notifyAuctionTrade = onCall(async (request) => {
+export const notifyAuctionTrade = onCall(CALLABLE_OPTS, async (request) => {
   const uid = requireAuth(request);
   const auctionId = requireString(request.data?.auctionId, 'auctionId');
   const tradeId = requireString(request.data?.tradeId, 'tradeId');

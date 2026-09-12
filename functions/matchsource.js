@@ -22,6 +22,8 @@
 
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
+
+import { CALLABLE_OPTS } from './app_check.js';
 import { logger } from 'firebase-functions';
 
 function db() {
@@ -61,10 +63,14 @@ export async function backfillMatchSources({ dryRun = false } = {}) {
 
   // ---- Every competition, so a fixture can be classified from its parent. --
   const compById = new Map();
-  const compsSnap = await db().collectionGroup('competitions').get();
-  for (const doc of compsSnap.docs) {
-    compById.set(doc.id, { id: doc.id, ...doc.data() });
-  }
+  // Paged rather than read whole — see functions/paged_scan.js.
+  await forEachPaged(
+    db().collectionGroup('competitions'),
+    (doc) => {
+        compById.set(doc.id, { id: doc.id, ...doc.data() });
+    },
+    { label: 'backfillMatchSource competitions' },
+  );
 
   let scanned = 0;
   let updated = 0;
@@ -75,48 +81,52 @@ export async function backfillMatchSources({ dryRun = false } = {}) {
   let batch = db().batch();
   let pending = 0;
 
-  const fixturesSnap = await db().collectionGroup('fixtures').get();
-  for (const doc of fixturesSnap.docs) {
-    scanned += 1;
-    const fixture = doc.data();
-    // Never overwrite. A fixture created after this shipped already knows
-    // where it came from, and it knows better than any heuristic here.
-    if (fixture.sourceType) continue;
+  // Paged rather than read whole — see functions/paged_scan.js.
+  await forEachPaged(
+    db().collectionGroup('fixtures'),
+    async (doc) => {
+        scanned += 1;
+        const fixture = doc.data();
+        // Never overwrite. A fixture created after this shipped already knows
+        // where it came from, and it knows better than any heuristic here.
+        if (fixture.sourceType) return;
 
-    const compId = doc.ref.parent.parent?.id;
-    if (!compId) continue;
+        const compId = doc.ref.parent.parent?.id;
+        if (!compId) return;
 
-    let source;
-    if (challengeByCompId.has(compId)) {
-      source = { type: 'challenge', id: challengeByCompId.get(compId) };
-    } else {
-      const comp = compById.get(compId);
-      if (!comp) continue; // orphaned fixture; leave it to the client fallback
-      // A competition holding exactly one fixture, with no tournament above
-      // it, is a quick match — the shape `createQuickMatch` writes.
-      source =
-        !comp.tournamentId && comp.fixtureCount === 1
-          ? { type: 'single_match', id: comp.id }
-          : sourceForCompetition(comp);
-    }
+        let source;
+        if (challengeByCompId.has(compId)) {
+          source = { type: 'challenge', id: challengeByCompId.get(compId) };
+        } else {
+          const comp = compById.get(compId);
+          if (!comp) return; // orphaned fixture; leave it to the client fallback
+          // A competition holding exactly one fixture, with no tournament above
+          // it, is a quick match — the shape `createQuickMatch` writes.
+          source =
+            !comp.tournamentId && comp.fixtureCount === 1
+              ? { type: 'single_match', id: comp.id }
+              : sourceForCompetition(comp);
+        }
 
-    counts[source.type] = (counts[source.type] ?? 0) + 1;
-    updated += 1;
+        counts[source.type] = (counts[source.type] ?? 0) + 1;
+        updated += 1;
 
-    if (!dryRun) {
-      batch.update(doc.ref, {
-        sourceType: source.type,
-        sourceId: source.id,
-        sourceBackfilledAt: FieldValue.serverTimestamp(),
-      });
-      pending += 1;
-      if (pending >= 400) {
-        await batch.commit();
-        batch = db().batch();
-        pending = 0;
-      }
-    }
-  }
+        if (!dryRun) {
+          batch.update(doc.ref, {
+            sourceType: source.type,
+            sourceId: source.id,
+            sourceBackfilledAt: FieldValue.serverTimestamp(),
+          });
+          pending += 1;
+          if (pending >= 400) {
+            await batch.commit();
+            batch = db().batch();
+            pending = 0;
+          }
+        }
+    },
+    { label: 'backfillMatchSource fixtures' },
+  );
 
   if (!dryRun && pending > 0) await batch.commit();
 
@@ -134,8 +144,8 @@ export async function backfillMatchSources({ dryRun = false } = {}) {
  * to see what it *would* do, on real data, before it does it is worth the few
  * lines it costs.
  */
-export const backfillMatchSource = onCall(
-  { region: 'asia-south1', timeoutSeconds: 540, memory: '1GiB' },
+export const backfillMatchSource = onCall({
+    ...CALLABLE_OPTS, region: 'asia-south1', timeoutSeconds: 540, memory: '1GiB' },
   async (request) => {
     if (request.auth?.token?.admin !== true) {
       throw new HttpsError(

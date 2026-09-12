@@ -104,6 +104,7 @@ class _VenueSelectorDialogState extends ConsumerState<VenueSelectorDialog> {
                     ),
                   ),
                   IconButton(
+                    tooltip: 'Close',
                     icon: const Icon(Icons.close),
                     onPressed: () => Navigator.of(context).pop(),
                   ),

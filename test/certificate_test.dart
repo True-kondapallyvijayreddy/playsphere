@@ -8,6 +8,8 @@ import 'package:playsphere/domain/tournament/certificate.dart';
 /// no evidence they were there. Every field on a certificate comes from the
 /// fixtures, so one cannot claim a result the matches do not support.
 void main() {
+  _verificationTests();
+
   Certificate certificate({
     required CertificateTitle title,
     String name = 'Ravi Kumar',
@@ -126,6 +128,112 @@ void main() {
       );
       expect(RegExp(r'^[A-Za-z0-9_]+\.png$').hasMatch(c.fileName), isTrue,
           reason: c.fileName);
+    });
+  });
+}
+
+/// Verification — the half that makes a certificate more than a picture.
+///
+/// SRS §27.4 asks for a public verification URL and none existed, which left
+/// the "verifiable proof for a career resume" claim resting on a PNG that
+/// anybody could reproduce with a different name on it.
+void _verificationTests() {
+  Certificate cert({
+    String? orgId = 'org_1',
+    String? tournamentId = 'trn_1',
+    String? compId = 'comp_1',
+    String? entrantId = 'uid_asha',
+  }) =>
+      Certificate(
+        recipientName: 'Asha Reddy',
+        title: CertificateTitle.champion,
+        eventName: 'U-17 Girls Singles',
+        tournamentName: 'Nalgonda District Championship',
+        organizerName: 'Nalgonda DSA',
+        sportName: 'Badminton',
+        date: DateTime(2026, 8, 20),
+        orgId: orgId,
+        tournamentId: tournamentId,
+        compId: compId,
+        entrantId: entrantId,
+      );
+
+  group('verification', () {
+    test('a certificate with a full identity is verifiable', () {
+      final c = cert();
+      expect(c.isVerifiable, isTrue);
+      expect(c.verifyPath, '/verify/org_1/trn_1/comp_1/uid_asha');
+      expect(c.verifyUrl,
+          'https://playsphere-os.web.app/verify/org_1/trn_1/comp_1/uid_asha');
+      expect(c.verifyCode, startsWith('PS-'));
+      expect(c.verifyCode!.length, 9);
+    });
+
+    test('a preview certificate carries no code', () {
+      // One rendered inside the app already knows its own context. Only the
+      // ones handed out need to be checkable.
+      for (final c in [
+        cert(orgId: null),
+        cert(tournamentId: null),
+        cert(compId: null),
+        cert(entrantId: null),
+      ]) {
+        expect(c.isVerifiable, isFalse);
+        expect(c.verifyPath, isNull);
+        expect(c.verifyUrl, isNull);
+        expect(c.verifyCode, isNull);
+      }
+    });
+
+    test('the code is stable for the same award', () {
+      // It is printed on paper. A code that changed between two renders of the
+      // same certificate would be worse than no code.
+      expect(cert().verifyCode, cert().verifyCode);
+    });
+
+    test('the code depends on every part of the identity', () {
+      // Two different awards must not read out the same code, or "quote me the
+      // code" stops distinguishing anything.
+      final codes = {
+        cert().verifyCode,
+        cert(orgId: 'org_2').verifyCode,
+        cert(tournamentId: 'trn_2').verifyCode,
+        cert(compId: 'comp_2').verifyCode,
+        cert(entrantId: 'uid_bhavana').verifyCode,
+      };
+      expect(codes.length, 5, reason: 'the code collided across identities');
+    });
+
+    test('the code avoids the letters that get mistyped off paper', () {
+      // Crockford-ish alphabet: no I, L, O or U, so a code read aloud cannot
+      // be written down as a different valid-looking one.
+      for (final id in ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']) {
+        final code = cert(entrantId: id).verifyCode!.substring(3);
+        expect(code, isNot(matches(RegExp('[ILOU]'))));
+        expect(code, matches(RegExp(r'^[0-9ABCDEFGHJKMNPQRSTVWXYZ]{6}$')));
+      }
+    });
+
+    test('the name on the certificate does not change the code', () {
+      // Because the code identifies the AWARD, not the copy. A forger who
+      // swaps the name keeps a code that resolves to the real winner, which is
+      // exactly how the verify page catches them.
+      final real = cert();
+      final forged = Certificate(
+        recipientName: 'Somebody Else',
+        title: CertificateTitle.champion,
+        eventName: real.eventName,
+        tournamentName: real.tournamentName,
+        organizerName: real.organizerName,
+        sportName: real.sportName,
+        date: real.date,
+        orgId: real.orgId,
+        tournamentId: real.tournamentId,
+        compId: real.compId,
+        entrantId: real.entrantId,
+      );
+      expect(forged.verifyCode, real.verifyCode);
+      expect(forged.verifyPath, real.verifyPath);
     });
   });
 }

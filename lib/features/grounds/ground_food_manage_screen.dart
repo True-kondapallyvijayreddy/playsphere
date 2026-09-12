@@ -91,7 +91,8 @@ class _ItemTile extends ConsumerWidget {
         trailing: Wrap(
           spacing: 4,
           children: [
-            IconButton(icon: const Icon(Icons.edit_outlined), onPressed: onEdit),
+            IconButton(
+              tooltip: 'Edit',icon: const Icon(Icons.edit_outlined), onPressed: onEdit),
             Switch(
               value: item.isActive,
               onChanged: (v) =>

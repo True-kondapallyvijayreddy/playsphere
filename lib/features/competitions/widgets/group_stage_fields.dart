@@ -288,6 +288,7 @@ class CountStepper extends StatelessWidget {
         children: [
           Expanded(child: Text(label)),
           IconButton(
+            tooltip: 'Remove one',
             icon: const Icon(Icons.remove_circle_outline),
             onPressed:
                 value - step >= min ? () => onChanged(value - step) : null,
@@ -301,6 +302,7 @@ class CountStepper extends StatelessWidget {
             ),
           ),
           IconButton(
+            tooltip: 'Add one',
             icon: const Icon(Icons.add_circle_outline),
             onPressed:
                 value + step <= max ? () => onChanged(value + step) : null,

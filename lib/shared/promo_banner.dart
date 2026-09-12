@@ -87,7 +87,7 @@ class _PromoBannerState extends ConsumerState<PromoBanner> {
   void _open(Promo promo) {
     final campaignId = _campaignIdOf(promo);
     if (campaignId != null) {
-      unawaited(ref.read(adRepositoryProvider).recordClick(campaignId));
+      unawaited(ref.read(adRepositoryProvider).recordClick(campaignId, ref.read(currentUidProvider)));
     }
     final target = promo.destination;
     if (target == null) return;
@@ -128,7 +128,7 @@ class _PromoBannerState extends ConsumerState<PromoBanner> {
       // computing what to show.
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
-          unawaited(ref.read(adRepositoryProvider).recordImpression(campaignId));
+          unawaited(ref.read(adRepositoryProvider).recordImpression(campaignId, ref.read(currentUidProvider)));
         }
       });
     }

@@ -46,6 +46,10 @@
 
 import { getFirestore } from 'firebase-admin/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
+
+import { CALLABLE_OPTS } from './app_check.js';
+
+import { collectPaged, forEachPaged } from './paged_scan.js';
 import { logger } from 'firebase-functions';
 
 import { accumulateCareer, careerContributions } from './career.js';
@@ -125,30 +129,46 @@ export async function rebuildCareerStats({
   prune = true,
   uid = null,
 } = {}) {
-  // Every match ever played, in one sweep. Unfiltered because
+  // Every match ever played, PAGED. Unfiltered because
   // `collectionGroup('fixtures').where('status', ...)` needs a collection-group
   // index this project does not have, and the whole set has to be read to
   // recompute a total anyway — a partial read produces a partial career.
-  const fixturesSnap = await db().collectionGroup('fixtures').get();
-
+  //
+  // Paged rather than slurped even though this is a hand-run rebuild rather
+  // than a scheduled job: the win here is not avoiding a silent nightly
+  // failure but resident memory and resumability. Reading half a million
+  // fixture documents into one array — each carrying a `scoreState` with
+  // batting and bowling maps — is the one operation in this codebase most
+  // likely to be killed by the runtime, and it is the operation you reach for
+  // precisely when the career figures are already wrong.
   const contributions = [];
   let counted = 0;
-  for (const doc of fixturesSnap.docs) {
-    // orgs/{orgId}/competitions/{compId}/fixtures/{fixtureId}
-    const orgId = doc.ref.parent.parent?.parent.parent?.id ?? null;
-    const some = careerContributions(doc.data(), { orgId });
-    if (some.length > 0) counted += 1;
-    for (const c of some) {
-      if (uid && c.uid !== uid) continue;
-      contributions.push(c);
-    }
-  }
+  await forEachPaged(
+    db().collectionGroup('fixtures'),
+    (doc) => {
+      // orgs/{orgId}/competitions/{compId}/fixtures/{fixtureId}
+      const orgId = doc.ref.parent.parent?.parent.parent?.id ?? null;
+      const some = careerContributions(doc.data(), { orgId });
+      if (some.length > 0) counted += 1;
+      for (const c of some) {
+        // Filtered as it is read, not afterwards: a single-player rebuild
+        // should not accumulate the whole platform's contributions to throw
+        // all but one away.
+        if (uid && c.uid !== uid) continue;
+        contributions.push(c);
+      }
+    },
+    { label: 'careerRebuild fixtures' },
+  );
 
   const records = accumulateCareer(contributions);
 
-  const statsSnap = await db().collectionGroup('career_stats').get();
+  const statsSnap = await collectPaged(
+    db().collectionGroup('career_stats'),
+    { label: 'careerRebuild career_stats' },
+  );
   const stored = new Map();
-  for (const doc of statsSnap.docs) {
+  for (const doc of statsSnap) {
     // users/{uid}/career_stats/{sportId}
     const owner = doc.ref.parent.parent?.id;
     if (!owner) continue;
@@ -230,8 +250,8 @@ export async function rebuildCareerStats({
  * consequential thing in this codebase; seeing the counts on real data before
  * committing to them costs one extra call.
  */
-export const rebuildPlayerCareerStats = onCall(
-  { region: 'asia-south1', timeoutSeconds: 540, memory: '1GiB' },
+export const rebuildPlayerCareerStats = onCall({
+    ...CALLABLE_OPTS, region: 'asia-south1', timeoutSeconds: 540, memory: '1GiB' },
   async (request) => {
     if (request.auth?.token?.admin !== true) {
       throw new HttpsError(

@@ -58,7 +58,7 @@ class _PromoStripState extends ConsumerState<PromoStrip> {
     // build is a framework error.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
-        unawaited(ref.read(adRepositoryProvider).recordImpression(id));
+        unawaited(ref.read(adRepositoryProvider).recordImpression(id, ref.read(currentUidProvider)));
       }
     });
   }
@@ -66,7 +66,7 @@ class _PromoStripState extends ConsumerState<PromoStrip> {
   void _open(Promo promo) {
     final id = _campaignIdOf(promo);
     if (id != null) {
-      unawaited(ref.read(adRepositoryProvider).recordClick(id));
+      unawaited(ref.read(adRepositoryProvider).recordClick(id, ref.read(currentUidProvider)));
     }
     final target = promo.destination;
     // In-app routes only, for the reason spelled out in [PromoBanner._open]:

@@ -1539,13 +1539,40 @@ final myMembershipProvider =
   return ref.watch(orgRepositoryProvider).watchMembership(orgId, uid);
 });
 
+/// This person's membership in one club, taken from the list already in memory.
+///
+/// [myMembershipsProvider] is a single collection-group stream carrying EVERY
+/// membership this person holds, and it is already running: the dashboard, the
+/// club chip and the app bar all read from it. Answering "what am I in this
+/// club?" from that list costs nothing.
+///
+/// Asking [myMembershipProvider] instead opens a second live listener on a
+/// document the list is already streaming — and authority is asked per club on
+/// almost every screen, so that duplicate ran once per club, permanently, for
+/// data sitting in memory. On a dashboard fanning out over four clubs it was
+/// four redundant Firestore subscriptions before anything had been drawn.
+///
+/// [myMembershipProvider] is still the right call for a screen that wants to
+/// watch one club's membership document on its own; this is only for the
+/// derived authority questions below, which are asked constantly and in bulk.
+Membership? _myMembershipIn(Ref ref, String orgId) {
+  final all =
+      ref.watch(myMembershipsProvider).valueOrNull ?? const <Membership>[];
+  for (final m in all) {
+    if (m.orgId == orgId) return m;
+  }
+  return null;
+}
+
 /// Capabilities the caller holds in an organization.
 ///
 /// A pending or absent membership yields an empty set, so screens fail closed
-/// while the membership is still loading rather than flashing admin controls.
+/// while the membership is still loading rather than flashing admin controls —
+/// which is still true now that the source is the list: an unloaded list reads
+/// as "no membership yet", exactly as an unloaded document did.
 final myCapabilitiesProvider =
     Provider.family<Set<Capability>, String>((ref, orgId) {
-  final membership = ref.watch(myMembershipProvider(orgId)).valueOrNull;
+  final membership = _myMembershipIn(ref, orgId);
   if (membership == null || !membership.isActive) return const {};
   // Rank AND portfolios. Reading the rank alone was correct only while every
   // capability came from the ladder; it would now hide the store from the
@@ -1557,7 +1584,7 @@ final myCapabilitiesProvider =
 /// included. Owners get the full set.
 final myPortfoliosProvider =
     Provider.family<Set<ClubPortfolio>, String>((ref, orgId) {
-  final membership = ref.watch(myMembershipProvider(orgId)).valueOrNull;
+  final membership = _myMembershipIn(ref, orgId);
   if (membership == null || !membership.isActive) return const {};
   return membership.effectivePortfolios;
 });

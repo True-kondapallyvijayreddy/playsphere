@@ -361,6 +361,7 @@ class _CreateSheetState extends ConsumerState<_CreateSheet> {
                   ),
                 ),
                 IconButton(
+                  tooltip: 'Remove one',
                   onPressed: _maxPlayers == 0
                       ? null
                       : () => setState(() => _maxPlayers -= 2),
@@ -374,6 +375,7 @@ class _CreateSheetState extends ConsumerState<_CreateSheet> {
                   ),
                 ),
                 IconButton(
+                  tooltip: 'Add one',
                   onPressed: () => setState(() => _maxPlayers += 2),
                   icon: const Icon(Icons.add_circle_outline),
                 ),

@@ -2,15 +2,32 @@
 /// event reminder, match start, result, membership request approved,
 /// challenge received.
 ///
-/// [isCritical] marks the subset Module A specifically calls out as needing
-/// the WhatsApp/SMS fallback (event reminder, match start, result) — a
-/// missed match-start push means a player genuinely does not show up;
-/// a missed "your join request was approved" push is annoying but the
-/// membership is still sitting there waiting the next time they open the
-/// app. That distinction is what
-/// `NotificationFallbackPolicy.shouldFallback` keys off — see
-/// fallback_policy.dart for why it matters that this is a property of the
-/// event TYPE and not a runtime decision.
+/// [isCritical] marks the subset that must reach somebody in time to act on
+/// it: a missed match-start push means a player genuinely does not show up,
+/// while a missed "your join request was approved" is annoying and the
+/// membership is still sitting there next time they open the app.
+///
+/// ## What critical means today, and what it does not
+///
+/// Today it means one thing only: `sendToUsersDigestAware` in
+/// functions/index.js pushes these immediately and batches everything else
+/// into the next digest. Push over FCM is the ONLY delivery channel the
+/// product has.
+///
+/// This comment used to say the flag marked the subset needing "the
+/// WhatsApp/SMS fallback", and pointed at `NotificationFallbackPolicy` in
+/// `fallback_policy.dart`. Neither exists. No fallback was ever built, in any
+/// form, and describing one in the present tense made a gap read like a
+/// feature — which matters more here than in most places, because FCM
+/// delivery on the low-end Android handsets this product is aimed at is
+/// routinely killed by the vendor's battery manager, and "your match starts
+/// in an hour" is by this file's own reasoning the difference between turning
+/// up and not.
+///
+/// The gap is real and it is scoped in `docs/NOTIFICATION_FALLBACK.md`. This
+/// set is the input that design needs, so the flag stays exactly as it is —
+/// it is correct about which events matter. It just does not yet reach a
+/// second channel.
 enum NotificationType {
   eventReminder('event_reminder', isCritical: true),
   matchStart('match_start', isCritical: true),
@@ -32,8 +49,9 @@ enum NotificationType {
   /// Critical. This is the invitation itself, not a nudge about one somebody
   /// already has: a member who never sees it never knows the thing is being
   /// run, and by the time they open the app the entries may well be closed.
-  /// A tournament announced by push and missed is the exact failure the
-  /// WhatsApp fallback exists for.
+  /// A tournament announced by push and missed is the exact failure a second
+  /// delivery channel would exist to prevent — see the note at the top of this
+  /// file for why there is not one yet.
   tournamentAnnounced('tournament_announced', isCritical: true),
 
   /// Another club has invited this one into their tournament.
@@ -57,7 +75,9 @@ enum NotificationType {
   /// invitation itself and it expires. A member who does not see it until
   /// Monday did not miss a notification, they missed the game — which is
   /// exactly what the WhatsApp poll this replaces gets right by default,
-  /// because a phone puts a group message in front of you.
+  /// because a phone puts a group message in front of you and does not let a
+  /// battery manager decide otherwise. That advantage is still theirs; see
+  /// the note at the top of this file.
   matchRsvp('match_rsvp', isCritical: true),
 
   /// This person has said they are In for two matches at the same hour.

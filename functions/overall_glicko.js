@@ -45,7 +45,11 @@
 
 import { getFirestore } from 'firebase-admin/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
+
+import { CALLABLE_OPTS } from './app_check.js';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
+
+import { forEachPaged } from './paged_scan.js';
 import { logger } from 'firebase-functions';
 
 import { DEFAULT_DEVIATION, DEFAULT_RATING } from './glicko2.js';
@@ -357,45 +361,62 @@ export async function refreshOverallForUids(uids, asOf = new Date()) {
 /**
  * The nightly pass over everybody.
  *
- * Scans the `ratings` collection group once and joins it to `career_stats` in
+ * Scans the `ratings` collection group and joins it to `career_stats` in
  * memory, rather than the per-user reads `refreshOverallForUids` does — two
- * scans is two queries where the per-user shape is thousands. Same trade, and
- * the same ceiling, as `loadPlayerCandidates` in `talent.js`; see that file's
- * scale note for where this goes when the scan stops fitting.
+ * paged scans is two cursors where the per-user shape is thousands of reads.
+ *
+ * Both scans are paged and sequential; they used to be a `Promise.all` of two
+ * unbounded reads, which held every rating and every career row in one
+ * instance at the same time. See functions/paged_scan.js for why that stops
+ * working long before the platform does.
  */
 async function runOverallGlicko(asOf = new Date()) {
-  const [ratingsSnap, careerSnap] = await Promise.all([
-    db().collectionGroup('ratings').get(),
-    db().collectionGroup('career_stats').get(),
-  ]);
+  // Both scans are PAGED and run one after the other rather than together.
+  //
+  // `Promise.all` of two unbounded collection-group reads held every rating
+  // and every career row in one 1 GiB instance simultaneously, which is the
+  // peak this job could possibly have. Sequential and paged, the resident set
+  // is one page plus the two maps below — and those are the answer, so they
+  // were always going to be held.
+  //
+  // The join still needs `lastPlayed` complete before the ratings pass, so
+  // career_stats goes first. See functions/paged_scan.js.
 
   // `${uid}__${ratingKey}` -> last played
   const lastPlayed = new Map();
-  for (const doc of careerSnap.docs) {
-    const uid = doc.ref.parent.parent?.id;
-    if (!uid) continue;
-    const raw = doc.data().lastPlayedAt;
-    const at = raw?.toDate ? raw.toDate() : null;
-    if (at) lastPlayed.set(`${uid}__${doc.id}`, at);
-  }
+  await forEachPaged(
+    db().collectionGroup('career_stats'),
+    (doc) => {
+      const uid = doc.ref.parent.parent?.id;
+      if (!uid) return;
+      const raw = doc.data().lastPlayedAt;
+      const at = raw?.toDate ? raw.toDate() : null;
+      if (at) lastPlayed.set(`${uid}__${doc.id}`, at);
+    },
+    { label: 'overallGlicko career_stats' },
+  );
 
   /** uid -> entries */
   const byUid = new Map();
-  for (const doc of ratingsSnap.docs) {
-    const uid = doc.ref.parent.parent?.id;
-    if (!uid) continue;
-    const d = doc.data();
-    const updated = d.updatedAt?.toDate ? d.updatedAt.toDate() : null;
-    const list = byUid.get(uid) ?? [];
-    list.push({
-      ratingKey: doc.id,
-      rating: typeof d.rating === 'number' ? d.rating : DEFAULT_RATING,
-      deviation: typeof d.deviation === 'number' ? d.deviation : DEFAULT_DEVIATION,
-      gamesPlayed: typeof d.gamesPlayed === 'number' ? d.gamesPlayed : 0,
-      lastPlayedAt: lastPlayed.get(`${uid}__${doc.id}`) ?? updated,
-    });
-    byUid.set(uid, list);
-  }
+  await forEachPaged(
+    db().collectionGroup('ratings'),
+    (doc) => {
+      const uid = doc.ref.parent.parent?.id;
+      if (!uid) return;
+      const d = doc.data();
+      const updated = d.updatedAt?.toDate ? d.updatedAt.toDate() : null;
+      const list = byUid.get(uid) ?? [];
+      list.push({
+        ratingKey: doc.id,
+        rating: typeof d.rating === 'number' ? d.rating : DEFAULT_RATING,
+        deviation: typeof d.deviation === 'number' ? d.deviation : DEFAULT_DEVIATION,
+        gamesPlayed: typeof d.gamesPlayed === 'number' ? d.gamesPlayed : 0,
+        lastPlayedAt: lastPlayed.get(`${uid}__${doc.id}`) ?? updated,
+      });
+      byUid.set(uid, list);
+    },
+    { label: 'overallGlicko ratings' },
+  );
 
   let updated = 0;
   let skipped = 0;
@@ -450,8 +471,8 @@ export const computeOverallGlicko = onSchedule(
 );
 
 /** Staff-only manual rebuild, for after a formula change or a data fix. */
-export const rebuildOverallGlicko = onCall(
-  { region: 'asia-south1', timeoutSeconds: 540, memory: '1GiB' },
+export const rebuildOverallGlicko = onCall({
+    ...CALLABLE_OPTS, region: 'asia-south1', timeoutSeconds: 540, memory: '1GiB' },
   async (request) => {
     if (request.auth?.token?.admin !== true) {
       throw new HttpsError(

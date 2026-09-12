@@ -23,6 +23,26 @@
   <link rel="apple-touch-icon" href="icons/Icon-192.png">
   <link rel="icon" type="image/png" href="favicon.png">
   <meta name="theme-color" content="#0A0A0A">
+
+  <!-- Start-up latency, not decoration.
+       The engine's CanvasKit build (~2.1MB compressed) is fetched from
+       gstatic, and Firestore/Auth are hit the moment the app boots — but the
+       browser learns none of those origins until main.dart.js has downloaded,
+       parsed and run. Each one then costs a fresh DNS + TLS handshake on the
+       critical path. Warming the connections here overlaps that cost with the
+       bundle download instead of queueing behind it.
+
+       `main.dart.js` is preloaded rather than merely discovered: it is
+       referenced from flutter_bootstrap.js, so without this the browser does
+       not start fetching the largest file in the app until a second script has
+       run. `scripts/hash_web_bundle.sh` rewrites the name here in lockstep
+       with the bundle, so this link cannot point at a file that is not there. -->
+  <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+  <link rel="preconnect" href="https://firestore.googleapis.com" crossorigin>
+  <link rel="preconnect" href="https://securetoken.googleapis.com" crossorigin>
+  <link rel="preconnect" href="https://identitytoolkit.googleapis.com" crossorigin>
+  <link rel="preload" href="main.dart.js" as="script">
+
   <title>PlaySphere Sports OS</title>
 </head>
 <body>

@@ -99,6 +99,7 @@ class _CatalogTile extends ConsumerWidget {
           spacing: 4,
           children: [
             IconButton(
+              tooltip: 'Edit',
               icon: const Icon(Icons.edit_outlined),
               onPressed: onEdit,
             ),

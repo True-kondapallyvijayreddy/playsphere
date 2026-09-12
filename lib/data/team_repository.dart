@@ -283,8 +283,18 @@ class TeamRepository {
       });
 
   /// Who is waiting on this team's captain.
+  ///
+  /// Bounded like the team queries themselves, and for the same reason: this
+  /// is a live listener, so the client holds and is re-billed for the whole
+  /// result on every change. A popular independent team's join queue is
+  /// unbounded in principle — a shared join code reaches whoever it reaches —
+  /// and a captain works through a queue from the top rather than scrolling to
+  /// the end of it.
   Stream<List<TeamJoinRequest>> watchJoinRequests(String teamId) => guardStream(
-        () => Refs.teamJoinRequests(teamId).snapshots().map(
+        () => Refs.teamJoinRequests(teamId)
+            .limit(Refs.teamQueryLimit)
+            .snapshots()
+            .map(
               (s) => s.docs.map(TeamJoinRequest.fromDoc).toList(),
             ),
       );

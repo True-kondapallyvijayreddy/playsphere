@@ -31,6 +31,8 @@
 
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
+
+import { PAGE_SIZE, forEachPaged } from './paged_scan.js';
 import { logger } from 'firebase-functions';
 
 import { pushToUids } from './push.js';
@@ -83,16 +85,25 @@ export const flushNotificationDigests = onSchedule(
     timeoutSeconds: 300,
   },
   async () => {
-    const pending = await db()
-      .collectionGroup('notificationDigest')
-      .where('pendingCount', '>', 0)
-      .get();
-
-    if (pending.empty) return;
-
+    // Paged, and one page at a time rather than `Promise.all` over the whole
+    // result.
+    //
+    // This runs every fifteen minutes and its result set grows with the
+    // active user base: "every account with something waiting" is a small
+    // fraction of the platform and an unbounded number of documents. Reading
+    // them all and then fanning out a push for each concurrently is two
+    // ceilings at once — the resident set, and however many FCM calls the
+    // runtime will let one instance have in flight. See paged_scan.js.
+    //
+    // Pages are processed in order and each page's pushes go out together, so
+    // the concurrency is bounded by PAGE_SIZE rather than by how many people
+    // happen to have notifications waiting.
     let sent = 0;
-    await Promise.all(
-      pending.docs.map(async (doc) => {
+    const page = [];
+    const flushPage = async () => {
+      if (page.length === 0) return;
+      const batch = page.splice(0, page.length);
+      await Promise.all(batch.map(async (doc) => {
         const uid = doc.ref.parent.parent?.id;
         if (!uid) return;
 
@@ -120,8 +131,18 @@ export const flushNotificationDigests = onSchedule(
           updatedAt: FieldValue.serverTimestamp(),
         });
         sent += 1;
-      }),
+      }));
+    };
+
+    await forEachPaged(
+      db().collectionGroup('notificationDigest').where('pendingCount', '>', 0),
+      async (doc) => {
+        page.push(doc);
+        if (page.length >= PAGE_SIZE) await flushPage();
+      },
+      { label: 'notificationDigest flush' },
     );
+    await flushPage();
 
     logger.info('notification digest flush complete', { recipients: sent });
   },

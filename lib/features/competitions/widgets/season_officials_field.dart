@@ -510,6 +510,7 @@ class _AddOfficialSheetState extends ConsumerState<AddOfficialSheet> {
                           ),
                         )
                       : IconButton(
+                        tooltip: 'Next',
                           icon: const Icon(Icons.arrow_forward),
                           onPressed: _lookUpCode,
                         ),
@@ -857,6 +858,7 @@ class _OfficialAvailabilitySheetState extends State<OfficialAvailabilitySheet> {
                     ),
                   ),
                   IconButton(
+                    tooltip: 'Remove one',
                     icon: const Icon(Icons.remove_circle_outline),
                     onPressed: _maxPerDay > 1
                         ? () => setState(() => _maxPerDay--)
@@ -871,6 +873,7 @@ class _OfficialAvailabilitySheetState extends State<OfficialAvailabilitySheet> {
                     ),
                   ),
                   IconButton(
+                    tooltip: 'Add one',
                     icon: const Icon(Icons.add_circle_outline),
                     onPressed: _maxPerDay < 20
                         ? () => setState(() => _maxPerDay++)

@@ -45,7 +45,14 @@
 import { getAuth } from 'firebase-admin/auth';
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
+
+import { CALLABLE_OPTS } from './app_check.js';
 import { logger } from 'firebase-functions';
+
+// The declared inventory of everywhere one person's data lives, and the
+// traversal that walks it. Shared with `exportMyData` below so erasure and
+// export cannot come to disagree about which collections exist.
+import { eraseSubject, exportSubject } from './subject_runner.js';
 
 function db() {
   return getFirestore();
@@ -101,7 +108,7 @@ export function deletionRefusalReason(userData) {
  * leave an un-scrubbed profile behind with no session that could ever reach it.
  */
 export const deleteMyAccount = onCall(
-  { region: 'asia-south1' },
+  { ...CALLABLE_OPTS },
   async (request) => {
     const uid = request.auth?.uid;
     if (!uid) {
@@ -116,39 +123,95 @@ export const deleteMyAccount = onCall(
       throw new HttpsError(code, message);
     }
 
-    if (snap.exists) {
-      await userRef.set(redactedProfile(), { merge: true });
-    }
+    // Everything, from the declared inventory.
+    //
+    // This used to be four hand-written steps — profile, devices, directory
+    // listing, player code — and the review found nine more places it had
+    // never heard of: the coach, practitioner, shop and official listings a
+    // person publishes about themselves, their ground check-ins (a position
+    // and a time), their uploaded photos and the bytes behind them, their
+    // arena tally, their notification inbox, their guardian-consent records,
+    // and the verification documents behind a ground they claimed — which
+    // carry a home address and which firestore.rules marks undeletable by any
+    // client, so once the auth user was gone nobody could ever remove them.
+    //
+    // The fault was structural: every feature that stores something about a
+    // person had to remember to edit a function in a file it has no other
+    // reason to touch. subject_data.js is the declared list instead, walked
+    // here and by `exportMyData`, and a test asserts every row is reachable.
+    const report = await eraseSubject(uid, {
+      profileScrub: snap.exists ? redactedProfile() : null,
+    });
 
-    // The push tokens are the other place a person's device is named. Left
-    // behind, they would keep this account's notifications arriving on a phone
-    // that no longer has an account on it.
-    const devices = await userRef.collection('devices').get();
-    await Promise.all(devices.docs.map((d) => d.ref.delete()));
-
-    // The discovery listing is the one place the profile was deliberately
-    // searchable. It is a separate document keyed by uid, and it does not go
-    // private when the profile does — see `playerDirectory` in firestore.rules.
-    await db().collection('playerDirectory').doc(uid).delete().catch(() => {});
-
-    // The public code → player lookup carries a name and a photo of its own.
-    // Scrubbed rather than deleted, so the code stays spent and cannot be
-    // handed to somebody else later.
-    await db()
-      .collection('playerCodes')
-      .where('uid', '==', uid)
-      .get()
-      .then((codes) => Promise.all(
-        codes.docs.map((d) => d.ref.set(
-          { displayName: 'Deleted player', photoUrl: null },
-          { merge: true },
-        )),
-      ))
-      .catch((err) => logger.warn('playerCode scrub failed', { uid, err }));
-
+    // The sign-in goes last, deliberately, and the ordering is the same
+    // argument as before: if the sweep fails, nothing has been deleted and the
+    // account still works, so the person can try again. The reverse order
+    // leaves un-erased data behind with no session that could ever reach it.
     await getAuth().deleteUser(uid);
 
-    logger.info('account deleted', { uid, devicesCleared: devices.size });
+    const failures = report.filter((r) => r.error);
+    if (failures.length > 0) {
+      // Not thrown. The sign-in is already gone and the person is entitled to
+      // that having worked; what they are not entitled to is silence about a
+      // row that did not erase. Logged at error so it pages rather than
+      // scrolls.
+      logger.error('account deleted with incomplete erasure', { uid, failures });
+    }
+
+    logger.info('account deleted', {
+      uid,
+      erased: report.filter((r) => r.matched > 0).map((r) => r.row),
+      failures: failures.length,
+    });
     return { ok: true };
+  },
+);
+
+/**
+ * Hands the caller everything PlaySphere holds about them, as JSON.
+ *
+ * ## Why this exists
+ *
+ * The privacy policy has always said "ask, and we will send you your account
+ * data in a machine-readable file". Nothing implemented it — there was no
+ * automated path and no tooling to produce one by hand either, so the promise
+ * rested on somebody writing ad-hoc queries against production. India's DPDP
+ * Act gives a Data Principal the right to a summary of the personal data being
+ * processed about them; Google Play's data-safety rules expect the same.
+ *
+ * Walks the same inventory `deleteMyAccount` erases, which is the point of the
+ * inventory being declared rather than hand-written: a collection that would
+ * be missed by an export is a collection that would be missed by an erasure,
+ * and one list makes that impossible to get differently wrong in two places.
+ *
+ * ## What it does and does not include
+ *
+ * Everything keyed to this person: their profile, per-sport ratings, career
+ * records, competition entries, match history, listings, bookings, orders,
+ * check-ins and payment receipts. It does NOT include other people's records
+ * that merely mention them — a club's full roster, another player's scorecard
+ * — because those are not this person's data to be handed, and a right of
+ * access is not a right to the rest of the database.
+ *
+ * Returned inline rather than as a file in Storage. An export is a handful of
+ * documents, the client writes the JSON out itself (`file_download.dart`), and
+ * a generated download URL sitting in a bucket is one more copy of somebody's
+ * personal data waiting to leak.
+ */
+export const exportMyData = onCall(
+  { ...CALLABLE_OPTS },
+  async (request) => {
+    const uid = request.auth?.uid;
+    if (!uid) {
+      throw new HttpsError('unauthenticated', 'Sign in to export your data.');
+    }
+
+    const data = await exportSubject(uid);
+    logger.info('data export produced', {
+      uid,
+      keys: Object.keys(data).filter((k) => !k.startsWith('_')).length,
+      problems: data._problems?.length ?? 0,
+    });
+    return data;
   },
 );

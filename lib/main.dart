@@ -10,6 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'core/firebase/app_check_setup.dart';
 import 'core/l10n/locale_controller.dart';
 import 'core/providers.dart';
 import 'core/router/app_router.dart';
@@ -96,6 +97,19 @@ Future<void> main() async {
     runApp(_StartupFailure(error: error, stack: stack));
     return;
   }
+
+  // Attestation, immediately after the app exists and before anything reads
+  // or writes.
+  //
+  // `firestore.rules` authorizes identities, not clients, and a web API key is
+  // public by design — so until this, every rule in the product was reachable
+  // by a script rather than only by the app. Deliberately NOT fatal and
+  // deliberately not awaited for correctness: enforcement is a server-side
+  // setting that is currently off, so a client that cannot attest behaves
+  // exactly as it always has. See `activateAppCheck` for the rollout order,
+  // which matters — enforcing Firestore first would lock out every old build
+  // in the wild at once.
+  await activateAppCheck();
 
   // Installed AFTER Firebase.initializeApp, because Crashlytics needs the app
   // to exist before it can be handed anything. Before this, all three
@@ -202,7 +216,12 @@ class _PlaySphereAppState extends ConsumerState<PlaySphereApp> {
       // system toggle gets to make on the brand's behalf.
       themeMode: ThemeMode.light,
       // Null follows the device language; a user who has picked one overrides
-      // it. Telugu, Hindi and English ship from Phase 1 per CLAUDE.md §2.6.
+      // it.
+      //
+      // English only for now — see `supportedLocales`. Telugu and Hindi are
+      // translated and deliberately not offered, because the translations
+      // reach three screens and everything after them is an English literal.
+      // The delegates stay wired so restoring a locale is one line.
       locale: ref.watch(localeControllerProvider),
       supportedLocales: supportedLocales,
       localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -234,6 +253,19 @@ class _SplashGate extends StatefulWidget {
   State<_SplashGate> createState() => _SplashGateState();
 }
 
+/// How long [SplashScreen] covers the app on a cold start.
+///
+/// This was four seconds, and on the web that was four seconds added to a
+/// start-up that already had megabytes to fetch before it could paint: the
+/// engine, the bundle and the poster itself all land first, and only then does
+/// this timer begin. The brand still gets its moment — long enough to read as a
+/// screen rather than a flash — but it is no longer the largest single delay
+/// between opening the app and being able to use it.
+///
+/// Raise it if the splash should linger; it is the only knob, and nothing else
+/// depends on the value.
+const Duration kSplashHold = Duration(milliseconds: 900);
+
 class _SplashGateState extends State<_SplashGate> {
   bool _showSplash = true;
   Timer? _timer;
@@ -241,7 +273,7 @@ class _SplashGateState extends State<_SplashGate> {
   @override
   void initState() {
     super.initState();
-    _timer = Timer(const Duration(seconds: 4), () {
+    _timer = Timer(kSplashHold, () {
       if (mounted) setState(() => _showSplash = false);
     });
   }

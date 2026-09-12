@@ -47,17 +47,28 @@ import {
   settleCareer,
   settleOfficials,
 } from './settlement.js';
-import { ratingWithheldReason } from './rating_eligibility.js';
+import {
+  competitionRatingWithheldReason,
+  ratingWithheldReason,
+  sidesAreDistinct,
+} from './rating_eligibility.js';
+// WHO a fixture may rate, as opposed to WHETHER the fixture is rateable at
+// all. See participant_trust.js for the forged-fixture attack this closes.
+import {
+  relevantOrgIds,
+  splitParticipantsByTrust,
+} from './participant_trust.js';
 
 export { createPaymentLink, razorpayWebhook } from './razorpay.js';
 // Erasing an account: the profile's personal details AND the sign-in, which a
 // client cannot do for itself — see account.js.
-export { deleteMyAccount } from './account.js';
+export { deleteMyAccount, exportMyData } from './account.js';
 export { computeGovAggregates } from './gov.js';
 export {
   scoreNewGround,
   onGroundReported,
   onGroundCheckIn,
+  onGroundBooked,
   flagUnvisitedGround,
 } from './grounds.js';
 export { syncGovAggregates, runAnalyticsSync } from './analytics.js';
@@ -1431,6 +1442,135 @@ export const onMatchSettled = onDocumentUpdated(
     if (sideB.length === 0 && soloB) sideB.push(soloB);
     if (sideA.length === 0 || sideB.length === 0) return;
 
+    // -----------------------------------------------------------------
+    // WHO this match may rate.
+    //
+    // `ratingWithheldReason` above answered whether the fixture is the KIND
+    // that carries a rating. It has no view on whether the people named on it
+    // ever agreed to play, and until now nothing did: a fixture could name any
+    // two account ids in the country and this trigger would move their
+    // ratings. See participant_trust.js for the four-write attack and for why
+    // a rule cannot tell a forged entrant from a legitimate walk-up one.
+    //
+    // Ratings are withheld per PLAYER, not per fixture, so one unverifiable
+    // name does not cost the other twenty-one their result.
+    const trustOrgIds = relevantOrgIds(after, event.params.orgId);
+    const facts = new Map();
+    await Promise.all(
+      [...new Set([...sideA, ...sideB])].map(async (uid) => {
+        // Membership first and registration only on a miss: in an ordinary
+        // club match every player is a member, so the common case costs one
+        // read per player rather than two.
+        for (const id of trustOrgIds) {
+          const member = await db.doc(`orgs/${id}/members/${uid}`).get();
+          if (member.exists) {
+            facts.set(uid, { memberStatus: member.data().status ?? null });
+            return;
+          }
+        }
+        const reg = await db
+          .doc(
+            `orgs/${event.params.orgId}/competitions/${event.params.compId}` +
+              `/registrations/${uid}`,
+          )
+          .get();
+        if (reg.exists) {
+          facts.set(uid, {
+            memberStatus: null,
+            // An organizer-written entry proves an organizer wrote it. Only a
+            // registration the person made themselves stands on its own.
+            selfRegistered: reg.data().preselected !== true,
+          });
+          return;
+        }
+        // A squad player has no registration of their own — the document id is
+        // the team's. Being named on a team entry by whoever runs that team is
+        // a relationship of the same kind, so it counts.
+        const teamEntries = await db
+          .collection(
+            `orgs/${event.params.orgId}/competitions/${event.params.compId}` +
+              '/registrations',
+          )
+          .where('memberUids', 'array-contains', uid)
+          .limit(1)
+          .get();
+        facts.set(uid, {
+          memberStatus: null,
+          namedInTeamEntry: !teamEntries.empty,
+        });
+      }),
+    );
+
+    // The event itself has to be a real one.
+    //
+    // `ratingWithheldReason` asked what KIND of match this is and got the
+    // right answer for the wrong club: anybody may found an organization, so a
+    // two-account competition stamped `tournament` passed every check and its
+    // rating travelled onto ranking boards and scout searches like a district
+    // championship's. See `MIN_RATED_ENTRANTS`.
+    const compSnap = await db
+      .doc(`orgs/${event.params.orgId}/competitions/${event.params.compId}`)
+      .get();
+    const fieldReason = competitionRatingWithheldReason(
+      compSnap.exists ? compSnap.data() : null,
+    );
+    if (fieldReason) {
+      logger.info(
+        `Fixture ${fixtureId}: not rated (${fieldReason}). Career records and ` +
+          'the sport tally still settled above.',
+      );
+      return;
+    }
+
+    const trustA = splitParticipantsByTrust(sideA, facts);
+    const trustB = splitParticipantsByTrust(sideB, facts);
+    const withheld = [...trustA.withheld, ...trustB.withheld];
+    if (withheld.length > 0) {
+      // Logged rather than swallowed: a legitimate case that trips this has to
+      // surface as something an organizer can be asked about, not as a number
+      // that quietly never moved.
+      logger.warn(
+        `Fixture ${fixtureId}: rating withheld for ` +
+          `${withheld.length} participant(s) with no verifiable relationship ` +
+          'to this competition.',
+        { withheld },
+      );
+    }
+    // Both sides must still have somebody rateable. A match where one whole
+    // side is unverifiable has no opponent to rate anybody against, and
+    // averaging over an empty list is how a NaN reaches a rating document.
+    if (trustA.rated.length === 0 || trustB.rated.length === 0) {
+      logger.warn(
+        `Fixture ${fixtureId}: not rated — one side has no verifiable ` +
+          'participants.',
+      );
+      return;
+    }
+
+    // ...and they have to be two different people.
+    //
+    // A side rating itself is not a contest and it is the cheapest forgery
+    // available: one account on both team sheets. `interClubShapeValid`
+    // requires two distinct CLUBS and says nothing about accounts, and an
+    // individual event has no clubs to compare. A shared custodian collapses
+    // too, so a guardian cannot farm a rating off a child's profile they
+    // manage.
+    const custodianByUid = {};
+    await Promise.all(
+      [...trustA.rated, ...trustB.rated].map(async (uid) => {
+        const snap = await db.doc(`users/${uid}`).get();
+        const custodian = snap.exists ? snap.data().custodianUid : null;
+        if (custodian) custodianByUid[uid] = custodian;
+      }),
+    );
+    if (!sidesAreDistinct(trustA.rated, trustB.rated, custodianByUid)) {
+      logger.warn(
+        `Fixture ${fixtureId}: not rated — the two sides are the same person ` +
+          'or share a custodian.',
+      );
+      return;
+    }
+
     // Compared explicitly rather than by `===` alone: a fixture missing BOTH
     // fields makes `undefined === undefined` true and hands side A a win it
     // never earned.
@@ -1452,9 +1592,16 @@ export const onMatchSettled = onDocumentUpdated(
       ...contributionWeights(after.scoreState, after.lineupB ?? []),
     ]);
 
-    // Current ratings for everybody involved.
+    // Current ratings for everybody this match may rate.
+    //
+    // The verified set, not the full line-up, and that matters for the
+    // AVERAGES below as much as for the writes: an unverifiable name carries
+    // the default 1500, so including one in a side's average is itself the
+    // manipulation — inject a fabricated teammate and the opponent's expected
+    // score moves. Rating only the verified players against the verified
+    // opposition removes the lever rather than narrowing it.
     const current = new Map();
-    for (const uid of [...sideA, ...sideB]) {
+    for (const uid of [...trustA.rated, ...trustB.rated]) {
       const snap = await db.doc(`users/${uid}/ratings/${ratingKey}`).get();
       const d = snap.exists ? snap.data() : null;
       current.set(uid, {
@@ -1471,8 +1618,8 @@ export const onMatchSettled = onDocumentUpdated(
       const rs = uids.map((u) => current.get(u)?.rating ?? DEFAULT_RATING);
       return rs.reduce((s, r) => s + r, 0) / rs.length;
     };
-    const avgA = average(sideA);
-    const avgB = average(sideB);
+    const avgA = average(trustA.rated);
+    const avgB = average(trustB.rated);
 
     // The opponent's real uncertainty, not a hardcoded 350. A side whose
     // players are all established should move a rating further than one nobody
@@ -1482,8 +1629,8 @@ export const onMatchSettled = onDocumentUpdated(
       const ds = uids.map((u) => current.get(u)?.deviation ?? DEFAULT_DEVIATION);
       return ds.reduce((s, d) => s + d, 0) / ds.length;
     };
-    const rdA = avgDeviation(sideA);
-    const rdB = avgDeviation(sideB);
+    const rdA = avgDeviation(trustA.rated);
+    const rdB = avgDeviation(trustB.rated);
 
     const batch = db.batch();
     let settled = 0;
@@ -1495,8 +1642,8 @@ export const onMatchSettled = onDocumentUpdated(
     const settledAt = new Date();
 
     for (const [uids, opponentAvg, opponentRd, won] of [
-      [sideA, avgB, rdB, aWon],
-      [sideB, avgA, rdA, !aWon],
+      [trustA.rated, avgB, rdB, aWon],
+      [trustB.rated, avgA, rdA, !aWon],
     ]) {
       const score = isDraw ? 0.5 : won ? 1 : 0;
       for (const uid of uids) {
@@ -1589,8 +1736,11 @@ export const onMatchSettled = onDocumentUpdated(
     // Folding it into the batch above would mean a hiccup computing a rounded
     // number for a card could roll back a settled match result.
     try {
+      // The rated set, not the line-up: a player whose rating was withheld has
+      // nothing new to recompose, and naming them here would write a composite
+      // onto an account this match was not allowed to touch.
       const refreshed = await refreshOverallForUids(
-        [...sideA, ...sideB],
+        [...trustA.rated, ...trustB.rated],
         settledAt,
       );
       logger.info(

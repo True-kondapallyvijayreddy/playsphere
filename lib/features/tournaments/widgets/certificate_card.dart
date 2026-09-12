@@ -200,6 +200,36 @@ class CertificateCard extends StatelessWidget {
                         ),
                       ],
                     ),
+                    // The line that makes this a certificate rather than a
+                    // picture of one.
+                    //
+                    // Without somewhere to check it, a certificate is a PNG
+                    // anybody can reproduce with a different name on it — and
+                    // the whole pitch for the feature is verifiable proof for
+                    // a career resume. Printed rather than shown only in the
+                    // app, because the thing people do with these is print
+                    // them and hand them across a table.
+                    //
+                    // Text and not a QR image: a QR needs a dependency and an
+                    // image at print resolution, and the URL is short enough
+                    // to type. The short code beside it is for somebody who
+                    // would rather read it out than type a path.
+                    if (c.isVerifiable) ...[
+                      const SizedBox(height: 10),
+                      Center(
+                        child: Text(
+                          'Verify at playsphere-os.web.app${c.verifyPath}'
+                          '   ·   ${c.verifyCode}',
+                          textAlign: TextAlign.center,
+                          maxLines: 2,
+                          style: const TextStyle(
+                            color: _muted,
+                            fontSize: 7,
+                            letterSpacing: 0.2,
+                          ),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
