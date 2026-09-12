@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:firebase_storage/firebase_storage.dart';
 
 import '../core/errors/app_exception.dart';
@@ -15,16 +16,33 @@ import '../core/models/match_official.dart';
 import '../core/models/club_standing.dart';
 import '../core/models/ranking_entry.dart';
 import '../core/models/tournament.dart';
+import '../core/models/season_interest.dart';
 import '../core/models/tournament_invite.dart';
 import '../core/models/tournament_official.dart';
 import '../core/models/venue.dart';
+import '../core/models/venue_plan.dart';
+import '../domain/draw/match_count.dart';
 import '../domain/draw/officials_roster.dart';
 import '../domain/draw/schedule_guarantees.dart';
 import '../domain/draw/schedule_shift.dart';
+import '../domain/draw/season_capacity.dart';
 import '../domain/draw/tournament_scheduler.dart';
 import 'competition_repository.dart';
 import 'media_uploader.dart';
 import 'org_repository.dart' show guard, guardStream;
+
+/// One season, read once, in the shape every scheduling operation needs.
+typedef _SeasonPlan = ({
+  Tournament tournament,
+  List<Competition> events,
+  List<SchedulableMatch> matches,
+
+  /// Keyed `compId#matchIndex`, matching [SchedulableMatch.key].
+  Map<String, Fixture> fixturesByKey,
+  List<CourtCalendar> calendars,
+  Duration minRest,
+  Duration transition,
+});
 
 /// Venues, tournaments, and the one operation that needs both: laying out
 /// every match of every event across one shared pool of courts.
@@ -75,6 +93,44 @@ class TournamentRepository {
   }) =>
       guard(
         () => Refs.tournament(orgId, tournamentId).update({'bannerUrl': null}),
+      );
+
+  /// Puts the season's badge on it — the crest on the banner, in the season
+  /// list, and on the public link.
+  ///
+  /// A separate object and a separate field from the banner, not a second use
+  /// of one upload, because the two are different pictures at different
+  /// aspect ratios: a badge is squared and drawn `contain` at 56pt, a banner
+  /// is a full-bleed 1600px photograph. Shrunk harder on the way in for the
+  /// same reason — nothing in the app draws this above 96pt.
+  ///
+  /// A one-field write, like the banner above, so the edit sheet's
+  /// `Tournament.toUpdate` can never clobber it.
+  Future<String> uploadSeasonLogo({
+    required String orgId,
+    required String tournamentId,
+    required String uid,
+    required Uint8List bytes,
+    required String contentType,
+  }) =>
+      guard(() async {
+        final url = await _media.putImage(
+          folder: 'tournaments/$tournamentId/logo',
+          uid: uid,
+          bytes: bytes,
+          contentType: contentType,
+        );
+        await Refs.tournament(orgId, tournamentId).update({'logoUrl': url});
+        return url;
+      });
+
+  /// Goes back to no crest at all, which is the normal state.
+  Future<void> removeSeasonLogo({
+    required String orgId,
+    required String tournamentId,
+  }) =>
+      guard(
+        () => Refs.tournament(orgId, tournamentId).update({'logoUrl': null}),
       );
 
   static final StreamController<AppException> _writeFailures =
@@ -436,20 +492,23 @@ class TournamentRepository {
           });
         }
 
-        // Last, so a batch that fails part way through has not told anybody
-        // to go and look at a schedule that was never published.
-        final notifRef = Refs.notifications(orgId).doc();
-        batch.set(notifRef, {
-          'type': 'tournament_schedule_released',
-          'tournamentId': tournamentId,
-          'orgId': orgId,
-          'title': 'Tournament Schedule Released',
-          'body': 'The match schedule has been officially locked and published. Check your match timings and court details!',
-          'createdAt': FieldValue.serverTimestamp(),
-        });
-
+        // Telling everybody is `onScheduleReleased`'s job, in
+        // functions/index.js, and it fires off the `isScheduleLocked`
+        // transition this batch writes.
+        //
+        // It was done here, as a third write in this batch, and it could not
+        // work: the document went to `users/{orgId}/notifications` — an orgId
+        // is not a uid, so the path named a user who does not exist — and
+        // `firestore.rules` ends that collection with `allow create: if
+        // false`, because a notification is the server's to write and a
+        // client that could create one could notify anybody about anything.
+        // Firestore rejects a batch if ANY write in it is denied, so the
+        // rejected notification took the two status updates down with it and
+        // "Lock & publish" failed outright. The schedule could not be
+        // published at all.
+        //
         // Awaited, unlike the draw paths: an organizer pressing "publish" is
-        // entitled to know it landed, and the notification has already gone.
+        // entitled to know it landed.
         await batch.commitAll();
       });
 
@@ -498,6 +557,65 @@ class TournamentRepository {
         );
       });
 
+  /// Opens entries on every event of a season at once.
+  ///
+  /// ## Why this had to exist
+  ///
+  /// Every competition is created as a `draft` — `Competition.toCreate`
+  /// forces it and `firestore.rules` requires it, so that an organizer can
+  /// configure an event before anybody can enter it. That is right for one
+  /// event and wrong for a season: publishing a twelve-category sports week
+  /// produced twelve drafts, and the season page offered no way to open any
+  /// of them. The organizer had to open twelve event pages and press "Open
+  /// entries" twelve times before a single student could register — and
+  /// nothing on the season told them that was the next step, so the ordinary
+  /// experience of publishing a season was a season nobody could enter.
+  ///
+  /// Only drafts are touched. An event whose entries are already open, or
+  /// closed, or being played, is left exactly as it is: this opens a season,
+  /// it does not reopen one.
+  ///
+  /// The tournament moves to `entriesOpen` in the same batch, so the season
+  /// header and the events under it cannot disagree about whether the season
+  /// is taking entries.
+  Future<int> openEntriesForSeason({
+    required String orgId,
+    required String tournamentId,
+  }) =>
+      guard(() async {
+        final eventSnap = await Refs.competitions(orgId)
+            .where('tournamentId', isEqualTo: tournamentId)
+            .get();
+        final drafts = [
+          for (final doc in eventSnap.docs)
+            if (Competition.fromDoc(doc).status == CompetitionStatus.draft)
+              Competition.fromDoc(doc),
+        ];
+        if (drafts.isEmpty) {
+          throw const ValidationException(
+            'Every event in this season has already been opened.',
+          );
+        }
+
+        final batch = ChunkedBatch(Refs.db);
+        for (final event in drafts) {
+          batch.update(Refs.competition(orgId, event.id), {
+            'status': CompetitionStatus.registrationOpen.wire,
+            'updatedAt': FieldValue.serverTimestamp(),
+          });
+        }
+        batch.update(Refs.tournament(orgId, tournamentId), {
+          'status': TournamentStatus.entriesOpen.wire,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+
+        // Awaited, unlike most writes here. The organizer is watching a
+        // button and the next thing they will do is tell people to register;
+        // "entries are open" is not something to report optimistically.
+        await batch.commitAll();
+        return drafts.length;
+      });
+
   /// Draws every event, then lays the whole season out on one timetable.
   ///
   /// The operation the product exists to provide. An organizer running a
@@ -537,19 +655,25 @@ class TournamentRepository {
             'Set the season dates before laying out a schedule.',
           );
         }
-        if (tournament.venueIds.isEmpty) {
-          throw const ValidationException(
-            'This season has no grounds yet. Add a venue with at least one '
-            'court — the schedule is built out of courts.',
-          );
-        }
-
         final eventSnap = await Refs.competitions(orgId)
             .where('tournamentId', isEqualTo: tournamentId)
             .get();
         final events = eventSnap.docs.map(Competition.fromDoc).toList();
         if (events.isEmpty) {
           throw const ValidationException('This season has no events yet.');
+        }
+
+        // Checked against the same pool `generateSchedule` actually builds
+        // from — the season's grounds PLUS any ground a single sport names
+        // for itself. Testing only the tournament's own list would refuse a
+        // season whose cricket has the main field and whose season-level list
+        // was left empty, while the solve it is guarding would have worked.
+        if (tournament.venueIds.isEmpty &&
+            events.every((e) => e.scheduleConfig.venueIds.isEmpty)) {
+          throw const ValidationException(
+            'This season has no grounds yet. Add a venue with at least one '
+            'court — the schedule is built out of courts.',
+          );
         }
 
         const comps = CompetitionRepository();
@@ -572,10 +696,43 @@ class TournamentRepository {
           }
 
           final entrantSnap = await Refs.entrants(orgId, event.id).get();
-          final entrants = [
+          var entrants = [
             for (final doc in entrantSnap.docs)
               if (!Entrant.fromDoc(doc).withdrawn) Entrant.fromDoc(doc),
           ];
+
+          // Entries still open, and nothing promoted yet.
+          //
+          // ## Why this closes them rather than skipping
+          //
+          // An entrant list is not written when somebody registers — it is
+          // written when an organizer CLOSES entries, which promotes the
+          // confirmed registrations into the field (house squads resolved,
+          // pairs joined, waitlist settled). Until that happens the event has
+          // registrations and no entrants.
+          //
+          // Skipping here is what a season with twenty people signed up to
+          // every event looked like from the outside: "Set up the whole
+          // season" reported "0 entered, needs at least 2" for all twelve of
+          // them, while the event pages plainly showed twenty registrations.
+          // That reads as a broken schedule, and the fix an organizer needed
+          // was twelve trips into twelve event pages to press Close entries.
+          //
+          // So the one button does the whole thing, which is what it says it
+          // does. A failure to close is reported for that event alone and the
+          // rest of the season still gets drawn — same policy as a failed
+          // draw below.
+          if (entrants.isEmpty && event.status.acceptsRegistrations) {
+            try {
+              entrants = await comps.closeEntriesAndPromote(
+                orgId: orgId,
+                compId: event.id,
+              );
+            } on AppException catch (e) {
+              skipped.add('${event.name}: ${e.message}');
+              continue;
+            }
+          }
 
           if (entrants.length < 2) {
             skipped.add(
@@ -703,7 +860,13 @@ class TournamentRepository {
         final batch = Refs.db.batch();
         for (final club in targets) {
           batch.set(
-            Refs.tournamentInvites.doc(),
+            Refs.tournamentInvite(
+              TournamentInvite.idFor(
+                fromOrgId: tournament.orgId,
+                tournamentId: tournament.id,
+                toOrgId: club.orgId,
+              ),
+            ),
             TournamentInvite(
               id: '',
               tournamentId: tournament.id,
@@ -755,6 +918,34 @@ class TournamentRepository {
     );
   }
 
+  /// Every invitation into [orgId] that is still live — asked and unanswered,
+  /// or answered yes.
+  ///
+  /// The wider sibling of [watchIncomingInvites], which is pending-only
+  /// because it feeds a "you have been asked, reply" strip and an accepted
+  /// invitation is no longer a thing to reply to. This one answers a
+  /// different question — "what is my club actually part of?" — and there the
+  /// accepted ones are the whole point: a club that said yes in April is
+  /// still going in June, and dropping it the moment it was answered is how
+  /// the host's season became invisible to everybody it had invited.
+  ///
+  /// `declined` and `withdrawn` stay out. Both are a closed door, and a
+  /// season nobody at this club is going to is not this club's season.
+  ///
+  /// Guarded like its sibling: this feeds a home-screen count, and one club's
+  /// refused read must not surface as a raw exception.
+  Stream<List<TournamentInvite>> watchLiveIncomingInvites(String orgId) {
+    return guardStream(
+      () => Refs.tournamentInvites
+          .where('toOrgId', isEqualTo: orgId)
+          .where('status', whereIn: const ['pending', 'accepted'])
+          .snapshots()
+          .map((snap) => snap.docs.map(TournamentInvite.fromDoc).toList()
+            ..sort((a, b) => (a.startDate ?? DateTime(9999))
+                .compareTo(b.startDate ?? DateTime(9999)))),
+    );
+  }
+
   /// Records the invited club's answer, or the host taking the offer back.
   ///
   /// Accepting does NOT enter anybody into anything. The tournament's own
@@ -771,6 +962,64 @@ class TournamentRepository {
             'status': status,
             'respondedAt': FieldValue.serverTimestamp(),
           }));
+
+  // --- Interest in an invited season ------------------------------------
+
+  /// Who at [orgId] has put their hand up for the season [hostOrgId] invited
+  /// them into.
+  ///
+  /// Read by the club's own organizers when they pick the side, and by each
+  /// member to know whether their own hand is up. One stream for both, rather
+  /// than a second single-document read for "am I in this list", because the
+  /// rules already let any member of the club read the whole list and a
+  /// member seeing who else is available is a feature, not a leak.
+  Stream<List<SeasonInterest>> watchSeasonInterest({
+    required String orgId,
+    required String hostOrgId,
+    required String tournamentId,
+  }) {
+    return guardStream(
+      () => Refs.seasonInterest(orgId)
+          .where('hostOrgId', isEqualTo: hostOrgId)
+          .where('tournamentId', isEqualTo: tournamentId)
+          .snapshots()
+          .map((snap) => snap.docs.map(SeasonInterest.fromDoc).toList()
+            ..sort((a, b) => (a.createdAt ?? DateTime(9999))
+                .compareTo(b.createdAt ?? DateTime(9999)))),
+    );
+  }
+
+  /// Puts a member's hand up, or edits the note on a hand already up.
+  ///
+  /// A deterministic id and a `set`, so the button is idempotent: pressing it
+  /// on a second device updates the one row rather than adding another.
+  Future<void> setSeasonInterest(SeasonInterest interest) => guard(
+        () => Refs.seasonInterestDoc(interest.orgId, interest.id)
+            .set(interest.toCreate(), SetOptions(merge: true)),
+      );
+
+  /// Takes a hand back down.
+  ///
+  /// A delete rather than a status, unlike an invitation's `declined`:
+  /// availability is not an answer anybody is owed a record of, and a member
+  /// who changes their mind on Tuesday should leave no trace on the owner's
+  /// selection list on Wednesday.
+  Future<void> clearSeasonInterest({
+    required String orgId,
+    required String hostOrgId,
+    required String tournamentId,
+    required String uid,
+  }) =>
+      guard(
+        () => Refs.seasonInterestDoc(
+          orgId,
+          SeasonInterest.idFor(
+            hostOrgId: hostOrgId,
+            tournamentId: tournamentId,
+            uid: uid,
+          ),
+        ).delete(),
+      );
 
   // --- Officials (the season's own panel, pre-assigned ICC-style) -------
 
@@ -1049,6 +1298,445 @@ class TournamentRepository {
           ..sort((a, b) => b.points.compareTo(a.points)));
   }
 
+  // --- Venue planning ---------------------------------------------------
+
+  /// This season's plan for every venue it has been given one for.
+  ///
+  /// Absent means "no opinion" everywhere it is read, so a season whose
+  /// organizer never opened the venue planner behaves exactly as it did
+  /// before venue planning existed.
+  Stream<Map<String, VenuePlan>> watchVenuePlans(
+    String orgId,
+    String tournamentId,
+  ) =>
+      guardStream(
+        () => Refs.venuePlans(orgId, tournamentId).snapshots().map(
+              (snap) => {
+                for (final doc in snap.docs) doc.id: VenuePlan.fromDoc(doc),
+              },
+            ),
+      );
+
+  Future<void> saveVenuePlan({
+    required String orgId,
+    required String tournamentId,
+    required VenuePlan plan,
+  }) =>
+      guard(() async {
+        for (final session in plan.sessions) {
+          if (!session.isValid) {
+            throw const ValidationException(
+              'A playing session has to end after it starts.',
+            );
+          }
+        }
+        if ((plan.matchMinutes ?? 1) < 1) {
+          throw const ValidationException(
+            'A match has to be at least a minute long.',
+          );
+        }
+        await Refs.venuePlan(orgId, tournamentId, plan.venueId)
+            .set(plan.toMap(), SetOptions(merge: true));
+      });
+
+  /// Puts a venue back to "use it however the season needs".
+  Future<void> clearVenuePlan({
+    required String orgId,
+    required String tournamentId,
+    required String venueId,
+  }) =>
+      guard(() => Refs.venuePlan(orgId, tournamentId, venueId).delete());
+
+  /// Answers "will this fit?" before a single fixture is drawn.
+  ///
+  /// ## Why this runs before Generate and not after
+  ///
+  /// The failure it prevents is a season that is discovered to be impossible
+  /// only once it has been drawn, published and half-registered — at which
+  /// point the organizer's options are all bad. Every number here is
+  /// obtainable from the entrant counts and the venue plans, so the answer is
+  /// available at the moment it is still cheap to act on: add a day, add a
+  /// ground, shorten the match.
+  ///
+  /// Counts required matches from the draws when they exist and from the
+  /// entrant count when they do not, so it is answerable at both ends of the
+  /// season lifecycle.
+  Future<CapacityReport> assessCapacity({
+    required String orgId,
+    required String tournamentId,
+    int? matchMinutesOverride,
+  }) =>
+      guard(() async {
+        final tDoc = await Refs.tournament(orgId, tournamentId).get();
+        if (!tDoc.exists) {
+          throw const NotFoundException('That season no longer exists.');
+        }
+        final tournament = Tournament.fromDoc(tDoc);
+        final start = tournament.startDate;
+        if (start == null) {
+          throw const ValidationException(
+            'Set the season dates before checking capacity.',
+          );
+        }
+
+        final eventSnap = await Refs.competitions(orgId)
+            .where('tournamentId', isEqualTo: tournamentId)
+            .get();
+        final events = eventSnap.docs.map(Competition.fromDoc).toList();
+        if (events.isEmpty) {
+          throw const ValidationException('This season has no events yet.');
+        }
+
+        final venues = await _venuesOf(orgId, tournament, events);
+        final plans = await _venuePlansOf(orgId, tournamentId);
+
+        final availabilityFor = <String, EventAvailability>{
+          for (final event in events) event.id: availabilityOf(event, tournament),
+        };
+        final gridDays = _gridDaysFor(
+          tournament: tournament,
+          start: start,
+          availabilities: availabilityFor.values,
+        );
+
+        final calendars = SeasonCapacity.buildCalendars(
+          seasonStart: start,
+          dayCount: gridDays,
+          venues: venues,
+          plans: plans,
+          defaultMatchMinutes:
+              matchMinutesOverride ?? tournament.matchMinutesDefault,
+          defaultTurnaroundMinutes: tournament.changeoverMinutes,
+        );
+
+        final demands = <EventDemand>[];
+        for (final event in events) {
+          final availability =
+              availabilityFor[event.id] ?? EventAvailability.anywhere;
+          final eligible = <String>{
+            for (final c in calendars)
+              if (availability.allowsCourt(c.court) &&
+                  c.allowsSport(event.sportId))
+                c.court.key,
+          };
+
+          // Drawn already? Then the fixtures are the truth. Not drawn? Then
+          // the entrant count and the format say exactly how many matches the
+          // draw will make, which is the whole reason this can be asked first.
+          final fixtureSnap = await Refs.fixtures(orgId, event.id).count().get();
+          var required = fixtureSnap.count ?? 0;
+          if (required == 0) {
+            final entrants =
+                (await Refs.entrants(orgId, event.id).count().get()).count ?? 0;
+            required = MatchCount.forDraw(
+              format: event.format,
+              config: event.drawConfig,
+              entrants: entrants,
+            );
+          }
+          if (required == 0) continue;
+
+          final venuePlan = _planForEvent(plans, availability);
+          demands.add(EventDemand(
+            compId: event.id,
+            label: event.name,
+            sportId: event.sportId,
+            matchesRequired: required,
+            eligibleCourtKeys: eligible,
+            matchMinutes: matchMinutesOverride ??
+                venuePlan?.matchMinutes ??
+                event.scheduleConfig.matchMinutes,
+            turnaroundMinutes: venuePlan?.turnaroundMinutes ??
+                event.scheduleConfig.changeoverMinutes,
+          ));
+        }
+
+        return SeasonCapacity.assess(calendars: calendars, demands: demands);
+      });
+
+  /// What one venue offers this season, with the organizer's own ceiling kept
+  /// visibly apart from the arithmetic — see [VenueCapacityLine].
+  Future<List<VenueCapacityLine>> venueCapacityLines({
+    required String orgId,
+    required String tournamentId,
+  }) =>
+      guard(() async {
+        final tDoc = await Refs.tournament(orgId, tournamentId).get();
+        if (!tDoc.exists) return const <VenueCapacityLine>[];
+        final tournament = Tournament.fromDoc(tDoc);
+        final start = tournament.startDate;
+        if (start == null) return const <VenueCapacityLine>[];
+
+        final eventSnap = await Refs.competitions(orgId)
+            .where('tournamentId', isEqualTo: tournamentId)
+            .get();
+        final events = eventSnap.docs.map(Competition.fromDoc).toList();
+        final venues = await _venuesOf(orgId, tournament, events);
+        final plans = await _venuePlansOf(orgId, tournamentId);
+
+        return [
+          for (final venue in venues)
+            SeasonCapacity.lineFor(
+              venue: venue,
+              plan: plans[venue.id] ?? VenuePlan(venueId: venue.id),
+              seasonStart: start,
+              dayCount: tournament.dayCount,
+              defaultMatchMinutes: tournament.matchMinutesDefault,
+              defaultTurnaroundMinutes: tournament.changeoverMinutes,
+            ),
+        ];
+      });
+
+  /// Every venue this season could play at — its own list, plus any ground an
+  /// event named that the season itself never did.
+  ///
+  /// The union matters for a multi-sport season: the cricket needs the main
+  /// field and nothing else in the season goes near it, so an event's own
+  /// choice has to be able to add to the pool rather than only narrow it.
+  Future<List<Venue>> _venuesOf(
+    String orgId,
+    Tournament tournament,
+    List<Competition> events,
+  ) async {
+    final ids = <String>{
+      ...tournament.venueIds,
+      for (final event in events) ...event.scheduleConfig.venueIds,
+    };
+    final out = <Venue>[];
+    for (final id in ids) {
+      final doc = await Refs.venue(orgId, id).get();
+      if (!doc.exists) continue;
+      final venue = Venue.fromDoc(doc);
+      if (venue.isArchived || venue.usableCourts.isEmpty) continue;
+      out.add(venue);
+    }
+    out.sort((a, b) => a.id.compareTo(b.id));
+    return out;
+  }
+
+  Future<Map<String, VenuePlan>> _venuePlansOf(
+    String orgId,
+    String tournamentId,
+  ) async {
+    final snap = await Refs.venuePlans(orgId, tournamentId).get();
+    return {for (final doc in snap.docs) doc.id: VenuePlan.fromDoc(doc)};
+  }
+
+  /// The plan of the one venue an event is pinned to, for reading its match
+  /// length. Null when the event may go to several grounds, where no single
+  /// venue's timing is the right answer.
+  static VenuePlan? _planForEvent(
+    Map<String, VenuePlan> plans,
+    EventAvailability availability,
+  ) {
+    if (availability.venueIds.length != 1) return null;
+    return plans[availability.venueIds.first];
+  }
+
+  /// How many days the schedule grid has to span.
+  static int _gridDaysFor({
+    required Tournament tournament,
+    required DateTime start,
+    required Iterable<EventAvailability> availabilities,
+  }) {
+    var days = tournament.dayCount;
+    for (final availability in availabilities) {
+      final last = availability.lastDay;
+      if (last == null) continue;
+      final span = DateTime(last.year, last.month, last.day)
+              .difference(DateTime(start.year, start.month, start.day))
+              .inDays +
+          1;
+      if (span > days) days = span;
+    }
+    return days;
+  }
+
+  /// `{x}` when [value] is a real id, null when it is not — so a set literal
+  /// can spread it away without a branch.
+  static Set<String>? _maybe(String? value) =>
+      value == null || value.isEmpty ? null : {value};
+
+  /// Everything one solve of a season needs, read once.
+  ///
+  /// Extracted because three operations need exactly the same picture —
+  /// generating the timetable, checking the one already stored, and
+  /// re-checking it after an organizer moves a match by hand. Reading it
+  /// three different ways is how the health report and the scheduler end up
+  /// disagreeing about whether a court is open, and a disagreement there is
+  /// invisible until somebody is standing on the wrong court.
+  Future<_SeasonPlan> _loadPlan({
+    required String orgId,
+    required String tournamentId,
+    int? matchMinutesOverride,
+  }) async {
+    final tDoc = await Refs.tournament(orgId, tournamentId).get();
+    if (!tDoc.exists) {
+      throw const NotFoundException('That tournament no longer exists.');
+    }
+    final tournament = Tournament.fromDoc(tDoc);
+
+    final start = tournament.startDate;
+    if (start == null) {
+      throw const ValidationException(
+        'Set the tournament dates before generating a schedule.',
+      );
+    }
+
+    // ---- Every event, and every fixture in it. ----
+    //
+    // Read before the venues, unlike the original order, because an event
+    // may name a ground the season itself never did — a multi-sport
+    // season is exactly the case where the cricket needs the main field
+    // and nothing else in the season goes near it. The pool is the union
+    // of both, and `EventAvailability` below is what keeps each event on
+    // its own share of it.
+    final eventSnap = await Refs.competitions(orgId)
+        .where('tournamentId', isEqualTo: tournamentId)
+        .get();
+    final events = eventSnap.docs.map(Competition.fromDoc).toList();
+    if (events.isEmpty) {
+      throw const ValidationException(
+        'This tournament has no events yet.',
+      );
+    }
+
+    // ---- Venues, and this season's plan for each of them. ----
+    final venues = await _venuesOf(orgId, tournament, events);
+    if (venues.isEmpty) {
+      throw const ValidationException(
+        'This tournament has no usable courts. Add a venue with at least '
+        'one court, or mark an existing court available.',
+      );
+    }
+    final plans = await _venuePlansOf(orgId, tournamentId);
+
+    // ---- What each event is allowed, on its own. ----
+    //
+    // A multi-sport season is several tournaments sharing a fortnight and
+    // a set of grounds, and until this existed it was scheduled as though
+    // it were one: one pool of courts, one day window, every sport
+    // eligible for every court in the district. The badminton could be
+    // called to the cricket field.
+    //
+    // Everything below is a restriction on the shared grid rather than a
+    // grid of its own — that is what keeps a player entered in three
+    // sports from being booked onto three courts at once, which is the
+    // whole reason a season is scheduled in one pass.
+    final availabilityFor = <String, EventAvailability>{
+      for (final event in events)
+        event.id: availabilityOf(event, tournament),
+    };
+
+    final matches = <SchedulableMatch>[];
+    final fixturesByKey = <String, Fixture>{};
+
+    for (final event in events) {
+      final fSnap = await Refs.fixtures(orgId, event.id).get();
+      final fixtures = fSnap.docs.map(Fixture.fromDoc).toList();
+
+      // Individual events name their competitors on the entrant document
+      // rather than in a line-up, so the uid has to come from there.
+      final entrantSnap = await Refs.entrants(orgId, event.id).get();
+      final uidByEntrant = <String, List<String>>{};
+      final teamByEntrant = <String, String>{};
+      for (final doc in entrantSnap.docs) {
+        final entrant = Entrant.fromDoc(doc);
+        uidByEntrant[doc.id] = entrant.uid != null
+            ? [entrant.uid!]
+            : entrant.memberUids;
+        // The persistent team behind this entry, which is the only side
+        // identity that survives leaving one draw — an entrant id is
+        // scoped to its own competition and says nothing across a season.
+        final teamId = entrant.teamId;
+        if (teamId != null && teamId.isNotEmpty) {
+          teamByEntrant[doc.id] = teamId;
+        }
+      }
+
+      for (final f in fixtures) {
+        // Played or playing — the timetable does not get to move it.
+        if (f.status != FixtureStatus.scheduled || f.lastSeq > 0) continue;
+
+        final uids = <String>{
+          ...f.playerUids,
+          ...?uidByEntrant[f.entrantAId],
+          ...?uidByEntrant[f.entrantBId],
+        };
+
+        matches.add(SchedulableMatch(
+          compId: event.id,
+          matchIndex: f.matchIndex,
+          round: f.round,
+          playerUids: uids,
+          teamKeys: {
+            ...?_maybe(teamByEntrant[f.entrantAId]),
+            ...?_maybe(teamByEntrant[f.entrantBId]),
+          },
+          sportId: event.sportId,
+          isGroupStage: f.bracket == Bracket.group,
+          // Younger age groups first, so children are not kept at a
+          // venue until the evening waiting on a senior draw.
+          priority: _priorityFor(event),
+          matchMinutes:
+              matchMinutesOverride ?? event.scheduleConfig.matchMinutes,
+          availability:
+              availabilityFor[event.id] ?? EventAvailability.anywhere,
+        ));
+        fixturesByKey['${event.id}#${f.matchIndex}'] = f;
+      }
+    }
+
+    if (matches.isEmpty) {
+      throw const ValidationException(
+        'No unplayed matches to schedule. Generate the draws first.',
+      );
+    }
+
+    // How many days the grid has to cover. An event running past the
+    // season's own last day extends it rather than losing its final
+    // rounds.
+    final gridDays = _gridDaysFor(
+      tournament: tournament,
+      start: start,
+      availabilities: availabilityFor.values,
+    );
+
+    // ---- The resources, one calendar per playing area. ----
+    //
+    // Not one shared grid: a ground lent on five days of six, shut for
+    // lunch, and capped at three matches a day is a different resource
+    // from the hall next door, and a single uniform grid can express none
+    // of it. `buildCalendars` folds the venue's own hours, this season's
+    // sessions, its blackouts and its daily ceiling into the slots each
+    // court actually offers.
+    final calendars = SeasonCapacity.buildCalendars(
+      seasonStart: start,
+      dayCount: gridDays,
+      venues: venues,
+      plans: plans,
+      defaultMatchMinutes:
+          matchMinutesOverride ?? tournament.matchMinutesDefault,
+      defaultTurnaroundMinutes: tournament.changeoverMinutes,
+    );
+    if (calendars.isEmpty) {
+      throw const ValidationException(
+        'No playing area is open on any day of this season. Check the '
+        'venue availability — the dates, the sessions and the blackouts.',
+      );
+    }
+
+    return (
+      tournament: tournament,
+      events: events,
+      matches: matches,
+      fixturesByKey: fixturesByKey,
+      calendars: calendars,
+      minRest: Duration(minutes: tournament.restGapMinutes),
+      transition: Duration(minutes: tournament.venueTransitionMinutes),
+    );
+  }
+
   // --- The cross-event schedule ----------------------------------------
 
   /// Lays out every match of every event in [tournamentId] across the courts
@@ -1082,124 +1770,22 @@ class TournamentRepository {
     int? matchMinutesOverride,
   }) =>
       guard(() async {
-        final tDoc = await Refs.tournament(orgId, tournamentId).get();
-        if (!tDoc.exists) {
-          throw const NotFoundException('That tournament no longer exists.');
-        }
-        final tournament = Tournament.fromDoc(tDoc);
-
-        final start = tournament.startDate;
-        if (start == null) {
-          throw const ValidationException(
-            'Set the tournament dates before generating a schedule.',
-          );
-        }
-
-        // ---- Courts, from real venue documents. ----
-        final courts = <CourtRef>[];
-        var openHour = 23;
-        var closeHour = 0;
-        for (final venueId in tournament.venueIds) {
-          final vDoc = await Refs.venue(orgId, venueId).get();
-          if (!vDoc.exists) continue;
-          final venue = Venue.fromDoc(vDoc);
-          if (venue.isArchived) continue;
-          for (final court in venue.usableCourts) {
-            courts.add(CourtRef(
-              venueId: venue.id,
-              venueName: venue.name,
-              courtId: court.id,
-              courtName: court.name,
-            ));
-          }
-          // The union of the buildings' hours: a tournament runs as long as
-          // any of its venues is open, and the per-court check is implicit in
-          // a court only existing while its venue does.
-          if (venue.openHour < openHour) openHour = venue.openHour;
-          if (venue.closeHour > closeHour) closeHour = venue.closeHour;
-        }
-        if (courts.isEmpty) {
-          throw const ValidationException(
-            'This tournament has no usable courts. Add a venue with at least '
-            'one court, or mark an existing court available.',
-          );
-        }
-
-        // ---- Every event, and every fixture in it. ----
-        final eventSnap = await Refs.competitions(orgId)
-            .where('tournamentId', isEqualTo: tournamentId)
-            .get();
-        final events = eventSnap.docs.map(Competition.fromDoc).toList();
-        if (events.isEmpty) {
-          throw const ValidationException(
-            'This tournament has no events yet.',
-          );
-        }
-
-        final matches = <SchedulableMatch>[];
-        final fixturesByKey = <String, Fixture>{};
-
-        for (final event in events) {
-          final fSnap = await Refs.fixtures(orgId, event.id).get();
-          final fixtures = fSnap.docs.map(Fixture.fromDoc).toList();
-
-          // Individual events name their competitors on the entrant document
-          // rather than in a line-up, so the uid has to come from there.
-          final entrantSnap = await Refs.entrants(orgId, event.id).get();
-          final uidByEntrant = <String, List<String>>{
-            for (final doc in entrantSnap.docs)
-              if (Entrant.fromDoc(doc).uid != null)
-                doc.id: [Entrant.fromDoc(doc).uid!]
-              else
-                doc.id: Entrant.fromDoc(doc).memberUids,
-          };
-
-          for (final f in fixtures) {
-            // Played or playing — the timetable does not get to move it.
-            if (f.status != FixtureStatus.scheduled || f.lastSeq > 0) continue;
-
-            final uids = <String>{
-              ...f.playerUids,
-              ...?uidByEntrant[f.entrantAId],
-              ...?uidByEntrant[f.entrantBId],
-            };
-
-            matches.add(SchedulableMatch(
-              compId: event.id,
-              matchIndex: f.matchIndex,
-              round: f.round,
-              playerUids: uids,
-              isGroupStage: f.bracket == Bracket.group,
-              // Younger age groups first, so children are not kept at a
-              // venue until the evening waiting on a senior draw.
-              priority: _priorityFor(event),
-              matchMinutes:
-                  matchMinutesOverride ?? event.scheduleConfig.matchMinutes,
-            ));
-            fixturesByKey['${event.id}#${f.matchIndex}'] = f;
-          }
-        }
-
-        if (matches.isEmpty) {
-          throw const ValidationException(
-            'No unplayed matches to schedule. Generate the draws first.',
-          );
-        }
-
-        final slots = TournamentScheduler.buildSlots(
-          firstDay: start,
-          dayCount: tournament.dayCount,
-          openHour: openHour > closeHour ? 9 : openHour,
-          closeHour: closeHour <= openHour ? 19 : closeHour,
-          slotMinutes: tournament.slotMinutes,
+        final plan = await _loadPlan(
+          orgId: orgId,
+          tournamentId: tournamentId,
+          matchMinutesOverride: matchMinutesOverride,
         );
-
-        final minRest = Duration(minutes: tournament.restGapMinutes);
+        final matches = plan.matches;
+        final calendars = plan.calendars;
+        final fixturesByKey = plan.fixturesByKey;
+        final events = plan.events;
+        final minRest = plan.minRest;
+        final transition = plan.transition;
         final schedule = const TournamentScheduler().schedule(
           matches: matches,
-          courts: courts,
-          slots: slots,
+          calendars: calendars,
           minRestBetweenMatches: minRest,
+          venueTransition: transition,
         );
 
         // The promises, checked rather than asserted in a comment. A clash
@@ -1215,6 +1801,8 @@ class TournamentRepository {
           matches: matches,
           schedule: schedule,
           minRestBetweenMatches: minRest,
+          calendars: calendars,
+          venueTransition: transition,
         );
         if (violations.isNotEmpty) {
           throw ValidationException(
@@ -1235,6 +1823,11 @@ class TournamentRepository {
               'scheduledAt': Timestamp.fromDate(entry.value.window.start),
               'courtId': entry.value.court.courtName,
               'venue': entry.value.court.venueName,
+              // The ids beside the names, so the timetable can be checked
+              // against the real resource later — a manual move, or a health
+              // report — without matching two display names.
+              'courtRefId': entry.value.court.courtId,
+              'venueId': entry.value.court.venueId,
               'updatedAt': FieldValue.serverTimestamp(),
             },
           );
@@ -1252,7 +1845,7 @@ class TournamentRepository {
         return TournamentScheduleReport(
           scheduled: schedule.placements.length,
           unscheduled: schedule.unplaced.length,
-          courts: courts.length,
+          courts: calendars.length,
           events: events.length,
           finishesAt: schedule.finishesAt,
           problems: {
@@ -1260,6 +1853,209 @@ class TournamentRepository {
           }.toList(),
         );
       });
+
+  /// Checks the timetable that is actually stored, rather than the one that
+  /// was generated.
+  ///
+  /// ## Why these are different questions
+  ///
+  /// `generateSchedule` verifies its own output and refuses to write a broken
+  /// one, which makes a freshly generated timetable sound by construction. It
+  /// does not stay sound: an organizer moves a match, a ground withdraws a
+  /// day, a session is shortened, an event's dates change. Every one of those
+  /// is a legitimate action that can invalidate a timetable nobody has looked
+  /// at since, and until this existed nothing ever asked again.
+  ///
+  /// So this reads the fixtures back and runs the same guarantees over them.
+  /// It is the "Schedule Health" panel, and it is the check behind every
+  /// manual move.
+  Future<ScheduleHealthReport> checkScheduleHealth({
+    required String orgId,
+    required String tournamentId,
+  }) =>
+      guard(() async {
+        final plan = await _loadPlan(
+          orgId: orgId,
+          tournamentId: tournamentId,
+        );
+        return _healthOf(plan, overrides: const {});
+      });
+
+  /// Moves one match to another time, another court, or both — and refuses a
+  /// move that would break the timetable unless the organizer insists.
+  ///
+  /// ## Why this refuses rather than warns
+  ///
+  /// A manual move is the organizer's right and most of them are correct: a
+  /// team asks for a later start, a ground frees up. The one that is not
+  /// correct is invisible — moving a badminton semi-final to 17:00 is fine
+  /// until you know the same player is in the table-tennis doubles at 17:00,
+  /// which is a fact about a different event on a different page. Refusing by
+  /// default puts that fact in front of the person making the change, at the
+  /// moment they can still choose differently.
+  ///
+  /// [force] is the deliberate second press. It exists because an organizer at
+  /// a ground sometimes knows something the data does not, and a system that
+  /// cannot be overridden gets worked around with a piece of paper.
+  Future<ScheduleHealthReport> moveFixture({
+    required String orgId,
+    required String tournamentId,
+    required String compId,
+    required String fixtureId,
+    DateTime? newStart,
+    String? venueId,
+    String? courtRefId,
+    bool force = false,
+  }) =>
+      guard(() async {
+        if (newStart == null && venueId == null) {
+          throw const ValidationException(
+            'Say a new time, a new court, or both.',
+          );
+        }
+
+        final plan = await _loadPlan(orgId: orgId, tournamentId: tournamentId);
+
+        Fixture? target;
+        String? targetKey;
+        for (final entry in plan.fixturesByKey.entries) {
+          if (entry.value.id == fixtureId && entry.value.compId == compId) {
+            target = entry.value;
+            targetKey = entry.key;
+            break;
+          }
+        }
+        if (target == null || targetKey == null) {
+          throw const NotFoundException(
+            'That match is not part of this season\'s draft timetable — it may '
+            'already have been played.',
+          );
+        }
+
+        final start = newStart ?? target.scheduledAt;
+        if (start == null) {
+          throw const ValidationException(
+            'This match has no time yet, so give it one.',
+          );
+        }
+
+        CourtRef? court;
+        if (venueId != null && courtRefId != null) {
+          for (final c in plan.calendars) {
+            if (c.court.venueId == venueId && c.court.courtId == courtRefId) {
+              court = c.court;
+              break;
+            }
+          }
+          if (court == null) {
+            throw const ValidationException(
+              'That playing area is not open to this season.',
+            );
+          }
+        }
+
+        final health = _healthOf(
+          plan,
+          overrides: {targetKey: (start: start, court: court)},
+        );
+        final blocking = [
+          for (final v in health.violations)
+            if (v.matchKeys.contains(targetKey)) v,
+        ];
+        if (blocking.isNotEmpty && !force) {
+          throw ValidationException(
+            'That move breaks the timetable, so nothing was changed. '
+            '${blocking.take(3).map((v) => v.detail).join('; ')}',
+          );
+        }
+
+        await Refs.fixture(orgId, compId, fixtureId).update({
+          'scheduledAt': Timestamp.fromDate(start),
+          if (court != null) ...{
+            'courtId': court.courtName,
+            'venue': court.venueName,
+            'courtRefId': court.courtId,
+            'venueId': court.venueId,
+          },
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+
+        return health;
+      });
+
+  /// Runs the guarantees over the timetable as stored, optionally with one
+  /// match moved — which is how a move is tested before it is written.
+  ScheduleHealthReport _healthOf(
+    _SeasonPlan plan, {
+    required Map<String, ({DateTime start, CourtRef? court})> overrides,
+  }) {
+    final calendarByKey = {for (final c in plan.calendars) c.court.key: c};
+    final placements = <String, Placement>{};
+    final extraCalendars = <String, CourtCalendar>{};
+    var unscheduled = 0;
+    var unverifiable = 0;
+
+    for (final match in plan.matches) {
+      final fixture = plan.fixturesByKey[match.key];
+      final override = overrides[match.key];
+      final start = override?.start ?? fixture?.scheduledAt;
+      if (fixture == null || start == null) {
+        unscheduled++;
+        continue;
+      }
+
+      var court = override?.court;
+      if (court == null) {
+        final key = '${fixture.venueId}/${fixture.courtRefId}';
+        court = calendarByKey[key]?.court;
+        if (court == null) {
+          // Placed by hand, or before the ids were stored. It still has a
+          // court in the sense that matters to a player, so it is checked for
+          // clashes — but nothing can say whether that court was open, so it
+          // gets an unbounded calendar rather than a false violation.
+          court = CourtRef(
+            venueId: fixture.venueId ?? 'unknown',
+            venueName: fixture.venue ?? 'Venue',
+            courtId: fixture.courtRefId ?? (fixture.courtId ?? 'court'),
+            courtName: fixture.courtId ?? 'Court',
+          );
+          if (!calendarByKey.containsKey(court.key)) {
+            extraCalendars.putIfAbsent(
+              court.key,
+              () => CourtCalendar(court: court!, slotStarts: const []),
+            );
+            unverifiable++;
+          }
+        }
+      }
+
+      placements[match.key] = Placement(
+        court: court,
+        window: ScheduleWindow(
+          start: start,
+          end: start.add(Duration(minutes: match.matchMinutes)),
+        ),
+      );
+    }
+
+    final violations = ScheduleGuarantees.verify(
+      matches: plan.matches,
+      schedule: TournamentSchedule(
+        placements: placements,
+        unplaced: const [],
+      ),
+      minRestBetweenMatches: plan.minRest,
+      calendars: [...plan.calendars, ...extraCalendars.values],
+      venueTransition: plan.transition,
+    );
+
+    return ScheduleHealthReport(
+      scheduled: placements.length,
+      unscheduled: unscheduled,
+      unverifiable: unverifiable,
+      violations: violations,
+    );
+  }
 
   /// Moves the whole remaining schedule, keeping the plan intact.
   ///
@@ -1334,6 +2130,117 @@ class TournamentRepository {
     if (maxAge == null) return 100;
     return maxAge;
   }
+
+  /// The grounds, days and hours one event of a season is confined to.
+  ///
+  /// Every field is a restriction relative to the season, and every one of
+  /// them is dropped when it merely restates it. That is what keeps this
+  /// change invisible to the seasons that already exist: an event whose
+  /// `scheduleConfig.venueIds` is the season's own list, whose dates are the
+  /// season's own dates and whose hours are the season's own hours produces
+  /// [EventAvailability.anywhere] and schedules exactly as it did before.
+  ///
+  /// Dates come off the COMPETITION rather than the schedule config because
+  /// that is where they already live and where the event page already reads
+  /// them from — an event that says "12–13 September" on its own page and
+  /// then gets scheduled on the 15th is a bug whichever of the two is right.
+  /// Public because it is the translation worth testing on its own: every
+  /// promise this feature makes rests on turning two stored documents into
+  /// the right restriction, and the schedule that comes out of a wrong one is
+  /// wrong in a way nobody can see by reading it.
+  @visibleForTesting
+  static EventAvailability availabilityOf(
+    Competition event,
+    Tournament tournament,
+  ) {
+    final config = event.scheduleConfig;
+
+    // Only a genuine subset restricts anything. An event listing every ground
+    // the season has is not choosing one.
+    final seasonVenues = tournament.venueIds.toSet();
+    final eventVenues = config.venueIds.toSet();
+    final venueIds = eventVenues.isEmpty ||
+            (eventVenues.length >= seasonVenues.length &&
+                eventVenues.containsAll(seasonVenues))
+        ? const <String>{}
+        : eventVenues;
+
+    // A start on the season's own opening day is not a restriction, and
+    // treating it as one would pin every legacy event to day one.
+    final start = event.startDate;
+    final seasonStart = tournament.startDate;
+    final firstDay = (start == null ||
+            seasonStart == null ||
+            !start.isAfter(seasonStart))
+        ? null
+        : start;
+
+    final end = event.endDate;
+    final seasonEnd = tournament.endDate;
+    final lastDay =
+        (end == null || (seasonEnd != null && !end.isBefore(seasonEnd)))
+            ? null
+            : end;
+
+    return EventAvailability(
+      venueIds: venueIds,
+      firstDay: firstDay,
+      lastDay: lastDay,
+      // Applied as written, with no "is this the default" test. The
+      // single-event scheduler in `CompetitionRepository` has always built
+      // its grid straight from these two numbers; a tournament that instead
+      // took the union of its buildings' opening hours was the odd one out,
+      // and it is why a season whose form said 09:00–19:00 could still put a
+      // match on at seven in the morning because one ground unlocks then.
+      dayStartHour: config.dayStartHour,
+      dayEndHour: config.dayEndHour,
+    );
+  }
+}
+
+/// The state of a timetable as it actually stands.
+///
+/// The panel behind "Publish": an organizer is entitled to see, in one place,
+/// that nobody is double-booked before they send the schedule to two hundred
+/// people. Zeroes across the board is the whole point — a health check that
+/// only ever appears when something is wrong teaches nobody to trust it.
+class ScheduleHealthReport {
+  const ScheduleHealthReport({
+    required this.scheduled,
+    required this.unscheduled,
+    required this.unverifiable,
+    required this.violations,
+  });
+
+  final int scheduled;
+
+  /// Matches still without a time — waiting on a feeder result, or never
+  /// placed.
+  final int unscheduled;
+
+  /// Matches on a court that cannot be resolved to a venue document, so the
+  /// venue-side checks could not run on them. Placed by hand, or scheduled
+  /// before the court ids were stored.
+  final int unverifiable;
+
+  final List<ScheduleViolation> violations;
+
+  bool get isHealthy => violations.isEmpty;
+
+  int countOf(ScheduleViolationKind kind) {
+    var n = 0;
+    for (final v in violations) {
+      if (v.kind == kind) n++;
+    }
+    return n;
+  }
+
+  /// The first few details of one kind, for a panel that names the problem
+  /// rather than only counting it.
+  List<String> detailsOf(ScheduleViolationKind kind, {int limit = 3}) => [
+        for (final v in violations)
+          if (v.kind == kind) v.detail,
+      ].take(limit).toList();
 }
 
 /// What one scheduling run produced, in the terms an organizer decides on.

@@ -13,6 +13,7 @@ import '../../shared/app_scaffold.dart';
 import '../profile/widgets/match_memories_section.dart';
 import 'widgets/ask_to_score.dart';
 import 'widgets/cheer_bar.dart';
+import 'widgets/live_stream_panel.dart';
 import 'widgets/box_score_table.dart';
 import 'widgets/share_match_button.dart';
 import 'widgets/point_log.dart';
@@ -93,6 +94,13 @@ class SpectatorScreen extends ConsumerWidget {
           // nothing for scorers, spectators from other clubs, and finished
           // matches.
           final askToScore = AskToScoreButton(fixture: fixture);
+          // The broadcast, when there is one. Above the scoreboard rather
+          // than below it: somebody who opened a link to a match that is
+          // being filmed came for the picture, and a video the reader has to
+          // scroll past the score to find is a video most of them never find.
+          // Renders nothing at all for a match with no stream link and a
+          // viewer who could not set one — see [LiveStreamPanel].
+          final stream = LiveStreamPanel(fixture: fixture);
           final memories = MatchMemoriesSection(fixture: fixture);
           // The scorecard, not just the score. A remote viewer following a
           // school match wants to know who is batting and what they have
@@ -115,6 +123,7 @@ class SpectatorScreen extends ConsumerWidget {
                     flex: 3,
                     child: ListView(
                       children: [
+                        stream,
                         board,
                         const SizedBox(height: 16),
                         askToScore,
@@ -141,6 +150,7 @@ class SpectatorScreen extends ConsumerWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    stream,
                     board,
                     const SizedBox(height: 16),
                     askToScore,

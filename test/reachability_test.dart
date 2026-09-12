@@ -37,6 +37,17 @@ void main() {
   /// spec stays forever, a deferred subsystem is a decision to revisit, and
   /// an unrouted screen is a bug someone has not noticed yet.
   const allowedUnreachable = <String, String>{
+    // ---- Platform halves behind a conditional import. ----
+    //
+    // The web body of `lib/shared/web/inline_frame.dart`, which is an
+    // `export ... if (dart.library.js_interop)`. The walker below follows
+    // plain imports, so it sees the stub and never the half the web build
+    // actually compiles — the file IS reached, by every web build, through a
+    // directive this test does not model. Deleting it would silently take the
+    // embedded live-stream player off the web and leave the phones working.
+    'lib/shared/web/inline_frame_web.dart':
+        'Web half of a conditional export; unreachable by plain imports only',
+
     // ---- Reference implementations. Unreachable by design. ----
     //
     // The talent boards are built server-side, because no client may read

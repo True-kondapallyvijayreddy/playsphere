@@ -110,7 +110,7 @@ class _SponsorCreateListingScreenState
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final me = ref.watch(currentUserProvider).valueOrNull;
+    final me = ref.watch(authUserProvider).valueOrNull;
 
     if (me == null) {
       return const Scaffold(body: EmptyState(icon: Icons.lock_outline, title: 'Sign in first'));

@@ -13,6 +13,7 @@ import '../../core/router/app_router.dart';
 import '../../data/image_composer.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/glicko.dart';
 import '../../shared/identity.dart';
 import '../../shared/image_upload.dart';
 
@@ -226,6 +227,16 @@ class _PlayerRow extends ConsumerWidget {
     final isCaptain = uid == team.captainUid;
     final isManager = uid == team.managerUid;
 
+    final subtitleParts = <Widget>[
+      if (isCaptain || isManager)
+        Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: Text(isCaptain ? 'Captain' : 'Manager'),
+        ),
+      if (GlickoChip.forSport(user?.glicko, team.sportId) case final chip?)
+        chip,
+    ];
+
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
@@ -235,9 +246,15 @@ class _PlayerRow extends ConsumerWidget {
           seed: uid,
         ),
         title: Text(user?.displayName ?? 'Loading…'),
-        subtitle: isCaptain || isManager
-            ? Text(isCaptain ? 'Captain' : 'Manager')
-            : null,
+        // A roster is a team sheet, and a team sheet without standings is the
+        // thing every captain in the country currently keeps in a separate
+        // notebook. The rating shown is this TEAM's sport where the profile
+        // carries it — see `GlickoChip.forSport` — because "how good is this
+        // player at the game we are picking them for" is the only question a
+        // roster is asked.
+        subtitle: subtitleParts.isEmpty
+            ? null
+            : Row(mainAxisSize: MainAxisSize.min, children: subtitleParts),
         trailing: canEdit
             ? IconButton(
                 tooltip: 'Remove from team',
@@ -487,7 +504,12 @@ class _AskToJoin extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final me = ref.watch(currentUserProvider).valueOrNull;
+    // The acting profile — the guardian themselves, or a managed child
+    // they're currently "managing as" (see actingProfileProvider). Joining
+    // a team is exactly the kind of participation action a guardian takes
+    // on a child's behalf, so this asks on whoever is currently active,
+    // not always the signed-in account.
+    final me = ref.watch(actingProfileProvider);
     if (me == null) return const SizedBox.shrink();
     // Already on the roster: there is nothing to ask for.
     if (team.memberUids.contains(me.uid)) return const SizedBox.shrink();

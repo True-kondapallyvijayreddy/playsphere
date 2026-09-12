@@ -4,6 +4,7 @@ import 'billing.dart';
 import 'enums.dart';
 import 'firestore_codec.dart';
 import 'geo.dart';
+import 'glicko_badge.dart';
 
 /// A person, globally — one document per real human, at `users/{uid}`.
 ///
@@ -25,11 +26,13 @@ class AppUser {
     this.profileComplete = false,
     this.geo = GeoLocation.empty,
     this.orgIds = const [],
+    this.pendingOrgIds = const [],
     this.playerCode,
     this.plan = MemberPlan.free,
     this.planState = PlanState.none,
     this.custodianUid,
     this.claimedAt,
+    this.glicko,
     this.createdAt,
     this.updatedAt,
   });
@@ -79,6 +82,27 @@ class AppUser {
   /// Kept in step by `UserRepository.mirrorOrgIds`.
   final List<String> orgIds;
 
+  /// The clubs this person has an OUTSTANDING application to, most-recently-
+  /// applied first. The same kind of mirror as [orgIds], for the same kind of
+  /// reason, but pointing the other way.
+  ///
+  /// It exists so `firestore.rules` can let the admins of a club read the
+  /// profile of somebody who has asked to join it — a decision they were
+  /// previously asked to make on a name and a photo alone. Rules cannot run a
+  /// query, so without this there is no path from the applicant's document to
+  /// the club whose admins are entitled to read it.
+  ///
+  /// A padded list grants nothing. The rule checks TWO facts per entry: that
+  /// the caller is an owner or admin of that club, and that this person's
+  /// membership row in it is still `pending`. So naming a club you never
+  /// applied to grants its admins nothing, and the grant lapses on its own the
+  /// moment the application is decided — which matters, because the approver
+  /// cannot write this list to clean it up. Only the first few entries are
+  /// checked (see the rule), so freshest must come first.
+  ///
+  /// Kept in step by `UserRepository.mirrorPendingOrgIds`.
+  final List<String> pendingOrgIds;
+
   /// Google Sign-In gives us a name, an email and a photo — but never a birth
   /// date. Until the user supplies one we cannot judge age eligibility or
   /// apply minor protections, so the app routes them to a completion screen
@@ -111,6 +135,15 @@ class AppUser {
   /// by the guardian — the moment they finish linking their own Google
   /// account via a claim code. See [isManaged].
   final DateTime? claimedAt;
+
+  /// This person's competitive standing across every sport they play, or null
+  /// if they have not played a rated match.
+  ///
+  /// Server-written and frozen against client writes — see [GlickoBadge]. It
+  /// is here, on the document every screen already loads, precisely so that a
+  /// standing can appear beside a name anywhere a name appears, which is the
+  /// whole point of treating it as identity rather than as a statistic.
+  final GlickoBadge? glicko;
 
   final DateTime? createdAt;
   final DateTime? updatedAt;
@@ -154,6 +187,7 @@ class AppUser {
       profileComplete: Fs.boolean(d['profileComplete']),
       geo: GeoLocation.fromDocData(d, legacyDistrictKey: null),
       orgIds: Fs.strList(d['orgIds']),
+      pendingOrgIds: Fs.strList(d['pendingOrgIds']),
       playerCode: Fs.strOrNull(d['playerCode']),
       plan: MemberPlan.fromWire(Fs.str(d['plan'])),
       planState: PlanState.fromDocData(
@@ -164,6 +198,7 @@ class AppUser {
       ),
       custodianUid: Fs.strOrNull(d['custodianUid']),
       claimedAt: Fs.dateOrNull(d['claimedAt']),
+      glicko: GlickoBadge.fromMap(d['glicko']),
       createdAt: Fs.dateOrNull(d['createdAt']),
       updatedAt: Fs.dateOrNull(d['updatedAt']),
     );
@@ -184,6 +219,7 @@ class AppUser {
         'profileComplete': profileComplete,
         'geo': geo.toMap(),
         'orgIds': orgIds,
+        'pendingOrgIds': pendingOrgIds,
         'playerCode': playerCode,
         'plan': plan.wire,
         'isMinor': isMinor,
@@ -201,9 +237,10 @@ class AppUser {
   /// reject any write that changes them, so including them would turn every
   /// profile edit into a permission error.
   ///
-  /// Omits `orgIds` for a different reason: it is a mirror of the membership
-  /// documents, maintained by [UserRepository.mirrorOrgIds] from the live
-  /// memberships stream. Writing it from an edit form would let a screen that
+  /// Omits `orgIds` and `pendingOrgIds` for a different reason: both are
+  /// mirrors of the membership documents, maintained by
+  /// [UserRepository.mirrorOrgIds] and [UserRepository.mirrorPendingOrgIds]
+  /// from the live memberships stream. Writing it from an edit form would let a screen that
   /// never loaded the memberships blank it — and blanking it silently makes
   /// the profile unreadable to every club-mate.
   ///
@@ -234,6 +271,7 @@ class AppUser {
     bool? profileComplete,
     GeoLocation? geo,
     List<String>? orgIds,
+    List<String>? pendingOrgIds,
   }) {
     return AppUser(
       uid: uid,
@@ -247,6 +285,7 @@ class AppUser {
       profileComplete: profileComplete ?? this.profileComplete,
       geo: geo ?? this.geo,
       orgIds: orgIds ?? this.orgIds,
+      pendingOrgIds: pendingOrgIds ?? this.pendingOrgIds,
       // Not a copyWith parameter. A player code is claimed once, against a
       // reservation document that makes it unique, and is never edited — an
       // editable code would let two people trade identities, and every match
@@ -262,6 +301,10 @@ class AppUser {
       // claim. Neither is ever the product of a profile-edit form.
       custodianUid: custodianUid,
       claimedAt: claimedAt,
+      // Not a copyWith parameter, for the sharpest version of that same
+      // reason: this one is a statement about how good somebody is, and the
+      // only thing entitled to make it is the result of a match.
+      glicko: glicko,
       createdAt: createdAt,
       updatedAt: updatedAt,
     );

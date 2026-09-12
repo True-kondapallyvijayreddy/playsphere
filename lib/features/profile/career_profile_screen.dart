@@ -15,6 +15,7 @@ import '../../domain/career/head_to_head.dart';
 import '../../domain/rating/glicko2.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/glicko.dart';
 import '../../shared/identity.dart';
 import '../../shared/image_upload.dart';
 import '../../shared/ui_kit.dart';
@@ -135,6 +136,17 @@ class _CareerProfileScreenState extends ConsumerState<CareerProfileScreen> {
                     _SportBreakdown(career: career, uid: uid),
                     const SizedBox(height: 24),
 
+                    // The headline number, explained. It sits directly above
+                    // the per-sport cards it is built from, because the first
+                    // question a composite provokes is "which of these made
+                    // it that", and the answer should be the next thing on
+                    // the page rather than a tap away.
+                    if (ref.watch(overallGlickoProvider(uid)).valueOrNull
+                        case final overall?) ...[
+                      GlickoBreakdown(result: overall, isMe: isMe),
+                      const SizedBox(height: 24),
+                    ],
+
                     Text(
                       'Sports',
                       key: _sportsKey,
@@ -198,11 +210,14 @@ class _Identity extends ConsumerWidget {
   final AppUser user;
   final bool isMe;
 
-  /// Only your own face, and only ever your own: the storage rule and the
-  /// Firestore rule are both self-only, so this check is the courtesy of not
-  /// showing a button that would be refused.
+  /// The face on the profile in front of you — your own, or that of a child
+  /// whose profile you are in. `firestore.rules` allows a custodian to write
+  /// a managed child's `photoUrl`, and the object itself goes under the
+  /// uploading ACCOUNT's storage segment because storage rules cannot see
+  /// custody; see [UserRepository.uploadProfilePhoto].
   Future<void> _changePhoto(BuildContext context, WidgetRef ref) {
     final repo = ref.read(userRepositoryProvider);
+    final uploaderUid = ref.read(authUidProvider);
     return pickAndUploadImage(
       context: context,
       title: 'Your profile photo',
@@ -219,6 +234,7 @@ class _Identity extends ConsumerWidget {
       removedMessage: 'Photo removed.',
       onUpload: (image) => repo.uploadProfilePhoto(
         uid: user.uid,
+        uploaderUid: uploaderUid ?? user.uid,
         bytes: image.bytes,
         contentType: image.contentType,
       ),
@@ -252,7 +268,28 @@ class _Identity extends ConsumerWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(user.displayName, style: theme.textTheme.headlineSmall),
+              // Name and standing on one line, wrapping together when the
+              // name is long. This is the whole premise of treating Glicko as
+              // identity rather than as a statistic: it belongs beside the
+              // name, not in a stats block further down the page.
+              Wrap(
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 10,
+                runSpacing: 4,
+                children: [
+                  Text(user.displayName, style: theme.textTheme.headlineSmall),
+                  // Computed from the ratings this screen has already loaded
+                  // rather than read off the user document, so it is exact
+                  // the moment a match settles. See [overallGlickoProvider].
+                  if (ref.watch(overallGlickoProvider(user.uid)).valueOrNull
+                      case final g?)
+                    GlickoChip(
+                      rating: g.overall.round(),
+                      provisional: g.isProvisional,
+                      size: GlickoChipSize.prominent,
+                    ),
+                ],
+              ),
               const SizedBox(height: 2),
               Text(
                 [
@@ -486,42 +523,14 @@ class _SportBreakdownState extends State<_SportBreakdown> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        SizedBox(
-          height: 38,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            itemCount: lines.length,
-            separatorBuilder: (_, __) => const SizedBox(width: 8),
-            itemBuilder: (context, i) {
-              final line = lines[i];
-              final isSelected = line.sportId == selected.sportId;
-              return InkWell(
-                onTap: () => setState(() => _selected = line.sportId),
-                borderRadius: BorderRadius.circular(Ps.radiusSm),
-                child: Container(
-                  alignment: Alignment.center,
-                  padding: const EdgeInsets.symmetric(horizontal: 14),
-                  decoration: BoxDecoration(
-                    border: Border(
-                      bottom: BorderSide(
-                        color: isSelected ? Ps.primary : Colors.transparent,
-                        width: 2,
-                      ),
-                    ),
-                  ),
-                  child: Text(
-                    SportCatalog.byId(line.sportId).name,
-                    style: TextStyle(
-                      fontSize: 13.5,
-                      fontWeight:
-                          isSelected ? FontWeight.w700 : FontWeight.w500,
-                      color: isSelected ? Ps.primary : Ps.muted,
-                    ),
-                  ),
-                ),
-              );
-            },
-          ),
+        // The shared strip — a club's page shows its sports with the same
+        // control, so the two read as one product. See [PsUnderlineTabs].
+        PsUnderlineTabs(
+          labels: [
+            for (final line in lines) SportCatalog.byId(line.sportId).name,
+          ],
+          selected: lines.indexOf(selected),
+          onSelected: (i) => setState(() => _selected = lines[i].sportId),
         ),
         const SizedBox(height: 12),
         if (tiles.isEmpty)
@@ -548,7 +557,7 @@ class _SportBreakdownState extends State<_SportBreakdown> {
                 childAspectRatio: 1.75,
                 children: [
                   for (final tile in tiles)
-                    _CounterTile(
+                    PsCounterTile(
                       label: tile.key,
                       value: tile.value,
                       // Same destination as "Season, tournament and
@@ -585,60 +594,6 @@ class _SportBreakdownState extends State<_SportBreakdown> {
       ],
     );
   }
-}
-
-/// One counter from the tally — "Runs / 1,824". Tapping it opens that stat's
-/// own scoped breakdown (season/tournament/challenge splits, and — once a
-/// player has one — where it ranks), the same way a single number on
-/// CricHeroes opens into its own page rather than staying a static tile.
-class _CounterTile extends StatelessWidget {
-  const _CounterTile({
-    required this.label,
-    required this.value,
-    required this.onTap,
-  });
-
-  final String label;
-  final num value;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return PsCard(
-      padding: const EdgeInsets.all(12),
-      onTap: onTap,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Text(
-            psHumanizeCounter(label),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: 11.5, color: Ps.muted),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            _formatValue(value),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.w700,
-              color: Ps.ink,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// Whole numbers stay whole; averages and rates keep two places. A strike
-  /// rate rendered as "132" and an average as "45" would both be wrong in the
-  /// direction that flatters, which is the direction people notice.
-  static String _formatValue(num v) =>
-      v is int || v == v.roundToDouble() ? psGrouped(v.round()) : v.toStringAsFixed(2);
-
 }
 
 class _SportsList extends StatelessWidget {

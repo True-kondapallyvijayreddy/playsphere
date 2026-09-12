@@ -1,5 +1,7 @@
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
 import '../errors/app_exception.dart';
@@ -78,6 +80,8 @@ class AuthService {
       return await _auth.signInWithCredential(credential);
     } on FirebaseAuthException catch (e) {
       throw _translate(e);
+    } on PlatformException catch (e) {
+      throw _translatePlatform(e);
     }
   }
 
@@ -131,6 +135,8 @@ class AuthService {
       return await current.linkWithCredential(credential);
     } on FirebaseAuthException catch (e) {
       throw _translate(e);
+    } on PlatformException catch (e) {
+      throw _translatePlatform(e);
     }
   }
 
@@ -149,20 +155,77 @@ class AuthService {
     await _auth.signOut();
   }
 
-  /// Deleting an account requires a recent sign-in. Surfacing that as a
-  /// distinct, actionable error avoids the generic "something went wrong"
-  /// that leaves a user unable to exercise their deletion right.
+  /// Erases the account: the profile's personal details first, then the
+  /// sign-in.
+  ///
+  /// Both halves happen in `deleteMyAccount` (functions/account.js), because
+  /// neither is the client's to do. This used to be `user.delete()` alone,
+  /// which removes the credential and nothing else — `users/{uid}` kept the
+  /// name, email, phone, date of birth and district, and `firestore.rules`
+  /// refuses to delete that document for anybody, so no client could have
+  /// cleaned up even if it had tried. The server scrubs it under Admin
+  /// privileges instead and deletes the Auth user in the same call, which also
+  /// retires the "requires a recent sign-in" failure this used to raise.
+  ///
+  /// Throws with a message to show when the account still manages a child
+  /// profile: those are separate accounts only this one can hand over, so they
+  /// have to be passed on before it goes.
   Future<void> deleteAccount() async {
     final user = _auth.currentUser;
     if (user == null) throw const UnauthorizedException();
     try {
-      await user.delete();
+      await FirebaseFunctions.instanceFor(region: 'asia-south1')
+          .httpsCallable('deleteMyAccount')
+          .call<Map<String, dynamic>>();
+      // The account is already gone server-side. Clearing the local session
+      // (and the Google one on mobile) makes the router redirect now rather
+      // than whenever the next token refresh notices.
+      await signOut();
+    } on FirebaseFunctionsException catch (e) {
+      throw ValidationException(
+        e.message ?? 'Your account could not be deleted. Please try again.',
+      );
     } on FirebaseAuthException catch (e) {
-      if (e.code == 'requires-recent-login') {
-        throw const ReauthenticationRequiredException();
-      }
       throw _translate(e);
     }
+  }
+
+  /// Failures raised by the native Google Sign-In SDK, before Firebase is
+  /// ever reached.
+  ///
+  /// These do not arrive as [FirebaseAuthException] — the SDK throws a
+  /// `PlatformException` — so without this they fell through every catch in
+  /// the app and reached the UI as the generic "Something went wrong. Please
+  /// try again.", which is unactionable for the one failure that actually
+  /// happens in the wild.
+  ///
+  /// That failure is `ApiException: 10` (DEVELOPER_ERROR): the certificate
+  /// the app was signed with has no OAuth client registered against it in
+  /// the Firebase console. It is the signature of a Play Store install,
+  /// because Play App Signing re-signs the bundle with a key that is neither
+  /// the debug nor the upload keystore — so debug builds work, internal
+  /// testing works, and only real users hit it. See
+  /// `docs/PLAY_STORE_RELEASE.md`.
+  ///
+  /// Release builds minify the exception class name, so the message reads
+  /// `commonapi.b: 10:` rather than `ApiException: 10:`. Matching on the
+  /// code alone is what survives R8.
+  AppException _translatePlatform(PlatformException e) {
+    final detail = '${e.message ?? ''} ${e.details ?? ''}';
+    if (detail.contains(': 10:') || detail.contains(': 10,')) {
+      return const AuthException(
+        'Sign-in is not configured for this build of the app. The app is '
+        'signed with a certificate that has not been registered. Please '
+        'report this — it needs a fix from the PlaySphere team, not from you.',
+      );
+    }
+    if (e.code == 'network_error') {
+      return const NetworkException(
+        'No connection. Check your network and try again.',
+      );
+    }
+    if (e.code == 'sign_in_canceled') return const AuthCancelledException();
+    return AuthException(e.message ?? 'Sign-in failed. Please try again.');
   }
 
   AppException _translate(FirebaseAuthException e) {

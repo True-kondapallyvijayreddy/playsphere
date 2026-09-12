@@ -4,13 +4,16 @@ import 'package:go_router/go_router.dart';
 
 import '../core/errors/app_exception.dart';
 import '../core/layout/responsive.dart';
+import '../core/models/app_user.dart';
 import '../core/permissions/capability.dart';
 import '../core/providers.dart';
 import '../core/router/app_router.dart';
+import '../features/family/profile_switcher.dart';
 import '../features/home/home_providers.dart';
 import 'account_button.dart';
+import 'club_switcher.dart';
 import 'identity.dart';
-import 'module_drawer.dart';
+import 'live_dot.dart';
 import 'playsphere_logo.dart';
 
 /// Width of the extended navigation rail.
@@ -51,10 +54,18 @@ class NavItem {
 /// The application shell.
 ///
 /// Every signed-in screen wears the same three things: the PlaySphere mark at
-/// the top left, the module menu — the "three lines" — behind it, and the
-/// account button at the top right. Underneath that it renders a bottom bar on
-/// phones, a navigation rail on tablets and an extended rail on laptops, from
-/// one declaration. Screens never think about which they are getting, which is
+/// the top left, which is always a tap back to the dashboard, and the
+/// notification bell and account button at the top right. Underneath that it
+/// renders a bottom bar on phones, a navigation rail on tablets and an
+/// extended rail on laptops, from one declaration.
+///
+/// There is deliberately no drawer. One used to hang off every route in the
+/// app carrying twenty-seven destinations, most of them also on the bar, on
+/// the dashboard or on the More screen — and the club-scoped half of it
+/// pointed at whichever club the person had joined most recently rather than
+/// the one they were reading. Its contents now live in exactly one place
+/// each: `MoreMenuScreen` for the product's index, and `ClubSectionsGrid` on
+/// a club's own page for that club's sections. Screens never think about which they are getting, which is
 /// what keeps Android, iOS and web the same product rather than three that
 /// slowly diverge.
 class AppScaffold extends ConsumerWidget {
@@ -69,8 +80,8 @@ class AppScaffold extends ConsumerWidget {
   });
 
   /// The club this screen belongs to, or null on the screens that belong to
-  /// the person rather than to any one club — home, and the profile. The
-  /// module menu falls back to their most recent club for org-scoped links.
+  /// the person rather than to any one club — home, More, and the profile.
+  /// It decides which of the two bars this screen gets, and nothing else.
   final String? orgId;
 
   final String title;
@@ -94,6 +105,12 @@ class AppScaffold extends ConsumerWidget {
     // shell so it runs on every in-app screen, not only the landing one.
     ref.watch(profileOrgMirrorProvider);
 
+    // The other half of the same job: keeps the list of clubs this person is
+    // waiting on a decision from current, which is what lets those clubs'
+    // admins see who they are being asked to admit — and what withdraws that
+    // the moment the decision is made.
+    ref.watch(profilePendingMirrorProvider);
+
     // Backfills this account's PSOS code if it predates codes existing. Same
     // placement and same reasoning as the mirror above.
     ref.watch(playerCodeProvider);
@@ -103,6 +120,42 @@ class AppScaffold extends ConsumerWidget {
     // restored and no sign-in ever happened, not only at the moment somebody
     // taps Sign in.
     ref.watch(pushRegistrationProvider);
+
+    // Resets "Managing as X" the moment X stops being a still-managed
+    // child — see the provider's own doc comment. Same placement logic as
+    // the two above: every screen, not only the participation ones.
+    ref.watch(actingProfileGuardProvider);
+    final actingChildUid = ref.watch(actingProfileUidProvider);
+    final resolvedActing = ref.watch(actingProfileProvider);
+    // Only actually "in a child's profile" once resolution confirms it — the
+    // guard clears the selection the moment it stops being valid, and the
+    // banner must disappear in that same instant rather than a build later.
+    final actingChild =
+        (actingChildUid != null && resolvedActing?.uid == actingChildUid)
+            ? resolvedActing
+            : null;
+
+    // Walking into one of your own clubs IS being in it.
+    //
+    // Without this the app could hold two answers at once: the chip in the
+    // bar naming the club you selected, and a create form three taps deeper
+    // creating for the club whose pages you happened to be reading. Adopting
+    // the club on arrival collapses that to one — the selection follows you,
+    // so "which club am I acting as" has the same answer in the bar, on the
+    // dashboard and in every form that writes something.
+    //
+    // Only your own clubs. Reading a club you do not belong to is browsing,
+    // not joining, and `switchTo` refuses a club you are not an active member
+    // of — which is also what keeps a public club page from quietly
+    // reassigning you. Deferred a frame because it writes provider state, and
+    // a write during build is a build that depends on its own outcome.
+    if (orgId != null &&
+        ref.watch(currentClubIdProvider) != orgId &&
+        ref.watch(myActiveOrgIdsProvider).contains(orgId)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        ref.read(currentClubIdProvider.notifier).switchTo(orgId);
+      });
+    }
 
     final items = (orgId == null
             ? _globalItems(ref)
@@ -138,11 +191,7 @@ class AppScaffold extends ConsumerWidget {
     }
 
     // A screen that was pushed needs a way back that is not the system
-    // button. Scaffold will not offer one here: it renders the hamburger
-    // whenever a drawer is present and never looks at whether the route can
-    // pop, so every inner screen in this app showed a menu icon and nothing
-    // else. The menu does not disappear — it moves to the right, next to the
-    // account button, so it is still reachable from every screen.
+    // button — Android has one, iOS and the web do not.
     final canPop = context.canPop();
 
     final appBar = AppBar(
@@ -184,24 +233,43 @@ class AppScaffold extends ConsumerWidget {
         // until this was app-wide the only honest signal that work was still
         // held locally lived on the one screen they had already left.
         const SyncStatusIcon(),
-        // Bell immediately beside the profile photo, on every screen. The
-        // module menu used to sit between them once a back arrow appeared,
-        // so the pair a user reaches for by muscle memory moved depending on
-        // how deep they had navigated.
-        if (canPop) const _ModuleMenuButton(),
+        // Which club this person is in, immediately left of the bell.
+        //
+        // The app acts as one club at a time — the matches it shows, the game
+        // it starts, the event it creates — and before this it never said
+        // which, because the choice was made silently from whichever club was
+        // joined last. Stating it in the chrome makes it checkable at a
+        // glance from any screen, and tapping it switches without a trip to a
+        // club page. See [ClubChip].
+        ClubChip(orgId: orgId),
+        // Bell immediately beside the profile photo, on every screen and at
+        // a fixed position: the pair a person reaches for by muscle memory
+        // must not move with how deep they have navigated.
         const _NotificationBell(),
         const AccountButton(),
         const SizedBox(width: 4),
       ],
     );
 
-    final drawer = ModuleDrawer(orgId: orgId);
+    // Both banners, in the order they were earned: "this is your child's
+    // profile" changes who every screen is ABOUT and so stays on top; "you
+    // are scoring" is a door back to work in progress.
+    final banners = <Widget>[
+      if (actingChild != null) _ActingAsBanner(child: actingChild),
+      const ScoringNowBanner(),
+    ];
+
+    final content = Column(
+      children: [
+        ...banners,
+        Expanded(child: body),
+      ],
+    );
 
     if (window.isCompact) {
       return Scaffold(
         appBar: appBar,
-        drawer: drawer,
-        body: body,
+        body: content,
         floatingActionButton: floatingActionButton,
         bottomNavigationBar: items.length < 2
             ? null
@@ -222,7 +290,6 @@ class AppScaffold extends ConsumerWidget {
 
     return Scaffold(
       appBar: appBar,
-      drawer: drawer,
       floatingActionButton: floatingActionButton,
       body: Row(
         children: [
@@ -275,8 +342,172 @@ class AppScaffold extends ConsumerWidget {
             ],
           ),
           const VerticalDivider(width: 1),
-          Expanded(child: body),
+          Expanded(child: content),
         ],
+      ),
+    );
+  }
+}
+
+/// The standing reminder that this is somebody else's profile.
+///
+/// The profile switch is total — every screen, every list, every action is
+/// the child's — and it survives closing the app, so nothing else on screen
+/// would ever tell a parent that the notifications they are reading are not
+/// theirs. Persistent rather than a snackbar for exactly that reason, and on
+/// every screen rather than only the participation ones, because the switch
+/// outlives whichever screen made it.
+///
+/// Tapping it opens the switcher; the trailing button is the one-tap way
+/// straight back to the account holder's own profile, which is the thing
+/// people want from it nine times out of ten.
+class _ActingAsBanner extends ConsumerWidget {
+  const _ActingAsBanner({required this.child});
+
+  final AppUser child;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.secondaryContainer,
+      child: InkWell(
+        onTap: () => showProfileSwitcher(context),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(
+            children: [
+              PsAvatar(
+                name: child.displayName,
+                photoUrl: child.photoUrl,
+                seed: child.uid,
+                size: 24,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  "You're in ${child.displayName}'s profile",
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: scheme.onSecondaryContainer,
+                        fontWeight: FontWeight.w600,
+                      ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              TextButton(
+                onPressed: () => switchToProfile(context, ref, null),
+                child: Text(
+                  'Switch back',
+                  style: TextStyle(color: scheme.onSecondaryContainer),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The way back to the match you are in the middle of scoring.
+///
+/// ## The gap this fills
+///
+/// Scoring is the one job in the app that is interrupted by default. The
+/// scorer looks up a rule, answers a message, takes a photo of the team
+/// sheet, or the phone simply locks — and the pad is now several screens
+/// deep in a stack that the next tap on any navigation destination throws
+/// away. Getting back meant remembering which club, which event and which
+/// fixture, then walking down through three lists, all while a game carried
+/// on in front of them. "Live now" is not that door either: it lists every
+/// match on at their clubs, which is a spectator's question.
+///
+/// So the match a person is NAMED as scorer of follows them across every
+/// screen until it is finished. One tap and they are back on the pad, with
+/// the score they queued still queued — the pad's own local projection is
+/// unaffected by having been left.
+///
+/// Hidden on the pad itself, which would otherwise be a button that
+/// re-navigates to the screen you are reading it on. Hidden, too, for anyone
+/// who is not a scorer: see [myScoringFixturesProvider] for why an org
+/// manager's blanket permission does not count as being mid-job.
+class ScoringNowBanner extends ConsumerWidget {
+  const ScoringNowBanner({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final scoring = ref.watch(myScoringFixturesProvider);
+    if (scoring.isEmpty) return const SizedBox.shrink();
+
+    // Everything except the pad being read right now. Subtracting the current
+    // one before counting is what keeps the tail honest: a scorer standing on
+    // court one's pad with two matches open is owed "court two", not "court
+    // two and one more" — the one more is the screen in front of them.
+    final path = GoRouterState.of(context).uri.path;
+    final elsewhere = [
+      for (final f in scoring)
+        if (Routes.scoring(f.orgId, f.compId, f.id) != path) f,
+    ];
+    if (elsewhere.isEmpty) return const SizedBox.shrink();
+
+    // The oldest still-running one, which is the one somebody scoring two
+    // courts is furthest behind on.
+    final next = elsewhere.first;
+    final target = Routes.scoring(next.orgId, next.compId, next.id);
+
+    final scheme = Theme.of(context).colorScheme;
+    final more = elsewhere.length - 1;
+
+    return Material(
+      color: scheme.errorContainer,
+      child: InkWell(
+        onTap: () => context.push(target),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+          child: Row(
+            children: [
+              const LiveDot(),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'You are scoring',
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                            color: scheme.onErrorContainer,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0.4,
+                          ),
+                    ),
+                    Text(
+                      '${next.entrantAName} v ${next.entrantBName}'
+                      '${more > 0 ? '  ·  +$more more' : ''}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                            color: scheme.onErrorContainer,
+                            fontWeight: FontWeight.w600,
+                          ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              FilledButton.icon(
+                onPressed: () => context.push(target),
+                icon: const Icon(Icons.sports_score, size: 18),
+                label: const Text('Resume'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: scheme.onErrorContainer,
+                  foregroundColor: scheme.errorContainer,
+                  visualDensity: VisualDensity.compact,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -320,33 +551,37 @@ class _NotificationBell extends ConsumerWidget {
   }
 }
 
-/// Opens the module menu from the app bar's right side.
+/// The bar, in both of the shapes it takes.
 ///
-/// Only rendered when the back arrow has taken the leading slot. Without it
-/// the "three lines" would vanish the moment anyone navigated one level in,
-/// which is where most of the product actually lives.
-class _ModuleMenuButton extends StatelessWidget {
-  const _ModuleMenuButton();
-
-  @override
-  Widget build(BuildContext context) {
-    return IconButton(
-      icon: const Icon(Icons.menu),
-      tooltip: 'Modules',
-      onPressed: Scaffold.of(context).openDrawer,
-    );
-  }
-}
-
-/// The four destinations a person uses on a match day inside one club.
+/// ## The rule the two lists follow
 ///
-/// Deliberately short. Everything else the product does lives in the module
-/// menu — a bottom bar with seven items is a bar nobody reads, and the rail
-/// mirrors it so the two never say different things.
+/// **The first slot is the section's own root, and the last slot is always
+/// More.** That is the whole contract, and it is what makes the bar readable
+/// without being memorised: whatever screen you are on, the leftmost item is
+/// "back to the top of where I am" and the rightmost is "everything else".
+///
+/// The club bar used to break the second half of it. It carried six items —
+/// Club, Live now, Challenges, Gallery, Members, Home — and **no More at
+/// all**, so stepping into a club silently took the product's index away and
+/// replaced it with a different set of five. The way back to the rest of
+/// PlaySphere was a drawer behind a hamburger that had moved to the right of
+/// the app bar. That is the single worst thing the old navigation did, and it
+/// is why this file no longer builds a drawer.
+///
+/// Gallery and Members left the bar rather than More: both are sections OF a
+/// club, and a club's sections now sit on the club's own page where they are
+/// one tap from it and unambiguously scoped to it — see `ClubSectionsGrid`.
+/// The bar keeps only what a person reaches for repeatedly during a match.
+
+/// Inside one club: the club, what is being played, who wants to play us, and
+/// the index.
 List<NavItem> _clubItems(WidgetRef ref, String orgId) => [
+      // First, and load-bearing: `go()` treats `items.first.path` as the root
+      // of the section, which is what makes "back" from a sibling return to
+      // the club instead of leaving it.
       NavItem(
-        icon: Icons.home_outlined,
-        selectedIcon: Icons.home,
+        icon: Icons.shield_outlined,
+        selectedIcon: Icons.shield,
         label: 'Club',
         path: Routes.org(orgId),
       ),
@@ -366,24 +601,15 @@ List<NavItem> _clubItems(WidgetRef ref, String orgId) => [
         badgeCount:
             ref.watch(incomingChallengesProvider(orgId)).valueOrNull?.length,
       ),
-      NavItem(
-        icon: Icons.photo_library_outlined,
-        selectedIcon: Icons.photo_library,
-        label: 'Gallery',
-        path: Routes.gallery(orgId),
-      ),
-      NavItem(
-        icon: Icons.groups_outlined,
-        selectedIcon: Icons.groups,
-        label: 'Members',
-        path: Routes.members(orgId),
-        requires: Capability.manageMembers,
-      ),
+      // The escape hatch, in the same slot it occupies everywhere else.
+      // Opening it lands on a screen with no club behind it, so the bar there
+      // is the global one — which is how a person inside a club gets back to
+      // their own dashboard in one further tap.
       const NavItem(
-        icon: Icons.dashboard_outlined,
-        selectedIcon: Icons.dashboard,
-        label: 'Home',
-        path: Routes.home,
+        icon: Icons.apps_outlined,
+        selectedIcon: Icons.apps,
+        label: 'More',
+        path: Routes.more,
       ),
     ];
 
@@ -402,6 +628,10 @@ List<NavItem> _globalItems(WidgetRef ref) {
       label: 'Home',
       path: Routes.home,
     ),
+    // "My clubs" here, in the More index and nowhere else under a third name.
+    // `/orgs` used to answer to "My clubs" on the bar, "Clubs" on the
+    // dashboard counter and "All clubs" in the index, which made one screen
+    // look like three.
     const NavItem(
       icon: Icons.groups_2_outlined,
       selectedIcon: Icons.groups_2,
@@ -417,8 +647,8 @@ List<NavItem> _globalItems(WidgetRef ref) {
         badgeCount: live == 0 ? null : live,
       ),
     const NavItem(
-      icon: Icons.menu_outlined,
-      selectedIcon: Icons.menu,
+      icon: Icons.apps_outlined,
+      selectedIcon: Icons.apps,
       label: 'More',
       path: Routes.more,
     ),
@@ -616,6 +846,15 @@ class AsyncErrorStrip extends StatelessWidget {
 /// the exact leak the class was introduced to prevent.
 String errorMessage(Object error) {
   if (error is AppException) return error.message;
+  // A caller that already has the sentence — a form's own validation message,
+  // "Pick a start date." — passes the String itself. Those were being turned
+  // into "Something went wrong. Please try again." here, which is how a
+  // create form could refuse to submit without ever saying which field was
+  // wrong. Shown as written, and only when written for a person: an empty or
+  // suspiciously long string falls through to the generic sentence.
+  if (error is String && error.trim().isNotEmpty && error.length <= 200) {
+    return error;
+  }
   // Anything else is a bug rather than a condition we modelled, so the user
   // gets a sentence they can act on and the detail goes to the log.
   debugPrint('[PlaySphere] unmapped error surfaced to UI: $error');

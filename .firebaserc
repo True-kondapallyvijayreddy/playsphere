@@ -1,6 +1,17 @@
 {
   "projects": {},
-  "targets": {},
+  "targets": {
+    "playsphere-os": {
+      "hosting": {
+        "app": [
+          "playsphere-os"
+        ],
+        "legal": [
+          "playsphere-legal"
+        ]
+      }
+    }
+  },
   "etags": {
     "playsphere-os": {
       "extensionInstances": {

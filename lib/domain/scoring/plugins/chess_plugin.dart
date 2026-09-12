@@ -316,6 +316,69 @@ class ChessPlugin extends ScoringPlugin {
       ];
     }
 
+    // Who actually sat at the board, asked once per board.
+    //
+    // The engine has always credited `whitePlayerId` and `blackPlayerId` —
+    // games, wins, draws, colour split, score percentage, and the
+    // per-time-control rating all hang off them — and no control ever asked
+    // for either, so both arrived null and every chess result credited
+    // nobody. A season of club chess produced a standings table and an empty
+    // career record for all of it.
+    //
+    // Drawn from EITHER side rather than from the acting one, because a board
+    // result is not evidence of colour: side A can perfectly well have been
+    // Black and won.
+    //
+    // Required, not optional, and that is safe: `Fixture.scoringContext` never
+    // hands out an empty line-up — a side with no named players falls back to
+    // a stand-in for the entrant itself — so there is always somebody to
+    // name. Being required is also what makes the two mutually exclusive,
+    // since the pad only enforces "these must be different people" on prompts
+    // it knows must be answered. One player cannot have both colours.
+    const seats = [
+      PlayerPrompt(
+        key: 'whitePlayerId',
+        label: 'White',
+        from: PromptSource.eitherSide,
+      ),
+      PlayerPrompt(
+        key: 'blackPlayerId',
+        label: 'Black',
+        from: PromptSource.eitherSide,
+      ),
+    ];
+
+    // How the board ended. Already stored — `_recordBoard` writes it into the
+    // board's row and defaults it to 'unknown' — and until now 'unknown' was
+    // the only value it could ever hold.
+    const decisive = [
+      ChoicePrompt(
+        key: 'reason',
+        label: 'How it ended',
+        optional: true,
+        options: [
+          ChoiceOption('checkmate', 'Checkmate'),
+          ChoiceOption('resignation', 'Resignation'),
+          ChoiceOption('timeout', 'Flag fell'),
+          ChoiceOption('forfeit', 'Forfeit'),
+        ],
+      ),
+    ];
+    const drawn = [
+      ChoicePrompt(
+        key: 'reason',
+        label: 'How it ended',
+        optional: true,
+        options: [
+          ChoiceOption('agreement', 'Agreed'),
+          ChoiceOption('stalemate', 'Stalemate'),
+          ChoiceOption('repetition', 'Threefold repetition'),
+          ChoiceOption('fifty_move', 'Fifty-move rule'),
+          ChoiceOption('insufficient', 'Insufficient material'),
+        ],
+      ),
+    ];
+
     final groups = <ScoreControlGroup>[
       ScoreControlGroup(
         title: 'Board result',
@@ -326,6 +389,8 @@ class ChessPlugin extends ScoringPlugin {
             side: Side.a,
             style: ControlStyle.primary,
             payload: const {'result': 'a'},
+            prompts: seats,
+            choices: decisive,
             shortcut: '1',
             tooltip: '${ctx.entrantAName} wins the board',
           ),
@@ -334,6 +399,8 @@ class ChessPlugin extends ScoringPlugin {
             label: '½ - ½',
             style: ControlStyle.secondary,
             payload: {'result': 'draw'},
+            prompts: seats,
+            choices: drawn,
             shortcut: '5',
             tooltip: 'Draw',
           ),
@@ -343,6 +410,8 @@ class ChessPlugin extends ScoringPlugin {
             side: Side.b,
             style: ControlStyle.primary,
             payload: const {'result': 'b'},
+            prompts: seats,
+            choices: decisive,
             shortcut: '0',
             tooltip: '${ctx.entrantBName} wins the board',
           ),
@@ -351,9 +420,31 @@ class ChessPlugin extends ScoringPlugin {
     ];
 
     if (_recordMoves(ctx)) {
-      groups.add(const ScoreControlGroup(
-        title: 'Moves',
-        controls: [
+      final moves = movesOf(state);
+      groups.add(ScoreControlGroup(
+        // The move number the scorer is about to write, so the group itself
+        // confirms the list is being kept — the previous version showed
+        // "Moves" over a single Take back button and looked broken because it
+        // was.
+        title: moves.isEmpty
+            ? 'Moves'
+            : 'Moves · ${(moves.length / 2).ceil()} played',
+        controls: const [
+          ScoreControl(
+            action: 'move',
+            label: 'Add move',
+            style: ControlStyle.primary,
+            shortcut: 'm',
+            tooltip: 'Record the move that was just played',
+            texts: [
+              TextPrompt(
+                key: 'san',
+                label: 'Move',
+                hint: 'e4, Nf3, O-O, Qxd5+',
+                maxLength: 12,
+              ),
+            ],
+          ),
           ScoreControl(
             action: 'takeback',
             label: 'Take back',

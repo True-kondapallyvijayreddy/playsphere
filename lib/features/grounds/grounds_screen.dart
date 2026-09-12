@@ -8,10 +8,14 @@ import '../../core/layout/responsive.dart';
 import '../../core/models/billing.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
+import '../../core/models/ground.dart';
 import '../../data/ground_repository.dart';
+import '../../data/site_fix_service.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/ground_trust.dart';
 import '../../shared/promo_banner.dart';
 import 'ground_booking_flow.dart';
+import 'report_ground_sheet.dart';
 
 /// Grounds to hire, and the bookings this person already holds.
 ///
@@ -70,26 +74,7 @@ class GroundsScreen extends ConsumerWidget {
                         style: theme.textTheme.titleMedium),
                   ),
                   const SizedBox(height: 8),
-                  for (final b in upcoming)
-                    Card(
-                      margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-                      child: ListTile(
-                        leading: const Icon(Icons.event_available_outlined),
-                        title: Text(b.groundName),
-                        subtitle: Text(
-                          '${DateFormat('EEE d MMM').format(b.startsAt)} · '
-                          '${groundHourLabel(b.startHour)}–'
-                          '${groundHourLabel(b.endHour)}'
-                          '${b.amountPaise == 0 ? '' : ' · '
-                              '${Pricing.formatPaise(b.amountPaise)}'}',
-                        ),
-                        trailing: TextButton(
-                          onPressed: () => _cancel(context, ref, b.groundId,
-                              b.id, b.groundName),
-                          child: const Text('Cancel'),
-                        ),
-                      ),
-                    ),
+                  for (final b in upcoming) _BookingCard(booking: b),
                   const SizedBox(height: 16),
                 ],
 
@@ -153,5 +138,195 @@ class GroundsScreen extends ConsumerWidget {
     } catch (e) {
       if (context.mounted) showError(context, e);
     }
+  }
+}
+
+/// One booking this person holds, with the two things they can do about it:
+/// cancel it, or say they have arrived.
+///
+/// ## Why arriving is a button and not an assumption
+///
+/// A booking says somebody intended to be at a ground. Nothing in the system
+/// said whether they got there, and the gap between those two facts is where
+/// the whole ground-listing fraud lives: a fake listing takes bookings that
+/// look exactly like real ones, right up until nobody can find the place.
+///
+/// One tap on the day, with the phone's own position behind it, closes the
+/// gap. Three different people doing it is stronger evidence a ground exists
+/// than anything its owner could ever upload — see `GroundCheckIn`. And a
+/// listing that collects bookings and never collects an arrival becomes
+/// visible, which it was not before.
+class _BookingCard extends ConsumerStatefulWidget {
+  const _BookingCard({required this.booking});
+
+  final GroundBooking booking;
+
+  @override
+  ConsumerState<_BookingCard> createState() => _BookingCardState();
+}
+
+class _BookingCardState extends ConsumerState<_BookingCard> {
+  bool _busy = false;
+
+  Future<void> _checkIn() async {
+    final b = widget.booking;
+    final uid = ref.read(authUidProvider);
+    if (uid == null) return;
+
+    setState(() => _busy = true);
+    try {
+      // The listing is read fresh rather than taken from the booking row.
+      // The row carries a denormalized name and nothing else, and the check
+      // needs the ground's pin — which is also the field most likely to have
+      // been corrected since the slot was taken.
+      final ground = await ref
+          .read(groundRepositoryProvider)
+          .watchGround(b.groundId)
+          .first;
+      if (ground == null) throw 'That ground is no longer listed.';
+
+      final fix = await const SiteFixService().currentChecked();
+      final checkIn = await ref.read(groundRepositoryProvider).checkInToBooking(
+            ground: ground,
+            booking: b,
+            fix: fix,
+            uid: uid,
+          );
+      if (!mounted) return;
+
+      if (checkIn.isWithinRange) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Checked in. Thanks — this helps other clubs '
+                'trust this ground.'),
+          ),
+        );
+        return;
+      }
+
+      // Out of range. Not an error and not silently swallowed: the person is
+      // standing somewhere that is not the ground they booked, which is
+      // either a wrong pin or a listing with nothing behind it. Both are
+      // worth reporting and neither is their fault.
+      final distance = checkIn.distanceMetres >= 1000
+          ? '${(checkIn.distanceMetres / 1000).toStringAsFixed(1)} km'
+          : '${checkIn.distanceMetres.round()} m';
+      final report = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('You are not at this ground'),
+          content: Text(
+            'Your phone says you are $distance from where ${b.groundName} is '
+            'listed. If you are at the right place and there is no ground '
+            'here, tell us — it is the fastest way to get a fake listing '
+            'taken down.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Not now'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Report this listing'),
+            ),
+          ],
+        ),
+      );
+      if (report == true && mounted) {
+        await showReportGroundSheet(context, ground: ground, bookingId: b.id);
+      }
+    } catch (e) {
+      if (mounted) showError(context, e);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final b = widget.booking;
+    final canCheckIn = b.canCheckInOn(DateTime.now());
+
+    return Card(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      child: Column(
+        children: [
+          ListTile(
+            leading: Icon(
+              b.isCheckedIn
+                  ? Icons.where_to_vote_outlined
+                  : Icons.event_available_outlined,
+              color: b.isCheckedIn ? theme.colorScheme.primary : null,
+            ),
+            title: Text(b.groundName),
+            subtitle: Text(
+              '${DateFormat('EEE d MMM').format(b.startsAt)} · '
+              '${groundHourLabel(b.startHour)}–'
+              '${groundHourLabel(b.endHour)}'
+              '${b.amountPaise == 0 ? '' : ' · '
+                  '${Pricing.formatPaise(b.amountPaise)}'}',
+            ),
+            trailing: TextButton(
+              onPressed: _busy
+                  ? null
+                  : () => GroundsScreen._cancel(
+                        context,
+                        ref,
+                        b.groundId,
+                        b.id,
+                        b.groundName,
+                      ),
+              child: const Text('Cancel'),
+            ),
+          ),
+          // Shown only on the day. Offering "I'm here" for next Tuesday would
+          // collect a fix from somebody's sofa and walk a listing towards
+          // "Location confirmed" on the strength of nothing.
+          if (canCheckIn)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'At the ground? Confirm it so other clubs know this '
+                      'place is real.',
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton.tonal(
+                    onPressed: _busy ? null : _checkIn,
+                    child: Text(_busy ? 'Checking…' : 'I\'m here'),
+                  ),
+                ],
+              ),
+            )
+          else if (b.isCheckedIn)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Row(
+                children: [
+                  Icon(Icons.check_circle,
+                      size: 15, color: theme.colorScheme.primary),
+                  const SizedBox(width: 6),
+                  Text(
+                    'You checked in here',
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: theme.colorScheme.primary),
+                  ),
+                ],
+              ),
+            ),
+          if (b.amountPaise > 0 && !b.isCheckedIn)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: AdvancePaymentWarning(dense: true),
+            ),
+        ],
+      ),
+    );
   }
 }

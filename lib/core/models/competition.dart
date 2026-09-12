@@ -183,6 +183,7 @@ class Competition {
     required this.scoringPluginKey,
     this.description,
     this.bannerUrl,
+    this.logoUrl,
     this.venue,
     this.startDate,
     this.endDate,
@@ -252,6 +253,16 @@ class Competition {
   /// thirty seconds still has a header. An upload replaces a good default
   /// rather than filling an empty box.
   final String? bannerUrl;
+
+  /// The event's own badge, on the header beside its name and in lists.
+  ///
+  /// The same field `Tournament.logoUrl` is and for the same reasons: a club
+  /// almost always has a badge long before it has a header photograph, and
+  /// the two are different pictures at different aspect ratios. An event
+  /// inside a season usually shows the season's, but a standalone tournament
+  /// — the commonest thing this product creates — has nowhere else to put
+  /// one.
+  final String? logoUrl;
 
   final String? venue;
   final DateTime? startDate;
@@ -507,6 +518,7 @@ class Competition {
     String? scoringPluginKey,
     String? description,
     String? bannerUrl,
+    String? logoUrl,
     String? venue,
     DateTime? startDate,
     DateTime? endDate,
@@ -562,6 +574,7 @@ class Competition {
         scoringPluginKey: scoringPluginKey ?? this.scoringPluginKey,
         description: description ?? this.description,
         bannerUrl: bannerUrl ?? this.bannerUrl,
+        logoUrl: logoUrl ?? this.logoUrl,
         venue: venue ?? this.venue,
         startDate: startDate ?? this.startDate,
         endDate: endDate ?? this.endDate,
@@ -826,6 +839,7 @@ class Competition {
       scoringPluginKey: Fs.str(d['scoringPluginKey'], 'simple_points'),
       description: Fs.strOrNull(d['description']),
       bannerUrl: Fs.strOrNull(d['bannerUrl']),
+      logoUrl: Fs.strOrNull(d['logoUrl']),
       venue: Fs.strOrNull(d['venue']),
       startDate: Fs.dateOrNull(d['startDate']),
       endDate: Fs.dateOrNull(d['endDate']),
@@ -905,6 +919,7 @@ class Competition {
         'scoringPluginKey': scoringPluginKey,
         'description': description,
         'bannerUrl': bannerUrl,
+        'logoUrl': logoUrl,
         'venue': venue,
         'startDate': Fs.ts(startDate),
         'endDate': Fs.ts(endDate),

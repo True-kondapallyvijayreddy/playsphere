@@ -68,6 +68,80 @@ enum MembershipRole {
       );
 }
 
+/// A department brief inside a club, granted on top of a [MembershipRole].
+///
+/// ## Why this is not more entries in the role ladder
+///
+/// [MembershipRole] is a *rank*: it is ordered, and `assignableBy` uses that
+/// order to stop people promoting themselves. "Treasurer" has no place in
+/// that order — it is not more or less authority than Event Manager, it is
+/// authority over a different thing. Adding it to the ladder would force an
+/// answer to a question the club does not actually have, and would make the
+/// treasurer inherit every power beneath their rank, so handing somebody the
+/// money would silently hand them the member roster too.
+///
+/// So a portfolio is orthogonal. A member holds a rank AND a set of
+/// portfolios, and their permissions are the union. That lets a club say the
+/// true thing — "Ramesh runs our grounds and nothing else, Priya is an admin
+/// who also keeps the books" — without inventing a rank for every pairing.
+///
+/// Owners hold every portfolio implicitly; see [PermissionMatrix].
+enum ClubPortfolio {
+  finance(
+    'finance',
+    'Finance',
+    'Fees, payments, the club store and its orders.',
+  ),
+  grounds(
+    'grounds',
+    'Grounds & Venues',
+    'Home ground, courts, and the season venue plan.',
+  ),
+  equipment(
+    'equipment',
+    'Kit & Equipment',
+    'Club kit, inventory, and equipment donations.',
+  ),
+  officials(
+    'officials',
+    'Officials & Scorers',
+    'Appointing umpires and handing out the scoring pen.',
+  ),
+  medical(
+    'medical',
+    'Medical & Welfare',
+    'Physios, injury records and emergency contacts.',
+  ),
+  communications(
+    'communications',
+    'Communications',
+    'Announcements, the club gallery and its files.',
+  );
+
+  const ClubPortfolio(this.wire, this.label, this.blurb);
+  final String wire;
+  final String label;
+
+  /// One line describing the brief, shown next to the toggle so the person
+  /// granting it does not have to guess what they are handing over.
+  final String blurb;
+
+  static ClubPortfolio? fromWire(String? w) {
+    for (final p in ClubPortfolio.values) {
+      if (p.wire == w) return p;
+    }
+    // Unknown wire values are dropped rather than defaulted. A portfolio this
+    // build does not understand must not silently become one it does.
+    return null;
+  }
+
+  static Set<ClubPortfolio> setFrom(Iterable<String> wires) =>
+      wires.map(fromWire).whereType<ClubPortfolio>().toSet();
+
+  static List<String> wiresOf(Set<ClubPortfolio> portfolios) =>
+      (portfolios.map((p) => p.wire).toList()..sort());
+}
+
 enum MembershipStatus {
   pending('pending'),
   active('active'),
@@ -459,6 +533,21 @@ enum FixtureStatus {
 
   bool get acceptsScoring =>
       this == FixtureStatus.scheduled || this == FixtureStatus.live;
+
+  /// Reached by somebody deciding it, not by the score reaching it.
+  ///
+  /// The scoring engine can only ever produce [live] and [completed]: every
+  /// other value on this enum is an official's ruling written straight onto
+  /// the fixture. That distinction is what the pad needs and never had —
+  /// `acceptsScoring` answers "may a tap be written", which is false for a
+  /// finished match as well as an abandoned one, and those two need opposite
+  /// treatment. A finished match offers Reopen; an abandoned one has to be
+  /// un-abandoned first, because nothing in the event log says it was
+  /// abandoned and the next tap would silently write it back to `live`.
+  bool get isDecision =>
+      this == FixtureStatus.walkover ||
+      this == FixtureStatus.abandoned ||
+      this == FixtureStatus.disputed;
 }
 
 /// How ready a match is to be played, as distinct from whether it has been.
@@ -912,8 +1001,8 @@ enum SponsorshipTargetType {
   final String label;
 
   static SponsorshipTargetType fromWire(String? w) =>
-      SponsorshipTargetType.values
-          .firstWhere((e) => e.wire == w, orElse: () => SponsorshipTargetType.athlete);
+      SponsorshipTargetType.values.firstWhere((e) => e.wire == w,
+          orElse: () => SponsorshipTargetType.athlete);
 }
 
 /// What kind of support a listing is asking a sponsor to provide. [equipment]
@@ -962,8 +1051,9 @@ enum SponsorPledgeStatus {
   final String wire;
   final String label;
 
-  static SponsorPledgeStatus fromWire(String? w) => SponsorPledgeStatus.values
-      .firstWhere((e) => e.wire == w, orElse: () => SponsorPledgeStatus.pending);
+  static SponsorPledgeStatus fromWire(String? w) =>
+      SponsorPledgeStatus.values.firstWhere((e) => e.wire == w,
+          orElse: () => SponsorPledgeStatus.pending);
 }
 
 // -----------------------------------------------------------------------------

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/models/fixture.dart';
@@ -8,6 +9,7 @@ import '../../domain/scoring/scoring_plugin.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../core/providers.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/coin_flip.dart';
 import 'registered_squad.dart';
 
 /// Everything that has to happen between "the teams have arrived" and the
@@ -189,6 +191,7 @@ class _LineupEditorState extends ConsumerState<LineupEditor> {
         ],
       ),
     );
+    controller.dispose();
     if (name == null || name.trim().isEmpty) return;
     setState(() {
       _current.add(MatchPlayer(
@@ -487,6 +490,17 @@ class _SquadNotice extends StatelessWidget {
 /// first. Recording it decides which innings belongs to whom, and is written
 /// into the fixture's frozen scoring config so the match reads the same way
 /// forever.
+///
+/// Built around the throw rather than around a form. It used to be an
+/// [AlertDialog] of radio buttons and chips with the coin hidden behind a
+/// small button in the corner, which put the one moment of the match everybody
+/// actually gathers round somewhere you had to go looking for it. Now the coin
+/// is the screen: heads and tails are named on it before it is thrown, the
+/// throw decides, and only then does it ask what the winner took.
+///
+/// A toss taken at the ground stays first-class — [TossCoin.settleOn] turns
+/// the coin to the face a scorer picks by hand, without animating a throw the
+/// app did not make.
 class TossDialog extends ConsumerStatefulWidget {
   const TossDialog({super.key, required this.fixture});
 
@@ -497,124 +511,282 @@ class TossDialog extends ConsumerStatefulWidget {
 }
 
 class _TossDialogState extends ConsumerState<TossDialog> {
+  final _coin = GlobalKey<TossCoinState>();
+
   String? _winnerId;
   late final List<TossChoice> _choices =
       TossOptions.forSport(widget.fixture.sport);
   late String _decision = _choices.first.id;
   bool _busy = false;
+  bool _flipping = false;
+
+  /// Whether the coin decided it, or a scorer did. Only a thrown result is
+  /// offered a re-throw; one entered by hand is a record of something that
+  /// already happened off-screen and re-throwing it would be a fiction.
+  bool _thrown = false;
+
+  /// Chess has no toss; it has a drawing of lots for colour. Saying "toss"
+  /// there would be the same error in the wording that the Bat/Field buttons
+  /// once were in the body.
+  bool get _isChess => widget.fixture.sport == 'chess';
+
+  String get _noun => _isChess ? 'draw' : 'toss';
+
+  String _nameOf(String entrantId) => entrantId == widget.fixture.entrantAId
+      ? widget.fixture.entrantAName
+      : widget.fixture.entrantBName;
+
+  void _pickByHand(String entrantId) {
+    setState(() {
+      _winnerId = entrantId;
+      _thrown = false;
+    });
+    _coin.currentState?.settleOn(entrantId == widget.fixture.entrantAId);
+  }
+
+  void _throw() {
+    setState(() {
+      _winnerId = null;
+      _flipping = true;
+    });
+    _coin.currentState?.flip();
+  }
+
+  Future<void> _record() async {
+    final f = widget.fixture;
+    setState(() => _busy = true);
+    try {
+      await ref.read(competitionRepositoryProvider).recordToss(
+            fixture: f,
+            wonByEntrantId: _winnerId!,
+            decision: _decision,
+            startingSide: _startingSide(f),
+            // Only cricket's toss decides who bats, and only cricket's engine
+            // reads `battingFirst`. Writing it for a badminton match would put
+            // a meaningless key into a frozen ruleset.
+            decidesBatting: TossOptions.decidesBatting(f.sport),
+            scoringConfig: f.scoringConfig,
+          );
+      if (mounted) Navigator.pop(context, true);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _busy = false);
+        showError(context, e);
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final f = widget.fixture;
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
     final sport = SportCatalog.byId(f.sport);
+    final decided = _winnerId != null;
 
-    return AlertDialog(
-      // Chess has no toss; it has a drawing of lots for colour. Calling it
-      // "Toss" there would be the same error in the title that the Bat/Field
-      // buttons were in the body.
-      title: Text(f.sport == 'chess' ? 'Colours' : 'Toss'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                f.sport == 'chess' ? 'Who drew White?' : 'Who won it?',
-                style: Theme.of(context).textTheme.bodyMedium,
+    return Dialog.fullscreen(
+      child: CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.space): () {
+            if (!_flipping && !_busy) _throw();
+          },
+        },
+        child: Focus(
+          autofocus: true,
+          child: Scaffold(
+            backgroundColor: cs.surface,
+            appBar: AppBar(
+              leading: IconButton(
+                tooltip: 'Cancel',
+                icon: const Icon(Icons.close),
+                // `false` is Cancel, and both callers keep their gate on it.
+                onPressed:
+                    _busy || _flipping ? null : () => Navigator.pop(context, false),
               ),
-              OutlinedButton.icon(
-                onPressed: () {
-                  final randomWinner = (DateTime.now().millisecondsSinceEpoch % 2 == 0)
-                      ? f.entrantAId
-                      : f.entrantBId;
-                  final winnerName = randomWinner == f.entrantAId
-                      ? f.entrantAName
-                      : f.entrantBName;
-                  setState(() => _winnerId = randomWinner);
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('🪙 Coin toss result: $winnerName won the toss!')),
-                  );
-                },
-                icon: const Icon(Icons.casino_outlined, size: 16),
-                label: const Text('Flip Coin 🪙'),
-              ),
-            ],
-          ),
-          RadioListTile<String>(
-            value: f.entrantAId,
-            groupValue: _winnerId,
-            onChanged: (v) => setState(() => _winnerId = v),
-            title: Text(f.entrantAName),
-            dense: true,
-          ),
-          RadioListTile<String>(
-            value: f.entrantBId,
-            groupValue: _winnerId,
-            onChanged: (v) => setState(() => _winnerId = v),
-            title: Text(f.entrantBName),
-            dense: true,
-          ),
-          const Divider(),
-          const Text('And chose to'),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            children: [
-              for (final c in _choices)
-                ChoiceChip(
-                  label: Text(c.label),
-                  selected: _decision == c.id,
-                  onSelected: (_) => setState(() => _decision = c.id),
+              title: Text(_isChess ? 'Colours' : 'Toss'),
+              centerTitle: false,
+            ),
+            body: SafeArea(
+              // Centred when the throw fits, scrolling when the choices push it
+              // past the screen. A fixed list left the coin stranded at the top of
+              // a tall phone with the button a long way beneath it.
+              child: LayoutBuilder(
+                builder: (context, box) => SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(minHeight: box.maxHeight - 28),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                  Text(
+                    '${sport.name} · ${f.entrantAName} v ${f.entrantBName}',
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.bodyMedium
+                        ?.copyWith(color: cs.onSurfaceVariant),
+                  ),
+                  const SizedBox(height: 16),
+                  // Said before the coin is thrown, never after it.
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _FaceCard(
+                          face: 'HEADS',
+                          name: f.entrantAName,
+                          won: _winnerId == f.entrantAId,
+                          onTap: _flipping || _busy
+                              ? null
+                              : () => _pickByHand(f.entrantAId),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: _FaceCard(
+                          face: 'TAILS',
+                          name: f.entrantBName,
+                          won: _winnerId == f.entrantBId,
+                          onTap: _flipping || _busy
+                              ? null
+                              : () => _pickByHand(f.entrantBId),
+                        ),
+                      ),
+                    ],
+                  ),
+                  // The coin is the button. Tapping the thing you are about to
+                  // throw is the obvious gesture, and hunting for a control at
+                  // the bottom of the screen is not — the bar below stays for
+                  // discoverability and for anyone who reaches for it first.
+                  GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: _flipping || _busy ? null : _throw,
+                    child: TossCoin(
+                      key: _coin,
+                      headsLabel: f.entrantAName,
+                      tailsLabel: f.entrantBName,
+                      onLanded: (heads) => setState(() {
+                        _flipping = false;
+                        _thrown = true;
+                        _winnerId = heads ? f.entrantAId : f.entrantBId;
+                      }),
+                    ),
+                  ),
+                  Semantics(
+                    liveRegion: true,
+                    child: Text(
+                      switch ((_flipping, _winnerId)) {
+                        (true, _) => 'In the air…',
+                        (_, null) =>
+                          'Tap the coin to throw it, or tap the side that won '
+                              'it at the ground.',
+                        (_, final w?) => '${_nameOf(w)} won the $_noun',
+                      },
+                      textAlign: TextAlign.center,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: decided ? FontWeight.w700 : FontWeight.w500,
+                        color: decided ? cs.primary : cs.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                  if (decided) ...[
+                    const SizedBox(height: 24),
+                    Text(
+                      _isChess
+                          ? 'And ${_nameOf(_winnerId!)} took'
+                          : 'And ${_nameOf(_winnerId!)} chose to',
+                      style: theme.textTheme.titleSmall
+                          ?.copyWith(fontWeight: FontWeight.w600),
+                    ),
+                    const SizedBox(height: 8),
+                    // Full-width tiles rather than the chips this used to use: the
+                    // choice is what decides who bats, serves or raids first, and
+                    // it was the smallest thing on the screen.
+                    for (final c in _choices)
+                      _ChoiceTile(
+                        label: c.label,
+                        selected: _decision == c.id,
+                        onTap: _busy ? null : () => setState(() => _decision = c.id),
+                      ),
+                    const SizedBox(height: 12),
+                    // Spells the consequence back before it is saved. "Bat" and
+                    // "field" produce opposite starters and a scorer who tapped the
+                    // wrong tile has no other way to notice.
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: cs.secondaryContainer,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(Icons.play_arrow_rounded,
+                              size: 20, color: cs.onSecondaryContainer),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              _startsLabel(f),
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                fontWeight: FontWeight.w600,
+                                color: cs.onSecondaryContainer,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                      ],
+                      ],
+                    ),
+                  ),
                 ),
-            ],
+              ),
+            ),
+            bottomNavigationBar: SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (!decided)
+                      FilledButton.icon(
+                        onPressed: _flipping ? null : _throw,
+                        icon: const Icon(Icons.monetization_on_outlined),
+                        label: Text(_flipping ? 'Flipping…' : 'Flip the coin'),
+                      )
+                    else
+                      FilledButton.icon(
+                        onPressed: _busy ? null : _record,
+                        icon: const Icon(Icons.check),
+                        label: Text(_busy ? 'Saving…' : 'Record $_noun & Start'),
+                      ),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        TextButton(
+                          // Kept, and kept quiet. A club playing an evening
+                          // friendly that genuinely did not toss must not be
+                          // locked out of scoring it.
+                          onPressed: _busy || _flipping
+                              ? null
+                              : () => Navigator.pop(context, true),
+                          child: Text('Skip $_noun'),
+                        ),
+                        if (_thrown && !_busy)
+                          TextButton.icon(
+                            onPressed: _flipping ? null : _throw,
+                            icon: const Icon(Icons.refresh, size: 18),
+                            label: const Text('Throw again'),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ),
-          const SizedBox(height: 8),
-          Text(
-            '${sport.name} · ${_startsLabel(f)}',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-        ],
+        ),
       ),
-      actions: [
-        TextButton(
-          onPressed: _busy ? null : () => Navigator.pop(context, false),
-          child: const Text('Cancel'),
-        ),
-        TextButton(
-          onPressed: _busy ? null : () => Navigator.pop(context, true),
-          child: const Text('Skip toss'),
-        ),
-        FilledButton(
-          onPressed: _busy || _winnerId == null
-              ? null
-              : () async {
-                  setState(() => _busy = true);
-                  try {
-                    await ref.read(competitionRepositoryProvider).recordToss(
-                          fixture: f,
-                          wonByEntrantId: _winnerId!,
-                          decision: _decision,
-                          startingSide: _startingSide(f),
-                          // Only cricket's toss decides who bats, and only
-                          // cricket's engine reads `battingFirst`. Writing it
-                          // for a badminton match would put a meaningless key
-                          // into a frozen ruleset.
-                          decidesBatting: TossOptions.decidesBatting(f.sport),
-                          scoringConfig: f.scoringConfig,
-                        );
-                    if (context.mounted) Navigator.pop(context, true);
-                  } catch (e) {
-                    if (context.mounted) {
-                      setState(() => _busy = false);
-                      showError(context, e);
-                    }
-                  }
-                },
-          child: Text(_busy ? 'Saving…' : 'Record toss & Start'),
-        ),
-      ],
     );
   }
 
@@ -630,9 +802,7 @@ class _TossDialogState extends ConsumerState<TossDialog> {
     return winnerIsA ? 'b' : 'a';
   }
 
-  /// Spells the consequence back before it is saved, in the sport's own
-  /// words. "Bat" and "field" produce opposite starters and a scorer who
-  /// tapped the wrong chip has no other way to notice.
+  /// Spells the consequence back before it is saved, in the sport's own words.
   String _startsLabel(Fixture f) {
     final startsA = _startingSide(f) == 'a';
     final who = startsA ? f.entrantAName : f.entrantBName;
@@ -648,6 +818,187 @@ class _TossDialogState extends ConsumerState<TossDialog> {
   }
 }
 
+/// One side of the coin, with the name riding on it.
+class _FaceCard extends StatelessWidget {
+  const _FaceCard({
+    required this.face,
+    required this.name,
+    required this.won,
+    required this.onTap,
+  });
+
+  final String face;
+  final String name;
+  final bool won;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(14),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 220),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: won ? cs.primaryContainer : cs.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: won ? cs.primary : cs.outlineVariant,
+            width: won ? 2 : 1,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              face,
+              style: theme.textTheme.labelSmall?.copyWith(
+                letterSpacing: 1.4,
+                fontWeight: FontWeight.w700,
+                color: won ? cs.onPrimaryContainer : cs.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.titleSmall?.copyWith(
+                fontWeight: FontWeight.w700,
+                color: won ? cs.onPrimaryContainer : cs.onSurface,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// What the winner took — one full-width tile per option.
+class _ChoiceTile extends StatelessWidget {
+  const _ChoiceTile({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding:
+              const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+          decoration: BoxDecoration(
+            color: selected ? cs.primaryContainer : cs.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: selected ? cs.primary : cs.outlineVariant,
+              width: selected ? 2 : 1,
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                selected
+                    ? Icons.radio_button_checked
+                    : Icons.radio_button_unchecked,
+                size: 20,
+                color: selected ? cs.primary : cs.onSurfaceVariant,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  label,
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w600,
+                    color:
+                        selected ? cs.onPrimaryContainer : cs.onSurface,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The toss, once it has been taken: stated, not re-offered.
+///
+/// A recorded toss is settled history — it has already decided who bats,
+/// serves, raids or chases, and the opening state of the match was built from
+/// it. So from that moment it stops being a question anywhere in the app and
+/// becomes one line at the top of the pad. Re-opening [TossDialog] on a match
+/// in progress could only ever overwrite the decision the innings was built
+/// on, which is why nothing offers it any more.
+///
+/// Sport-agnostic on purpose: the choice is named from the same catalogue the
+/// dialog offered it from, so "Bat", "Raid first", "First possession" and
+/// "Play White" all read correctly without this widget knowing a single
+/// sport's rules.
+class TossResultStrip extends StatelessWidget {
+  const TossResultStrip({super.key, required this.fixture});
+
+  final Fixture fixture;
+
+  @override
+  Widget build(BuildContext context) {
+    final won = fixture.tossWonByEntrantId;
+    if (won == null || won.isEmpty) return const SizedBox.shrink();
+
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final name =
+        won == fixture.entrantAId ? fixture.entrantAName : fixture.entrantBName;
+    final choice = TossOptions.resolve(fixture.sport, fixture.tossDecision);
+    // Chess draws lots for colour rather than tossing; calling it a toss here
+    // would be the same error the dialog's own title avoids.
+    final verb = fixture.sport == 'chess' ? 'won the draw' : 'won the toss';
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.monetization_on_outlined, size: 18, color: cs.primary),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '$name $verb \u00b7 ${choice.label}',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                fontWeight: FontWeight.w600,
+                color: cs.onSurface,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
 /// Asks which player fills a role — the incoming batter, the next bowler, or
 /// the opening trio.
 ///
@@ -664,7 +1015,13 @@ class PlayerPicker extends StatefulWidget {
     this.exclusiveRoleGroups = const [],
     this.values = const [],
     this.choices = const [],
+    this.texts = const [],
   });
+
+  /// Short free text collected alongside the rest — a chess move in algebraic
+  /// notation, a dart checkout, a stroke code. Deliberately not a notes field:
+  /// see [TextPrompt].
+  final List<TextPrompt> texts;
 
   /// Fixed-answer questions — "why is the match ending?" — asked after the
   /// people and the numbers. See [ChoicePrompt].
@@ -784,6 +1141,18 @@ class _PlayerPickerState extends State<PlayerPicker> {
   /// what lets somebody type a time without the field fighting them.
   final Map<String, String> _typed = {};
 
+  /// Raw text per free-text field, trimmed only when it is read.
+  ///
+  /// Kept separate from [_typed] because these are not numbers and must never
+  /// be parsed: in algebraic notation `b4` is a pawn move and `B4` is not a
+  /// move at all, so the string a scorer typed is the whole of the answer.
+  final Map<String, String> _entered = {};
+
+  String? _textOf(TextPrompt t) {
+    final text = _entered[t.key]?.trim() ?? '';
+    return text.isEmpty ? null : text;
+  }
+
   double? _valueOf(ValuePrompt v) {
     final text = _typed[v.key]?.trim() ?? '';
     if (text.isEmpty) return null;
@@ -799,6 +1168,7 @@ class _PlayerPickerState extends State<PlayerPicker> {
         (key) => widget.optionalRoles.contains(key) || _filled(key),
       ) &&
       widget.values.every((v) => v.optional || _valueOf(v) != null) &&
+      widget.texts.every((t) => t.optional || _textOf(t) != null) &&
       // A required choice with nothing picked is the case this whole prompt
       // exists for: a retirement with no reason is exactly what the engine
       // refuses, so the dialog must not offer to send one.
@@ -916,6 +1286,31 @@ class _PlayerPickerState extends State<PlayerPicker> {
                   onChanged: (text) => setState(() => _typed[v.key] = text),
                 ),
               ),
+            for (final t in widget.texts)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: TextFormField(
+                  // Focused when it is the only question, which is the chess
+                  // case: the scorer taps Add move and types straight into it.
+                  autofocus: widget.roles.isEmpty && widget.values.isEmpty,
+                  maxLength: t.maxLength,
+                  // Off unless the prompt asks for it, because the case that
+                  // forced this field is one where case is MEANING and an
+                  // autocapitalising keyboard would corrupt every entry.
+                  textCapitalization: t.autoCapitalize
+                      ? TextCapitalization.sentences
+                      : TextCapitalization.none,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  decoration: InputDecoration(
+                    labelText: t.label,
+                    hintText: t.hint,
+                    helperText: t.optional ? 'Optional' : null,
+                    border: const OutlineInputBorder(),
+                  ),
+                  onChanged: (text) => setState(() => _entered[t.key] = text),
+                ),
+              ),
             for (final c in widget.choices)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 6),
@@ -966,6 +1361,11 @@ class _PlayerPickerState extends State<PlayerPicker> {
                     for (final v in widget.values)
                       if (_valueOf(v) case final n?)
                         v.key: v.isInteger ? n.round() : n,
+                    // Sent as typed. A blank optional field is dropped rather
+                    // than sent as an empty string, for the same reason a
+                    // blank optional role is.
+                    for (final t in widget.texts)
+                      if (_textOf(t) case final s?) t.key: s,
                     for (final e in _picked.entries) e.key: e.value,
                   })
               : null,

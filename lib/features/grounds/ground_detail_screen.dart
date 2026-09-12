@@ -7,8 +7,10 @@ import '../../core/layout/responsive.dart';
 import '../../core/providers.dart';
 import '../../data/image_composer.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/ground_trust.dart';
 import '../../shared/image_upload.dart';
 import '../../shared/ps_banner.dart';
+import 'report_ground_sheet.dart';
 
 /// A single ground, previously a route that existed only as `Routes.ground`
 /// with nothing registered behind it — booking has always happened through
@@ -24,7 +26,7 @@ class GroundDetailScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final ground = ref.watch(groundProvider(groundId)).valueOrNull;
-    final me = ref.watch(currentUserProvider).valueOrNull;
+    final me = ref.watch(authUserProvider).valueOrNull;
     final isOwner = me != null && ground != null && me.uid == ground.ownerUid;
 
     return AppScaffold(
@@ -87,14 +89,30 @@ class GroundDetailScreen extends ConsumerWidget {
                           runSpacing: 6,
                           children: [
                             Chip(label: Text(ground.rateLabel)),
-                            if (ground.isVerified)
-                              const Chip(
-                                avatar: Icon(Icons.verified, size: 16),
-                                label: Text('Verified'),
-                              ),
                             for (final f in ground.facilities) Chip(label: Text(f)),
                           ],
                         ),
+                        const SizedBox(height: 14),
+                        // The trust state, in full, on the page where
+                        // somebody decides whether to ring the number on this
+                        // listing. The old single "Verified" chip could only
+                        // say one thing and said nothing at all for the
+                        // listings that most needed explaining.
+                        GroundTrustPanel(
+                          ground: ground,
+                          onReport: isOwner
+                              ? null
+                              : () => showReportGroundSheet(
+                                    context,
+                                    ground: ground,
+                                  ),
+                        ),
+                        if (ground.contactPhone != null ||
+                            ground.hourlyRatePaise > 0) ...[
+                          const SizedBox(height: 12),
+                          // Beside the number a fraudster would ring from.
+                          const AdvancePaymentWarning(),
+                        ],
                         if (ground.latitude != null &&
                             ground.longitude != null) ...[
                           const SizedBox(height: 12),

@@ -10,14 +10,19 @@ import '../../core/models/tournament.dart';
 import '../../core/models/venue.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
+import '../../domain/draw/draft_season_plan.dart';
+import '../../domain/draw/match_duration.dart';
 import '../../domain/scoring/scoring_registry.dart';
+import '../../shared/app_scaffold.dart' show showError;
 import '../../shared/club_context_banner.dart';
+import '../../shared/offline_fee_notice.dart';
+import '../../shared/season_branding_field.dart';
 import '../../shared/ui_kit.dart';
 import '../../shared/wizard.dart';
 import 'widgets/daily_hours_field.dart';
-import '../tournaments/widgets/venue_selector_dialog.dart'
-    show showQuickAddVenueDialog;
 import 'widgets/bulk_category_selector_sheet.dart';
+import 'widgets/season_officials_field.dart';
+import 'widgets/season_plan_field.dart';
 import 'widgets/group_stage_fields.dart';
 import '../../domain/tournament/house_roster.dart';
 import 'widgets/house_list_editor.dart';
@@ -39,6 +44,62 @@ class _SeasonSport {
   CompetitionCategory category;
   CompetitionFormat format;
   int maxEntrants = 16;
+
+  // --- Where and when THIS sport plays -------------------------------------
+  //
+  // Every field below is an override of the season's own answer, and null or
+  // empty means "whatever the season said". That is deliberate: the common
+  // season is one ground and one set of hours, and an organizer who has not
+  // asked for anything different must not have to fill six sports' worth of
+  // identical forms to get it.
+  //
+  // The reason they exist at all is that the *other* common season is a
+  // school sports week: badminton in the indoor hall from four to seven,
+  // cricket on the main field all day Saturday, football on the far pitch on
+  // Sunday. One ground list and one day window cannot describe that, and
+  // scheduling it as though they could is how a cricket match gets called to
+  // a badminton court.
+
+  /// Grounds this sport is played at. Empty means every ground the season
+  /// picked. Always a subset of the season's list — the picker only offers
+  /// those, so a sport can never point at a ground the season does not hold.
+  Set<String> venueIds = {};
+
+  /// The days this sport runs, inside the season's own span. Null on either
+  /// end means the season's own date.
+  DateTime? startDate;
+  DateTime? endDate;
+
+  /// The hours this sport's ground is available. Null means the season's.
+  int? dayStartHour;
+  int? dayEndHour;
+
+  /// How long one match of this sport takes. Null means the season's default
+  /// — and this is the field that most often should not be: a T20 innings and
+  /// a badminton singles are not both 30 minutes, and a season that pretends
+  /// they are produces a timetable that drifts by lunchtime.
+  int? matchMinutes;
+
+  /// Whether anything at all has been said about this sport specifically.
+  /// Drives the summary line on the card, so an organizer can see at a glance
+  /// which sports they have customised without opening each one.
+  bool get hasScheduleOverride =>
+      venueIds.isNotEmpty ||
+      startDate != null ||
+      endDate != null ||
+      dayStartHour != null ||
+      dayEndHour != null ||
+      matchMinutes != null;
+
+  /// This event's entry fee in whole rupees. Zero is free, and is the
+  /// default because most of them are.
+  ///
+  /// Held as an int rather than a controller for the same reason
+  /// [maxEntrants] is: a `_SeasonSport` is added and removed freely from a
+  /// plain list with no lifecycle hook to dispose a controller in, and a
+  /// leaked controller per removed category is a worse trade than parsing
+  /// the field on change.
+  int entryFeeRupees = 0;
 
   /// How this category's field is split up — groups, how many, and how many
   /// of each go through.
@@ -107,21 +168,40 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
   final _organizer = TextEditingController();
   final _venue = TextEditingController();
 
+  /// The season's crest and header art, staged until the season has an id —
+  /// see [SeasonBranding]. The same block the one-page form uses, so a season
+  /// built through the wizard and a season built on `CreateSeasonScreen` come
+  /// out looking the same.
+  final _branding = SeasonBranding();
+
   final List<_SeasonSport> _sports = [];
 
-  /// Venues the season runs across, as ids into `orgs/{orgId}/venues`.
+  /// The grounds the season runs across and the hours it has each of them
+  /// for — the pair [SeasonPlanField] needs to answer "does this fit?".
   ///
   /// This is what makes the schedule generatable. `generateSchedule` resolves
   /// courts from these documents and refuses outright when there are none, so
   /// a season created without them produced a tournament whose only
   /// scheduling button failed — the organizer had to find a different screen
   /// to fix something they were never told was missing.
-  final Set<String> _venueIds = {};
+  final _grounds = SeasonGroundsDraft();
+
+  /// The officiating panel, staged like the grounds — see
+  /// [SeasonOfficialsDraft] for why it is asked for here.
+  final _officials = SeasonOfficialsDraft();
+
+  Set<String> get _venueIds => {..._grounds.venueIds};
 
   DateTime? _startDate;
   DateTime? _endDate;
 
+  /// The season-wide match length, and whether the organizer set it.
+  ///
+  /// Untouched, each category takes its length from its own ruleset — see
+  /// [MatchDuration] and the identical note in `create_season_screen.dart`.
   int _matchMinutes = 30;
+  bool _matchMinutesSet = false;
+
   int _changeoverMinutes = 5;
   int _restGapMinutes = 20;
   /// When play may start and when it must stop, per day.
@@ -150,6 +230,19 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
   bool _resultsApproval = false;
   bool _allowProtests = false;
 
+  /// One fee for the season, or one per sport — see [SeasonFeeMode]. Asked
+  /// before any amount, because it decides which fields exist.
+  SeasonFeeMode _feeMode = SeasonFeeMode.wholeSeason;
+
+  /// The whole-season fee. Only read under [SeasonFeeMode.wholeSeason].
+  final _seasonFee = TextEditingController();
+
+  /// The declared whole-season fee in whole rupees, floored at zero.
+  int get _seasonFeeRupees {
+    final n = int.tryParse(_seasonFee.text.trim());
+    return (n == null || n < 0) ? 0 : n;
+  }
+
   bool _busy = false;
 
   @override
@@ -158,6 +251,9 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
     _shortName.dispose();
     _organizer.dispose();
     _venue.dispose();
+    _seasonFee.dispose();
+    _grounds.dispose();
+    _officials.dispose();
     super.dispose();
   }
 
@@ -234,6 +330,25 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
       final competitions = ref.read(competitionRepositoryProvider);
       final end = _endDate ?? start;
 
+      // Grounds before the season, because the season document carries their
+      // ids — and any sport pinned to a ground added on this form is
+      // re-pointed at the real id, or its draw would be confined to a ground
+      // key nothing has. Same order and same reason as
+      // `create_season_screen.dart`.
+      final remap = await _grounds.ensureVenues(
+        repo: tournaments,
+        orgId: widget.orgId,
+      );
+      if (remap.isNotEmpty) {
+        for (final sport in _sports) {
+          final moved = {for (final id in sport.venueIds) remap[id] ?? id};
+          sport.venueIds
+            ..clear()
+            ..addAll(moved);
+        }
+      }
+      final venueIds = _grounds.venueIds;
+
       // The container first: every event below carries its id, and an event
       // pointing at a season that does not exist yet is a dangling reference
       // for however long the writes take.
@@ -245,11 +360,17 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
           status: TournamentStatus.draft,
           startDate: start,
           endDate: end,
-          venueIds: _venueIds.toList(),
+          venueIds: venueIds,
           eventCount: _sports.length,
           matchMinutesDefault: _matchMinutes,
           changeoverMinutes: _changeoverMinutes,
           restGapMinutes: _restGapMinutes,
+          feeMode: _feeMode,
+          // Zero under per-sport pricing — see the same guard in
+          // `create_season_screen.dart` for why a stale season fee must not
+          // survive a mode switch.
+          entryFeeRupees:
+              _feeMode == SeasonFeeMode.wholeSeason ? _seasonFeeRupees : 0,
           createdBy: uid,
         ),
       );
@@ -279,20 +400,43 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
             scoringPluginKey: sport.pluginKey,
             scoringConfig: entry.sideFormat.configOverrides,
             drawConfig: entry.drawToSubmit,
+            // The season's answers, with this sport's own where it gave any
+            // — see `_SeasonSport` for why the override is per sport and why
+            // it is stored resolved rather than as "same as the season".
+            // `generateSchedule` reads exactly these fields back, so what an
+            // organizer set on this card is what the timetable obeys.
             scheduleConfig: ScheduleConfig(
-              venueIds: _venueIds.toList(),
-              matchMinutes: _matchMinutes,
+              venueIds: entry.venueIds.isEmpty
+                  ? venueIds
+                  : entry.venueIds.toList(),
+              // The sport's own length unless it was overridden — the number
+              // the plan on the Schedule step was computed from, so the
+              // timetable this season generates is the one it promised.
+              matchMinutes: _minutesFor(entry),
               changeoverMinutes: _changeoverMinutes,
               restGapMinutes: _restGapMinutes,
-              dayStartHour: _dayStartHour,
-              dayEndHour: _dayEndHour,
+              dayStartHour: entry.dayStartHour ?? _dayStartHour,
+              dayEndHour: entry.dayEndHour ?? _dayEndHour,
             ),
             teamEntryMode: sport.defaultEntrantType == EntrantType.individual
                 ? TeamEntryMode.individual
                 : (_externalEntries ? TeamEntryMode.preformedTeam : TeamEntryMode.houseBatch),
             presetHouses: _externalEntries ? const [] : _presetHouses,
             venue: _venue.text.trim().isEmpty ? null : _venue.text.trim(),
-            startDate: start,
+            // The sport's own days where it has them. Written onto the event
+            // rather than only into the schedule config because this is the
+            // date the event page already shows: an event that reads
+            // "12 September" and is then scheduled on the 15th is wrong
+            // whichever of the two the organizer believes.
+            startDate: entry.startDate ?? start,
+            // Left null when the sport runs the whole season, which is what
+            // every event carried before this and what the season page
+            // already says on their behalf. Set only when this sport stops
+            // earlier than the season does.
+            endDate: entry.endDate,
+            entryFeeRupees: _feeMode == SeasonFeeMode.perEvent
+                ? entry.entryFeeRupees
+                : 0,
             maxEntrants: entry.maxEntrants,
             participationModel: _participation,
             waitlistEnabled: true,
@@ -312,8 +456,33 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
         count: _sports.length,
       );
 
+      // Everything that needs the season's id and may fail without taking
+      // the season with it: the per-ground hours, the officiating panel, the
+      // artwork — see [SeasonBranding.uploadTo].
+      await _grounds.savePlans(
+        repo: tournaments,
+        orgId: widget.orgId,
+        tournamentId: seasonId,
+      );
+
+      final panelProblem = await _officials.commit(
+        repo: tournaments,
+        orgId: widget.orgId,
+        tournamentId: seasonId,
+        addedByUid: uid,
+      );
+
+      final brandingProblem = await _branding.uploadTo(
+        repo: tournaments,
+        orgId: widget.orgId,
+        tournamentId: seasonId,
+        uid: uid,
+      );
+
       if (!mounted) return;
       context.pushReplacement(Routes.tournament(widget.orgId, seasonId));
+      final problem = panelProblem ?? brandingProblem;
+      if (problem != null) showError(context, problem);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -401,6 +570,12 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
                   decoration: _input('Hyderabad Sports Association'),
                 ),
               ),
+              const SizedBox(height: 8),
+              SeasonBrandingField(
+                branding: _branding,
+                name: _name.text,
+                onChanged: () => setState(() {}),
+              ),
             ],
           ),
         ),
@@ -473,12 +648,96 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
     );
   }
 
+  /// Whether entrants pay once for the season or once per sport, and the
+  /// whole-season amount when it is the former.
+  ///
+  /// Asked before any amount, because the answer decides whether the number
+  /// belongs here or on each sport card below — see [SeasonFeeMode]. Neither
+  /// mode collects anything; see [FeeSettlement].
+  Widget _feeCard(BuildContext context) {
+    return PsCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text(
+            'Entry fee',
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w700,
+              color: Ps.ink,
+            ),
+          ),
+          const SizedBox(height: 2),
+          const Text(
+            'Either option is free if you leave the amount blank.',
+            style: TextStyle(fontSize: 12, color: Ps.muted),
+          ),
+          for (final mode in SeasonFeeMode.values)
+            RadioListTile<SeasonFeeMode>(
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              value: mode,
+              groupValue: _feeMode,
+              title: Text(mode.label, style: const TextStyle(fontSize: 14)),
+              // Spelled out rather than left to the two labels. "A separate
+              // fee for each sport" does not tell an organizer that the
+              // amounts are typed on the cards below, and one who does not
+              // scroll concludes the feature is missing.
+              subtitle: Text(
+                mode == SeasonFeeMode.wholeSeason
+                    ? 'One payment lets an entrant play every event in this '
+                        'season.'
+                    : 'Badminton ₹500, cricket ₹2000 — set each amount on its '
+                        'own sport card below.',
+                style: const TextStyle(fontSize: 12, color: Ps.muted),
+              ),
+              onChanged: (v) => setState(() => _feeMode = v ?? _feeMode),
+            ),
+          if (_feeMode == SeasonFeeMode.wholeSeason)
+            WizardField(
+              label: 'Fee for the whole season',
+              child: TextFormField(
+                controller: _seasonFee,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  hintText: 'Free',
+                  prefixText: '₹ ',
+                  isDense: true,
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            )
+          else if (_sports.isEmpty)
+            const Text(
+              'Add a sport below to set its fee.',
+              style: TextStyle(fontSize: 12, color: Ps.muted),
+            ),
+          const SizedBox(height: 8),
+          const OfflineFeeNotice(message: FeeSettlement.organiserHelper),
+        ],
+      ),
+    );
+  }
+
   Widget _structureStep(BuildContext context) {
     final presets = CompetitionCategory.presets(cutOff: _startDate);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        // Named the moment they are in the season, not weeks later when the
+        // timetable is built and one event is missing from it.
+        _PerformanceSportNotice(sports: _sports),
+        // ABOVE the sport cards, and that ordering is the whole point.
+        //
+        // This card decides whether each sport card below shows an entry-fee
+        // field at all. Sitting underneath them, it asked the organizer to
+        // choose per-sport pricing and then left the fields it had just
+        // revealed off the top of the screen — so the honest report was that
+        // per-sport entry fees "were not in the app". They were; nobody was
+        // ever shown them.
+        _feeCard(context),
+        const SizedBox(height: 12),
         for (int i = 0; i < _sports.length; i++) ...[
           Builder(builder: (context) {
             final entry = _sports[i];
@@ -589,6 +848,35 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
                           setState(() => entry.maxEntrants = v ?? 16),
                     ),
                   ),
+                  // Declared per sport, up front, and collected by the
+                  // organizer at the venue — see `FeeSettlement`. Absent
+                  // under a whole-season fee: the event is covered, not
+                  // separately priced.
+                  if (_feeMode == SeasonFeeMode.perEvent)
+                  WizardField(
+                    label: 'Entry fee — ${entry.sport.name}',
+                    child: TextFormField(
+                      key: ObjectKey(entry),
+                      initialValue: entry.entryFeeRupees == 0
+                          ? ''
+                          : '${entry.entryFeeRupees}',
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        hintText: 'Free',
+                        prefixText: '₹ ',
+                        isDense: true,
+                        border: OutlineInputBorder(),
+                      ),
+                      // No setState: the value is read back at submit time
+                      // and nothing else on this card renders from it, so
+                      // rebuilding the whole step on every keystroke would
+                      // only cost the field its cursor position.
+                      onChanged: (v) {
+                        final n = int.tryParse(v.trim());
+                        entry.entryFeeRupees = (n == null || n < 0) ? 0 : n;
+                      },
+                    ),
+                  ),
                 ],
               ),
             );
@@ -652,7 +940,26 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
           ),
         ),
         const SizedBox(height: 12),
-        _venuePicker(context),
+        SeasonPlanField(
+          orgId: widget.orgId,
+          draft: _grounds,
+          events: _eventPlans,
+          start: _startDate,
+          end: _endDate,
+          defaultTurnaroundMinutes: _changeoverMinutes,
+          onChanged: () => setState(() {}),
+          onAddDay: _addADay,
+        ),
+        const SizedBox(height: 12),
+        SeasonOfficialsField(
+          orgId: widget.orgId,
+          draft: _officials,
+          events: _eventPlans,
+          days: _preview.days,
+          seasonStart: _startDate,
+          seasonEnd: _endDate,
+          onChanged: () => setState(() {}),
+        ),
         const SizedBox(height: 12),
         PsCard(
           child: Column(
@@ -683,7 +990,10 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
                         min: 5,
                         max: 240,
                         step: 5,
-                        onChanged: (v) => setState(() => _matchMinutes = v),
+                        onChanged: (v) => setState(() {
+                          _matchMinutes = v;
+                          _matchMinutesSet = true;
+                        }),
                       ),
                     ),
                   ),
@@ -738,146 +1048,130 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
             ],
           ),
         ),
+        const SizedBox(height: 12),
+        _perSportSchedule(context),
       ],
     );
   }
 
-  /// Grounds and their courts, which is what the timetable is actually built
-  /// out of.
+  /// Per-sport grounds, days and hours.
   ///
-  /// Separate from the free-text field above on purpose: that string is the
-  /// line printed on an event ("Green Field Ground"), while these are real
-  /// [Venue] documents whose courts the scheduler allocates. Conflating them
-  /// is what left seasons unschedulable — a name is not a court.
-  Widget _venuePicker(BuildContext context) {
-    final venuesAsync = ref.watch(venuesProvider(widget.orgId));
+  /// ## Why this is a second, optional layer rather than the only one
+  ///
+  /// The season-wide answers above are right for most seasons and are the
+  /// only thing a club running one badminton weekend should have to fill in.
+  /// But a school sports week is the other half of the product: badminton in
+  /// the hall from four to seven, cricket on the main field all Saturday,
+  /// football on the far pitch on Sunday. Scheduling that against one ground
+  /// list and one day window is not an approximation, it is wrong — the
+  /// timetable will call a cricket match to a badminton court and print it as
+  /// though it were fact.
+  ///
+  /// Everything here is an override, and an untouched sport stores exactly
+  /// what it stored before. That is the difference between offering this and
+  /// imposing it: nobody is asked six times for an answer they gave once.
+  ///
+  /// Only the season's own grounds are offered. A sport pointing at a ground
+  /// the season does not hold would be unschedulable in a way whose cause is
+  /// two screens away from its symptom.
+  Widget _perSportSchedule(BuildContext context) {
+    if (_sports.isEmpty) {
+      return const PsCard(
+        child: Text(
+          'Add a sport first — per-sport grounds and timings are set here '
+          'once there is something to set them on.',
+          style: TextStyle(fontSize: 12, color: Ps.muted, height: 1.4),
+        ),
+      );
+    }
+
+    // Straight off the grounds panel: a ground added on this form is not a
+    // saved venue yet, so filtering the saved list by the season's ids would
+    // hide exactly the ground the organizer had just typed in.
+    final seasonVenues = [for (final g in _grounds.grounds) g.venue];
+    final nameById = {for (final v in seasonVenues) v.id: v.name};
 
     return PsCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            children: [
-              const Text(
-                'Grounds & Courts',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w700,
-                  color: Ps.ink,
-                ),
-              ),
-              const SizedBox(width: 6),
-              // Marked required, and enforced by the step's `canAdvance`. The
-              // two have to agree: a disabled Next button with nothing
-              // explaining it is how an organizer concludes the app is broken.
-              if (_venueIds.isEmpty)
-                const Text(
-                  'Required',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    color: Ps.live,
-                  ),
-                ),
-            ],
+          const Text(
+            'Each sport’s own ground & timing',
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w700,
+              color: Ps.ink,
+            ),
           ),
           const SizedBox(height: 2),
           const Text(
-            'Pick every ground this season may use. Matches are spread across '
-            'their courts when the schedule is generated.',
+            'Optional. Badminton in the hall, cricket on the main field, '
+            'football on Sunday — set it here and the timetable keeps each '
+            'sport where and when you put it. Anything left alone follows the '
+            'season above.',
             style: TextStyle(fontSize: 12, color: Ps.muted, height: 1.4),
           ),
-          const SizedBox(height: 12),
-          venuesAsync.when(
-            loading: () => const Padding(
-              padding: EdgeInsets.symmetric(vertical: 12),
-              child: Center(
-                child: SizedBox(
-                  height: 20,
-                  width: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-              ),
-            ),
-            error: (e, _) => Text(
-              'Could not load your venues: $e',
-              style: const TextStyle(fontSize: 12, color: Ps.muted),
-            ),
-            data: (venues) {
-              final usable = [
-                for (final v in venues)
-                  if (!v.isArchived) v,
-              ];
-              if (usable.isEmpty) {
-                return const Text(
-                  'No grounds saved yet. Add one below — a season with no '
-                  'courts cannot be scheduled.',
-                  style: TextStyle(fontSize: 12, color: Ps.muted, height: 1.4),
-                );
-              }
-              return Column(
-                children: [
-                  for (final v in usable)
-                    CheckboxListTile(
-                      contentPadding: EdgeInsets.zero,
-                      dense: true,
-                      controlAffinity: ListTileControlAffinity.leading,
-                      value: _venueIds.contains(v.id),
-                      title: Text(
-                        v.name,
-                        style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: Ps.ink,
-                        ),
-                      ),
-                      subtitle: Text(
-                        '${v.usableCourts.length} usable '
-                        '${v.usableCourts.length == 1 ? "court" : "courts"}'
-                        '${v.address == null ? "" : " · ${v.address}"}',
-                        style: const TextStyle(fontSize: 12, color: Ps.muted),
-                      ),
-                      onChanged: (on) => setState(() {
-                        if (on ?? false) {
-                          _venueIds.add(v.id);
-                        } else {
-                          _venueIds.remove(v.id);
-                        }
-                      }),
-                    ),
-                ],
-              );
-            },
-          ),
           const SizedBox(height: 8),
-          OutlinedButton.icon(
-            onPressed: _addVenue,
-            icon: const Icon(Icons.add_location_alt_outlined, size: 18),
-            label: const Text('Add a ground & its courts'),
-            style: OutlinedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(vertical: 12),
+          for (final entry in _sports)
+            _SportScheduleTile(
+              entry: entry,
+              seasonVenues: seasonVenues,
+              nameById: nameById,
+              seasonStart: _startDate,
+              seasonEnd: _endDate,
+              seasonDayStartHour: _dayStartHour,
+              seasonDayEndHour: _dayEndHour,
+              seasonMatchMinutes: _minutesFor(entry),
+              onChanged: () => setState(() {}),
             ),
-          ),
         ],
       ),
     );
   }
 
-  /// Saves a new ground and ticks it, so adding one is a single action rather
-  /// than an add followed by a select the organizer has to remember.
-  Future<void> _addVenue() async {
-    final draft = await showQuickAddVenueDialog(context, orgId: widget.orgId);
-    if (draft == null || !mounted) return;
-    try {
-      final id = await ref.read(tournamentRepositoryProvider).createVenue(draft);
-      if (!mounted) return;
-      setState(() => _venueIds.add(id));
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not save that ground: $e')),
+  /// Every category as the capacity engine needs it — see the identical
+  /// getter in `create_season_screen.dart`. Both forms build the same season,
+  /// so both measure it the same way.
+  List<SeasonEventPlan> get _eventPlans => [
+        for (final sport in _sports)
+          SeasonEventPlan(
+            key: '${sport.sportId}/${sport.sideFormat.id}/'
+                '${sport.category.label}',
+            label: '${sport.sport.name} ${sport.category.label}',
+            sportId: sport.sportId,
+            entrants: sport.maxEntrants < 2 ? 16 : sport.maxEntrants,
+            format: sport.format,
+            drawConfig: sport.drawToSubmit,
+            groundIds: sport.venueIds,
+            matchMinutes: _minutesFor(sport),
+            turnaroundMinutes: _changeoverMinutes,
+            isTimetabled: !sport.sport.isPerformance,
+          ),
+      ];
+
+  /// Minutes one match of [sport] takes: its own override, then the season's
+  /// if the organizer set one, then the sport's ruleset.
+  int _minutesFor(_SeasonSport sport) =>
+      sport.matchMinutes ??
+      (_matchMinutesSet
+          ? _matchMinutes
+          : MatchDuration.estimate(sportId: sport.sportId));
+
+  /// The season as typed, measured against the grounds it has.
+  SeasonPlanPreview get _preview => DraftSeasonPlan.build(
+        start: _startDate,
+        end: _endDate,
+        grounds: _grounds.grounds,
+        events: _eventPlans,
+        defaultTurnaroundMinutes: _changeoverMinutes,
       );
-    }
+
+  /// Adds a day, from the verdict's own suggestion.
+  void _addADay() {
+    final start = _startDate;
+    if (start == null) return;
+    final end = _endDate ?? start;
+    setState(() => _endDate = DateTime(end.year, end.month, end.day + 1));
   }
 
   Widget _settingsStep(BuildContext context) {
@@ -1001,47 +1295,44 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
     final end = _endDate;
     final entrants = _sports.fold<int>(0, (sum, s) => sum + s.maxEntrants);
 
+    // One sport across every category means the generated art can be that
+    // sport's; five sports under one season have no single colour, which is
+    // the same rule the season page itself applies.
+    final sportIds = {for (final s in _sports) s.sportId};
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        PsCard(
-          child: Row(
-            children: [
-              Container(
-                width: 44,
-                height: 44,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: Ps.primary.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(Ps.radiusSm),
-                ),
-                child: const Icon(
-                  Icons.emoji_events,
-                  color: Ps.primary,
-                  size: 22,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Text(
-                  _name.text.trim().isEmpty
-                      ? 'Untitled season'
-                      : _name.text.trim(),
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                    color: Ps.ink,
-                  ),
-                ),
-              ),
-            ],
-          ),
+        // The header the season will open with, artwork and all — see
+        // [SeasonBrandingPreview] for why the review step draws the real
+        // thing rather than a trophy tile.
+        SeasonBrandingPreview(
+          branding: _branding,
+          name: _name.text,
+          sportId: sportIds.length == 1 ? sportIds.first : null,
+        ),
+        const SizedBox(height: 12),
+        // The last chance to see the season is impossible before it exists.
+        // The Schedule step already showed this; repeating it here is not
+        // duplication — an organizer who added two more categories on the
+        // steps in between has changed the answer without going back.
+        SeasonPlanVerdict(
+          preview: _preview,
+          hasGrounds: !_grounds.isEmpty,
+          hasDates: _startDate != null,
+          onAddDay: _addADay,
         ),
         const SizedBox(height: 12),
         PsCard(
           child: Column(
             children: [
               WizardReviewRow(label: 'Sports', value: '${_sports.length}'),
+              WizardReviewRow(
+                label: 'Officials',
+                value: _officials.isEmpty
+                    ? 'None yet'
+                    : '${_officials.officials.length} on the panel',
+              ),
               WizardReviewRow(
                 label: 'Events created',
                 value: '${_sports.length}',
@@ -1114,19 +1405,42 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
                 Padding(
                   padding: const EdgeInsets.only(bottom: 8),
                   child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       SportBadge(sportId: entry.sportId, size: 28),
                       const SizedBox(width: 10),
                       Expanded(
-                        child: Text(
-                          entry.sport.name,
-                          style: const TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w500,
-                            color: Ps.ink,
-                          ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              entry.sport.name,
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
+                                color: Ps.ink,
+                              ),
+                            ),
+                            // The two per-sport answers worth re-reading
+                            // before publishing: what this sport costs, and
+                            // where and when it is played. Both were set
+                            // several steps back, and both are wrong in a way
+                            // that is expensive to discover afterwards — a
+                            // fee is quoted to entrants, and a ground is
+                            // where people physically turn up.
+                            if (_reviewLineFor(entry) case final line?)
+                              Text(
+                                line,
+                                style: const TextStyle(
+                                  fontSize: 11.5,
+                                  color: Ps.muted,
+                                  height: 1.3,
+                                ),
+                              ),
+                          ],
                         ),
                       ),
+                      const SizedBox(width: 8),
                       Text(
                         '${entry.format.label} · ${entry.maxEntrants}',
                         style: const TextStyle(fontSize: 11.5, color: Ps.muted),
@@ -1141,13 +1455,48 @@ class _GuidedSeasonScreenState extends ConsumerState<GuidedSeasonScreen> {
         const Padding(
           padding: EdgeInsets.symmetric(horizontal: 4),
           child: Text(
-            'The season and its events are created as drafts. Entries do not '
-            'open until you open them.',
+            'The season and its events are created as drafts so you can check '
+            'them first. The season page opens entries on all of them in one '
+            'tap — nobody can register until you do.',
             style: TextStyle(fontSize: 12, color: Ps.muted, height: 1.4),
           ),
         ),
       ],
     );
+  }
+
+  /// The review line under one sport: its own fee, ground, days and hours —
+  /// whichever of them it actually has. Null when the sport is priced with
+  /// the season and follows it everywhere, so an ordinary season's review
+  /// stays a plain list rather than four identical repetitions of what the
+  /// card above already says.
+  String? _reviewLineFor(_SeasonSport entry) {
+    final nameById = {
+      for (final g in _grounds.grounds) g.venue.id: g.venue.name,
+    };
+    final fmt = DateFormat('d MMM');
+
+    final parts = <String>[
+      if (_feeMode == SeasonFeeMode.perEvent)
+        entry.entryFeeRupees == 0 ? 'Free' : '₹${entry.entryFeeRupees}',
+      if (entry.venueIds.isNotEmpty)
+        entry.venueIds.map((id) => nameById[id] ?? 'Ground').join(', '),
+      if (entry.startDate != null || entry.endDate != null)
+        switch ((entry.startDate, entry.endDate)) {
+          (final a?, final b?) when a == b => fmt.format(a),
+          (final a?, final b?) => '${fmt.format(a)} – ${fmt.format(b)}',
+          (final a?, null) => 'from ${fmt.format(a)}',
+          (null, final b?) => 'until ${fmt.format(b)}',
+          _ => '',
+        },
+      if (entry.dayStartHour != null || entry.dayEndHour != null)
+        '${(entry.dayStartHour ?? _dayStartHour).toString().padLeft(2, '0')}'
+            ':00–'
+            '${(entry.dayEndHour ?? _dayEndHour).toString().padLeft(2, '0')}'
+            ':00',
+      if (entry.matchMinutes != null) '${entry.matchMinutes} min',
+    ];
+    return parts.isEmpty ? null : parts.join(' · ');
   }
 
   // --- Shared pieces -------------------------------------------------------
@@ -1263,6 +1612,74 @@ class _SportCheckRow extends StatelessWidget {
 /// Firebase Storage is not configured on this project. An upload control that
 /// throws on tap is worse than one that explains itself — the organizer would
 /// assume their season was broken rather than that a feature is pending.
+/// Says which of the chosen sports will not appear on the timetable.
+///
+/// ## Why this is a notice and not a block
+///
+/// Track, field and swimming produce measured marks, not pairwise matches:
+/// eight sprinters in one heat is one race, and `Fixture` holds exactly two
+/// sides. So `FixtureGenerator` builds nothing for them and
+/// `CompetitionRepository.generateDraw` refuses outright — heats, lanes and
+/// progression are a real piece of work that has not been done.
+///
+/// They stay selectable because a school sports week is half athletics and
+/// dropping them from the catalogue would silently shrink the product's main
+/// use case. What must not happen is finding out at schedule time: the
+/// organizer built a season, opened entries, took forty registrations, and
+/// only then got one line in a skipped list. So the season says it here,
+/// while the choice is still being made.
+class _PerformanceSportNotice extends StatelessWidget {
+  const _PerformanceSportNotice({required this.sports});
+
+  final List<_SeasonSport> sports;
+
+  @override
+  Widget build(BuildContext context) {
+    final names = <String>{
+      for (final s in sports)
+        if (s.sport.isPerformance) s.sport.name,
+    };
+    if (names.isEmpty) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: PsCard(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Icon(Icons.timer_outlined, size: 20, color: Ps.live),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${names.join(', ')} will not be timetabled',
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: Ps.ink,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  const Text(
+                    'These are recorded as marks and times rather than as '
+                    'matches, so they take entries and results but are not '
+                    'drawn or placed on the schedule. Everything else in the '
+                    'season is.',
+                    style:
+                        TextStyle(fontSize: 12, color: Ps.muted, height: 1.4),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _StorageNotice extends StatelessWidget {
   const _StorageNotice();
 
@@ -1302,28 +1719,311 @@ class _StorageNotice extends StatelessWidget {
 }
 
 /// A tappable box that opens a date picker.
+/// One sport's row in the per-sport schedule card — collapsed to a summary
+/// until an organizer opens it.
+///
+/// Collapsed by default and summarised in one line, because the card lists
+/// every category in the season and a season can hold a dozen. Six expanded
+/// forms of six fields each is not a screen anybody reads; a list saying
+/// "Badminton (Singles) · Season default" and "Cricket · Main Field · 12–13
+/// Sep" is one they can check at a glance.
+class _SportScheduleTile extends StatelessWidget {
+  const _SportScheduleTile({
+    required this.entry,
+    required this.seasonVenues,
+    required this.nameById,
+    required this.seasonStart,
+    required this.seasonEnd,
+    required this.seasonDayStartHour,
+    required this.seasonDayEndHour,
+    required this.seasonMatchMinutes,
+    required this.onChanged,
+  });
+
+  final _SeasonSport entry;
+  final List<Venue> seasonVenues;
+  final Map<String, String> nameById;
+  final DateTime? seasonStart;
+  final DateTime? seasonEnd;
+  final int seasonDayStartHour;
+  final int seasonDayEndHour;
+  final int seasonMatchMinutes;
+  final VoidCallback onChanged;
+
+  String get _summary {
+    if (!entry.hasScheduleOverride) return 'Follows the season';
+    final parts = <String>[
+      if (entry.venueIds.isNotEmpty)
+        entry.venueIds.map((id) => nameById[id] ?? 'Ground').join(', '),
+      if (entry.startDate != null || entry.endDate != null)
+        _dayRangeLabel(),
+      if (entry.dayStartHour != null || entry.dayEndHour != null)
+        '${_hh(entry.dayStartHour ?? seasonDayStartHour)}–'
+            '${_hh(entry.dayEndHour ?? seasonDayEndHour)}',
+      if (entry.matchMinutes != null) '${entry.matchMinutes} min',
+    ];
+    return parts.join(' · ');
+  }
+
+  String _dayRangeLabel() {
+    final fmt = DateFormat('d MMM');
+    final from = entry.startDate ?? seasonStart;
+    final to = entry.endDate ?? seasonEnd;
+    if (from == null) return to == null ? '' : 'until ${fmt.format(to)}';
+    if (to == null) return 'from ${fmt.format(from)}';
+    return from == to
+        ? fmt.format(from)
+        : '${fmt.format(from)} – ${fmt.format(to)}';
+  }
+
+  static String _hh(int hour) => '${hour.toString().padLeft(2, '0')}:00';
+
+  @override
+  Widget build(BuildContext context) {
+    final overridden = entry.hasScheduleOverride;
+
+    return Theme(
+      // The divider the default ExpansionTile draws above and below itself
+      // stacks into a double rule between adjacent tiles.
+      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        tilePadding: EdgeInsets.zero,
+        childrenPadding: const EdgeInsets.only(bottom: 12),
+        title: Text(
+          entry.displayName,
+          style: const TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+            color: Ps.ink,
+          ),
+        ),
+        subtitle: Text(
+          _summary,
+          style: TextStyle(
+            fontSize: 12,
+            color: overridden ? Ps.ink : Ps.muted,
+            fontWeight: overridden ? FontWeight.w600 : FontWeight.w400,
+          ),
+        ),
+        children: [
+          if (seasonVenues.isEmpty)
+            const Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Text(
+                'Pick the season’s grounds above first, then choose which of '
+                'them this sport uses.',
+                style: TextStyle(fontSize: 12, color: Ps.muted, height: 1.4),
+              ),
+            )
+          else ...[
+            const _FieldLabel('Grounds for this sport'),
+            // "All of them" is a real, selectable state rather than the
+            // absence of a selection: an organizer who unticks the last
+            // ground has said nothing about this sport, and silently reading
+            // that as "no grounds" would make the sport unschedulable for a
+            // reason the screen never showed them.
+            RadioListTile<bool>(
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              value: false,
+              groupValue: entry.venueIds.isNotEmpty,
+              title: const Text(
+                'Every ground the season uses',
+                style: TextStyle(fontSize: 13),
+              ),
+              onChanged: (_) {
+                entry.venueIds.clear();
+                onChanged();
+              },
+            ),
+            RadioListTile<bool>(
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              value: true,
+              groupValue: entry.venueIds.isNotEmpty,
+              title: const Text(
+                'Only these grounds',
+                style: TextStyle(fontSize: 13),
+              ),
+              onChanged: (_) {
+                if (entry.venueIds.isEmpty && seasonVenues.isNotEmpty) {
+                  entry.venueIds.add(seasonVenues.first.id);
+                }
+                onChanged();
+              },
+            ),
+            if (entry.venueIds.isNotEmpty)
+              for (final v in seasonVenues)
+                CheckboxListTile(
+                  contentPadding: const EdgeInsets.only(left: 24),
+                  dense: true,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  value: entry.venueIds.contains(v.id),
+                  title: Text(
+                    v.name,
+                    style: const TextStyle(fontSize: 13, color: Ps.ink),
+                  ),
+                  subtitle: Text(
+                    '${v.usableCourts.length} usable '
+                    '${v.usableCourts.length == 1 ? "court" : "courts"}',
+                    style: const TextStyle(fontSize: 11, color: Ps.muted),
+                  ),
+                  onChanged: (on) {
+                    if (on ?? false) {
+                      entry.venueIds.add(v.id);
+                    } else {
+                      entry.venueIds.remove(v.id);
+                      // Back to "all grounds" rather than to none — see the
+                      // radio above.
+                    }
+                    onChanged();
+                  },
+                ),
+            const SizedBox(height: 8),
+          ],
+          if (seasonStart != null) ...[
+            const _FieldLabel('Days this sport runs'),
+            Row(
+              children: [
+                Expanded(
+                  child: _DateBox(
+                    value: entry.startDate,
+                    hint: 'Season start',
+                    firstDate: seasonStart!,
+                    lastDate: seasonEnd,
+                    onPick: (d) {
+                      entry.startDate = d;
+                      final end = entry.endDate;
+                      if (end != null && end.isBefore(d)) entry.endDate = d;
+                      onChanged();
+                    },
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _DateBox(
+                    value: entry.endDate,
+                    hint: 'Season end',
+                    firstDate: entry.startDate ?? seasonStart!,
+                    lastDate: seasonEnd,
+                    onPick: (d) {
+                      entry.endDate = d;
+                      onChanged();
+                    },
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+          ],
+          Row(
+            children: [
+              Expanded(
+                child: WizardField(
+                  label: 'Daily hours',
+                  child: DailyHoursField(
+                    startHour: entry.dayStartHour ?? seasonDayStartHour,
+                    endHour: entry.dayEndHour ?? seasonDayEndHour,
+                    onChanged: (start, end) {
+                      entry.dayStartHour = start;
+                      entry.dayEndHour = end;
+                      onChanged();
+                    },
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: WizardField(
+                  label: 'Match duration',
+                  child: _TimingStepper(
+                    value: entry.matchMinutes ?? seasonMatchMinutes,
+                    unit: 'min',
+                    min: 5,
+                    max: 480,
+                    step: 5,
+                    onChanged: (v) {
+                      entry.matchMinutes = v;
+                      onChanged();
+                    },
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (overridden)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: () {
+                  entry.venueIds.clear();
+                  entry.startDate = null;
+                  entry.endDate = null;
+                  entry.dayStartHour = null;
+                  entry.dayEndHour = null;
+                  entry.matchMinutes = null;
+                  onChanged();
+                },
+                icon: const Icon(Icons.undo, size: 16),
+                label: const Text('Follow the season again'),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FieldLabel extends StatelessWidget {
+  const _FieldLabel(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.only(top: 4, bottom: 2),
+        child: Text(
+          text,
+          style: const TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: Ps.muted,
+          ),
+        ),
+      );
+}
+
 class _DateBox extends StatelessWidget {
   const _DateBox({
     required this.value,
     required this.hint,
     required this.firstDate,
     required this.onPick,
+    this.lastDate,
   });
 
   final DateTime? value;
   final String hint;
   final DateTime firstDate;
+
+  /// The last date offerable. Given for a per-sport window, which cannot run
+  /// past the season containing it — bounding the picker is how that is said,
+  /// rather than accepting the date and complaining afterwards.
+  final DateTime? lastDate;
   final ValueChanged<DateTime> onPick;
 
   @override
   Widget build(BuildContext context) {
     return InkWell(
       onTap: () async {
+        final last = lastDate ?? firstDate.add(const Duration(days: 365 * 3));
         final picked = await showDatePicker(
           context: context,
           initialDate: value ?? firstDate,
           firstDate: firstDate,
-          lastDate: firstDate.add(const Duration(days: 365 * 3)),
+          // A caller that hands over a window narrower than one day would
+          // otherwise crash the picker on its own assertion.
+          lastDate: last.isBefore(firstDate) ? firstDate : last,
         );
         if (picked != null) onPick(picked);
       },

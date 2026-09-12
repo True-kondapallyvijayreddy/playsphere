@@ -15,6 +15,7 @@ import '../../shared/club_context_banner.dart';
 import '../../shared/identity.dart';
 import '../../shared/ui_kit.dart';
 import '../../shared/invite_card.dart';
+import 'widgets/applicant_review_sheet.dart';
 import 'widgets/ownership_actions.dart';
 import 'widgets/member_grouping_sheet.dart';
 
@@ -232,6 +233,17 @@ class _PendingTile extends ConsumerWidget {
       }
     }
 
+    final app = member.application;
+    // What the row can say about this person without opening anything. The
+    // subtitle used to read "Wants to join" for everybody, which is the one
+    // fact the section heading had already given.
+    final summary = [
+      if (app.ageYears != null) '${app.ageYears} yrs',
+      if (app.locationLabel != null) app.locationLabel!,
+      if (app.sports.isNotEmpty)
+        SportCatalog.byId(app.sports.first.sportId).name,
+    ].join(' · ');
+
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
@@ -241,9 +253,20 @@ class _PendingTile extends ConsumerWidget {
           seed: member.uid,
         ),
         title: Text(member.displayName),
-        subtitle: const Text('Wants to join'),
+        subtitle: Text(summary.isEmpty ? 'Wants to join' : summary),
+        // Deciding on a stranger takes a look first, so the row opens the
+        // review sheet and the approve/decline buttons live inside it. The
+        // two inline icons stay as well: an admin working through a queue of
+        // people they already know should not have to open five sheets to
+        // say yes five times.
+        onTap: () => ApplicantReviewSheet.show(
+          context,
+          orgId: orgId,
+          member: member,
+          canManage: canManage,
+        ),
         trailing: !canManage
-            ? null
+            ? const Icon(Icons.chevron_right)
             : Wrap(
                 spacing: 4,
                 children: [

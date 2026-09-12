@@ -58,6 +58,15 @@ class MatchRsvpCard extends ConsumerStatefulWidget {
 
 class _MatchRsvpCardState extends ConsumerState<MatchRsvpCard> {
   bool _chatOpen = false;
+
+  /// Everything past the question itself: the note, the roster, the
+  /// discussion, and the alternatives to one straight match.
+  ///
+  /// Shut by default. See the class doc — the card has to answer "what am I
+  /// being asked, and what do I say" inside about 140pt, or a member with five
+  /// calls waiting is scrolling instead of answering.
+  bool _open = false;
+
   final _chat = TextEditingController();
 
   @override
@@ -181,9 +190,14 @@ class _MatchRsvpCardState extends ConsumerState<MatchRsvpCard> {
     final confirmed = _poll.countFor(Rsvp.yes);
     final target = _match.maxPlayers;
     final surplus = _match.hasSurplus(confirmed);
+    // Whoever put the call out. See the doc on [_OrganizerActions].
+    final isAuthor = uid != null && uid == _a.authorUid;
+    final forward = widget.canOrganize && confirmed >= 2
+        ? _ForwardAction.of(_a)
+        : null;
 
     return Container(
-      margin: const EdgeInsets.only(bottom: 12),
+      margin: const EdgeInsets.only(bottom: 10),
       decoration: BoxDecoration(
         color: Ps.surface,
         borderRadius: BorderRadius.circular(Ps.radius),
@@ -206,16 +220,11 @@ class _MatchRsvpCardState extends ConsumerState<MatchRsvpCard> {
           ),
           if (widget.clashesWith.isNotEmpty)
             _ClashBanner(clashes: widget.clashesWith),
-          if (_a.content.trim().isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
-              child: Text(
-                _a.content,
-                style: const TextStyle(fontSize: 13, color: Ps.muted),
-              ),
-            ),
+
+          // The question. Always visible, never behind a tap — this is the
+          // one thing every recipient of the card has to do.
           Padding(
-            padding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
             child: Row(
               children: [
                 for (final (index, label, icon, colour) in const [
@@ -225,7 +234,7 @@ class _MatchRsvpCardState extends ConsumerState<MatchRsvpCard> {
                 ])
                   Expanded(
                     child: Padding(
-                      padding: const EdgeInsets.only(right: 8),
+                      padding: const EdgeInsets.only(right: 6),
                       child: _VoteButton(
                         label: label,
                         icon: icon,
@@ -239,22 +248,267 @@ class _MatchRsvpCardState extends ConsumerState<MatchRsvpCard> {
               ],
             ),
           ),
-          _Roster(orgId: _a.orgId, poll: _poll),
-          _ChatSection(
-            open: _chatOpen,
-            onToggle: () => setState(() => _chatOpen = !_chatOpen),
-            orgId: _a.orgId,
-            announcementId: _a.id,
-            controller: _chat,
-            onSend: _send,
+
+          _FooterBar(
+            open: _open,
+            onToggle: () => setState(() => _open = !_open),
+            poll: _poll,
+            hasNote: _a.content.trim().isNotEmpty,
+            // The forward action, one tap from the collapsed card. Getting
+            // from "who is free" to a match being played is the whole reason
+            // the call exists, and burying it behind an expand is what made
+            // the old card feel like a form.
+            //
+            // WHERE it goes depends on what the call belongs to — see
+            // [_ForwardAction].
+            forward: forward,
+            // Author-only, and the only place these two live now. See the
+            // class doc on [_OrganizerActions].
+            onEdit: isAuthor ? () => editCall(context, ref, _a) : null,
+            onCancel:
+                isAuthor ? () => cancelCall(context, ref, _a, confirmed) : null,
           ),
-          if (widget.canOrganize)
-            _OrganizerActions(
-              announcement: _a,
-              confirmed: confirmed,
-              surplus: surplus,
+
+          if (_open) ...[
+            if (_a.content.trim().isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 2, 14, 10),
+                child: Text(
+                  _a.content,
+                  style: const TextStyle(fontSize: 13, color: Ps.muted),
+                ),
+              ),
+            _CalledBy(announcement: _a, isAuthor: isAuthor),
+            _Roster(orgId: _a.orgId, poll: _poll),
+            _ChatSection(
+              open: _chatOpen,
+              onToggle: () => setState(() => _chatOpen = !_chatOpen),
+              orgId: _a.orgId,
+              announcementId: _a.id,
+              controller: _chat,
+              onSend: _send,
+            ),
+            if (widget.canOrganize)
+              _OrganizerActions(
+                announcement: _a,
+                confirmed: confirmed,
+                surplus: surplus,
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// The strip along the bottom: what the club has answered, and what to do next.
+///
+/// One 38pt row carrying four things that each used to cost a row of their
+/// own — the tally, the way into the detail, the forward action, and the
+/// author's own controls. That collapse is most of what takes the card from
+/// roughly 300pt to under 150.
+class _FooterBar extends StatelessWidget {
+  const _FooterBar({
+    required this.open,
+    required this.onToggle,
+    required this.poll,
+    required this.hasNote,
+    required this.forward,
+    required this.onEdit,
+    required this.onCancel,
+  });
+
+  final bool open;
+  final VoidCallback onToggle;
+  final Poll poll;
+  final bool hasNote;
+
+  /// Null unless this viewer may run the club's matches AND enough people
+  /// have said In to do anything with.
+  final _ForwardAction? forward;
+
+  /// Both null unless this viewer wrote the call.
+  final VoidCallback? onEdit;
+  final VoidCallback? onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    final yes = poll.countFor(Rsvp.yes);
+    final maybe = poll.countFor(Rsvp.maybe);
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(6, 0, 6, 2),
+      child: Row(
+        children: [
+          // The whole left half is the expand target, not just the chevron —
+          // a 16pt caret is a dart-throw on a phone.
+          Flexible(
+            child: InkWell(
+              onTap: onToggle,
+              borderRadius: BorderRadius.circular(Ps.radiusSm),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      open ? Icons.expand_less : Icons.expand_more,
+                      size: 18,
+                      color: Ps.muted,
+                    ),
+                    const SizedBox(width: 4),
+                    Flexible(
+                      child: Text(
+                        open
+                            ? 'Hide'
+                            : [
+                                'Who is in',
+                                if (maybe > 0) '$yes + $maybe maybe',
+                                if (hasNote) 'note',
+                              ].join(' · '),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: Ps.muted,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const Spacer(),
+          if (forward != null)
+            Consumer(
+              builder: (context, ref, _) => FilledButton(
+                onPressed: () => forward!.go(context, ref),
+                style: FilledButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  textStyle: const TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                child: Text(forward!.label),
+              ),
+            ),
+          if (onEdit != null || onCancel != null)
+            PopupMenuButton<int>(
+              tooltip: 'Your call',
+              icon: const Icon(Icons.more_vert, size: 18, color: Ps.muted),
+              padding: EdgeInsets.zero,
+              onSelected: (v) => v == 0 ? onEdit?.call() : onCancel?.call(),
+              itemBuilder: (_) => const [
+                PopupMenuItem(
+                  value: 0,
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.edit_outlined, size: 18),
+                    title: Text('Edit call'),
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 1,
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading:
+                        Icon(Icons.event_busy_outlined, size: 18, color: Ps.live),
+                    title: Text(
+                      'Cancel match',
+                      style: TextStyle(color: Ps.live),
+                    ),
+                  ),
+                ),
+              ],
             ),
         ],
+      ),
+    );
+  }
+}
+
+/// Where "this call is answered, now what" actually leads.
+///
+/// ## Why this is not always "make teams"
+///
+/// A call is put out for one of three reasons, and only one of them ends in
+/// splitting the people who said yes into two sides:
+///
+///  * **A club's own Sunday game.** Nothing exists yet. The yeses ARE both
+///    teams, and drafting them is the next step — [Routes.quickMatch], seeded
+///    with their uids.
+///  * **A challenge to another club.** The yeses are ONE side; the opponent is
+///    the other club, and the fixture is created by accepting the challenge,
+///    not here. Dealing these people into two teams would produce a second,
+///    private match that the other club is not in and nobody is expecting —
+///    which is precisely the "hiccup" this class exists to remove. It goes to
+///    the challenge board instead.
+///  * **A fixture that already exists.** Same again: there is a match, this
+///    club has a side in it, and the answers belong on that side's squad
+///    sheet. `SquadRsvpActions` on the fixture does that move in one write.
+///
+/// The old card offered "Draft teams & play" for all three, so the two
+/// club-versus-club paths — the ones the product is actually for — each had a
+/// button on them that quietly built the wrong thing.
+class _ForwardAction {
+  const _ForwardAction._(this.label, this._go);
+
+  final String label;
+  final void Function(BuildContext, WidgetRef) _go;
+
+  void go(BuildContext context, WidgetRef ref) => _go(context, ref);
+
+  static _ForwardAction of(Announcement a) {
+    final match = a.match!;
+
+    if (match.isForChallenge) {
+      return _ForwardAction._(
+        'Open challenge',
+        (context, _) => context.push(Routes.challenges(a.orgId)),
+      );
+    }
+
+    final fixture = match.forFixture;
+    if (fixture != null) {
+      return _ForwardAction._(
+        'Open match',
+        (context, _) => context.push(
+          Routes.watch(fixture.orgId, fixture.compId, fixture.fixtureId),
+        ),
+      );
+    }
+
+    return _ForwardAction._(
+      // Named for what it does to the people, not for the screen it opens.
+      'Make teams',
+      (context, ref) => draftTeams(context, ref, a),
+    );
+  }
+}
+
+/// Whose call this is — and, for everybody else, why they cannot touch it.
+class _CalledBy extends StatelessWidget {
+  const _CalledBy({required this.announcement, required this.isAuthor});
+
+  final Announcement announcement;
+  final bool isAuthor;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+      child: Text(
+        isAuthor
+            ? 'Your call.'
+            : '${announcement.authorName} called this match — only they can '
+                'edit or cancel it.',
+        style: const TextStyle(fontSize: 11.5, color: Ps.faint),
       ),
     );
   }
@@ -311,51 +565,55 @@ class _Header extends ConsumerWidget {
     final full = target > 0 && confirmed >= target;
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 14, 14, 10),
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Container(
-            width: 40,
-            height: 40,
+            width: 36,
+            height: 36,
             decoration: BoxDecoration(
               color: visual.color,
               borderRadius: BorderRadius.circular(Ps.radiusSm),
             ),
-            child: Icon(visual.icon, color: Colors.white, size: 22),
+            child: Icon(visual.icon, color: Colors.white, size: 20),
           ),
-          const SizedBox(width: 12),
+          const SizedBox(width: 10),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
                   title,
-                  maxLines: 2,
+                  maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                    fontSize: 15,
+                    fontSize: 14.5,
                     fontWeight: FontWeight.w800,
                     color: Ps.ink,
                   ),
                 ),
-                const SizedBox(height: 3),
+                const SizedBox(height: 2),
+                // Kick-off first. A member scanning five calls is deciding by
+                // WHEN before anything else, and the club's name is the least
+                // distinguishing thing on a screen that is already scoped to
+                // the clubs they are in.
                 Text(
                   [
-                    if (club != null) club.name,
                     _when(match.matchDate),
                     if (match.venue.isNotEmpty) match.venue,
+                    if (club != null) club.name,
                   ].join('  ·  '),
-                  maxLines: 2,
+                  maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 12, color: Ps.muted),
+                  style: const TextStyle(fontSize: 11.5, color: Ps.muted),
                 ),
               ],
             ),
           ),
           const SizedBox(width: 8),
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
             decoration: BoxDecoration(
               color: (full ? Ps.primary : Ps.muted).withValues(alpha: 0.12),
               borderRadius: BorderRadius.circular(100),
@@ -385,8 +643,8 @@ class _ClashBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     const amber = Color(0xFFF59E0B);
     return Container(
-      margin: const EdgeInsets.fromLTRB(14, 0, 14, 10),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: BoxDecoration(
         color: amber.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(Ps.radiusSm),
@@ -440,7 +698,7 @@ class _VoteButton extends StatelessWidget {
         onTap: onTap,
         borderRadius: BorderRadius.circular(Ps.radiusSm),
         child: Container(
-          height: 44,
+          height: 40,
           alignment: Alignment.center,
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(Ps.radiusSm),
@@ -716,6 +974,21 @@ class _Bubble extends ConsumerWidget {
 }
 
 /// What the organizer does once enough people have answered.
+///
+/// ## Why calling it off is narrower than the rest
+///
+/// Drafting the sides is a club job: any organizer who can run a competition
+/// can turn a full call into a fixture, and a captain who is at the ground
+/// while the person who put the call out is not should not be blocked from
+/// starting the game.
+///
+/// **Editing the call and cancelling it are not.** Both rewrite or destroy
+/// something a specific person asked the club — and cancelling deletes it
+/// outright, discussion and all (see `CommunityRepository.cancelMatchCall`).
+/// A club with four admins had four people able to delete each other's
+/// Saturday, silently, from a card that gave no hint whose call it was. So
+/// those two are the author's alone; everybody else, admins included, gets the
+/// vote row like any other member.
 class _OrganizerActions extends ConsumerWidget {
   const _OrganizerActions({
     required this.announcement,
@@ -737,6 +1010,27 @@ class _OrganizerActions extends ConsumerWidget {
     // leads to a screen that cannot be submitted.
     final enough = confirmed >= 2;
 
+    // A call attached to a challenge or an existing fixture has no "how shall
+    // we split these people" question in it — they are one side of a match
+    // that already has an opponent. See [_ForwardAction].
+    final ownGame = !match.isForChallenge && !match.isForFixture;
+    if (!ownGame) {
+      return Container(
+        padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+        decoration: const BoxDecoration(
+          border: Border(top: BorderSide(color: Ps.border)),
+        ),
+        child: Text(
+          match.isForChallenge
+              ? 'Everybody who says In is your side for this challenge. The '
+                  'match itself is created on the challenge board.'
+              : 'Everybody who says In goes onto your side of a match that '
+                  'already exists. Open it to move them onto the squad.',
+          style: const TextStyle(fontSize: 12, color: Ps.faint),
+        ),
+      );
+    }
+
     return Container(
       padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
       decoration: const BoxDecoration(
@@ -750,71 +1044,371 @@ class _OrganizerActions extends ConsumerWidget {
               'Two people have to be In before you can draft sides.',
               style: TextStyle(fontSize: 12, color: Ps.faint),
             )
-          else ...[
-            if (surplus)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Text(
-                  '$confirmed said In and this match seats ${match.maxPlayers}. '
-                  'A mini-tournament fits everybody.',
-                  style: const TextStyle(fontSize: 12, color: Ps.muted),
-                ),
-              ),
-            Row(
-              children: [
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: () => _draftTeams(context, ref),
-                    icon: const Icon(Icons.groups_2_outlined, size: 18),
-                    label: const Text('Draft teams & play'),
-                  ),
-                ),
-                if (surplus) ...[
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: () => _miniTournament(context, ref),
-                      icon: const Icon(Icons.emoji_events_outlined, size: 18),
-                      label: const Text('Mini-tournament'),
-                    ),
-                  ),
-                ],
-              ],
+          else if (surplus) ...[
+            Text(
+              '$confirmed said In and this match seats ${match.maxPlayers}. '
+              '"Make teams" plays one match and leaves the rest out; a '
+              'mini-tournament fits everybody.',
+              style: const TextStyle(fontSize: 12, color: Ps.muted),
             ),
-          ],
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: () => miniTournament(context, announcement),
+              icon: const Icon(Icons.emoji_events_outlined, size: 18),
+              label: const Text('Mini-tournament instead'),
+            ),
+          ] else
+            const Text(
+              'Everybody who said In fits one match. "Make teams" deals the '
+              'sides and starts it.',
+              style: TextStyle(fontSize: 12, color: Ps.faint),
+            ),
+
         ],
       ),
     );
   }
+}
 
-  /// Hands the confirmed roster to the quick-match screen.
-  ///
-  /// The uids travel in the route rather than the names: a player added by
-  /// name is a stranger with that name and nothing accrues to them, which is
-  /// the distinction `QuickMatchScreen` already exists to protect. Resolving
-  /// them to real members is that screen's job, and it already knows how.
-  void _draftTeams(BuildContext context, WidgetRef ref) {
-    final match = announcement.match!;
-    context.push(
-      Routes.quickMatch(
-        announcement.orgId,
-        name: announcement.title,
-        sportId: match.sportId,
-        venue: match.venue,
-        playerUids: announcement.poll!.votersFor(Rsvp.yes),
+// ---------------------------------------------------------------------------
+// The four things that can be done to a call.
+//
+// Library-level rather than methods on one widget: the footer bar offers
+// "Make teams", the author's menu offers edit and cancel, and the expanded
+// block offers the mini-tournament. Three call sites, one implementation
+// each. WHO may invoke them is decided at those call sites — see the doc on
+// [_OrganizerActions] — and deliberately not re-checked here, so there is one
+// place to read the rule rather than four.
+// ---------------------------------------------------------------------------
+
+/// Changes the facts of a call that is already out, keeping the answers.
+///
+/// See `CommunityRepository.updateMatchCall` for why the votes survive. The
+/// sheet says plainly that nobody is re-notified, because the alternative —
+/// pushing the whole club again on every typo — is worse, and an organizer
+/// who has just moved a kick-off by three hours needs to know to say so in
+/// the discussion.
+Future<void> editCall(
+  BuildContext context,
+  WidgetRef ref,
+  Announcement announcement,
+) async {
+  final result = await showModalBottomSheet<_CallEdits>(
+    context: context,
+    isScrollControlled: true,
+    builder: (sheet) => Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(sheet).bottom),
+      child: _EditCallSheet(announcement: announcement),
+    ),
+  );
+  if (result == null || !context.mounted) return;
+
+  try {
+    await ref.read(communityRepositoryProvider).updateMatchCall(
+          orgId: announcement.orgId,
+          announcementId: announcement.id,
+          title: result.title,
+          content: result.content,
+          matchDate: result.matchDate,
+          venue: result.venue,
+          maxPlayers: result.maxPlayers,
+        );
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Call updated. Nobody was re-notified — say what changed in the '
+          'discussion.',
+        ),
       ),
     );
+  } catch (e) {
+    if (context.mounted) showError(context, e);
+  }
+}
+
+/// Calls the match off, after saying out loud how many people it strands.
+///
+/// The count is in the question rather than in a toast afterwards: "nine
+/// people have said they are In" is the single fact that decides whether an
+/// organizer should be cancelling or editing, and it belongs in front of
+/// them while the decision is still reversible.
+Future<void> cancelCall(
+  BuildContext context,
+  WidgetRef ref,
+  Announcement announcement,
+  int confirmed,
+) async {
+  final sure = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      icon: const Icon(Icons.event_busy_outlined, color: Ps.live),
+      title: const Text('Call this match off?'),
+      content: Text(
+        confirmed == 0
+            ? 'The call comes off everyone\'s home screen. Nobody has '
+                'answered it yet.'
+            : '$confirmed ${confirmed == 1 ? 'person has' : 'people have'} '
+                'said they are In. The call and its discussion come off '
+                'everyone\'s home screen, and they are not told why — tell '
+                'them yourself first if the match is only moving.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, false),
+          child: const Text('Keep it'),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(backgroundColor: Ps.live),
+          onPressed: () => Navigator.pop(ctx, true),
+          child: const Text('Call it off'),
+        ),
+      ],
+    ),
+  );
+  if (sure != true || !context.mounted) return;
+
+  try {
+    await ref.read(communityRepositoryProvider).cancelMatchCall(
+          orgId: announcement.orgId,
+          announcementId: announcement.id,
+        );
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Match called off.')),
+    );
+  } catch (e) {
+    if (context.mounted) showError(context, e);
+  }
+}
+
+/// Hands the confirmed roster to the quick-match screen.
+///
+/// The uids travel in the route rather than the names: a player added by
+/// name is a stranger with that name and nothing accrues to them, which is
+/// the distinction `QuickMatchScreen` already exists to protect. Resolving
+/// them to real members is that screen's job, and it already knows how.
+void draftTeams(
+  BuildContext context,
+  WidgetRef ref,
+  Announcement announcement,
+) {
+  final match = announcement.match!;
+  context.push(
+    Routes.quickMatch(
+      announcement.orgId,
+      name: announcement.title,
+      sportId: match.sportId,
+      venue: match.venue,
+      playerUids: announcement.poll!.votersFor(Rsvp.yes),
+    ),
+  );
+}
+
+void miniTournament(BuildContext context, Announcement announcement) {
+  final match = announcement.match!;
+  context.push(
+    Routes.quickTournament(
+      announcement.orgId,
+      name: announcement.title,
+      sportId: match.sportId,
+      venue: match.venue,
+      playerUids: announcement.poll!.votersFor(Rsvp.yes),
+    ),
+  );
+}
+
+/// What the organizer changed about a call that is already out.
+class _CallEdits {
+  const _CallEdits({
+    required this.title,
+    required this.content,
+    required this.matchDate,
+    required this.venue,
+    required this.maxPlayers,
+  });
+
+  final String title;
+  final String content;
+  final DateTime matchDate;
+  final String venue;
+  final int maxPlayers;
+}
+
+/// The four facts of a call an organizer can be wrong about.
+///
+/// The sport is not among them, and that is deliberate rather than an
+/// omission: changing it would silently invalidate every answer already given
+/// — somebody free for badminton on Sunday has not agreed to play cricket —
+/// and it would strand a call attached to a challenge or a fixture on a sport
+/// its match is not being played in. A call for the wrong sport is a call to
+/// cancel, not to edit.
+class _EditCallSheet extends StatefulWidget {
+  const _EditCallSheet({required this.announcement});
+
+  final Announcement announcement;
+
+  @override
+  State<_EditCallSheet> createState() => _EditCallSheetState();
+}
+
+class _EditCallSheetState extends State<_EditCallSheet> {
+  late final TextEditingController _title;
+  late final TextEditingController _content;
+  late final TextEditingController _venue;
+  late DateTime _at;
+  late int _players;
+
+  @override
+  void initState() {
+    super.initState();
+    final a = widget.announcement;
+    _title = TextEditingController(text: a.title);
+    _content = TextEditingController(text: a.content);
+    _venue = TextEditingController(text: a.match!.venue);
+    _at = a.match!.matchDate.toLocal();
+    _players = a.match!.maxPlayers;
   }
 
-  void _miniTournament(BuildContext context, WidgetRef ref) {
-    final match = announcement.match!;
-    context.push(
-      Routes.quickTournament(
-        announcement.orgId,
-        name: announcement.title,
-        sportId: match.sportId,
-        venue: match.venue,
-        playerUids: announcement.poll!.votersFor(Rsvp.yes),
+  @override
+  void dispose() {
+    _title.dispose();
+    _content.dispose();
+    _venue.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pickWhen() async {
+    final date = await showDatePicker(
+      context: context,
+      initialDate: _at,
+      // Backwards as well as forwards. A call whose date was typed as next
+      // month when it meant this one is a real correction, and a picker that
+      // only moves forward cannot make it.
+      firstDate: DateTime.now().subtract(const Duration(days: 1)),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+    );
+    if (date == null || !mounted) return;
+    final time = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(_at),
+    );
+    if (!mounted) return;
+    setState(() {
+      _at = DateTime(
+        date.year,
+        date.month,
+        date.day,
+        time?.hour ?? _at.hour,
+        time?.minute ?? _at.minute,
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final answered = widget.announcement.poll?.votes.length ?? 0;
+
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Edit this call',
+              style: theme.textTheme.titleMedium
+                  ?.copyWith(fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              answered == 0
+                  ? 'Nobody has answered yet, so nothing is lost.'
+                  : '$answered ${answered == 1 ? 'answer stays' : 'answers stay'} '
+                      'as given. Nobody is notified of the change — post it in '
+                      'the discussion if it matters.',
+              style: theme.textTheme.bodySmall,
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _title,
+              textCapitalization: TextCapitalization.sentences,
+              decoration: const InputDecoration(
+                labelText: 'Title',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            InkWell(
+              onTap: _pickWhen,
+              borderRadius: BorderRadius.circular(Ps.radiusSm),
+              child: InputDecorator(
+                decoration: const InputDecoration(
+                  labelText: 'When',
+                  border: OutlineInputBorder(),
+                  suffixIcon: Icon(Icons.event),
+                ),
+                child: Text(_when(_at)),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _venue,
+              textCapitalization: TextCapitalization.words,
+              decoration: const InputDecoration(
+                labelText: 'Ground',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                const Expanded(child: Text('Players needed')),
+                IconButton(
+                  onPressed:
+                      _players == 0 ? null : () => setState(() => _players -= 1),
+                  icon: const Icon(Icons.remove_circle_outline),
+                ),
+                Text(
+                  _players == 0 ? 'Any' : '$_players',
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
+                IconButton(
+                  onPressed: () => setState(() => _players += 1),
+                  icon: const Icon(Icons.add_circle_outline),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            TextField(
+              controller: _content,
+              maxLines: 2,
+              textCapitalization: TextCapitalization.sentences,
+              decoration: const InputDecoration(
+                labelText: 'Message',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 16),
+            FilledButton(
+              onPressed: _title.text.trim().isEmpty
+                  ? null
+                  : () => Navigator.pop(
+                        context,
+                        _CallEdits(
+                          title: _title.text.trim(),
+                          content: _content.text.trim(),
+                          matchDate: _at,
+                          venue: _venue.text.trim(),
+                          maxPlayers: _players,
+                        ),
+                      ),
+              child: const Text('Save changes'),
+            ),
+          ],
+        ),
       ),
     );
   }

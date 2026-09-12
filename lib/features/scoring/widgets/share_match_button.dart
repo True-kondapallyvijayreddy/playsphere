@@ -37,17 +37,26 @@ class ShareMatchButton extends StatelessWidget {
       '${fixture.summary.isEmpty ? '' : ' — ${fixture.summary}'}\n'
       'Follow it live: $_url';
 
-  Future<void> _share(BuildContext context) async {
+  Future<void> _share(BuildContext context) => share(context, fixture);
+
+  /// Shares [fixture] without needing a button on screen.
+  ///
+  /// The schedule board folds its per-row affordances into one overflow menu,
+  /// so sharing has to be callable as an action rather than only as a widget.
+  /// Same message and same clipboard fallback — there is one way to share a
+  /// match, and this is it.
+  static Future<void> share(BuildContext context, Fixture fixture) async {
+    final button = ShareMatchButton(fixture: fixture);
     final messenger = ScaffoldMessenger.of(context);
     try {
       await SharePlus.instance.share(
         ShareParams(
-          text: _message,
+          text: button._message,
           subject: '${fixture.entrantAName} v ${fixture.entrantBName}',
         ),
       );
     } catch (_) {
-      await Clipboard.setData(ClipboardData(text: _url));
+      await Clipboard.setData(ClipboardData(text: button._url));
       messenger
         ..hideCurrentSnackBar()
         ..showSnackBar(

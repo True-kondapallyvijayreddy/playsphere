@@ -10,6 +10,8 @@ import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../home/home_providers.dart';
+import 'widgets/challenge_rsvp_block.dart';
 
 /// Inter-club challenges — school v school, village v village, club v club.
 ///
@@ -207,6 +209,31 @@ class _ChallengeCardState extends ConsumerState<_ChallengeCard> {
             selectedSlot: slot,
             acceptedByUid: uid,
           );
+
+      // The other club asked its own members the moment it issued the
+      // challenge; this club asks its own the moment it agrees to play. Only
+      // if nobody has asked yet — an organizer who already ran "Ask who's in"
+      // before accepting has the answers, and a second identical call would
+      // put the same question on the same feed twice.
+      if (!mounted) return;
+      final asked = ref.read(
+        challengeRsvpsProvider(
+          (orgId: widget.orgId, challengeId: widget.challenge.id),
+        ),
+      );
+      if (asked.isEmpty) {
+        await postChallengeAvailabilityCall(
+          ref: ref,
+          orgId: widget.orgId,
+          challengeId: widget.challenge.id,
+          opponentName: widget.challenge.opponentNameFor(widget.orgId),
+          sportId: widget.challenge.sportId,
+          when: slot,
+          venue: widget.challenge.liveVenue ?? '',
+          incoming: widget.challenge.isIncomingFor(widget.orgId),
+        );
+      }
+
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Accepted. The match is ready to score.')),
@@ -487,6 +514,17 @@ class _ChallengeCardState extends ConsumerState<_ChallengeCard> {
                   label: Text(_busy ? 'Working…' : 'Withdraw'),
                 ),
               ),
+
+            // Under the negotiation, because it is a different conversation:
+            // the buttons above are between the two clubs, this is between
+            // this club and its own members. It stays through every state a
+            // match could still be played in — including `accepted`, where
+            // the answers gathered here become the team sheet.
+            ChallengeRsvpBlock(
+              challenge: c,
+              orgId: widget.orgId,
+              canManage: widget.canManage,
+            ),
           ],
         ),
       ),
@@ -797,7 +835,8 @@ class _IssueChallengeDialogState
 
     setState(() => _busy = true);
     try {
-      await ref.read(communityRepositoryProvider).createChallenge(
+      final challengeId =
+          await ref.read(communityRepositoryProvider).createChallenge(
             Challenge(
               id: '',
               fromOrgId: me.id,
@@ -820,10 +859,32 @@ class _IssueChallengeDialogState
               entryFeeRupees: int.tryParse(_entryFee.text.trim()) ?? 0,
             ),
           );
+
+      // The club is told at the same moment the opponent is. Sent before the
+      // dialog closes so the failure path — see the helper — is the only one
+      // that can leave the two out of step, and it degrades to "nobody has
+      // been asked yet" rather than to silence.
+      final slots = [..._slots]..sort();
+      await postChallengeAvailabilityCall(
+        ref: ref,
+        orgId: me.id,
+        challengeId: challengeId,
+        opponentName: opponent.name,
+        sportId: _legs.first.sportId,
+        when: slots.first,
+        venue: _venue.text.trim(),
+        incoming: false,
+      );
+
       if (!mounted) return;
       Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Challenge sent to ${opponent.name}.')),
+        SnackBar(
+          content: Text(
+            'Challenge sent to ${opponent.name}. Your club has been asked '
+            'who is in.',
+          ),
+        ),
       );
     } catch (e) {
       if (mounted) {

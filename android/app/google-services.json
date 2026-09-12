@@ -1,6 +1,7 @@
 {
   "project_info": {
     "project_number": "178810835926",
+    "firebase_url": "https://playsphere-os-default-rtdb.firebaseio.com",
     "project_id": "playsphere-os",
     "storage_bucket": "playsphere-os.firebasestorage.app"
   },
@@ -14,11 +15,43 @@
       },
       "oauth_client": [
         {
+          "client_id": "178810835926-e5ejk8m2dfj54jgakgqqlnj8a0cg457a.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.company.playsphere",
+            "certificate_hash": "77aca77392a566031b4adac18d6c82ed88665e38"
+          }
+        },
+        {
           "client_id": "178810835926-ffl2df4ujn8dir6tk33muoe2j2lkojam.apps.googleusercontent.com",
           "client_type": 1,
           "android_info": {
             "package_name": "com.company.playsphere",
             "certificate_hash": "7b7a61f58998926536451b9c3062c9f662b7ea5b"
+          }
+        },
+        {
+          "client_id": "178810835926-l8cct91s85h7t2gtgadpggtu9b6mbmki.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.company.playsphere",
+            "certificate_hash": "e2238dd669a8620315cb1b6fe81300d0675f845c"
+          }
+        },
+        {
+          "client_id": "178810835926-u2mre3bv5ntak8dbbf9udagddu3t7a64.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.company.playsphere",
+            "certificate_hash": "9b1829a862564880f0b52000d00a5641a847c5ac"
+          }
+        },
+        {
+          "client_id": "178810835926-uds5476fvjoii2dr6e5fbpgvc73j1b0c.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.company.playsphere",
+            "certificate_hash": "f4272fb85320bb9efc9f575b45b13d9a04368964"
           }
         },
         {

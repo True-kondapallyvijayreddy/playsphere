@@ -452,6 +452,77 @@ class PsFilterChips extends StatelessWidget {
   }
 }
 
+/// The green-underlined tab strip a profile uses to switch between sports.
+///
+/// Lifted out of `career_profile_screen.dart`, where it was a private strip
+/// inside `_SportBreakdown`, so a club's page can present its sports the same
+/// way a player's presents theirs. The two are the same question asked of
+/// different subjects — "what does this play, and how well" — and a club page
+/// that answered it with a different control would read as a different
+/// product.
+///
+/// Scrolls rather than wrapping. Six sports do not fit a 360pt screen at a
+/// readable size, and a strip that reflows to two rows moves the content
+/// under it every time the selection changes.
+class PsUnderlineTabs extends StatelessWidget {
+  const PsUnderlineTabs({
+    super.key,
+    required this.labels,
+    required this.selected,
+    required this.onSelected,
+    this.padding = EdgeInsets.zero,
+  });
+
+  final List<String> labels;
+  final int selected;
+  final ValueChanged<int> onSelected;
+  final EdgeInsets padding;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 38,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: padding,
+        itemCount: labels.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (context, i) {
+          final isSelected = i == selected;
+          return Semantics(
+            selected: isSelected,
+            button: true,
+            child: InkWell(
+              onTap: () => onSelected(i),
+              borderRadius: BorderRadius.circular(Ps.radiusSm),
+              child: Container(
+                alignment: Alignment.center,
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                decoration: BoxDecoration(
+                  border: Border(
+                    bottom: BorderSide(
+                      color: isSelected ? Ps.primary : Colors.transparent,
+                      width: 2,
+                    ),
+                  ),
+                ),
+                child: Text(
+                  labels[i],
+                  style: TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+                    color: isSelected ? Ps.primary : Ps.muted,
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
 /// The small red "LIVE" flag on a match that is being played now.
 class PsLivePill extends StatelessWidget {
   const PsLivePill({super.key});
@@ -588,6 +659,72 @@ String psGrouped(int value) {
   return buffer.toString();
 }
 
+/// A statistic as a table renders it: grouped when it is a count, two
+/// decimals when it is not.
+///
+/// Whole numbers stay whole; averages and rates keep two places. A strike
+/// rate rendered as "132" and an average as "45" would both be wrong in the
+/// direction that flatters, which is the direction people notice.
+///
+/// One definition, beside [psHumanizeCounter], for the same reason that one
+/// has one: these are the same numbers on a profile, a club page and a
+/// scorecard, and four private copies of the rule is four chances for the
+/// same figure to appear two ways.
+String psFormatStat(num v) => v is int || v == v.roundToDouble()
+    ? psGrouped(v.round())
+    : v.toStringAsFixed(2);
+
+/// One counter from a tally — "Runs / 1,824" — as a tappable tile.
+///
+/// Shared between a player's profile and a club's page: a stat is a
+/// drill-down, not a static number, and both subjects drill down into the
+/// same shape of screen.
+class PsCounterTile extends StatelessWidget {
+  const PsCounterTile({
+    super.key,
+    required this.label,
+    required this.value,
+    this.onTap,
+  });
+
+  /// The raw tally key. Humanized here so no caller has to remember to.
+  final String label;
+
+  final num value;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return PsCard(
+      padding: const EdgeInsets.all(12),
+      onTap: onTap,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            psHumanizeCounter(label),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 11.5, color: Ps.muted),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            psFormatStat(value),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w700,
+              color: Ps.ink,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// A scoring engine's counter key as a person reads it — `strikeRate` becomes
 /// `Strike rate`.
 ///
@@ -692,12 +829,21 @@ class PsOverflowMenu extends StatelessWidget {
                   color: a.destructive ? error : Ps.muted,
                 ),
                 const SizedBox(width: 12),
-                Text(
-                  a.label,
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w500,
-                    color: a.destructive ? error : Ps.ink,
+                // Flexible, because a menu is 256pt wide and a label is
+                // written for clarity rather than to fit — "Change season
+                // banner" overflowed the row by 14pt and painted the striped
+                // debug bar across it. An honest label that runs long should
+                // be trimmed, never make the menu render as broken.
+                Expanded(
+                  child: Text(
+                    a.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: a.destructive ? error : Ps.ink,
+                    ),
                   ),
                 ),
               ],
@@ -826,6 +972,15 @@ class PsNavTile extends StatelessWidget {
   /// Rendered as a count on the icon when non-null and positive.
   final int? badgeCount;
 
+  /// What a grid must give one of these so a two-line label fits.
+  ///
+  /// 10 + 44 + 6 + (2 x 15) + 10 = 100, and four to spare. The number lives
+  /// here rather than being written out at each grid, because it is derived
+  /// from this widget's own paddings and text metrics: the caller cannot know
+  /// it, and the two callers that were guessing it both guessed 86 — which
+  /// overflowed by 5px on a ONE-line label and by 20px on a two-line one.
+  static const double gridHeight = 104;
+
   @override
   Widget build(BuildContext context) {
     final color = tint ?? Ps.primary;
@@ -849,12 +1004,12 @@ class PsNavTile extends StatelessWidget {
         onTap: onTap,
         borderRadius: BorderRadius.circular(Ps.radius),
         child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
+          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               count > 0 ? Badge.count(count: count, child: glyph) : glyph,
-              const SizedBox(height: 8),
+              const SizedBox(height: 6),
               Text(
                 label,
                 textAlign: TextAlign.center,

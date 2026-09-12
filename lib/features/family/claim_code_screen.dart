@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/models/claim_code.dart';
 import '../../core/providers.dart';
 import '../../shared/app_scaffold.dart';
 
@@ -47,7 +48,11 @@ class _ClaimCodeScreenState extends ConsumerState<ClaimCodeScreen> {
       _busy = true;
       _error = null;
     });
-    final guardianUid = ref.read(currentUidProvider);
+    // The ACCOUNT, never the profile in use: a claim code is minted by the
+    // custodian, and `firestore.rules` checks the writer against the child's
+    // `custodianUid` — so this would fail outright if it read the profile a
+    // guardian happened to be switched into.
+    final guardianUid = ref.read(authUidProvider);
     if (guardianUid == null) return;
     try {
       final code = await ref.read(userRepositoryProvider).createClaimCode(
@@ -120,11 +125,17 @@ class _ClaimCodeScreenState extends ConsumerState<ClaimCodeScreen> {
                     color: theme.colorScheme.surfaceContainerHighest,
                     borderRadius: BorderRadius.circular(16),
                   ),
-                  child: Text(
-                    _code!,
-                    style: theme.textTheme.displaySmall?.copyWith(
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 6,
+                  // Scaled down rather than wrapped: fourteen characters at
+                  // display size overflow a phone, and a code broken across
+                  // two lines gets read out in the wrong order.
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      ClaimCode.format(_code!),
+                      style: theme.textTheme.displaySmall?.copyWith(
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 3,
+                      ),
                     ),
                   ),
                 ),

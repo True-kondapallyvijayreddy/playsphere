@@ -28,27 +28,63 @@ import { onDocumentCreated, onDocumentUpdated, onDocumentWritten } from 'firebas
 import { setGlobalOptions } from 'firebase-functions/v2';
 import { logger } from 'firebase-functions';
 
+import { persistNotifications, pushToUids } from './push.js';
+
 import { awardsFor, ROUND_LABEL, WINDOW_DAYS } from './ranking.js';
 import { contributionWeights, ratingKeyFor } from './contribution.js';
-import { RESULTED_STATUSES, careerContributions } from './career.js';
 import {
   DEFAULT_DEVIATION,
   DEFAULT_RATING,
   DEFAULT_VOLATILITY,
   rate,
 } from './glicko2.js';
+import { refreshOverallForUids } from './overall_glicko.js';
+// Career and officiating credit, settled against the fixture as it IS rather
+// than as this trigger's snapshot remembers it — see settlement.js for the
+// reopen race that made the difference matter.
+import {
+  claimRatingSettlement,
+  settleCareer,
+  settleOfficials,
+} from './settlement.js';
+import { ratingWithheldReason } from './rating_eligibility.js';
 
 export { createPaymentLink, razorpayWebhook } from './razorpay.js';
+// Erasing an account: the profile's personal details AND the sign-in, which a
+// client cannot do for itself — see account.js.
+export { deleteMyAccount } from './account.js';
 export { computeGovAggregates } from './gov.js';
+export {
+  scoreNewGround,
+  onGroundReported,
+  onGroundCheckIn,
+  flagUnvisitedGround,
+} from './grounds.js';
 export { syncGovAggregates, runAnalyticsSync } from './analytics.js';
 export { computeTalentBoards, rebuildTalentBoards } from './talent.js';
 export { computeSportStats, rebuildSportStats } from './sports.js';
 export { computeClubStandings, rebuildClubStandings } from './clubs.js';
+export { flushNotificationDigests } from './notification_digest.js';
 export { backfillMatchSource } from './matchsource.js';
 export { backfillFixtureParticipants } from './participants.js';
 export { rebuildPlayerCareerStats } from './careerrebuild.js';
 export { computeLeaderboards, rebuildLeaderboards } from './leaderboard.js';
-export { createManagedChildProfile, redeemClaimCode } from './family.js';
+export { computeOverallGlicko, rebuildOverallGlicko } from './overall_glicko.js';
+export {
+  createManagedChildProfile,
+  redeemClaimCode,
+  onChildProfileClaimed,
+} from './family.js';
+export {
+  placeAuctionBid,
+  openAuctionBidding,
+  revealAuctionNow,
+  revealDueAuctions,
+  lockAuctionSquads,
+  executeAuctionTrade,
+  notifyAuctionDecision,
+  notifyAuctionTrade,
+} from './auctions.js';
 
 initializeApp();
 const db = getFirestore();
@@ -95,67 +131,77 @@ const TRAIL_LENGTH = 24;
  * from the client for exactly that reason.
  */
 async function sendToUsers(uids, payload) {
-  const unique = [...new Set(uids)].filter(Boolean);
+  const unique = await persistNotifications(uids, payload);
+  await pushToUids(unique, payload);
+}
+
+/**
+ * The [NotificationType]s the Dart model marks `isCritical: true` — see
+ * `lib/core/notifications/notification_model.dart`. MUST be kept in sync by
+ * hand; there is no shared source between Dart and this file. Anything NOT
+ * in this set is routed through the digest instead of pushed immediately by
+ * [sendToUsersDigestAware].
+ *
+ * `official_assigned` is deliberately absent from both this set and the
+ * Dart enum — `NotificationType.fromWire` falls back to `eventReminder`
+ * (critical) for any unrecognized wire value, so today it already pushes
+ * immediately. Leaving it out here preserves that existing behavior rather
+ * than silently changing it as a side effect of this file.
+ */
+const CRITICAL_NOTIFICATION_TYPES = new Set([
+  'event_reminder',
+  'tournament_announced',
+  'event_cancelled',
+  'match_start',
+  'result',
+  'match_rsvp',
+  'match_clash',
+]);
+
+/**
+ * Same in-app record as [sendToUsers], but the *push* for a non-critical
+ * type is deferred to the next digest flush (`notification_digest.js`)
+ * instead of sent immediately.
+ *
+ * Why the record still writes immediately either way: the in-app
+ * Notifications screen must show every event the moment someone opens the
+ * app, whether or not a push for it has gone out yet. Only the "buzz your
+ * phone right now" step is batched — see `notification_digest.js` for why
+ * that is the part that scales badly at high event volume.
+ */
+async function sendToUsersDigestAware(uids, payload) {
+  const unique = await persistNotifications(uids, payload);
   if (unique.length === 0) return;
 
-  const record = { ...payload, createdAt: FieldValue.serverTimestamp(), read: false };
-  // One write per recipient rather than a single batch: recipients can run
-  // past Firestore's 500-writes-per-batch ceiling for a club-wide
-  // announcement, and no single failure here should cancel the others'.
+  if (CRITICAL_NOTIFICATION_TYPES.has(payload.type)) {
+    await pushToUids(unique, payload);
+    return;
+  }
+  await queueDigest(unique, payload);
+}
+
+/**
+ * Bumps each recipient's pending-digest counter instead of pushing now.
+ *
+ * One fixed-id doc per user (`notificationDigest/pending`) rather than a
+ * growing subcollection — the flush job only ever needs the current totals,
+ * never a history, so there is nothing to gain from one doc per event and a
+ * real cost (an unbounded collection under every active user) from writing
+ * that way.
+ */
+async function queueDigest(uids, payload) {
   await Promise.all(
-    unique.map((uid) =>
-      db.collection('users').doc(uid).collection('notifications').add(record)
-        .catch((error) => logger.warn('notification persist failed', { uid, error: String(error) })),
+    uids.map((uid) =>
+      db.collection('users').doc(uid).collection('notificationDigest').doc('pending').set(
+        {
+          pendingCount: FieldValue.increment(1),
+          [`types.${payload.type}`]: FieldValue.increment(1),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      ).catch((error) => logger.warn('digest queue failed', { uid, error: String(error) })),
     ),
   );
-
-  // Firestore `in` queries cap at 30, and a club can be far larger than that,
-  // so tokens are gathered per user. These are small reads on a collection
-  // that holds one document per device.
-  const tokenDocs = await Promise.all(
-    unique.map((uid) => db.collection('users').doc(uid).collection('devices').get()),
-  );
-
-  /** @type {{token: string, ref: FirebaseFirestore.DocumentReference}[]} */
-  const targets = [];
-  tokenDocs.forEach((snap) => {
-    snap.forEach((doc) => {
-      const token = doc.get('token');
-      if (typeof token === 'string' && token.length > 0) {
-        targets.push({ token, ref: doc.ref });
-      }
-    });
-  });
-
-  if (targets.length === 0) return;
-
-  // sendEachForMulticast caps at 500 tokens per call.
-  const chunks = [];
-  for (let i = 0; i < targets.length; i += 500) chunks.push(targets.slice(i, i + 500));
-
-  for (const chunk of chunks) {
-    const response = await getMessaging().sendEachForMulticast({
-      tokens: chunk.map((t) => t.token),
-      data: payload,
-      android: { priority: 'high' },
-      apns: { headers: { 'apns-priority': '10' } },
-    });
-
-    const dead = [];
-    response.responses.forEach((result, index) => {
-      if (result.success) return;
-      const code = result.error?.code ?? '';
-      if (
-        code === 'messaging/registration-token-not-registered' ||
-        code === 'messaging/invalid-registration-token'
-      ) {
-        dead.push(chunk[index].ref.delete());
-      } else {
-        logger.warn('push failed', { code, message: result.error?.message });
-      }
-    });
-    await Promise.all(dead);
-  }
 }
 
 /**
@@ -177,6 +223,18 @@ async function activeMemberUids(orgId, { onlyAdmins = false } = {}) {
   }
   const snap = await query.get();
   return snap.docs.map((d) => d.id);
+}
+
+/**
+ * The first line of a message, for a lock screen.
+ *
+ * Capped well under what a message may actually be: a push body is read at a
+ * glance over somebody's shoulder, and the whole point of opening the app is
+ * to read the rest.
+ */
+function previewOf(text) {
+  const trimmed = String(text).trim().replace(/\s+/g, ' ');
+  return trimmed.length <= 120 ? trimmed : `${trimmed.slice(0, 119)}…`;
 }
 
 function notification({ id, type, title, body, route, params = {} }) {
@@ -295,6 +353,97 @@ export const onTournamentCreated = onDocumentCreated(
 );
 
 /**
+ * A season's timetable being locked and published.
+ *
+ * ## Who hears about it
+ *
+ * Everybody who is IN it, which is a wider set than "members of the club that
+ * runs it". A district meet's draws are full of entrants from other schools,
+ * and those are exactly the people who need to know their child plays at 9:40
+ * on Court 3 — telling only the host club's members would notify the
+ * organizers and nobody else. So the fan-out is the union of:
+ *
+ *   * the host club's active members;
+ *   * every uid named on an entrant of any event in the season — the entrant
+ *     itself for an individual draw, its squad for a team one;
+ *   * the active members of every OTHER club with an entrant in the season.
+ *
+ * The last of those is the one that makes a visiting school's coach and
+ * parents hear about it at all, and it is bounded: a season has as many
+ * entrant clubs as it has schools, not as it has players.
+ *
+ * ## Why this is a trigger and not a client write
+ *
+ * `TournamentRepository.lockSchedule` used to write the notification itself,
+ * into `users/{orgId}/notifications` — a path naming a user that does not
+ * exist, at a collection whose rule is `allow create: if false`. The denied
+ * write failed the whole batch, so publishing a schedule did not merely fail
+ * to notify anyone: it failed. Notifications are the server's to write, which
+ * is the rule that was already there.
+ *
+ * Critical, and `event_reminder` rather than a type of its own on the wire so
+ * an older build in somebody's pocket still renders it: this is the message
+ * that tells a family which morning to be at the ground.
+ */
+export const onScheduleReleased = onDocumentUpdated(
+  'orgs/{orgId}/tournaments/{tournamentId}',
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (!before || !after) return;
+    // Only the false -> true edge. A later edit to any other field must not
+    // re-announce a timetable everybody already has.
+    if (before.isScheduleLocked === true || after.isScheduleLocked !== true) return;
+
+    const { orgId, tournamentId } = event.params;
+
+    const comps = await db.collection('orgs').doc(orgId).collection('competitions')
+      .where('tournamentId', '==', tournamentId)
+      .get();
+    if (comps.empty) return;
+
+    const uids = new Set(await activeMemberUids(orgId));
+    const entrantOrgIds = new Set();
+
+    const entrantSnaps = await Promise.all(
+      comps.docs.map((doc) => doc.ref.collection('entrants').get()),
+    );
+    for (const snap of entrantSnaps) {
+      snap.forEach((doc) => {
+        const data = doc.data();
+        if (data.withdrawn === true) return;
+        if (typeof data.uid === 'string' && data.uid) uids.add(data.uid);
+        for (const member of data.memberUids ?? []) {
+          if (typeof member === 'string' && member) uids.add(member);
+        }
+        if (typeof data.clubId === 'string' && data.clubId && data.clubId !== orgId) {
+          entrantOrgIds.add(data.clubId);
+        }
+      });
+    }
+
+    const visiting = await Promise.all(
+      [...entrantOrgIds].map((id) => activeMemberUids(id)),
+    );
+    for (const list of visiting) for (const uid of list) uids.add(uid);
+
+    if (uids.size === 0) return;
+
+    const dates = tournamentDates(after);
+    await sendToUsers([...uids], notification({
+      id: `schedule_released_${tournamentId}`,
+      type: 'event_reminder',
+      title: `${after.name ?? 'The schedule'} — timetable published`,
+      body: dates
+        ? `Match times and courts are now final for ${dates}. Tap to see when you play.`
+        : 'Match times and courts are now final. Tap to see when you play.',
+      route: '/org/:orgId/tournaments/:tournamentId/schedule',
+      params: { orgId, tournamentId },
+    }));
+  },
+);
+
+/**
  * A tournament invitation arriving from another club.
  *
  * Goes to the invited club's organizers, not its members, for the same reason
@@ -312,7 +461,7 @@ export const onTournamentInvite = onDocumentCreated(
 
     const dates = tournamentDates(data);
 
-    await sendToUsers(
+    await sendToUsersDigestAware(
       await activeMemberUids(data.toOrgId, { onlyAdmins: true }),
       notification({
         id: `tournament_invite_${event.params.inviteId}`,
@@ -513,7 +662,7 @@ export const onOwnerVote = onDocumentWritten(
     });
     await batch.commit();
 
-    await sendToUsers(ownerUids, notification({
+    await sendToUsersDigestAware(ownerUids, notification({
       id: `owner_removed_${orgId}_${targetUid}`,
       type: 'membership_approved',
       title: 'Ownership changed',
@@ -734,13 +883,74 @@ export const onChallengeReceived = onDocumentCreated(
     if (!data.toOrgId) return;
 
     const uids = await activeMemberUids(data.toOrgId, { onlyAdmins: true });
-    await sendToUsers(uids, notification({
+    await sendToUsersDigestAware(uids, notification({
       id: `challenge_${event.params.challengeId}`,
       type: 'challenge_received',
       title: `${data.fromOrgName ?? 'A club'} has challenged you`,
       body: 'Accept, pick a slot, or decline.',
       route: '/org/:orgId/challenges',
       params: { orgId: data.toOrgId },
+    }));
+  },
+);
+
+/**
+ * A message arriving from another club in the club owners' network.
+ *
+ * Goes to the receiving club's OWNERS, not its organizers and not its
+ * members. The network is an owner-to-owner surface all the way down — see
+ * the `clubThreads` rules, which let nobody else read a thread at all — so
+ * anyone else notified here would be told about a message they cannot open.
+ *
+ * The recipient is derived from the thread id rather than read off the
+ * message, for the same reason the rules derive it: the id IS the pair
+ * (`{a}__{b}`, sorted — see `ClubThread.idFor`), so there is nothing to trust
+ * and nothing to look up. A message whose id does not decompose into two
+ * clubs, or whose sender is not one of them, is not a message this function
+ * has anything to say about.
+ *
+ * Digest-aware. Two clubs arranging a fixture on a Saturday morning send each
+ * other a dozen messages, and a buzz per line is how an owner learns to mute
+ * the whole category.
+ */
+export const onClubMessageSent = onDocumentCreated(
+  'clubThreads/{threadId}/messages/{messageId}',
+  async (event) => {
+    const data = event.data?.data();
+    if (!data) return;
+
+    const pair = String(event.params.threadId).split('__');
+    if (pair.length !== 2) return;
+
+    const senderOrgId = data.senderOrgId;
+    const recipientOrgId = pair.find((id) => id !== senderOrgId);
+    if (!senderOrgId || !recipientOrgId || !pair.includes(senderOrgId)) return;
+
+    const [senderOrg, recipientMembers] = await Promise.all([
+      db.collection('orgs').doc(senderOrgId).get(),
+      db.collection('orgs').doc(recipientOrgId).collection('members')
+        .where('status', '==', 'active')
+        .where('role', '==', 'owner')
+        .get(),
+    ]);
+
+    const uids = recipientMembers.docs.map((d) => d.id);
+    if (uids.length === 0) return;
+
+    // The preview, not the message. A club's fixture terms are its own
+    // business, and a lock-screen is the one place in this product where
+    // somebody else is reading over the recipient's shoulder.
+    const body = typeof data.text === 'string' && data.text.trim().length > 0
+      ? previewOf(data.text)
+      : 'Shared something with your club.';
+
+    await sendToUsersDigestAware(uids, notification({
+      id: `club_msg_${event.params.threadId}_${event.params.messageId}`,
+      type: 'club_message',
+      title: `${senderOrg.get('name') ?? 'A club'} messaged you`,
+      body,
+      route: '/network/t/:threadId',
+      params: { threadId: event.params.threadId },
     }));
   },
 );
@@ -765,7 +975,7 @@ export const onMembershipApproved = onDocumentUpdated(
     const { orgId, memberUid } = event.params;
     const org = await db.collection('orgs').doc(orgId).get();
 
-    await sendToUsers([memberUid], notification({
+    await sendToUsersDigestAware([memberUid], notification({
       id: `member_active_${orgId}_${memberUid}`,
       type: 'membership_approved',
       title: org.get('name') ?? 'Your club',
@@ -1046,100 +1256,129 @@ export const onMatchSettled = onDocumentUpdated(
     // -----------------------------------------------------------------
     // Career statistics, settled independently of the rating.
     //
-    // These used to be written inside the rating loop below, which meant they
-    // inherited every one of the rating's preconditions — and a rating has
-    // preconditions a career record does not. Glicko needs a rated opponent,
-    // so a match where the other side was a guest returned before the loop and
-    // credited nobody: a player's forty-five points against a friend without
-    // an account showed on the splits screen, which reads the fixtures
-    // directly, and nowhere in their totals, which read this document. Same
-    // season, two answers.
+    // Independently, because a rating has preconditions a career record does
+    // not: Glicko needs a rated opponent, so a match played against a guest
+    // moves nobody's rating and must still count on both players' records.
+    // `careerContributions` (career.js) applies the client's own rule — the one
+    // in `ScopedStats.forPlayer` and `Fixture.countsTowardsRecords` — so the
+    // two halves of the product agree by construction rather than coincidence.
     //
-    // `careerContributions` applies the client's own rule — the one in
-    // `ScopedStats.forPlayer` and `Fixture.countsTowardsRecords` — so the two
-    // halves of the product now agree by construction rather than by
-    // coincidence.
+    // Credited AND reversed here: an organizer who awarded a walkover to the
+    // wrong side, or abandoned a match for a shower that passed, withdraws the
+    // ruling and the fixture goes back to `live`
+    // (`ScoringService.clearFixtureOutcome`). The credit has to come back off
+    // with it, or the appearance and the win stay on both squads' records
+    // forever and the real result is never counted.
+    //
+    // Both directions run inside a transaction that re-reads the fixture, so
+    // the decision is made against the match as it IS and not as this
+    // invocation's snapshot remembers it — see settlement.js for the reopen
+    // race that made the difference matter, and for why each credit records
+    // exactly what it added. `previous` is consulted only for fixtures credited
+    // before that record existed.
     // -----------------------------------------------------------------
-    if (!after.careerSettledAt && !RESULTED_STATUSES.has(before.status) &&
-        RESULTED_STATUSES.has(after.status)) {
-      const contributions = careerContributions(after, {
-        orgId: event.params.orgId,
-      });
-      if (contributions.length > 0) {
-        const careerBatch = db.batch();
-        for (const c of contributions) {
-          const tallyIncrement = {};
-          for (const [k, v] of Object.entries(c.tally)) {
-            if (v !== 0) tallyIncrement[k] = FieldValue.increment(v);
-          }
-          careerBatch.set(
-            db.doc(`users/${c.uid}/career_stats/${c.sportId}`),
-            {
-              uid: c.uid,
-              sportId: c.sportId,
-              matchesPlayed: FieldValue.increment(1),
-              wins: FieldValue.increment(c.outcome === 'won' ? 1 : 0),
-              draws: FieldValue.increment(c.outcome === 'drawn' ? 1 : 0),
-              losses: FieldValue.increment(c.outcome === 'lost' ? 1 : 0),
-              lastPlayedAt: c.playedAt ?? new Date(),
-              clubsPlayedFor: FieldValue.arrayUnion(event.params.orgId),
-              // The sport-specific breakdown — runs and wickets, goals and
-              // assists — which every stat screen renders and which was
-              // computed for the rating weight below and then discarded. A
-              // nested object under merge deep-merges into the existing map
-              // rather than replacing it.
-              ...(Object.keys(tallyIncrement).length > 0
-                ? { tally: tallyIncrement }
-                : {}),
-            },
-            { merge: true },
-          );
-        }
-        // The marker rides in the same batch as the increments it accounts
-        // for, for the reason `ratingSettledAt` does: an increment cannot be
-        // un-done, so a fixture re-finished after a retry must never be
-        // counted twice. Writing it leaves `status` resulted, so the next
-        // invocation of this trigger fails the transition test above.
-        careerBatch.set(
-          event.data.after.ref,
-          { careerSettledAt: new Date() },
-          { merge: true },
-        );
-        await careerBatch.commit();
-        logger.info(
-          `Fixture ${event.params.fixtureId}: ` +
-            `credited ${contributions.length} career records.`,
-        );
-      }
+    const careerOutcome = await settleCareer(event.data.after.ref, {
+      orgId: event.params.orgId,
+      previous: before,
+    });
+    if (careerOutcome) {
+      logger.info(
+        `Fixture ${event.params.fixtureId}: career records ${careerOutcome}.`,
+      );
+    }
+
+    // -----------------------------------------------------------------
+    // What the officials actually did.
+    //
+    // `UmpireProfile.matchesOfficiated` existed from the day the registry
+    // shipped and was written by nothing. Registration set it to 0, the
+    // directory displayed it, and `UmpireRepository.watchUmpires` SORTED on
+    // it — so every official ranked equally on a field that was zero for
+    // everybody, and a fifteen-year veteran presented exactly as a person who
+    // signed up that morning. Same bug class as the ground `isVerified` tick:
+    // a number with no process behind it is worse than no number, because it
+    // states something about a person that is not true.
+    //
+    // Counted on the transition into a resulted status, not on assignment: an
+    // official named on a fixture that never happened has not officiated
+    // anything, and a scheduled-match count would be a count of an
+    // organizer's intentions.
+    //
+    // Its own marker rather than riding `careerSettledAt`, because that one is
+    // only written when there were career contributions to make — a match
+    // between two guest sides credits nobody's career and would have left the
+    // umpire uncounted forever.
+    //
+    // Reversed on the same transition as the career totals, for the same
+    // reason: an official credited for a walkover that was then withdrawn has
+    // not officiated a match, and a marker left behind would additionally stop
+    // them being credited when the match is actually played.
+    //
+    // Same transactional footing too — an officiating credit stranded by a
+    // reopened match is the career bug wearing a different number.
+    // settleOfficials records which umpires it actually credited, so a
+    // withdrawal takes back exactly those rather than recomputing from a list
+    // that may have changed in between.
+    const officialsOutcome = await settleOfficials(event.data.after.ref, {
+      orgId: event.params.orgId,
+      compId: event.params.compId,
+      fixtureId: event.params.fixtureId,
+      previous: before,
+    });
+    if (officialsOutcome) {
+      logger.info(
+        `Fixture ${event.params.fixtureId}: ` +
+          `officiating credit ${officialsOutcome}.`,
+      );
     }
 
     const wasDone = before.status === 'completed';
     const isDone = after.status === 'completed';
     if (wasDone || !isDone) return;
 
-    // Settled once, whenever that was.
+    // WHERE the match was played decides whether it moves a rating.
     //
-    // The per-player `settledFixtures` list below is bounded — it has to be, an
-    // unbounded array on a rating document grows for a whole career — and a
-    // bounded list is a bounded memory: a fixture reopened and re-finished
-    // after fifty more matches had already pushed it off the end, and was paid
-    // for twice. This marker lives on the fixture, so it never expires.
+    // Glicko is for organised competition only — a season, a tournament or a
+    // league table. A single match and a challenge are arranged, staffed and
+    // scored by the people playing them: no draw, no organiser who did not want
+    // either side to win, no confirmation from the other end. That is the same
+    // unverifiable setup the Arena keeps out of every rating (see arena.js),
+    // and Glicko is the most valuable thing in this database to forge, since it
+    // travels onto rosters, ranking boards and scout searches.
     //
-    // Writing it back does not re-enter this trigger: the write leaves `status`
-    // at `completed`, so the next invocation returns at `wasDone` above.
-    if (after.ratingSettledAt) {
-      logger.info(`Fixture ${event.params.fixtureId}: already settled.`);
+    // Stats still settle for every one of them above — career totals, the
+    // sport tally, appearances, officiating credit. A challenge is a real match
+    // and counts as one everywhere a match is counted. Only the rating is
+    // withheld. See rating_eligibility.js, which also covers result types and
+    // fixtures too old to carry a `sourceType`.
+    const withheldReason = ratingWithheldReason(after);
+    if (withheldReason) {
+      logger.info(
+        `Fixture ${event.params.fixtureId}: not rated (${withheldReason}).`,
+      );
       return;
     }
 
-    const resultType = after.resultType ?? 'normal';
-    if (resultType !== 'normal' && resultType !== 'retired') {
-      logger.info(`Fixture ${event.params.fixtureId}: ${resultType}, not rated.`);
+    // The right to settle this match's ratings, claimed atomically before any
+    // arithmetic: the claim re-reads the fixture and stamps `ratingSettledAt`
+    // only if it is still completed and still unclaimed.
+    //
+    // Reading the marker off `after` instead was a snapshot of a moment that
+    // may already have passed — two invocations racing over one finished match
+    // could both find it unset and both pay it, and a match reopened while this
+    // ran was rated on a result that no longer stood. The per-player
+    // `settledFixtures` list stays as a second line of defence only: it is
+    // bounded, so it forgets, which is exactly how a re-finished match used to
+    // be paid for twice.
+    if (!(await claimRatingSettlement(event.data.after.ref))) {
+      logger.info(
+        `Fixture ${event.params.fixtureId}: rating already settled, or the ` +
+          'match was reopened before it could be.',
+      );
       return;
     }
 
-    const { orgId, fixtureId } = event.params;
-    const sportId = after.sportId ?? 'unknown';
+    const { fixtureId } = event.params;
     // Mirrors `Fixture.ratingKey`. Chess is rated per time control (§7.11) —
     // bullet and classical measure different skills — and every other sport
     // rates as itself. Settling under the bare sport id instead wrote to a
@@ -1313,16 +1552,40 @@ export const onMatchSettled = onDocumentUpdated(
       }
     }
 
-    // Stamped in the SAME batch as the ratings it accounts for, so the marker
-    // and the payment cannot come apart: either both land or neither does.
-    batch.set(
-      event.data.after.ref,
-      { ratingSettledAt: new Date() },
-      { merge: true },
-    );
-
+    // No marker write here any more: `claimRatingSettlement` stamped it in a
+    // transaction before any of this arithmetic ran, which is what stops two
+    // invocations paying the same match. Writing it again would be harmless but
+    // would record the wrong moment — the instant the ratings landed rather
+    // than the instant this fixture stopped being available to settle.
     await batch.commit();
     logger.info(`Fixture ${fixtureId}: settled ${settled} player ratings.`);
+
+    // The headline composite on each player's profile, refreshed the moment
+    // the ratings under it move — a player should walk off the pitch with
+    // their number already changed, not find out at 3am when the nightly pass
+    // runs. See `functions/overall_glicko.js` for why this is denormalised
+    // onto the user document at all.
+    //
+    // Deliberately after the commit and outside it. This is a derived display
+    // value: if it fails, the ratings it derives from are already safely
+    // written and tonight's scheduled pass will produce the same answer.
+    // Folding it into the batch above would mean a hiccup computing a rounded
+    // number for a card could roll back a settled match result.
+    try {
+      const refreshed = await refreshOverallForUids(
+        [...sideA, ...sideB],
+        settledAt,
+      );
+      logger.info(
+        `Fixture ${fixtureId}: refreshed ${refreshed.updated} overall ratings.`,
+      );
+    } catch (err) {
+      logger.warn(
+        `Fixture ${fixtureId}: overall rating refresh failed, ` +
+          'leaving it to the nightly pass.',
+        err,
+      );
+    }
   },
 );
 
@@ -1343,9 +1606,38 @@ function itemCountOf(donation) {
   return donation.items.reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
 }
 
+/**
+ * Who is on call for one staff queue.
+ *
+ * `platformStaff` exists because the thing that actually GRANTS staff access —
+ * the `admin` custom claim — cannot be queried. Claims live on auth tokens,
+ * and there is no "list every account whose token carries admin" short of
+ * walking every user in the project. So before this roster existed, an ad
+ * campaign submission, a donation and a raised need each landed in Firestore
+ * with nobody to notify, and were only ever discovered by somebody choosing to
+ * go and look.
+ *
+ * Returns [] on any failure rather than throwing: a notification that cannot
+ * find its recipients must not take the trigger down with it, because the
+ * trigger's other job (the impact tally below) is the one that cannot be
+ * reconstructed later. See `StaffMember` in
+ * lib/core/models/platform_staff.dart.
+ */
+async function staffUidsForDesk(desk) {
+  try {
+    const snap = await db.collection('platformStaff')
+      .where('desks', 'array-contains', desk)
+      .get();
+    return snap.docs.map((d) => d.id);
+  } catch (error) {
+    logger.warn('staff lookup failed', { desk, error: String(error) });
+    return [];
+  }
+}
+
 export const onDonationCreated = onDocumentCreated(
   'giveDonations/{donationId}',
-  async () => {
+  async (event) => {
     await db.doc('give/impactStats').set(
       {
         donationsCount: FieldValue.increment(1),
@@ -1353,6 +1645,164 @@ export const onDonationCreated = onDocumentCreated(
       },
       { merge: true },
     );
+
+    // Tell the Give desk something has arrived. A donation is a person
+    // standing somewhere with a bag of kit expecting to be met, so the value
+    // of this notification decays in hours — but it is deliberately routed
+    // through the digest like every other non-critical type, because a team
+    // of four woken individually by every donation stops reading any of them.
+    const data = event.data?.data();
+    if (!data) return;
+    const staff = await staffUidsForDesk('give');
+    if (staff.length === 0) return;
+
+    const isMoney = data.type === 'money';
+    await sendToUsersDigestAware(staff, notification({
+      id: `give_donation_${event.params.donationId}`,
+      type: 'give_donation_submitted',
+      title: isMoney ? 'A money pledge came in' : 'A kit donation came in',
+      body: [
+        data.donorName || 'Someone',
+        isMoney
+          ? `pledged \u20B9${Math.round((data.amountPaise || 0) / 100)}`
+          : `is donating ${itemCountOf(data)} item(s)`,
+        data.city ? `in ${data.city}` : null,
+      ].filter(Boolean).join(' '),
+      route: '/ops/give',
+    }));
+  },
+);
+
+/**
+ * A club has raised a shortfall.
+ *
+ * Worth its own trigger rather than a branch of the donation one, and for a
+ * sharper reason than tidiness: an unverified need is INVISIBLE — see
+ * `GiveRepository.watchVerifiedNeeds`. Until somebody on the Give desk
+ * verifies it, no donor in the country can see that a village club is six
+ * pairs of pads short. Silence here is not a missed notification, it is a need
+ * that never reaches the board at all.
+ */
+export const onGiveNeedRaised = onDocumentCreated(
+  'giveNeeds/{needId}',
+  async (event) => {
+    const data = event.data?.data();
+    if (!data) return;
+    const staff = await staffUidsForDesk('give');
+    if (staff.length === 0) return;
+
+    await sendToUsersDigestAware(staff, notification({
+      id: `give_need_${event.params.needId}`,
+      type: 'give_need_raised',
+      title: 'A need needs verifying',
+      body: [
+        data.title || 'A shortfall was raised',
+        data.orgName || data.playerName,
+        data.city,
+      ].filter(Boolean).join(' — '),
+      route: '/ops/give/needs',
+    }));
+  },
+);
+
+/**
+ * Telling a donor their kit moved.
+ *
+ * The traceability promise `GiveDonation`'s class doc makes — "delivered to a
+ * club in Telangana" — was previously only kept if the donor opened the app
+ * and checked. Only the two stages a donor can act on or celebrate are worth a
+ * push; the seven intermediate ones are visible on their own screen and
+ * notifying each would turn one donation into nine buzzes.
+ */
+export const onDonationStageNotified = onDocumentUpdated(
+  'giveDonations/{donationId}',
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (!before || !after || before.status === after.status) return;
+    if (!['collected', 'distributed', 'rejected'].includes(after.status)) return;
+    if (!after.donorUid) return;
+
+    const title = after.status === 'collected'
+      ? 'Your donation has been collected'
+      : after.status === 'distributed'
+        ? 'Your donation reached a player'
+        : 'One of your donated items could not be reused';
+
+    await sendToUsersDigestAware([after.donorUid], notification({
+      id: `give_stage_${event.params.donationId}_${after.status}`,
+      type: 'give_donation_advanced',
+      title,
+      body: after.status === 'rejected'
+        ? 'It was not safe to pass on. Thank you for offering it.'
+        : 'Follow the rest of its journey in My donations.',
+      route: '/give/mine',
+    }));
+  },
+);
+
+/**
+ * An advertiser has submitted a campaign.
+ *
+ * This is the trigger the advertising feature shipped without. A campaign
+ * landed `pending` and the only path to approval was somebody opening the
+ * Firebase console — so an advertiser's submission genuinely went nowhere,
+ * and the product had no way to tell its owner otherwise. See
+ * `AdReviewScreen`.
+ */
+export const onAdCampaignSubmitted = onDocumentCreated(
+  'adCampaigns/{campaignId}',
+  async (event) => {
+    const data = event.data?.data();
+    if (!data || data.status !== 'pending') return;
+    const staff = await staffUidsForDesk('ads');
+    if (staff.length === 0) return;
+
+    await sendToUsersDigestAware(staff, notification({
+      id: `ad_submitted_${event.params.campaignId}`,
+      type: 'ad_campaign_submitted',
+      title: 'A campaign is waiting for approval',
+      body: [
+        data.advertiserName || 'An advertiser',
+        data.headline ? `— "${data.headline}"` : null,
+      ].filter(Boolean).join(' '),
+      route: '/ops/ads',
+    }));
+  },
+);
+
+/**
+ * The advertiser hearing back.
+ *
+ * `reviewNote` carries the reason a reviewer typed, and putting it in the body
+ * is the whole point of having asked for one — see `AdRepository.review`.
+ */
+export const onAdCampaignReviewed = onDocumentUpdated(
+  'adCampaigns/{campaignId}',
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (!before || !after || before.status === after.status) return;
+    if (!after.advertiserUid) return;
+
+    const titles = {
+      approved: 'Your campaign is live',
+      rejected: 'Your campaign was not approved',
+      paused: 'Your campaign has been paused',
+    };
+    const title = titles[after.status];
+    if (!title) return;
+
+    await sendToUsersDigestAware([after.advertiserUid], notification({
+      id: `ad_reviewed_${event.params.campaignId}_${after.status}`,
+      type: 'ad_campaign_reviewed',
+      title,
+      body: after.reviewNote
+        || (after.status === 'approved'
+          ? 'It will start appearing in the slots you chose.'
+          : 'Open the advertising console for details.'),
+      route: '/ads',
+    }));
   },
 );
 
@@ -1419,7 +1869,7 @@ export const onSponsorPledgeCreated = onDocumentCreated(
     const listing = listingSnap.data();
     if (!listing?.createdByUid) return;
 
-    await sendToUsers([listing.createdByUid], notification({
+    await sendToUsersDigestAware([listing.createdByUid], notification({
       id: `sponsor_pledge_${event.params.pledgeId}`,
       type: 'sponsor_pledge_received',
       title: `${data.sponsorDisplayName ?? 'A sponsor'} has offered to help`,
@@ -1449,7 +1899,7 @@ export const onSponsorPledgeStatusChanged = onDocumentUpdated(
     }
 
     if (after.status === 'accepted' || after.status === 'declined') {
-      await sendToUsers([after.sponsorUid], notification({
+      await sendToUsersDigestAware([after.sponsorUid], notification({
         id: `sponsor_pledge_resolved_${event.params.pledgeId}`,
         type: 'sponsor_pledge_resolved',
         title: after.status === 'accepted'
@@ -1497,7 +1947,16 @@ export const onMatchRsvp = onDocumentWritten(
     // document — without this test the club would be pushed once per answer.
     if (!before) {
       const members = await activeMemberUids(orgId);
-      const recipients = members.filter((u) => u !== after.authorUid);
+      // A call may name its audience — see `MatchCall.invitedUids`. A club of
+      // 120 asking about an eleven-a-side match wants the twenty who might
+      // travel, and pushing the other hundred is exactly what the naming was
+      // for. Still intersected with the membership so a uid left over from
+      // someone who has since left the club is not notified.
+      const invited = Array.isArray(match.invitedUids) ? match.invitedUids : [];
+      const audience = invited.length === 0
+        ? members
+        : members.filter((u) => invited.includes(u));
+      const recipients = audience.filter((u) => u !== after.authorUid);
       await sendToUsers(recipients, notification({
         id: `match_rsvp_${announcementId}`,
         type: 'match_rsvp',
@@ -1594,3 +2053,9 @@ function formatKickOff(when) {
     timeZone: 'Asia/Kolkata',
   });
 }
+
+// ---------------------------------------------------------------------------
+// The Arena — idle-game cleanup and the (deliberately Glicko-free) ladder.
+// See arena.js for why both have to be server-side.
+// ---------------------------------------------------------------------------
+export { closeIdleArenaGames, onArenaMatchFinished } from './arena.js';

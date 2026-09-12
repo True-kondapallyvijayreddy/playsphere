@@ -1,7 +1,6 @@
 import 'dart:async';
-import 'dart:typed_data';
-
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 
 import '../core/errors/app_exception.dart';
@@ -19,6 +18,7 @@ import '../core/models/match_player.dart';
 import '../core/models/scoring_request.dart';
 import '../core/models/squad_entry.dart';
 import '../core/models/team.dart';
+import '../core/models/tournament.dart';
 import '../core/models/venue.dart' as venue_model;
 import '../core/sync/uuid_v7.dart';
 import '../domain/draw/fixture_generator.dart';
@@ -51,6 +51,23 @@ class TeamDraftSpec {
   final List<String> memberUids;
   final String? captainUid;
   final String? houseName;
+}
+
+/// An entry, with the event it was made in.
+///
+/// Exists because a collection-group query returns documents from everywhere
+/// at once and the reader has to be told where each one came from.
+@immutable
+class MyEntry {
+  const MyEntry({
+    required this.orgId,
+    required this.compId,
+    required this.registration,
+  });
+
+  final String orgId;
+  final String compId;
+  final Registration registration;
 }
 
 class CompetitionRepository {
@@ -105,6 +122,41 @@ class CompetitionRepository {
   }) =>
       guard(
         () => Refs.competition(orgId, compId).update({'bannerUrl': null}),
+      );
+
+  /// Puts the event's badge on its header, beside its name.
+  ///
+  /// A separate object and a separate field from the banner, exactly as
+  /// `TournamentRepository.uploadSeasonLogo` is: the crest is squared and
+  /// drawn small, the banner is a full-bleed photograph, and a club that has
+  /// one very often does not have the other. Shrunk to 512px on the way in,
+  /// which is why this takes the default 4 MB ceiling rather than the
+  /// banner's 6.
+  Future<String> uploadEventLogo({
+    required String orgId,
+    required String compId,
+    required String uid,
+    required Uint8List bytes,
+    required String contentType,
+  }) =>
+      guard(() async {
+        final url = await _media.putImage(
+          folder: 'competitions/$compId/logo',
+          uid: uid,
+          bytes: bytes,
+          contentType: contentType,
+        );
+        await Refs.competition(orgId, compId).update({'logoUrl': url});
+        return url;
+      });
+
+  /// Goes back to no crest, which is the normal state.
+  Future<void> removeEventLogo({
+    required String orgId,
+    required String compId,
+  }) =>
+      guard(
+        () => Refs.competition(orgId, compId).update({'logoUrl': null}),
       );
 
   /// Failures from a write that was applied to the local cache and returned
@@ -166,6 +218,32 @@ class CompetitionRepository {
             ),
       );
 
+  /// One entry this person holds, and where it lives.
+  ///
+  /// [Registration] itself carries neither the club nor the event — it never
+  /// needed to, because every screen that reads one already knows which event
+  /// page it is on. A cross-club query has no such context, so the path is
+  /// read off the document reference here and travels with it.
+  Stream<List<MyEntry>> watchMyEntries(String uid, {bool asTeamMember = false}) {
+    final q = asTeamMember
+        ? Refs.allRegistrationsQuery.where('memberUids', arrayContains: uid)
+        : Refs.allRegistrationsQuery.where('uid', isEqualTo: uid);
+    return guardStream(
+      () => q.snapshots().map(
+            (snap) => [
+              for (final doc in snap.docs)
+                if (doc.reference.parent.parent case final comp?)
+                  if (comp.parent.parent case final org?)
+                    MyEntry(
+                      orgId: org.id,
+                      compId: comp.id,
+                      registration: Registration.fromDoc(doc),
+                    ),
+            ],
+          ),
+    );
+  }
+
   Stream<List<Registration>> watchRegistrations(
     String orgId,
     String compId, {
@@ -223,15 +301,25 @@ class CompetitionRepository {
 
   /// Live matches across an entire organization — powers the spectator
   /// "what's on right now" screen that remote viewers land on.
+  ///
+  /// [_liveFixturesSafetyCap] is a safety net, not a real limit: a club's
+  /// concurrently-live matches are bounded by how many courts/grounds it
+  /// physically has, which stays small even for a large season. It exists so
+  /// that a club that never closes out old `live` fixtures (see
+  /// `isLiveAt`/`isStaleLiveAt` in `Fixture` — those are known to accumulate)
+  /// cannot turn this into an unbounded stream to every spectator's device.
   Stream<List<Fixture>> watchLiveFixtures(String orgId) {
     return guardStream(
       () => Refs.allFixturesQuery
           .where('orgId', isEqualTo: orgId)
           .where('status', isEqualTo: FixtureStatus.live.wire)
+          .limit(_liveFixturesSafetyCap)
           .snapshots()
           .map((snap) => snap.docs.map(Fixture.fromDoc).toList()),
     );
   }
+
+  static const _liveFixturesSafetyCap = 300;
 
   /// Fixtures a specific person is assigned to score.
   Stream<List<Fixture>> watchMyScoringAssignments(String uid) {
@@ -277,15 +365,69 @@ class CompetitionRepository {
             .update(competition.toUpdate()),
       );
 
+  /// Moves one event through its lifecycle.
+  ///
+  /// [seasonId] is the event's `tournamentId` when it belongs to a season,
+  /// and passing it is what keeps the season and its draws telling the same
+  /// story — see [_liftSeasonOutOfDraft]. Callers holding the `Competition`
+  /// should always pass `c.tournamentId`; it costs nothing when null.
   Future<void> setStatus({
     required String orgId,
     required String compId,
     required CompetitionStatus status,
+    String? seasonId,
   }) =>
-      guard(() => Refs.competition(orgId, compId).update({
-            'status': status.wire,
-            'updatedAt': FieldValue.serverTimestamp(),
-          }));
+      guard(() async {
+        await Refs.competition(orgId, compId).update({
+          'status': status.wire,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+        if (status == CompetitionStatus.registrationOpen && seasonId != null) {
+          await _liftSeasonOutOfDraft(orgId, seasonId);
+        }
+      });
+
+  /// Takes a season out of `draft` once one of its draws opens for entries.
+  ///
+  /// ## The disagreement this ends
+  ///
+  /// [TournamentRepository.openEntriesForSeason] moves the season and every
+  /// draft under it in one batch, precisely so "the season header and the
+  /// events under it cannot disagree about whether the season is taking
+  /// entries". Opening ONE draw from its own page had no such rule, and it is
+  /// the commoner path — an organizer publishes a sports week, opens the
+  /// under-14 badminton to see how it goes, and the season page still says
+  /// **Draft** while people are registering for it. The home screen's
+  /// "Active seasons & tournaments" row appears (correctly — the draw is what
+  /// decides), and a member who taps it lands on a board labelled Draft.
+  ///
+  /// ## Why it only ever climbs out of draft
+  ///
+  /// `draft` is the one status that is provably wrong here: entries are open,
+  /// so the season is not unpublished. Every other value is a decision
+  /// somebody made — `entriesClosed` after a deadline, `scheduled` once the
+  /// timetable is out, `inProgress` mid-week — and re-opening one draw of a
+  /// season that is already being played must not drag the whole season back
+  /// to "Entries open". So this reads first and writes only from draft.
+  ///
+  /// Failure is swallowed deliberately. The event DID open — that write has
+  /// already landed — and an organizer being shown an error for a cosmetic
+  /// status they never touched would suggest their real action failed. The
+  /// season is corrected the next time anything opens under it.
+  Future<void> _liftSeasonOutOfDraft(String orgId, String seasonId) async {
+    try {
+      final ref = Refs.tournament(orgId, seasonId);
+      final snap = await ref.get();
+      if (!snap.exists) return;
+      if (!Tournament.fromDoc(snap).status.yieldsToAnOpenDraw) return;
+      await ref.update({
+        'status': TournamentStatus.entriesOpen.wire,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (_) {
+      // See above: the event opened, and that is what the organizer asked for.
+    }
+  }
 
   /// Calls an event off, on the record, and tells everybody who had entered.
   ///
@@ -1384,53 +1526,116 @@ class CompetitionRepository {
     required String compId,
   }) =>
       guard(() async {
-        final compDoc = await Refs.competition(orgId, compId).get();
-        final comp = compDoc.exists ? Competition.fromDoc(compDoc) : null;
-
-        final snap = await Refs.registrations(orgId, compId)
-            .where('status', isEqualTo: RegistrationStatus.confirmed.wire)
-            .get();
-
-        if (snap.docs.isEmpty) {
-          throw const ValidationException(
-            'At least two confirmed entries are needed before you can close '
-            'entries and make a draw.',
-          );
-        }
-
-        final batch = Refs.db.batch();
-        int finalEntrantCount = 0;
-
-        // The promotion rules live in `EntrantPromoter` so they can be
-        // tested without a database. Everything this method still does is the
-        // part that genuinely needs Firestore: read the confirmed list, write
-        // the field it resolves to.
-        final promotion = const EntrantPromoter().promote(
-          mode: comp?.teamEntryMode ?? TeamEntryMode.individual,
-          confirmed: snap.docs.map(Registration.fromDoc).toList(),
+        final entrants = await _closeEntries(
+          orgId: orgId,
+          compId: compId,
+          awaitCommit: false,
         );
-        if (!promotion.isReady) {
-          throw ValidationException(promotion.problems.join('\n'));
-        }
-        for (final entrant in promotion.entrants) {
-          batch.set(
-            Refs.entrants(orgId, compId).doc(entrant.id),
-            entrant.toMap(),
-          );
-        }
-        finalEntrantCount = promotion.entrants.length;
-
-        batch.update(Refs.competition(orgId, compId), {
-          'status': CompetitionStatus.registrationClosed.wire,
-          'entrantCount': finalEntrantCount,
-          'updatedAt': FieldValue.serverTimestamp(),
-        });
-
-        unawaited(batch.commit().catchError((Object error) {
-          _writeFailures.add(_translateWriteFailure(error));
-        }));
-        return finalEntrantCount;
+        return entrants.length;
       });
+
+  /// The same close, awaited, returning the field it produced.
+  ///
+  /// ## Why the season path needs its own entry point
+  ///
+  /// [lockFieldAndCreateEntrants] deliberately does not await its write: an
+  /// organizer at a ground with no signal presses "Close entries", the batch
+  /// lands in the local cache, and the count they are shown is already
+  /// correct. Nothing reads the entrants back in that flow — the next thing
+  /// that happens is a screen rebuild off the same cache.
+  ///
+  /// `setUpWholeSeason` is the opposite: the very next thing it does is draw
+  /// FROM these entrants. Firing and forgetting there races the draw against
+  /// the field it is drawn from, which is the bug `seedEntrants` avoids for
+  /// the same reason. So this awaits, and hands the promoted entrants back
+  /// directly rather than making the caller re-read what it just wrote.
+  Future<List<Entrant>> closeEntriesAndPromote({
+    required String orgId,
+    required String compId,
+  }) =>
+      guard(() => _closeEntries(
+            orgId: orgId,
+            compId: compId,
+            awaitCommit: true,
+          ));
+
+  /// Reads the confirmed field, promotes it, and writes the entrants.
+  ///
+  /// Not wrapped in `guard` itself — both callers above are, and nesting
+  /// would translate an already-translated exception a second time.
+  Future<List<Entrant>> _closeEntries({
+    required String orgId,
+    required String compId,
+    required bool awaitCommit,
+  }) async {
+    final compDoc = await Refs.competition(orgId, compId).get();
+    final comp = compDoc.exists ? Competition.fromDoc(compDoc) : null;
+
+    final snap = await Refs.registrations(orgId, compId)
+        .where('status', isEqualTo: RegistrationStatus.confirmed.wire)
+        .get();
+
+    if (snap.docs.isEmpty) {
+      // Read only on the failure path, and worth the extra query there.
+      //
+      // An event open to other clubs takes every entry as PENDING — that is
+      // what `ParticipationModel.approval` means, and it is the whole point
+      // of opening a season to outsiders. So an organizer with thirty
+      // applications sitting unapproved was told "at least two confirmed
+      // entries are needed", which is true, reads as "nobody entered", and
+      // does not mention the thirty people waiting on them.
+      final pending = await Refs.registrations(orgId, compId)
+          .where('status', isEqualTo: RegistrationStatus.pending.wire)
+          .count()
+          .get();
+      final waiting = pending.count ?? 0;
+      if (waiting > 0) {
+        throw ValidationException(
+          '$waiting ${waiting == 1 ? 'entry is' : 'entries are'} waiting for '
+          'your approval, and only approved entries can be drawn. Approve '
+          'them on the event page, then set the season up again.',
+        );
+      }
+      throw const ValidationException(
+        'At least two confirmed entries are needed before you can close '
+        'entries and make a draw.',
+      );
+    }
+
+    // The promotion rules live in `EntrantPromoter` so they can be
+    // tested without a database. Everything this method still does is the
+    // part that genuinely needs Firestore: read the confirmed list, write
+    // the field it resolves to.
+    final promotion = const EntrantPromoter().promote(
+      mode: comp?.teamEntryMode ?? TeamEntryMode.individual,
+      confirmed: snap.docs.map(Registration.fromDoc).toList(),
+    );
+    if (!promotion.isReady) {
+      throw ValidationException(promotion.problems.join('\n'));
+    }
+
+    final batch = Refs.db.batch();
+    for (final entrant in promotion.entrants) {
+      batch.set(
+        Refs.entrants(orgId, compId).doc(entrant.id),
+        entrant.toMap(),
+      );
+    }
+    batch.update(Refs.competition(orgId, compId), {
+      'status': CompetitionStatus.registrationClosed.wire,
+      'entrantCount': promotion.entrants.length,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+
+    if (awaitCommit) {
+      await batch.commit();
+    } else {
+      unawaited(batch.commit().catchError((Object error) {
+        _writeFailures.add(_translateWriteFailure(error));
+      }));
+    }
+    return promotion.entrants;
+  }
 
   /// Writes an entrant list straight onto a competition, bypassing
   /// registration entirely.
@@ -1886,6 +2091,28 @@ class CompetitionRepository {
           field = [
             for (final e in entrants) e.withSeed(byId[e.id]),
           ];
+        }
+
+        // Said before the generator runs, because the generator cannot say
+        // it. `FixtureGenerator` returns an empty list both for "fewer than
+        // two entrants" and for "this format does not produce fixtures at
+        // all", and the caller below collapsed the two into the entrant
+        // message — so a 100m final with forty athletes entered was refused
+        // with "Not enough entrants to make a draw", which is false and sends
+        // an organizer hunting for entrants who are already there.
+        //
+        // Athletics, field events and swimming produce measured marks rather
+        // than pairwise matches: eight sprinters in one heat is not four
+        // fixtures, and `Fixture` holds exactly two sides. Building that is a
+        // real piece of work (heats, lanes, marks, progression) and it has
+        // not been done. Until it is, this says so plainly instead of
+        // blaming the entry list.
+        if (competition.format.isPerformanceFormat) {
+          throw const ValidationException(
+            'Track, field and swimming events are recorded as marks rather '
+            'than as matches, and PlaySphere cannot draw or timetable them '
+            'yet. Score them from the event page instead.',
+          );
         }
 
         final planned = const FixtureGenerator().generate(
@@ -3538,6 +3765,30 @@ class CompetitionRepository {
   }) =>
       guard(() => Refs.fixture(orgId, compId, fixtureId).update({
             'scorerUids': scorerUids,
+          }));
+
+  /// Points a match at the broadcast of it, or takes the pointer away.
+  ///
+  /// Passing null or a blank string deletes the field rather than writing an
+  /// empty one, so `Fixture.streamUrl` has exactly one "there is no stream"
+  /// value and the spectator screen never has to tell an empty string from a
+  /// missing key. A stream that has ended must be removable, or the match
+  /// page keeps offering a dead broadcast for the rest of the season.
+  ///
+  /// The link is not validated here: `StreamLink.parse` is what decides
+  /// whether a string is anything, and the editor refuses to save what it
+  /// cannot parse. Keeping the repository dumb means a link format this build
+  /// has never heard of is still storable by a later one.
+  Future<void> setStreamUrl({
+    required String orgId,
+    required String compId,
+    required String fixtureId,
+    required String? url,
+  }) =>
+      guard(() => Refs.fixture(orgId, compId, fixtureId).update({
+            'streamUrl': (url == null || url.trim().isEmpty)
+                ? FieldValue.delete()
+                : url.trim(),
           }));
 
   // --- Asking to score --------------------------------------------------

@@ -20,6 +20,10 @@ import '../scoring_plugin.dart';
 ///    nothing from it, which is the rule most scorers forget.
 ///  * A match runs to 29 points or a fixed number of boards, whichever the
 ///    organizer chose.
+/// What happened to the queen on a board: the three states that can actually
+/// occur, so a scorer cannot record a fourth.
+enum _Queen { none, covered, uncovered }
+
 class CarromPlugin extends ScoringPlugin {
   const CarromPlugin();
 
@@ -113,6 +117,13 @@ class CarromPlugin extends ScoringPlugin {
         }
         final coinsLeft =
             (action.payload['opponentCoinsLeft'] as num?)?.toInt() ?? 0;
+        // Read as a number, but only ever SENT by a pad that asked for one.
+        // Before the board control declared its prompts this key was never
+        // present, every board scored `0 * coinPoints` plus nothing for a
+        // queen nobody was asked about, and a club match ran its three boards
+        // out to a 0-0 draw. The default stays 0 for the same reason the
+        // prompt is required: a board worth nothing is a plausible board, so
+        // there is no sentinel that could have caught it.
         if (coinsLeft < 0 || coinsLeft > _coinsPerSide(ctx)) {
           return ScoringResult.rejected(
             'A side has ${_coinsPerSide(ctx)} coins, so between 0 and '
@@ -167,8 +178,9 @@ class CarromPlugin extends ScoringPlugin {
   ) {
     final winner = action.side;
     final key = winner == Side.a ? 'a' : 'b';
-    final queenTaken = action.payload['queen'] == true;
-    final queenCovered = action.payload['queenCovered'] == true;
+    final queen = _queenFrom(action.payload);
+    final queenTaken = queen != _Queen.none;
+    final queenCovered = queen == _Queen.covered;
     final running = _score(state, key);
 
     final value = boardValue(
@@ -206,6 +218,29 @@ class CarromPlugin extends ScoringPlugin {
     }
 
     return _settle(next, ctx);
+  }
+
+  /// What the scorer said about the queen, from either shape the payload can
+  /// take.
+  ///
+  /// Two booleans is the shape the engine has always stored and every existing
+  /// board carries, but it is a bad question to PUT: `queen` and
+  /// `queenCovered` can disagree — covered but not pocketed is not a state of
+  /// the world — and a pad that offered two switches would let a scorer record
+  /// it. One question with three answers cannot be answered incoherently, so
+  /// that is what the control asks; the booleans stay as the stored form so no
+  /// board recorded before this reads differently now.
+  static _Queen _queenFrom(Map<String, dynamic> payload) {
+    final v = payload['queen'];
+    if (v is String) {
+      return switch (v) {
+        'covered' => _Queen.covered,
+        'uncovered' => _Queen.uncovered,
+        _ => _Queen.none,
+      };
+    }
+    if (v != true) return _Queen.none;
+    return payload['queenCovered'] == true ? _Queen.covered : _Queen.uncovered;
   }
 
   Map<String, dynamic> _settle(
@@ -299,6 +334,42 @@ class CarromPlugin extends ScoringPlugin {
     // The board sheet needs the coin count and the queen, so the pad opens a
     // form rather than committing on a single tap. These controls declare the
     // intent; the widget layer collects the detail.
+    //
+    // ## Why the coin count is asked for and not assumed
+    //
+    // It IS the board's value. The winner scores one point per coin the loser
+    // still has on the board, so "who won" answers almost nothing on its own —
+    // the same tap is worth one point or nine. Until this prompt existed the
+    // pad sent no count at all, the engine defaulted it to zero, and every
+    // board in a club match was recorded as worth nothing: three boards
+    // played, 0-0, match over, no winner. The button worked and the sport did
+    // not.
+    final coins = [
+      ValuePrompt(
+        key: 'opponentCoinsLeft',
+        label: 'Coins left for the loser',
+        decimals: 0,
+        min: 0,
+        max: _coinsPerSide(ctx).toDouble(),
+      ),
+    ];
+
+    // Asked as one question rather than two switches — see [_queenFrom]. The
+    // wording carries the rule that decides it, because "covered" is the one
+    // carrom term a scorer at a village club may know by a different name and
+    // it is worth three points either way.
+    const queen = [
+      ChoicePrompt(
+        key: 'queen',
+        label: 'Queen',
+        options: [
+          ChoiceOption('none', 'Not pocketed'),
+          ChoiceOption('covered', 'Pocketed and covered'),
+          ChoiceOption('uncovered', 'Pocketed but not covered'),
+        ],
+      ),
+    ];
+
     return [
       ScoreControlGroup(
         title: 'Board won by',
@@ -308,6 +379,8 @@ class CarromPlugin extends ScoringPlugin {
             label: ctx.entrantAName,
             side: Side.a,
             prompts: winner,
+            values: coins,
+            choices: queen,
             style: ControlStyle.primary,
             shortcut: 'a',
             tooltip: 'Record the board to ${ctx.entrantAName}',
@@ -317,6 +390,8 @@ class CarromPlugin extends ScoringPlugin {
             label: ctx.entrantBName,
             side: Side.b,
             prompts: winner,
+            values: coins,
+            choices: queen,
             style: ControlStyle.primary,
             shortcut: 'l',
             tooltip: 'Record the board to ${ctx.entrantBName}',

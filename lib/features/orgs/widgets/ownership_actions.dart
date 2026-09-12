@@ -165,6 +165,7 @@ class OwnershipActions extends ConsumerWidget {
         ],
       ),
     );
+    controller.dispose();
     if (reason == null || !context.mounted) return;
 
     try {

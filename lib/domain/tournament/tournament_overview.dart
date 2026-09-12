@@ -3,6 +3,20 @@ import '../../core/models/enums.dart';
 import '../../core/models/fixture.dart';
 import '../standings/standings_calculator.dart';
 
+/// Who won an event: the entrant, by id and by the name they carried on the
+/// day.
+///
+/// The id matters as much as the name. A challenge names the two clubs as the
+/// two entrants, so `entrantId == orgId` is how a club tells a trophy it won
+/// itself from one its own under-14s won at an event it hosted — two very
+/// different lines on an honours board.
+class Champion {
+  const Champion({required this.entrantId, required this.displayName});
+
+  final String entrantId;
+  final String displayName;
+}
+
 /// One event's line in a tournament summary.
 class EventSummary {
   const EventSummary({
@@ -129,7 +143,7 @@ class TournamentOverview {
         total: own.length,
         played: ownPlayed,
         live: ownLive,
-        champion: _championOf(event, own),
+        champion: championOf(event, own)?.displayName,
       ));
     }
 
@@ -176,14 +190,23 @@ class TournamentOverview {
   ///
   /// Nobody is champion until every match is done: a leader mid-event is not
   /// a winner.
-  static String? _championOf(Competition event, List<Fixture> fixtures) {
+  ///
+  /// Public because a club's honours board asks exactly this question of
+  /// exactly these inputs — see `ClubHonours`. Two definitions of "who won"
+  /// would eventually name two different champions for the same event, one on
+  /// the tournament page and one in the trophy cabinet.
+  static Champion? championOf(Competition event, List<Fixture> fixtures) {
     if (fixtures.isEmpty) return null;
     if (fixtures.any((f) => !f.status.isResulted)) return null;
 
     if (_tableFormats.contains(event.format)) {
       final table = const StandingsCalculator()
           .computeFromFixtures(competition: event, fixtures: fixtures);
-      return table.isEmpty ? null : table.first.displayName;
+      if (table.isEmpty) return null;
+      return Champion(
+        entrantId: table.first.entrantId,
+        displayName: table.first.displayName,
+      );
     }
 
     final resulted = [
@@ -197,9 +220,11 @@ class TournamentOverview {
       return byRound != 0 ? byRound : b.matchIndex.compareTo(a.matchIndex);
     });
     final decider = resulted.first;
-    return decider.winnerEntrantId == decider.entrantAId
-        ? decider.entrantAName
-        : decider.entrantBName;
+    final wonByA = decider.winnerEntrantId == decider.entrantAId;
+    return Champion(
+      entrantId: decider.winnerEntrantId!,
+      displayName: wonByA ? decider.entrantAName : decider.entrantBName,
+    );
   }
 
   /// Formats decided by a table rather than by a last match.

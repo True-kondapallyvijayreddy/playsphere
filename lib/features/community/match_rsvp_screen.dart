@@ -215,7 +215,10 @@ class _Heading extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.fromLTRB(2, 10, 2, 10),
+        // Tight against the cards it heads. The cards are short now — see
+        // [MatchRsvpCard] — and 20pt of air around three words is a fifth of a
+        // card given away on the screen whose whole job is to stack them.
+        padding: const EdgeInsets.fromLTRB(2, 6, 2, 8),
         child: Text(
           text.toUpperCase(),
           style: const TextStyle(

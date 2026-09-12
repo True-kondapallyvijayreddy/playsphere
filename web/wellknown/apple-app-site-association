@@ -1,0 +1,15 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["TEAMID.com.example.playsphere"],
+        "components": [
+          { "/": "/orgs/join", "comment": "Club invite links" },
+          { "/": "/org/*", "comment": "Clubs, events, live scores, tournaments" },
+          { "/": "/player/*", "comment": "Player career pages" },
+          { "/": "/discover*", "comment": "Clubs and players near me" }
+        ]
+      }
+    ]
+  }
+}

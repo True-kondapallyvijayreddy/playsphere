@@ -3,12 +3,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/layout/responsive.dart';
+import '../../core/models/app_user.dart';
 import '../../core/models/enums.dart';
+import '../../core/models/membership_application.dart';
 import '../../core/models/organization.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/identity.dart';
+import 'widgets/applicant_review_sheet.dart';
 
 class JoinOrgScreen extends ConsumerStatefulWidget {
   const JoinOrgScreen({super.key, this.initialCode});
@@ -23,6 +26,7 @@ class JoinOrgScreen extends ConsumerStatefulWidget {
 
 class _JoinOrgScreenState extends ConsumerState<JoinOrgScreen> {
   late final _code = TextEditingController(text: widget.initialCode ?? '');
+  final _note = TextEditingController();
   InviteTarget? _found;
   bool _busy = false;
   String? _notFound;
@@ -41,6 +45,7 @@ class _JoinOrgScreenState extends ConsumerState<JoinOrgScreen> {
   @override
   void dispose() {
     _code.dispose();
+    _note.dispose();
     super.dispose();
   }
 
@@ -71,7 +76,10 @@ class _JoinOrgScreenState extends ConsumerState<JoinOrgScreen> {
 
   Future<void> _join() async {
     final target = _found;
-    final user = ref.read(currentUserProvider).valueOrNull;
+    // The acting profile — the signed-in guardian, or a managed child
+    // they're currently "managing as" — so joining a club works the same
+    // way asking to join a team already does.
+    final user = ref.read(actingProfileProvider);
     if (target == null || user == null) return;
 
     setState(() => _busy = true);
@@ -84,6 +92,7 @@ class _JoinOrgScreenState extends ConsumerState<JoinOrgScreen> {
             orgId: target.orgId,
             user: user,
             requiresApproval: target.requiresApprovalToJoin,
+            application: _application(user),
           );
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -104,6 +113,39 @@ class _JoinOrgScreenState extends ConsumerState<JoinOrgScreen> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  /// The introduction that travels with the request.
+  ///
+  /// Built here rather than in the repository because it describes the person
+  /// applying, and this screen is the only place that has all three sources
+  /// open at once — the profile, their own career record, and what they just
+  /// typed. See [MembershipApplication] for why a club reads this rather than
+  /// the profile itself.
+  ///
+  /// The career read is `valueOrNull`: somebody applying to their first club
+  /// on a slow connection must not be made to wait on a stream whose only job
+  /// is to enrich a message. An application with no sports on it is honest —
+  /// a brand-new player genuinely has none.
+  MembershipApplication _application(AppUser user) {
+    final career = ref.read(careerProvider(user.uid)).valueOrNull ?? const [];
+    final played = [
+      for (final line in career)
+        if (line.matchesPlayed > 0)
+          ApplicantSport(
+            sportId: line.sportId,
+            matchesPlayed: line.matchesPlayed,
+          ),
+    ]..sort((a, b) => b.matchesPlayed.compareTo(a.matchesPlayed));
+
+    return buildApplication(
+      user: user,
+      // Four is what the review sheet can show without becoming a scroll.
+      // Somebody who plays more than four sports is described well enough by
+      // their four biggest.
+      sports: played.take(4).toList(),
+      note: _note.text,
+    );
   }
 
   @override
@@ -187,6 +229,33 @@ class _JoinOrgScreenState extends ConsumerState<JoinOrgScreen> {
                     ),
                   ),
                 ),
+                if (target.requiresApprovalToJoin) ...[
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: _note,
+                    maxLines: 3,
+                    maxLength: MembershipApplication.maxNoteLength,
+                    textCapitalization: TextCapitalization.sentences,
+                    decoration: const InputDecoration(
+                      labelText: 'Anything they should know? (optional)',
+                      hintText: 'I played U-19 cricket in Warangal and have '
+                          'just moved here.',
+                      border: OutlineInputBorder(),
+                      alignLabelWithHint: true,
+                    ),
+                  ),
+                  // Said plainly rather than buried in a policy screen. This
+                  // is the moment the sharing happens, and it is the only
+                  // moment at which saying so can change what somebody does.
+                  Text(
+                    'Your name, age, district and the sports you have played '
+                    'are sent to this club\u2019s admins so they can decide. '
+                    'Nothing is shared with anyone else.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).hintColor,
+                        ),
+                  ),
+                ],
                 const SizedBox(height: 16),
                 FilledButton(
                   onPressed: _busy ? null : _join,

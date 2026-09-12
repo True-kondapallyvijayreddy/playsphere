@@ -27,14 +27,42 @@
 </head>
 <body>
   <script>
-    // Force unregister service worker to prevent stale web caching
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.getRegistrations().then(function(registrations) {
-        for (let registration of registrations) {
-          registration.unregister();
-        }
-      });
-    }
+    // Belt to `web/sw_selfdestruct.js`'s braces.
+    //
+    // That worker is what actually rescues a device stuck on an old build,
+    // because it runs even when this file was served from a stale cache. This
+    // script is the second line of defence, for the visitor who DOES reach a
+    // fresh index.html: it clears any worker and any CacheStorage left behind,
+    // so the next navigation cannot be answered from a previous build.
+    //
+    // Why neither alone is enough, kept here because it cost real time twice:
+    // by the time this script runs, an already-installed worker has served the
+    // page from CacheStorage, and a mobile reload does not bypass a worker the
+    // way desktop devtools does. The no-cache headers in `firebase.json` do
+    // not help either — the worker answers without reaching the network.
+    //
+    // So the build MUST be made with:
+    //
+    //     flutter build web --release --pwa-strategy=none
+    //
+    // and deployed through the `predeploy` hook in `firebase.json`, which
+    // replaces the empty worker that flag emits with the self-destructing one.
+    // Drop either and stale-on-mobile comes straight back.
+    (function () {
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function (regs) {
+          for (var i = 0; i < regs.length; i++) regs[i].unregister();
+        }).catch(function () {});
+      }
+      // Named caches are the old worker's copy of index.html and main.dart.js.
+      // Nothing in this app reads CacheStorage deliberately, so clearing all
+      // of it discards only stale build artefacts.
+      if (window.caches && caches.keys) {
+        caches.keys().then(function (names) {
+          for (var i = 0; i < names.length; i++) caches.delete(names[i]);
+        }).catch(function () {});
+      }
+    })();
   </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>

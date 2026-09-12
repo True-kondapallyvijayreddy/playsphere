@@ -10,6 +10,7 @@ import '../../core/models/group_entry.dart';
 import '../../core/models/organization.dart';
 import '../../core/models/scoring_request.dart';
 import '../../core/models/tournament_invite.dart';
+import '../../core/l10n/locale_controller.dart';
 import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 
@@ -39,14 +40,110 @@ final myActiveOrgIdsProvider = Provider<List<String>>((ref) {
   return [for (final m in active) m.orgId];
 });
 
+/// Which club the person is *in* right now, and the persistence behind it.
+///
+/// ## Why a club needed to be a standing choice at all
+///
+/// PlaySphere is used from inside one club at a time. A player belongs to a
+/// school team and a weekend academy; a coach runs two age groups at two
+/// clubs. Everything they open — the live matches, the quick match they
+/// start, the event they create — has to hang off one of them, and until this
+/// existed the app picked for them: the most recently joined club, silently,
+/// on every screen. Someone who joined a district academy once in March spent
+/// the rest of the year being pointed at it, and the only way to work as
+/// their own club again was to walk into that club's page and stay there.
+///
+/// So the club is now a selection the person makes and the app remembers,
+/// stated in the app bar on every screen and switchable from there and from
+/// the dashboard — see `ClubChip` and the club strip on `HomeScreen`.
+///
+/// ## What it falls back to, and what it refuses to invent
+///
+/// A saved choice is honoured only while it is still an active membership: a
+/// person removed from a club must not keep acting as it. Otherwise the
+/// most-recently-joined club stands in, which is the old behaviour and the
+/// right default for the overwhelming majority who are in exactly one.
+///
+/// Someone who has just installed the app is in no club, and the answer is
+/// null rather than a placeholder. Every caller already handles null by
+/// hiding the thing that needs a club — a "Live now" tab that opens an error
+/// is worse than one that is absent — and the UI says "No club yet" with the
+/// way to join one, which is the only honest thing to show.
+///
+/// Keyed by the profile in use rather than the account, so a parent switched
+/// into a child's profile gets the child's club, not their own.
+class CurrentClubController extends Notifier<String?> {
+  static String _keyFor(String uid) => 'ps.currentClub.$uid';
+
+  @override
+  String? build() {
+    final uid = ref.watch(currentUidProvider);
+    final active = ref.watch(myActiveOrgIdsProvider);
+    if (uid == null || active.isEmpty) return null;
+    final saved = ref.watch(sharedPreferencesProvider)?.getString(_keyFor(uid));
+    if (saved != null && active.contains(saved)) return saved;
+    return active.first;
+  }
+
+  /// Makes `orgId` the club this person is acting as. Ignores a club they are
+  /// not an active member of, which is what a stale deep link or a membership
+  /// revoked in another session looks like from here.
+  void switchTo(String orgId) {
+    if (!ref.read(myActiveOrgIdsProvider).contains(orgId)) return;
+    state = orgId;
+    final uid = ref.read(currentUidProvider);
+    if (uid == null) return;
+    ref.read(sharedPreferencesProvider)?.setString(_keyFor(uid), orgId);
+  }
+}
+
+/// The club this person is currently in — null for an account that has not
+/// joined one. See [CurrentClubController].
+final currentClubIdProvider =
+    NotifierProvider<CurrentClubController, String?>(CurrentClubController.new);
+
 /// The club the global screens point their org-scoped links at.
 ///
-/// The most recently joined one, because that is overwhelmingly the club a
-/// person is currently active in — a student who joined a district academy
-/// last week is not opening the app for the school club they joined in 2019.
-final primaryOrgIdProvider = Provider<String?>((ref) {
-  final ids = ref.watch(myActiveOrgIdsProvider);
-  return ids.isEmpty ? null : ids.first;
+/// The same answer as [currentClubIdProvider], under the name the org-scoped
+/// links have always used. Kept as its own provider because "which club do I
+/// aim this link at" and "which club am I in" are the same question only for
+/// as long as the app has one selection, and the call sites read better for
+/// saying which one they mean.
+final primaryOrgIdProvider =
+    Provider<String?>((ref) => ref.watch(currentClubIdProvider));
+
+/// The club a global "start something" button should act in, given what that
+/// action needs the person to be allowed to do.
+///
+/// ## Why this is not just [currentClubIdProvider]
+///
+/// The dashboard's buttons — Play sport, Challenge, New event — belong to no
+/// club, so each has to pick one. They used to pick the first club in the
+/// list where the person held the right, which had nothing to do with the
+/// club named at the top of the screen: a player whose chip said "Nizampet
+/// High School" could press New event and land in a season form creating for
+/// the academy they also coach at. The form said so, in its own banner, but
+/// by then the app had already contradicted itself in the one place it
+/// promises not to.
+///
+/// So the selection comes first, always, and the capability only decides
+/// whether it can stand: pass `null` for the actions any member can take, or
+/// the capability the destination screen actually enforces. Falling back to
+/// another club — rather than showing nothing — is deliberate for the case
+/// where the selected club genuinely cannot host the action; the create
+/// screens all name the club they are creating as, so a fallback is stated
+/// rather than silent. See `ClubContextBanner`.
+final actingOrgIdProvider = Provider.family<String?, Capability?>((ref, needs) {
+  bool allowed(String id) =>
+      needs == null || ref.watch(myCapabilitiesProvider(id)).contains(needs);
+
+  final current = ref.watch(currentClubIdProvider);
+  if (current != null && allowed(current)) return current;
+
+  for (final id in ref.watch(myActiveOrgIdsProvider)) {
+    if (allowed(id)) return id;
+  }
+  return null;
 });
 
 /// Everything being played right now, across every club this person is in,
@@ -91,6 +188,39 @@ final myLiveFixturesProvider = Provider<AsyncValue<List<Fixture>>>((ref) {
 final myLiveFixtureFailuresProvider = Provider<int>(
   (ref) => ref.watch(myLiveFixturesPartialProvider).failures.length,
 );
+
+/// The live matches this person is holding the pen for.
+///
+/// ## Why this is not "live matches at my clubs"
+///
+/// [myLiveFixturesProvider] answers "what is on right now", which is a
+/// spectator's question and rightly includes matches this person has nothing
+/// to do with. Scoring is a different relationship: a scorer who leaves the
+/// pad — to check a rule, to answer a call, because the phone locked — is not
+/// browsing, they are mid-job, and the match they were on is the ONLY one they
+/// want back. Filtering by `scorerUids` is what makes a one-tap door possible;
+/// a list of everything live is a search.
+///
+/// Sorted by kick-off so the one at the top of a doubles-up is the one that
+/// started first, which is the one somebody scoring two courts is behind on.
+final myScoringFixturesProvider = Provider<List<Fixture>>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return const [];
+  final live = ref.watch(myLiveFixturesProvider).valueOrNull ?? const <Fixture>[];
+  // `scorerUids` and not `canBeScoredBy`: an org manager can score any of
+  // their club's matches, and offering a club admin a "resume scoring" door
+  // into every match their club has on is not a resume, it is a fixture list.
+  // Only somebody actually named as a scorer is mid-job.
+  // An unscheduled match sorts last rather than crashing the comparator: a
+  // quick match started on a court has no kick-off time and is exactly the
+  // kind of fixture this is for.
+  final far = DateTime.utc(9999);
+  final mine = [
+    for (final f in live)
+      if (f.scorerUids.contains(uid)) f,
+  ]..sort((a, b) => (a.scheduledAt ?? far).compareTo(b.scheduledAt ?? far));
+  return mine;
+});
 
 /// Matches your clubmates are playing right now — including at other clubs.
 ///
@@ -308,6 +438,25 @@ final matchRsvpsProvider =
   return ref.watch(communityRepositoryProvider).watchMatchRsvps(orgId);
 });
 
+/// The availability calls one club has posted about one challenge.
+///
+/// Keyed on the challenge id rather than the date because a club may well have
+/// two things on the same Saturday, and pulling the wrong poll's yeses onto a
+/// team sheet is the failure the whole join exists to prevent — the same
+/// reasoning `SquadRsvpActions` applies to fixtures.
+///
+/// A list, not a single call: a club that asked its first-choice twenty a
+/// fortnight out and then opened it to everybody on the Friday has asked
+/// twice, and both sets of answers count.
+final challengeRsvpsProvider = Provider.family<List<Announcement>,
+    ({String orgId, String challengeId})>((ref, key) {
+  return [
+    for (final a in ref.watch(matchRsvpsProvider(key.orgId)).valueOrNull ??
+        const <Announcement>[])
+      if (a.match?.forChallenge?.challengeId == key.challengeId) a,
+  ];
+});
+
 /// The discussion under one match call.
 ///
 /// A record rather than two positional args so the family key compares by
@@ -342,13 +491,28 @@ final matchCommentsProvider = StreamProvider.family<List<MatchChatMessage>,
 /// So this is [myActiveOrgIdsProvider] — active membership, nothing else. No
 /// capability gate: unlike a challenge or a join request, a match call is
 /// aimed at the ordinary member, and they are exactly who must see it.
+///
+/// ## Why it is filtered by audience
+///
+/// Most calls are addressed to the whole club and every member sees them. A
+/// club that named the twenty people it wants for Saturday is asking those
+/// twenty, and putting the question on the other hundred members' dashboards
+/// undoes the naming — see [MatchCall.invitedUids]. The call is still on the
+/// club's board for anyone who goes looking; what it no longer does is
+/// interrupt people it was not addressed to.
 final myMatchRsvpsProvider =
     Provider<AsyncValue<List<Announcement>>>((ref) {
   final orgIds = ref.watch(myActiveOrgIdsProvider);
   if (orgIds.isEmpty) return const AsyncValue.data([]);
+  final uid = ref.watch(currentUidProvider);
   final combined = combineAsyncAll([
     for (final id in orgIds) ref.watch(matchRsvpsProvider(id)),
-  ]);
+  ]).whenData((all) => uid == null
+      ? all
+      : [
+          for (final a in all)
+            if (a.isAddressedTo(uid)) a,
+        ]);
   return combined.whenData((all) {
     // Soonest kick-off first, NOT newest posted first.
     //

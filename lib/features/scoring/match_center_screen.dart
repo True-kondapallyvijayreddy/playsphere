@@ -17,6 +17,7 @@ import '../../shared/app_scaffold.dart';
 import '../../shared/ui_kit.dart';
 import 'match_setup.dart';
 import 'registered_squad.dart';
+import 'widgets/live_stream_panel.dart';
 import 'widgets/scoring_control.dart';
 
 /// The hub a match opens into, whatever it came from.
@@ -81,6 +82,10 @@ class MatchCenterScreen extends ConsumerWidget {
             children: [
               _Header(fixture: fixture, competitionName: competition?.name),
               const SizedBox(height: 12),
+              // Stated at the top of the match, and never asked again:
+              // _StartAction below already goes straight to the pad once a
+              // toss exists, so this is the only place it still appears.
+              TossResultStrip(fixture: fixture),
               if (canManage) ...[
                 _OpponentsCard(fixture: fixture),
                 const SizedBox(height: 12),
@@ -90,6 +95,16 @@ class MatchCenterScreen extends ConsumerWidget {
                 canManage: canManage,
               ),
               const SizedBox(height: 12),
+              // The broadcast link, set here rather than only on the
+              // spectator screen. A club that films its matches decides who
+              // is filming while it is setting the match up, an hour before
+              // anybody is watching — and the spectator screen is the one
+              // place the organizer is NOT looking once the ball is in play.
+              // Renders nothing without the rights to set it.
+              if (canManage) ...[
+                LiveStreamPanel(fixture: fixture),
+                const SizedBox(height: 12),
+              ],
               _ConfigurationCard(fixture: fixture),
               const SizedBox(height: 20),
               _StartAction(

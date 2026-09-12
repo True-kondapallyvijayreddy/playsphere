@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ (android:dataExtractionRules). Same exclusions as
+     backup_rules.xml, applied to both transports: cloud-backup covers the
+     Google-account backup, device-transfer covers a direct phone-to-phone
+     copy. The two are configured separately, and omitting device-transfer is
+     the common way this fix gets half-applied. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="com.google.android.gms.appid.xml" />
+        <exclude domain="sharedpref" path="com.google.firebase.messaging.xml" />
+        <exclude domain="sharedpref" path="com.google.android.gms.measurement.prefs.xml" />
+        <exclude domain="file" path="PersistedInstallation.*.json" />
+        <exclude domain="sharedpref" path="com.google.firebase.auth.api.Store.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="com.google.android.gms.appid.xml" />
+        <exclude domain="sharedpref" path="com.google.firebase.messaging.xml" />
+        <exclude domain="sharedpref" path="com.google.android.gms.measurement.prefs.xml" />
+        <exclude domain="file" path="PersistedInstallation.*.json" />
+        <exclude domain="sharedpref" path="com.google.firebase.auth.api.Store.xml" />
+    </device-transfer>
+</data-extraction-rules>

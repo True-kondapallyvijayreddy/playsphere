@@ -7,6 +7,7 @@ import '../../../core/models/fixture.dart';
 import '../../../domain/memory_tagging.dart';
 import '../../../core/models/memory.dart';
 import '../../../core/providers.dart';
+import '../../../data/memory_composer.dart';
 import '../../../shared/app_scaffold.dart';
 import 'memory_grid.dart';
 
@@ -115,8 +116,17 @@ class MatchMemoriesSection extends ConsumerWidget {
     );
     if (source == null || !context.mounted) return;
 
-    final composed =
-        await ref.read(memoryComposerProvider).pickPhoto(source: source);
+    // Guarded because picking can now FAIL rather than merely return null:
+    // `ImageComposer.contentTypeOf` refuses a HEIC or an AVIF by name instead
+    // of uploading it mislabelled as a JPEG that no browser will draw. That
+    // refusal is a message for the person holding the phone, not a crash.
+    final ComposedMemory? composed;
+    try {
+      composed = await ref.read(memoryComposerProvider).pickPhoto(source: source);
+    } catch (e) {
+      if (context.mounted) showError(context, e);
+      return;
+    }
     if (composed == null || !context.mounted) return;
 
     final result = await showDialog<_MemoryDetails>(
@@ -146,6 +156,9 @@ class MatchMemoriesSection extends ConsumerWidget {
             compId: fixture.compId,
             fixtureId: fixture.id,
             uploaderUid: myUid,
+            // The account, not the profile — storage rules cannot see
+            // custody. See MemoryRepository.upload.
+            storageUid: ref.read(authUidProvider),
             orgIsPublic: org?.visibility == OrgVisibility.public,
             tournamentId: fixture.tournamentId,
             bytes: composed.bytes,

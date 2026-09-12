@@ -7,6 +7,7 @@ import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/identity.dart';
+import 'profile_switcher.dart';
 
 /// A guardian's list of the children they've created a profile for — both
 /// still-managed and already claimed onto the child's own device.
@@ -39,13 +40,13 @@ class ManagedChildrenScreen extends ConsumerWidget {
   }
 }
 
-class _Body extends StatelessWidget {
+class _Body extends ConsumerWidget {
   const _Body({required this.children});
 
   final List<AppUser> children;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     if (children.isEmpty) {
       final hint = Theme.of(context).hintColor;
       return Center(
@@ -97,13 +98,30 @@ class _Body extends StatelessWidget {
                   : 'Claimed — signed in on their own device',
             ),
             trailing: child.isManaged
-                ? FilledButton.tonal(
-                    onPressed: () =>
-                        context.push(Routes.claimCodeFor(child.uid)),
-                    child: const Text('Get code'),
+                ? Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        tooltip: "Open ${child.displayName}'s profile",
+                        icon: const Icon(Icons.switch_account_outlined),
+                        onPressed: () =>
+                            switchToProfile(context, ref, child.uid),
+                      ),
+                      FilledButton.tonal(
+                        onPressed: () =>
+                            context.push(Routes.claimCodeFor(child.uid)),
+                        child: const Text('Get code'),
+                      ),
+                    ],
                   )
                 : Icon(Icons.check_circle, color: Colors.green.shade600),
-            onTap: () => context.push(Routes.profile(child.uid)),
+            // Opening a child you still manage SWITCHES into their profile —
+            // the whole app becomes theirs — rather than pushing their
+            // career page as a viewer. A claimed child is somebody else's
+            // account now, so that one stays a page you visit.
+            onTap: child.isManaged
+                ? () => switchToProfile(context, ref, child.uid)
+                : () => context.push(Routes.profile(child.uid)),
           ),
         );
       },

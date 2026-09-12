@@ -283,7 +283,7 @@ class _TallyCard extends StatelessWidget {
                     ),
                   ),
                   Text(
-                    _format(entry.value),
+                    psFormatStat(entry.value),
                     style: TextStyle(
                       fontSize: 14,
                       fontWeight: FontWeight.w700,
@@ -299,8 +299,7 @@ class _TallyCard extends StatelessWidget {
   }
 
   /// Whole numbers stay whole; rates and averages keep two places.
-  static String _format(num v) =>
-      v is int || v == v.roundToDouble() ? psGrouped(v.round()) : v.toStringAsFixed(2);
+
 
 }
 

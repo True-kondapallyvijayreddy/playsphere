@@ -186,7 +186,13 @@ class ClubContextBanner extends ConsumerWidget {
         ),
       ),
     );
-    if (chosen != null && chosen != orgId) onChanged?.call(chosen);
+    if (chosen == null || chosen == orgId) return;
+    // Picking a club here is picking the club you are acting as, so it moves
+    // the app's selection too — the chip in the bar, the dashboard's buttons
+    // and this form must not end up naming two different clubs. See
+    // [CurrentClubController].
+    ref.read(currentClubIdProvider.notifier).switchTo(chosen);
+    onChanged?.call(chosen);
   }
 }
 

@@ -23,6 +23,67 @@ enum TournamentStatus {
       );
 
   bool get acceptsEntries => this == TournamentStatus.entriesOpen;
+
+  /// Whether a draw opening for entries should carry the season out of this
+  /// status.
+  ///
+  /// True for `draft` alone. A season with a draw taking entries is by
+  /// definition not unpublished, so `draft` is provably wrong and worth
+  /// correcting — a member arriving from the home screen's open-registrations
+  /// row must not land on a board labelled **Draft** while its Register
+  /// button works.
+  ///
+  /// Every other value is a decision somebody made: `entriesClosed` after a
+  /// deadline, `scheduled` once the timetable is published, `inProgress`
+  /// mid-week, `cancelled` deliberately. Re-opening one draw of a season
+  /// already being played must not drag the whole season back to "Entries
+  /// open", so nothing else yields.
+  ///
+  /// Lives here rather than in the repository that acts on it because it is a
+  /// statement about what these states mean, and the repository half cannot
+  /// be tested without a Firestore.
+  bool get yieldsToAnOpenDraw => this == TournamentStatus.draft;
+}
+
+/// Whether a season charges once for everything, or separately per sport.
+///
+/// ## Why this is stored rather than inferred
+///
+/// Both shapes are real and neither is rare. A school sports week takes ₹100
+/// at the gate and lets a child enter six events; a district open charges
+/// ₹300 for badminton and ₹500 for cricket and expects an entrant to pay for
+/// each draw they enter. Guessing between them from "is the tournament's
+/// number zero" would be wrong in the ordinary case where a per-event season
+/// happens to price every event the same — and worse, it would silently
+/// change meaning the moment an organizer edited one number to zero.
+///
+/// It also decides what an EVENT page may say. Under [wholeSeason] an event
+/// with no fee of its own is not free, it is already paid for, and a screen
+/// that cannot tell those apart will tell an entrant the wrong thing.
+///
+/// Neither mode collects anything — see `FeeSettlement`. This chooses what
+/// number is quoted, not who takes the money.
+enum SeasonFeeMode {
+  /// One fee covers every event in the season. The amount lives on
+  /// [Tournament.entryFeeRupees]; the events carry nothing.
+  wholeSeason('season', 'One fee for the whole season'),
+
+  /// Each event is priced on its own, on `Competition.entryFeeRupees`. The
+  /// tournament's own number is unused and stays zero.
+  perEvent('event', 'A separate fee for each sport');
+
+  const SeasonFeeMode(this.wire, this.label);
+
+  final String wire;
+  final String label;
+
+  /// Defaults to [wholeSeason], which is what every tournament written
+  /// before this field existed meant: its `entryFeeRupees` was the price of
+  /// entering it, and none of its events carried one.
+  static SeasonFeeMode fromWire(String? w) => SeasonFeeMode.values.firstWhere(
+        (e) => e.wire == w,
+        orElse: () => SeasonFeeMode.wholeSeason,
+      );
 }
 
 /// How much a tournament counts — the grade every federation uses to weight
@@ -94,6 +155,7 @@ class Tournament {
     this.grade = TournamentGrade.club,
     this.description,
     this.bannerUrl,
+    this.logoUrl,
     this.venueIds = const [],
     this.startDate,
     this.endDate,
@@ -101,9 +163,11 @@ class Tournament {
     this.eventCount = 0,
     this.contactPhone,
     this.entryFeeRupees = 0,
+    this.feeMode = SeasonFeeMode.wholeSeason,
     this.matchMinutesDefault = 30,
     this.changeoverMinutes = 5,
     this.restGapMinutes = 20,
+    this.venueTransitionMinutes = 0,
     this.isScheduleLocked = false,
     this.scheduleReleasedAt,
     this.isSuspended = false,
@@ -127,6 +191,20 @@ class Tournament {
   /// season's own colour when this is absent, so a tournament created in a
   /// hurry still has a header worth sharing.
   final String? bannerUrl;
+
+  /// The season's own mark — a school crest, a league badge, a sponsor's
+  /// logo — shown on the banner, in the season list and on the public link.
+  ///
+  /// Separate from [bannerUrl] because they answer different questions and a
+  /// club almost always has one before the other: the badge is the thing
+  /// already sitting on somebody's phone, while a 1600px header photograph is
+  /// something a season has to be given. Folding them into one field would
+  /// mean an organizer with only a badge either stretches it across the header
+  /// or uploads nothing.
+  ///
+  /// Null is the normal state: `PsBanner` simply draws no crest, rather than
+  /// a placeholder box, so a season without one is not marked as incomplete.
+  final String? logoUrl;
 
   /// Whether the timetable has been published to participants.
   ///
@@ -198,6 +276,21 @@ class Tournament {
   final String? contactPhone;
   final int entryFeeRupees;
 
+  /// Whether [entryFeeRupees] is the price of the whole season, or whether
+  /// each event carries its own — see [SeasonFeeMode].
+  final SeasonFeeMode feeMode;
+
+  /// True when one payment at the gate covers every event here.
+  ///
+  /// The guard on `entryFeeRupees` matters: a season set to [
+  /// SeasonFeeMode.wholeSeason] with nothing entered is simply free, and an
+  /// event inside it must read as free rather than as "already covered".
+  bool get seasonFeeCoversEverything =>
+      feeMode == SeasonFeeMode.wholeSeason && entryFeeRupees > 0;
+
+  /// True when an entrant pays per draw they enter.
+  bool get chargesPerEvent => feeMode == SeasonFeeMode.perEvent;
+
   /// Scheduling defaults inherited by every event that does not override
   /// them. A tournament-wide rest gap is the one that matters most: it is
   /// the promise that a player in three draws is not called straight from
@@ -206,6 +299,17 @@ class Tournament {
   final int matchMinutesDefault;
   final int changeoverMinutes;
   final int restGapMinutes;
+
+  /// Extra time a person is owed, on top of their rest, when their next match
+  /// is at a *different* venue.
+  ///
+  /// Zero for the ordinary club event, where everything is in one hall and
+  /// there is nothing to travel. It matters the moment a season runs across
+  /// town: someone finishing on the cricket ground at 17:00 with a 30-minute
+  /// rest cannot be on a table-tennis table at 17:30 if the hall is twenty
+  /// minutes away, and a timetable that says they can is a timetable that
+  /// runs late from its first clash onward.
+  final int venueTransitionMinutes;
 
   final String? createdBy;
   final DateTime? createdAt;
@@ -235,6 +339,7 @@ class Tournament {
       grade: TournamentGrade.fromWire(Fs.strOrNull(d['grade'])),
       description: Fs.strOrNull(d['description']),
       bannerUrl: Fs.strOrNull(d['bannerUrl']),
+      logoUrl: Fs.strOrNull(d['logoUrl']),
       venueIds: Fs.strList(d['venueIds']),
       startDate: Fs.dateOrNull(d['startDate']),
       endDate: Fs.dateOrNull(d['endDate']),
@@ -242,9 +347,11 @@ class Tournament {
       eventCount: Fs.integer(d['eventCount']),
       contactPhone: Fs.strOrNull(d['contactPhone']),
       entryFeeRupees: Fs.integer(d['entryFeeRupees']),
+      feeMode: SeasonFeeMode.fromWire(Fs.strOrNull(d['feeMode'])),
       matchMinutesDefault: Fs.integer(d['matchMinutesDefault'], 30),
       changeoverMinutes: Fs.integer(d['changeoverMinutes'], 5),
       restGapMinutes: Fs.integer(d['restGapMinutes'], 20),
+      venueTransitionMinutes: Fs.integer(d['venueTransitionMinutes']),
       isScheduleLocked: Fs.boolean(d['isScheduleLocked']),
       scheduleReleasedAt: Fs.dateOrNull(d['scheduleReleasedAt']),
       isSuspended: Fs.boolean(d['isSuspended']),
@@ -264,6 +371,7 @@ class Tournament {
         'grade': grade.wire,
         'description': description,
         'bannerUrl': bannerUrl,
+        'logoUrl': logoUrl,
         'venueIds': venueIds,
         'startDate': Fs.ts(startDate),
         'endDate': Fs.ts(endDate),
@@ -271,9 +379,11 @@ class Tournament {
         'eventCount': 0,
         'contactPhone': contactPhone,
         'entryFeeRupees': entryFeeRupees,
+        'feeMode': feeMode.wire,
         'matchMinutesDefault': matchMinutesDefault,
         'changeoverMinutes': changeoverMinutes,
         'restGapMinutes': restGapMinutes,
+        'venueTransitionMinutes': venueTransitionMinutes,
         'createdBy': createdBy,
         'createdAt': FieldValue.serverTimestamp(),
       };
@@ -290,16 +400,18 @@ class Tournament {
         'entryDeadline': Fs.ts(entryDeadline),
         'contactPhone': contactPhone,
         'entryFeeRupees': entryFeeRupees,
+        'feeMode': feeMode.wire,
         'matchMinutesDefault': matchMinutesDefault,
         'changeoverMinutes': changeoverMinutes,
         'restGapMinutes': restGapMinutes,
+        'venueTransitionMinutes': venueTransitionMinutes,
         'updatedAt': FieldValue.serverTimestamp(),
       };
-  // `bannerUrl` is deliberately absent from `toUpdate` for the same reason
+  // `bannerUrl` and `logoUrl` are deliberately absent from `toUpdate` for the same reason
   // the suspension fields are: the edit sheet does not show it, so writing it
   // there would mean an organizer fixing a typo in the name silently erased
-  // the artwork somebody else uploaded. `TournamentRepository.uploadBanner`
-  // owns that field.
+  // the artwork somebody else uploaded. `TournamentRepository.uploadSeasonBanner`
+  // and `uploadSeasonLogo` own those two fields.
   //
   // The suspension fields are deliberately absent from both maps above.
   // `TournamentRepository.suspendTournament` and `resumeTournament` own them,
@@ -312,6 +424,7 @@ class Tournament {
     TournamentGrade? grade,
     String? description,
     String? bannerUrl,
+    String? logoUrl,
     List<String>? venueIds,
     DateTime? startDate,
     DateTime? endDate,
@@ -319,9 +432,11 @@ class Tournament {
     int? eventCount,
     String? contactPhone,
     int? entryFeeRupees,
+    SeasonFeeMode? feeMode,
     int? matchMinutesDefault,
     int? changeoverMinutes,
     int? restGapMinutes,
+    int? venueTransitionMinutes,
     bool? isScheduleLocked,
     DateTime? scheduleReleasedAt,
     bool? isSuspended,
@@ -337,6 +452,7 @@ class Tournament {
         grade: grade ?? this.grade,
         description: description ?? this.description,
         bannerUrl: bannerUrl ?? this.bannerUrl,
+        logoUrl: logoUrl ?? this.logoUrl,
         venueIds: venueIds ?? this.venueIds,
         startDate: startDate ?? this.startDate,
         endDate: endDate ?? this.endDate,
@@ -344,9 +460,12 @@ class Tournament {
         eventCount: eventCount ?? this.eventCount,
         contactPhone: contactPhone ?? this.contactPhone,
         entryFeeRupees: entryFeeRupees ?? this.entryFeeRupees,
+        feeMode: feeMode ?? this.feeMode,
         matchMinutesDefault: matchMinutesDefault ?? this.matchMinutesDefault,
         changeoverMinutes: changeoverMinutes ?? this.changeoverMinutes,
         restGapMinutes: restGapMinutes ?? this.restGapMinutes,
+        venueTransitionMinutes:
+            venueTransitionMinutes ?? this.venueTransitionMinutes,
         isScheduleLocked: isScheduleLocked ?? this.isScheduleLocked,
         scheduleReleasedAt: scheduleReleasedAt ?? this.scheduleReleasedAt,
         isSuspended: isSuspended ?? this.isSuspended,

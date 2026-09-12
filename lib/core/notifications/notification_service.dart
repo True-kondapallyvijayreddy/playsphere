@@ -54,17 +54,25 @@ class NotificationService {
   /// listen — the router, to deep-link; a badge, to count.
   Stream<AppNotification> get incoming => _incoming.stream;
 
-  /// Asks for permission and registers this device against [uid].
+  /// Asks for permission and registers this device against every uid in
+  /// [uids].
+  ///
+  /// Usually one: the signed-in account. It is several on a phone that also
+  /// carries managed child profiles — a child with no device of their own has
+  /// this phone as their only device, so their match reminders have to reach
+  /// it, and `sendToUsers` in functions/index.js delivers to
+  /// `users/{uid}/devices`. Registering the same token under each of them is
+  /// what makes a household's notifications arrive at all.
   ///
   /// Safe to call on every sign-in and every app start: token registration is
   /// keyed by the token itself, so re-registering the same device rewrites one
-  /// document rather than accumulating rows.
+  /// document per uid rather than accumulating rows.
   ///
   /// Deliberately swallows its own failures. A player who declines
   /// notifications, or a build without the platform plumbing wired up, must
   /// still get a working app — losing pushes is a degradation, not a reason to
   /// fail a sign-in.
-  Future<void> register(String uid) async {
+  Future<void> register(List<String> uids) async {
     try {
       final settings = await _messaging.requestPermission();
       if (settings.authorizationStatus == AuthorizationStatus.denied) {
@@ -73,14 +81,22 @@ class NotificationService {
       }
 
       final token = await _messaging.getToken();
-      if (token != null) await _storeToken(uid, token);
+      if (token != null) {
+        for (final uid in uids) {
+          await _storeToken(uid, token);
+        }
+      }
 
       // A token can be rotated by the OS at any time. Without this the device
       // silently stops receiving anything, which is the worst failure mode
       // here because nothing appears to be wrong.
       await _onTokenRefresh?.cancel();
       _onTokenRefresh = _messaging.onTokenRefresh.listen(
-        (fresh) => _storeToken(uid, fresh),
+        (fresh) async {
+          for (final uid in uids) {
+            await _storeToken(uid, fresh);
+          }
+        },
         onError: (Object e) =>
             debugPrint('[PlaySphere] token refresh failed: $e'),
       );
@@ -128,14 +144,18 @@ class NotificationService {
   ///
   /// Without it a shared phone keeps delivering one person's match reminders
   /// to the next person who signs in on it.
-  Future<void> unregister(String uid) async {
+  Future<void> unregister(List<String> uids) async {
     // Nothing was ever registered — most obviously in a widget test, or for
     // someone who declined permission — so there is nothing to tear down and
     // no reason to reach for the plugin.
     if (_onMessage == null && _onTokenRefresh == null) return;
     try {
       final token = await _messaging.getToken();
-      if (token != null) await Refs.deviceToken(uid, token).delete();
+      if (token != null) {
+        for (final uid in uids) {
+          await Refs.deviceToken(uid, token).delete();
+        }
+      }
       await _messaging.deleteToken();
     } catch (error) {
       debugPrint('[PlaySphere] notification unregister failed: $error');

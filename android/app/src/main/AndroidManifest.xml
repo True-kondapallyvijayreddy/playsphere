@@ -1,4 +1,16 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The release manifest must declare INTERNET itself. Flutter's template
+         only puts it in the debug and profile manifests, which exist for the
+         tooling's hot-reload channel; a release build that relies on a
+         transitive dependency to merge it in is one dependency bump away from
+         a network-dead app. Every screen here talks to Firestore. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- NotificationService.requestPermission() (firebase_messaging) is a
+         no-op on Android 13+ unless this is declared: the runtime prompt
+         never appears and every push is dropped silently. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <!-- Used to find grounds near the player and, on the owner side, to fill
          a new ground's location with one tap instead of typing coordinates —
          see GroundRepository.watchNearby and the "Use my location" control
@@ -8,9 +20,14 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <application
-        android:label="playsphere"
+        android:label="PlaySphere"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:enableOnBackInvokedCallback="true"
+        android:extractNativeLibs="false"
+        android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules">
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -32,6 +49,48 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+
+            <!-- App Links. A club invite, a live score or a tournament page
+                 shared into a WhatsApp group is an ordinary https:// URL, so
+                 it works for the person with no app — and this is what makes
+                 it open IN the app for the person who has one, without an
+                 "open with" chooser and without a round trip through the
+                 browser.
+
+                 android:autoVerify="true" is the whole mechanism: at install
+                 time Android fetches
+                 https://<host>/.well-known/assetlinks.json and checks that it
+                 names this package and one of the certificates the installed
+                 APK is actually signed with. If that check fails the filter
+                 stays unverified and every link falls back to the browser —
+                 which is the correct degradation, not a broken state, since
+                 the web build serves the same routes.
+
+                 The host must match Routes.publicOrigin. A custom domain
+                 needs its own <data> line here AND its own assetlinks.json
+                 at that domain; adding one without the other silently sends
+                 every link back to the browser. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https"
+                      android:host="playsphere-os.web.app" />
+                <!-- The same Hosting site's other name. Firebase serves both
+                     from one deploy, so the assetlinks.json above is already
+                     there — and a link minted before the .web.app name was
+                     settled on still opens in the app rather than a tab. -->
+                <data android:scheme="https"
+                      android:host="playsphere-os.firebaseapp.com" />
+            </intent-filter>
+
+            <!-- Flutter hands the incoming URI to the app's router only when
+                 this is on; without it the intent-filter above launches the
+                 app on its home screen and the club in the link is lost,
+                 which looks more like a bug than no deep linking at all. -->
+            <meta-data
+                android:name="flutter_deeplinking_enabled"
+                android:value="true" />
         </activity>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->

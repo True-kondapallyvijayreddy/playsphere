@@ -1,4 +1,3 @@
-import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -8,7 +7,9 @@ import 'package:firebase_storage/firebase_storage.dart';
 import '../core/errors/app_exception.dart';
 import '../core/firebase/firestore_refs.dart';
 import '../core/models/app_user.dart';
+import '../core/models/membership_application.dart';
 import '../core/models/billing.dart';
+import '../core/models/claim_code.dart';
 import '../core/models/enums.dart';
 import '../core/models/firestore_codec.dart';
 import '../core/models/player_code.dart';
@@ -168,18 +169,31 @@ class UserRepository {
   /// squad sheet and leaderboard in the product, permanently, with no way to
   /// fix it.
   ///
-  /// Write is self-only in both rule files, which is the whole security story
-  /// here: the uid in the path and the uid in the document are the same one,
-  /// and it is the caller's own.
+  /// Two uids, deliberately.
+  ///
+  /// [uid] is the profile the photo belongs TO; [uploaderUid] is the account
+  /// doing the uploading, and it is the one in the storage path. They are the
+  /// same person for an ordinary account and differ for exactly one case: a
+  /// guardian setting the photo on a child's managed profile.
+  ///
+  /// The split is forced by what each rule file can see. `storage.rules`
+  /// cannot read Firestore — it says so itself — so the only fact it can
+  /// check about an upload is that the path segment is the caller's own uid;
+  /// custody is invisible to it. `firestore.rules` CAN see custody, and it is
+  /// the write of `photoUrl` there that decides which object is anybody's
+  /// photo. So the object is owned by the account that uploaded it, and the
+  /// reference is governed where custody is knowable — the same division the
+  /// club-logo rule already documents.
   Future<String> uploadProfilePhoto({
     required String uid,
+    required String uploaderUid,
     required Uint8List bytes,
     required String contentType,
   }) =>
       guard(() async {
         final url = await _media.putImage(
           folder: 'users/$uid/profile',
-          uid: uid,
+          uid: uploaderUid,
           bytes: bytes,
           contentType: contentType,
           // The rules ceiling for this path is 8 MB; a 512px crest that
@@ -230,6 +244,21 @@ class UserRepository {
   /// field, and the caller skips it when nothing moved.
   Future<void> mirrorOrgIds(String uid, List<String> orgIds) =>
       guard(() => Refs.user(uid).update({'orgIds': orgIds}));
+
+  /// Mirrors the clubs this user has an OUTSTANDING application to, most
+  /// recently applied first.
+  ///
+  /// The counterpart of [mirrorOrgIds], and the thing that lets a club's
+  /// owner read the profile of somebody asking to join it — see
+  /// `AppUser.pendingOrgIds` and the `appliedToClubIManage` rule.
+  ///
+  /// Only the applicant can write it, because `firestore.rules` lets nobody
+  /// else write a `users/{uid}` document. That is why the rule does not trust
+  /// this list on its own: it re-checks the membership row's status, so a
+  /// stale entry left behind by a decision made on somebody else's device
+  /// grants exactly nothing.
+  Future<void> mirrorPendingOrgIds(String uid, List<String> orgIds) =>
+      guard(() => Refs.user(uid).update({'pendingOrgIds': orgIds}));
 
   /// Makes sure this person has a player code, claiming one if they do not.
   ///
@@ -347,13 +376,28 @@ class UserRepository {
   /// Every child this guardian has created, most-recently-added first —
   /// both still-managed and already-claimed, so a claimed child does not
   /// simply vanish from the list the moment they get their own phone.
-  Stream<List<AppUser>> watchManagedChildren(String guardianUid) =>
-      guardStream(
+  ///
+  /// Sorted on the client rather than with `orderBy`. A single equality
+  /// filter is served by the automatic single-field index, so this query can
+  /// never fail with `failed-precondition` — an ordered version needs a
+  /// composite index, and a guardian staring at "not finished setting up on
+  /// the server" is a bad trade for ordering a list that is realistically
+  /// three documents long. A child written seconds ago has a null
+  /// `createdAt` until the server timestamp resolves; those sort first,
+  /// which is where a just-added child belongs anyway.
+  Stream<List<AppUser>> watchManagedChildren(String guardianUid) => guardStream(
         () => Refs.users
             .where('custodianUid', isEqualTo: guardianUid)
-            .orderBy('createdAt', descending: true)
             .snapshots()
-            .map((s) => s.docs.map(AppUser.fromDoc).toList()),
+            .map((s) {
+          final children = s.docs.map(AppUser.fromDoc).toList()
+            ..sort((a, b) {
+              if (a.createdAt == null) return b.createdAt == null ? 0 : -1;
+              if (b.createdAt == null) return 1;
+              return b.createdAt!.compareTo(a.createdAt!);
+            });
+          return children;
+        }),
       );
 
   /// Generates a fresh, short-lived code for `childUid` and claims it,
@@ -367,7 +411,7 @@ class UserRepository {
   }) =>
       guard(() async {
         for (var attempt = 0; attempt < 5; attempt++) {
-          final candidate = _generateClaimCode();
+          final candidate = ClaimCode.generate();
           try {
             await Refs.claimCode(candidate).set({
               'code': candidate,
@@ -420,15 +464,6 @@ class UserRepository {
           'claimedAt': FieldValue.serverTimestamp(),
         }),
       );
-}
-
-/// Six digits, easy to read aloud over a shared village phone — unlike
-/// [PlayerCode], this never has to survive being typed back in by a
-/// stranger from memory, so there's no need for the letters-that-read-wrong
-/// alphabet trick; it only has to survive one immediate, supervised handoff.
-String _generateClaimCode() {
-  final n = Random.secure().nextInt(900000) + 100000;
-  return '$n';
 }
 
 /// What `createManagedChildProfile` hands back.
@@ -720,15 +755,27 @@ class OrgRepository {
   /// A club that does not require approval grants membership immediately; the
   /// invite code is the authorization. The security rules enforce both paths
   /// independently, and neither can mint a role above `member`.
+  /// [application] is the introduction the applicant chose to send with the
+  /// request — see [MembershipApplication] for why the club reads that rather
+  /// than opening a profile it is usually not entitled to open. Empty is a
+  /// valid answer and the row simply carries no introduction.
   Future<MembershipStatus> requestToJoin({
     required String orgId,
     required AppUser user,
     required bool requiresApproval,
+    MembershipApplication application = MembershipApplication.empty,
   }) =>
       guard(() async {
-        final status = requiresApproval
-            ? MembershipStatus.pending
-            : MembershipStatus.active;
+        // Immediate membership is for a PUBLIC club that has opted out of
+        // approving joiners. An unlisted club always decides for itself,
+        // whatever its approval setting says: `firestore.rules` refuses an
+        // active self-join there, so writing one would be a local success the
+        // server rejects a second later — and before that rule existed, anyone
+        // who learned the orgId could walk into an unlisted club and read its
+        // roster, announcements and files.
+        final status = (!requiresApproval && await _orgIsPublic(orgId))
+            ? MembershipStatus.active
+            : MembershipStatus.pending;
 
         final existing = await Refs.member(orgId, user.uid).get();
         if (existing.exists) {
@@ -743,7 +790,11 @@ class OrgRepository {
               'displayName': user.displayName,
               'photoUrl': user.photoUrl,
               'reappliedAt': FieldValue.serverTimestamp(),
+              // A second application replaces the first. Keeping the old one
+              // would show the reviewer the pitch that was already declined.
+              if (application.isNotEmpty) 'application': application.toMap(),
             });
+            await _markApplicationPending(orgId, user);
             return MembershipStatus.pending;
           }
           throw ValidationException(
@@ -767,6 +818,7 @@ class OrgRepository {
             status: status,
             displayName: user.displayName,
             photoUrl: user.photoUrl,
+            application: application,
           ).toCreate(),
         );
         // Joining without approval takes effect immediately, so the roster
@@ -778,8 +830,60 @@ class OrgRepository {
           });
         }
         await batch.commit();
+        if (status == MembershipStatus.pending) {
+          await _markApplicationPending(orgId, user);
+        }
         return status;
       });
+
+  /// Whether [orgId] is a publicly listed club.
+  ///
+  /// Read rather than taken from the invite card on purpose: an
+  /// `inviteCodes/{code}` document written before this mattered carries no
+  /// visibility at all, and a stale card must not be what decides whether
+  /// somebody walks straight in.
+  ///
+  /// An unreadable org is treated as unlisted, which is the safe direction and
+  /// usually the literal truth — the org read rule admits members and public
+  /// clubs only, so a non-member who cannot read it is looking at an unlisted
+  /// club.
+  Future<bool> _orgIsPublic(String orgId) async {
+    try {
+      final snap = await Refs.org(orgId).get();
+      return snap.exists &&
+          Fs.str(snap.data()?['visibility']) == OrgVisibility.public.wire;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Puts [orgId] at the head of the applicant's own `pendingOrgIds`, which is
+  /// what lets that club's owner and admins open their profile while the
+  /// decision is outstanding.
+  ///
+  /// Deliberately best-effort and never awaited into the caller's error path:
+  /// the application itself is already committed by the time this runs, and a
+  /// failed mirror must not report a successful request as a failure. The
+  /// reviewer falls back to the introduction on the membership row, which is
+  /// on the document they can always read, and `profileOrgMirrorProvider`
+  /// rebuilds the list on this person's next visit.
+  Future<void> _markApplicationPending(String orgId, AppUser user) async {
+    final wanted = [
+      orgId,
+      for (final id in user.pendingOrgIds)
+        if (id != orgId) id,
+    ].take(_maxPendingMirrored).toList();
+    try {
+      await const UserRepository().mirrorPendingOrgIds(user.uid, wanted);
+    } catch (_) {
+      // Intentionally swallowed. See the doc comment.
+    }
+  }
+
+  /// The rule checks only the first few entries of `pendingOrgIds`, so there
+  /// is no point storing more — and a list bounded here is a list the rules'
+  /// own size check can never be surprised by.
+  static const _maxPendingMirrored = 5;
 
   Future<void> decideMembership({
     required String orgId,
@@ -810,6 +914,42 @@ class OrgRepository {
     required MembershipRole role,
   }) =>
       guard(() => Refs.member(orgId, uid).update({'role': role.wire}));
+
+  /// Puts somebody in charge of a set of departments — see [ClubPortfolio].
+  ///
+  /// Takes the whole set rather than an add/remove pair because the screen
+  /// that calls it shows every portfolio as a row of switches, and the person
+  /// using it thinks in terms of "these are Ramesh's jobs now", not a
+  /// sequence of grants. Sending the final state also makes the write
+  /// idempotent, so a double tap on a slow connection cannot leave a brief
+  /// half-granted.
+  ///
+  /// Portfolios are never written for an owner: they hold all of them by
+  /// rank, and a stored grant would outlive the rank if they ever stepped
+  /// down. Callers pass owners through unchanged and this is the guard for it.
+  Future<void> setPortfolios({
+    required String orgId,
+    required String uid,
+    required Set<ClubPortfolio> portfolios,
+  }) =>
+      guard(() => Refs.member(orgId, uid).update({
+            'portfolios': ClubPortfolio.wiresOf(portfolios),
+          }));
+
+  /// Demotes somebody out of every position of authority in one go: back to
+  /// plain member, with every department brief taken off them.
+  ///
+  /// One write, not two, because the two-write version has a window in which
+  /// a removed admin still runs the club's finances — which is precisely the
+  /// window that matters when an admin is being removed in a hurry.
+  Future<void> standDown({
+    required String orgId,
+    required String uid,
+  }) =>
+      guard(() => Refs.member(orgId, uid).update({
+            'role': MembershipRole.member.wire,
+            'portfolios': <String>[],
+          }));
 
   // --- Roster grouping ---------------------------------------------------
 

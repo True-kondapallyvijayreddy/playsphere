@@ -6,15 +6,22 @@ import 'package:firebase_storage/firebase_storage.dart';
 import '../core/ads/promo.dart';
 import '../core/firebase/firestore_refs.dart';
 import '../core/models/ad_campaign.dart';
+import '../core/models/enums.dart';
 import 'media_uploader.dart';
 import 'org_repository.dart' show guard, guardStream;
 
 /// The advertiser side of `lib/core/ads/promo.dart`. Submission is
 /// self-serve; approval is staff-only (the `admin` claim, same as Give's
-/// `isGiveStaff()`) with no in-app review screen — see `firestore.rules` on
-/// `adCampaigns` and the same precedent `giveNeeds.verified` already set:
-/// this product reviews trust-sensitive claims from the console, not from a
-/// screen inside the app that does not exist for Give either.
+/// `isGiveStaff()`) — see `firestore.rules` on `adCampaigns`.
+///
+/// Approval used to have no destination at all: a campaign landed as
+/// `pending` and the only way to move it was the Firebase console, so from
+/// inside the product a submitted campaign went nowhere and nobody was told
+/// it had arrived. [watchForReview] and [review] are the queue side of that,
+/// `AdReviewScreen` renders it, and `onAdCampaignSubmitted` in
+/// `functions/index.js` pages whoever is on the `ads` desk of
+/// `platformStaff` — see `StaffMember` for why that roster has to exist for
+/// a custom claim to be reachable by a notification.
 class AdRepository {
   const AdRepository({FirebaseStorage? storage}) : _storage = storage;
 
@@ -82,6 +89,50 @@ class AdRepository {
         await ref.set(campaign.toCreate(advertiserUid: advertiserUid));
         return ref.id;
       });
+
+  // --- Staff review --------------------------------------------------
+
+  /// Every campaign in one status, for the ops queue — newest first.
+  ///
+  /// Separate from [watchMyCampaigns] rather than a nullable-uid variant of
+  /// it, because the two are different reads with different rules branches:
+  /// an advertiser reads their own rows by `advertiserUid`, and staff read
+  /// everybody's by `status`. Collapsing them into one method would hide
+  /// which of the two `firestore.rules` is being asked to allow.
+  Stream<List<AdCampaign>> watchForReview(AdCampaignStatus status) =>
+      guardStream(
+        () => Refs.adCampaigns
+            .where('status', isEqualTo: status.wire)
+            .orderBy('createdAt', descending: true)
+            .limit(200)
+            .snapshots()
+            .map((s) => s.docs.map(AdCampaign.fromDoc).toList(growable: false)),
+      );
+
+  /// A reviewer approving, rejecting, pausing or un-pausing a campaign.
+  ///
+  /// [reviewNote] is written for the advertiser to read, and is what
+  /// `onAdCampaignReviewed` puts in the notification body — a rejection with
+  /// no reason attached is a support ticket waiting to happen. Cleared on
+  /// approval so an old rejection note cannot survive on a live campaign.
+  ///
+  /// `firestore.rules` allows this write only to the `admin` claim; see the
+  /// `adCampaigns` update rule, whose other branch is the narrow
+  /// counter-increment [recordImpression] uses.
+  Future<void> review(
+    String campaignId, {
+    required AdCampaignStatus status,
+    String? reviewNote,
+  }) =>
+      guard(
+        () => Refs.adCampaign(campaignId).update({
+          'status': status.wire,
+          'reviewNote': status == AdCampaignStatus.approved
+              ? null
+              : (reviewNote?.trim().isEmpty ?? true ? null : reviewNote!.trim()),
+          'reviewedAt': FieldValue.serverTimestamp(),
+        }),
+      );
 
   /// Fire-and-forget impression/click counters. Rules permit exactly a
   /// same-request +1 to one of these two fields and nothing else — see the

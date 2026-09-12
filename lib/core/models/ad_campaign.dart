@@ -29,7 +29,9 @@ class AdCampaign {
     this.budgetPaise = 0,
     this.impressions = 0,
     this.clicks = 0,
+    this.reviewNote,
     this.createdAt,
+    this.reviewedAt,
   });
 
   final String id;
@@ -68,7 +70,16 @@ class AdCampaign {
   final int impressions;
   final int clicks;
 
+  /// Why a reviewer rejected or paused this campaign, in words the
+  /// advertiser reads. Staff-written and staff-only-writable; null on an
+  /// approved campaign, and cleared on approval so a note from an earlier
+  /// rejection cannot sit under a live banner. See `AdRepository.review`.
+  final String? reviewNote;
+
   final DateTime? createdAt;
+
+  /// When a reviewer last moved [status]. Null until somebody has.
+  final DateTime? reviewedAt;
 
   bool get isLive => status == AdCampaignStatus.approved;
 
@@ -109,7 +120,9 @@ class AdCampaign {
       budgetPaise: Fs.intOrNull(d['budgetPaise']) ?? 0,
       impressions: Fs.intOrNull(d['impressions']) ?? 0,
       clicks: Fs.intOrNull(d['clicks']) ?? 0,
+      reviewNote: Fs.strOrNull(d['reviewNote']),
       createdAt: Fs.dateOrNull(d['createdAt']),
+      reviewedAt: Fs.dateOrNull(d['reviewedAt']),
     );
   }
 

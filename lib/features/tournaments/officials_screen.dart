@@ -6,14 +6,14 @@ import '../../core/layout/responsive.dart';
 import '../../core/models/enums.dart';
 import '../../core/models/fixture.dart';
 import '../../core/models/match_official.dart';
-import '../../core/models/organization.dart';
 import '../../core/models/tournament_official.dart';
-import '../../core/models/umpire_profile.dart';
 import '../../core/providers.dart';
 import '../../domain/draw/officials_roster.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../domain/tournament/officiating_demand.dart';
 import '../../shared/app_scaffold.dart';
+import '../competitions/widgets/season_officials_field.dart'
+    show AddOfficialSheet;
 
 /// The season owner's officiating panel — added ahead of the tournament,
 /// ICC-style, so nobody is chasing an umpire at the gate.
@@ -45,13 +45,7 @@ class OfficialsScreen extends ConsumerWidget {
         IconButton(
           icon: const Icon(Icons.person_add_alt_outlined),
           tooltip: 'Add an official',
-          onPressed: () => showModalBottomSheet<void>(
-            context: context,
-            isScrollControlled: true,
-            showDragHandle: true,
-            builder: (_) =>
-                _AddOfficialSheet(orgId: orgId, tournamentId: tournamentId),
-          ),
+          onPressed: () => _addOfficial(context, ref),
         ),
       ],
       body: AsyncView(
@@ -172,6 +166,56 @@ class OfficialsScreen extends ConsumerWidget {
         },
       ),
     );
+  }
+
+  /// Adds somebody to the panel, through the same sheet season creation uses.
+  ///
+  /// One sheet, not two: this screen had its own, which could reach the
+  /// umpire registry and this club's members and nothing else — no PlaySphere
+  /// ID for an umpire from another club, and no way at all to add the
+  /// treasurer's uncle, who has never opened the app and is umpiring the
+  /// final. It also took none of the three answers the assigner needs, so
+  /// every name added here arrived as "anyone, any sport, any day".
+  Future<void> _addOfficial(BuildContext context, WidgetRef ref) async {
+    final key = (orgId: orgId, tournamentId: tournamentId);
+    final tournament = ref.read(tournamentProvider(key)).valueOrNull;
+    final roster =
+        ref.read(tournamentOfficialsProvider(key)).valueOrNull ?? const [];
+    final events = ref.read(tournamentEventsProvider(key)).valueOrNull ?? const [];
+    final addedBy = ref.read(currentUidProvider);
+    if (addedBy == null) return;
+
+    final added = await showModalBottomSheet<TournamentOfficial>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (_) => AddOfficialSheet(
+        orgId: orgId,
+        seasonSportIds: {for (final e in events) e.sportId}.toList(),
+        seasonStart: tournament?.startDate,
+        seasonEnd: tournament?.endDate,
+        alreadyOn: {for (final o in roster) o.uid},
+      ),
+    );
+    if (added == null) return;
+
+    try {
+      await ref.read(tournamentRepositoryProvider).addOfficialToRoster(
+            orgId: orgId,
+            tournamentId: tournamentId,
+            official: added,
+            addedByUid: addedBy,
+          );
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(content: Text('${added.name} added to the panel.')),
+        );
+    } catch (e) {
+      if (context.mounted) showError(context, e);
+    }
   }
 
   Future<void> _runBulkAssign(BuildContext context, WidgetRef ref) async {
@@ -819,209 +863,6 @@ class _AssignToFixtureSheetState extends ConsumerState<_AssignToFixtureSheet> {
           );
       if (!mounted) return;
       Navigator.of(context).pop();
-    } catch (e) {
-      if (mounted) {
-        setState(() => _busy = false);
-        showError(context, e);
-      }
-    }
-  }
-}
-
-/// Adding someone to the panel — from the open, cross-club registry of
-/// people certified to officiate, from this club's own members, or typed in
-/// by hand for the common case: a volunteer who has never opened the app.
-class _AddOfficialSheet extends ConsumerStatefulWidget {
-  const _AddOfficialSheet({required this.orgId, required this.tournamentId});
-
-  final String orgId;
-  final String tournamentId;
-
-  @override
-  ConsumerState<_AddOfficialSheet> createState() => _AddOfficialSheetState();
-}
-
-class _AddOfficialSheetState extends ConsumerState<_AddOfficialSheet> {
-  final _sport = TextEditingController();
-  final _name = TextEditingController();
-  bool _searching = false;
-  bool _busy = false;
-  List<UmpireProfile> _found = const [];
-
-  @override
-  void dispose() {
-    _sport.dispose();
-    _name.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final membersAsync = ref.watch(orgMembersProvider(widget.orgId));
-    final members = membersAsync.valueOrNull ?? const <Membership>[];
-    final query = _name.text.trim().toLowerCase();
-    final memberMatches = query.isEmpty
-        ? const <Membership>[]
-        : [
-            for (final m in members)
-              if (m.isActive && m.displayName.toLowerCase().contains(query)) m,
-          ].take(8).toList();
-
-    return SafeArea(
-      child: Padding(
-        padding: EdgeInsets.fromLTRB(
-          20,
-          0,
-          20,
-          MediaQuery.of(context).viewInsets.bottom + 20,
-        ),
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text('Add an official', style: theme.textTheme.titleLarge),
-              const SizedBox(height: 4),
-              Text(
-                'Pick someone certified in the open registry, a member of '
-                'this club, or add a name by hand.',
-                style: theme.textTheme.bodySmall
-                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _sport,
-                decoration: InputDecoration(
-                  labelText: 'Search the open registry by sport',
-                  hintText: 'e.g. cricket',
-                  prefixIcon: const Icon(Icons.search),
-                  isDense: true,
-                  border: const OutlineInputBorder(),
-                  suffixIcon: _searching
-                      ? const Padding(
-                          padding: EdgeInsets.all(12),
-                          child: SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                        )
-                      : IconButton(
-                          icon: const Icon(Icons.arrow_forward),
-                          onPressed: _search,
-                        ),
-                ),
-                onSubmitted: (_) => _search(),
-              ),
-              if (_found.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                for (final u in _found)
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                    leading: const Icon(Icons.verified_outlined),
-                    title: Text(u.displayName),
-                    subtitle: Text('${_badgeLabel(u.badgeLevel)} · '
-                        '${u.sports.join(', ')}'),
-                    trailing: FilledButton.tonal(
-                      onPressed: _busy
-                          ? null
-                          : () => _add(
-                                uid: u.uid,
-                                name: u.displayName,
-                                sports: u.sports,
-                              ),
-                      child: const Text('Add'),
-                    ),
-                  ),
-              ],
-              const SizedBox(height: 20),
-              const Divider(),
-              const SizedBox(height: 8),
-              Text('Or a club member', style: theme.textTheme.labelLarge),
-              const SizedBox(height: 8),
-              TextField(
-                controller: _name,
-                decoration: const InputDecoration(
-                  labelText: 'Find by name',
-                  isDense: true,
-                  border: OutlineInputBorder(),
-                ),
-                onChanged: (_) => setState(() {}),
-              ),
-              for (final m in memberMatches)
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                  leading: const Icon(Icons.person_outline),
-                  title: Text(m.displayName),
-                  trailing: FilledButton.tonal(
-                    onPressed: _busy
-                        ? null
-                        : () => _add(
-                              uid: m.uid,
-                              name: m.displayName,
-                              clubId: widget.orgId,
-                            ),
-                    child: const Text('Add'),
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  static String _badgeLabel(String tier) => switch (tier) {
-        'district_certified' => 'District certified',
-        'state_certified' => 'State certified',
-        'association_certified' => 'Association certified',
-        _ => 'Community',
-      };
-
-  Future<void> _search() async {
-    final sport = _sport.text.trim().toLowerCase();
-    if (sport.isEmpty) return;
-    setState(() => _searching = true);
-    try {
-      final found =
-          await ref.read(umpireRepositoryProvider).fetchUmpiresForSport(sport);
-      if (mounted) setState(() => _found = found);
-    } catch (e) {
-      if (mounted) showError(context, e);
-    } finally {
-      if (mounted) setState(() => _searching = false);
-    }
-  }
-
-  Future<void> _add({
-    required String uid,
-    required String name,
-    List<String> sports = const [],
-    String? clubId,
-  }) async {
-    final addedBy = ref.read(currentUidProvider);
-    if (addedBy == null) return;
-    setState(() => _busy = true);
-    try {
-      await ref.read(tournamentRepositoryProvider).addOfficialToRoster(
-            orgId: widget.orgId,
-            tournamentId: widget.tournamentId,
-            official: TournamentOfficial(
-              uid: uid,
-              name: name,
-              sports: sports,
-              clubId: clubId,
-            ),
-            addedByUid: addedBy,
-          );
-      if (!mounted) return;
-      Navigator.of(context).pop();
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(SnackBar(content: Text('$name added to the panel.')));
     } catch (e) {
       if (mounted) {
         setState(() => _busy = false);

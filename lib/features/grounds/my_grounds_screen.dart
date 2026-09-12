@@ -7,10 +7,13 @@ import 'package:intl/intl.dart';
 import '../../core/layout/responsive.dart';
 import '../../core/models/billing.dart';
 import '../../core/models/ground.dart';
+import '../../core/models/ground_verification.dart';
 import '../../core/providers.dart';
 import '../../data/ground_repository.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/ground_trust.dart';
+import 'list_ground_flow.dart';
 
 /// The ground owner's side of the marketplace.
 ///
@@ -35,7 +38,7 @@ class MyGroundsScreen extends ConsumerWidget {
       title: 'My grounds',
       subtitle: 'Grounds you own and the bookings on them',
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _openEditor(context, ref, null),
+        onPressed: () => _listNewGround(context, ref),
         icon: const Icon(Icons.add),
         label: const Text('List a ground'),
       ),
@@ -121,6 +124,38 @@ class MyGroundsScreen extends ConsumerWidget {
       ),
     );
   }
+
+  /// Listing a new ground goes through on-site capture first.
+  ///
+  /// ## Why creating and editing take different routes
+  ///
+  /// Editing is a listing whose evidence already exists being corrected — a
+  /// changed rate, a new closing time — and demanding a fresh trip to the
+  /// ground to fix a typo would mean typos never get fixed. Creating is the
+  /// act this whole feature exists to make expensive, so it is the one that
+  /// goes through `ListGroundProofScreen`.
+  ///
+  /// The proof is gathered first and the details second, not the other way
+  /// round, because an owner who has typed out their rates and facilities and
+  /// is *then* told to walk outside and photograph the pitch will abandon the
+  /// form. Asking for the hard part while they are still standing there is
+  /// the difference between a flow that completes and one that does not.
+  static Future<void> _listNewGround(BuildContext context, WidgetRef ref) async {
+    final proof = await Navigator.of(context).push<GroundProofBundle>(
+      MaterialPageRoute<GroundProofBundle>(
+        builder: (_) => const ListGroundProofScreen(),
+        fullscreenDialog: true,
+      ),
+    );
+    if (proof == null || !context.mounted) return;
+
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => GroundEditor(proof: proof),
+        fullscreenDialog: true,
+      ),
+    );
+  }
 }
 
 class _GroundCard extends ConsumerWidget {
@@ -163,11 +198,13 @@ class _GroundCard extends ConsumerWidget {
                                   ?.copyWith(fontWeight: FontWeight.w700),
                             ),
                           ),
-                          if (ground.isVerified) ...[
-                            const SizedBox(width: 6),
-                            Icon(Icons.verified,
-                                size: 16, color: theme.colorScheme.primary),
-                          ],
+                          const SizedBox(width: 6),
+                          // The owner's own view of where their listing
+                          // stands. This is the only screen that shows it to
+                          // the person who can do something about it — an
+                          // owner whose listing is sitting in `pending`, or
+                          // has been suspended, finds out here.
+                          GroundTrustBadge.of(ground),
                         ],
                       ),
                       Text(
@@ -265,9 +302,17 @@ class _Pill extends StatelessWidget {
 
 /// Lists a new ground, or edits one.
 class GroundEditor extends ConsumerStatefulWidget {
-  const GroundEditor({super.key, this.existing});
+  const GroundEditor({super.key, this.existing, this.proof});
 
   final Ground? existing;
+
+  /// The on-site evidence gathered before this screen opened.
+  ///
+  /// Present exactly when a new ground is being listed, absent when an
+  /// existing one is being edited — the two are mutually exclusive and the
+  /// assert below says so, because a screen that silently accepted both would
+  /// let somebody attach fresh proof to somebody else's listing.
+  final GroundProofBundle? proof;
 
   @override
   ConsumerState<GroundEditor> createState() => _GroundEditorState();
@@ -295,8 +340,16 @@ class _GroundEditorState extends ConsumerState<GroundEditor> {
   late int _closeHour = widget.existing?.closeHour ?? 22;
   late bool _isIndoor = widget.existing?.isIndoor ?? false;
   late bool _isActive = widget.existing?.isActive ?? true;
-  late double? _lat = widget.existing?.latitude;
-  late double? _lng = widget.existing?.longitude;
+  /// The listing's pin.
+  ///
+  /// When the ground was captured on site, this is the capture's own best fix
+  /// and is not editable — the whole point of the capture is that the pin and
+  /// the photographs are the same place, and a pin the owner can drag
+  /// afterwards is a pin that proves nothing. `listGroundWithProof` re-checks
+  /// the two against each other regardless, so a caller that ignores this
+  /// still cannot publish a mismatched listing.
+  late double? _lat = widget.proof?.pin.latitude ?? widget.existing?.latitude;
+  late double? _lng = widget.proof?.pin.longitude ?? widget.existing?.longitude;
   bool _locating = false;
   bool _busy = false;
 
@@ -369,13 +422,28 @@ class _GroundEditorState extends ConsumerState<GroundEditor> {
     super.dispose();
   }
 
+  /// True while the person is agreeing to the undertaking on a new listing.
+  ///
+  /// Only asked when there is proof attached, i.e. only when creating. An
+  /// owner editing their closing time is not re-signing a declaration.
+  bool _undertakingAccepted = false;
+
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
-    final uid = ref.read(currentUidProvider);
+    final uid = ref.read(authUidProvider);
     if (uid == null) return;
 
     if (_closeHour <= _openHour) {
       showError(context, 'Closing time has to be after opening time.');
+      return;
+    }
+
+    final proof = widget.proof;
+    if (proof != null && !_undertakingAccepted) {
+      showError(
+        context,
+        'Please read and accept the declaration before publishing.',
+      );
       return;
     }
 
@@ -404,14 +472,33 @@ class _GroundEditorState extends ConsumerState<GroundEditor> {
         contactPhone: _phone.text.trim().isEmpty ? null : _phone.text.trim(),
         notes: _notes.text.trim().isEmpty ? null : _notes.text.trim(),
         isActive: _isActive,
-        isVerified: widget.existing?.isVerified ?? false,
+        verificationStatus: widget.existing?.verificationStatus ??
+            (proof == null
+                ? GroundVerificationStatus.unverified
+                : GroundVerificationStatus.pending),
         bookingCount: widget.existing?.bookingCount ?? 0,
+        checkInCount: widget.existing?.checkInCount ?? 0,
       );
 
-      if (widget.existing == null) {
-        await repo.registerGround(ground);
-      } else {
+      if (widget.existing != null) {
         await repo.updateGround(ground);
+      } else if (proof != null) {
+        await repo.listGroundWithProof(
+          ground: ground,
+          proofs: proof.proofs,
+          claimType: proof.claimType,
+          holderName: proof.holderName,
+          documentKind: proof.documentKind,
+          documentBytes: proof.documentBytes,
+          documentContentType: proof.documentContentType,
+          uid: uid,
+        );
+      } else {
+        // Unreachable from the UI — the FAB always routes through capture —
+        // and kept as a real branch rather than an assert because the editor
+        // is a public widget and a future call site that forgets the proof
+        // should get a listing marked `unverified`, not a crash.
+        await repo.registerGround(ground);
       }
       if (mounted) Navigator.of(context).pop();
     } catch (e) {
@@ -478,6 +565,20 @@ class _GroundEditorState extends ConsumerState<GroundEditor> {
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
                 const SizedBox(height: 8),
+                if (widget.proof != null)
+                  Card(
+                    color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                    child: ListTile(
+                      leading: const Icon(Icons.verified_outlined),
+                      title: const Text('Pinned where you took the photos'),
+                      subtitle: Text(
+                        '${_lat!.toStringAsFixed(5)}, '
+                        '${_lng!.toStringAsFixed(5)} · '
+                        '±${widget.proof!.pin.accuracyMetres.round()}m',
+                      ),
+                    ),
+                  )
+                else
                 Row(
                   children: [
                     Expanded(
@@ -513,7 +614,7 @@ class _GroundEditorState extends ConsumerState<GroundEditor> {
                     ],
                   ],
                 ),
-                if (_lat != null) ...[
+                if (_lat != null && widget.proof == null) ...[
                   const SizedBox(height: 6),
                   Text(
                     'Pinned at ${_lat!.toStringAsFixed(5)}, '
@@ -664,7 +765,35 @@ class _GroundEditorState extends ConsumerState<GroundEditor> {
                     ],
                   ),
                 ),
-                const SizedBox(height: 28),
+                const SizedBox(height: 20),
+
+                // The declaration, asked once, at the moment of publishing.
+                //
+                // Placed here rather than in the capture wizard on purpose:
+                // it declares that "the details above are true", and until
+                // this screen is filled in there are no details to be true
+                // about. Signing it three screens before typing the rate
+                // would make it the empty ritual it is on most forms.
+                if (widget.proof != null) ...[
+                  Card(
+                    color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(4, 8, 12, 8),
+                      child: CheckboxListTile(
+                        value: _undertakingAccepted,
+                        onChanged: (v) =>
+                            setState(() => _undertakingAccepted = v ?? false),
+                        controlAffinity: ListTileControlAffinity.leading,
+                        title: const Text('I agree'),
+                        subtitle: Text(
+                          GroundOwnershipClaim.undertaking,
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                ],
 
                 FilledButton(
                   onPressed: _busy ? null : _save,

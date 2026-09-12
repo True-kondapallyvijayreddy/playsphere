@@ -195,7 +195,7 @@ class _CampaignEditorSheetState extends ConsumerState<_CampaignEditorSheet> {
   }
 
   Future<void> _pickCreative() async {
-    final me = ref.read(currentUserProvider).valueOrNull;
+    final me = ref.read(authUserProvider).valueOrNull;
     if (me == null) return;
     await pickAndUploadImage(
       context: context,
@@ -214,7 +214,7 @@ class _CampaignEditorSheetState extends ConsumerState<_CampaignEditorSheet> {
   }
 
   Future<void> _submit() async {
-    final me = ref.read(currentUserProvider).valueOrNull;
+    final me = ref.read(authUserProvider).valueOrNull;
     if (me == null) return;
     if (_headline.text.trim().isEmpty || _advertiserName.text.trim().isEmpty) {
       showError(context, 'Give it a business name and a headline.');

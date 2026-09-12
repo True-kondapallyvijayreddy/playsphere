@@ -70,10 +70,39 @@ function documentFor(record) {
   };
 }
 
+/**
+ * `JSON.stringify` with object keys sorted, at every depth.
+ *
+ * The tally is a map, and a map has no order: Firestore hands back whatever
+ * order it stored, while `accumulateCareer` builds one in the order the
+ * counters happened to be added. Comparing the two with a plain stringify made
+ * every equal-but-differently-ordered tally look changed, which rewrote 17
+ * correct records on every run and quietly cost this function the idempotency
+ * promised above.
+ *
+ * `clubsPlayedFor` needs the same treatment for the same reason. It is a set
+ * upstream (`accumulateCareer` builds it as one) and only becomes an array to
+ * be stored, but the two writers disagree on order and always will: the
+ * settlement trigger appends with `FieldValue.arrayUnion` in arrival order
+ * (`index.js`), while `documentFor` sorts. Compared by position those two
+ * never converge, so a trigger-written record is rewritten by every rebuild
+ * for the rest of time. Sorted here, "same clubs" means what it says.
+ */
+function canonical(value) {
+  const byKey = ([a], [b]) => (a < b ? -1 : a > b ? 1 : 0);
+  return JSON.stringify(value ?? null, (_key, v) => {
+    if (!v || typeof v !== 'object') return v;
+    // Sorted copy: mutating the argument would reorder the record that is
+    // about to be written, and `documentFor` already decided that order.
+    if (Array.isArray(v)) return [...v].sort();
+    return Object.fromEntries(Object.entries(v).sort(byKey));
+  });
+}
+
 /** Whether a stored document already says what the recomputation says. */
 function alreadyCorrect(stored, next) {
   if (!stored) return false;
-  const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  const same = (a, b) => canonical(a) === canonical(b);
   return (
     stored.matchesPlayed === next.matchesPlayed &&
     stored.wins === next.wins &&

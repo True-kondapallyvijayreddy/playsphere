@@ -5,7 +5,6 @@ import 'package:go_router/go_router.dart';
 import '../../core/layout/responsive.dart';
 import '../../core/models/competition.dart';
 import '../../core/permissions/capability.dart';
-import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/section_header.dart';
@@ -32,16 +31,12 @@ class MyEventsScreen extends ConsumerWidget {
     // [groupEventFeed] — so this list reads as "your clubs' events" rather
     // than "your clubs' sports, five rows per season".
     final feed = groupEventFeed(events);
-    final organizingOrgId = ref
-        .watch(myActiveMembershipsProvider)
-        .valueOrNull
-        ?.map((m) => m.orgId)
-        .where(
-          (id) => ref
-              .watch(myCapabilitiesProvider(id))
-              .contains(Capability.manageCompetitions),
-        )
-        .firstOrNull;
+    // The club "Create an event" creates in — the one named in the app bar
+    // whenever it can host an event. See [actingOrgIdProvider]: this screen
+    // spans every club, so its one create button has to pick one, and the
+    // only defensible pick is the club the person is already in.
+    final organizingOrgId =
+        ref.watch(actingOrgIdProvider(Capability.manageCompetitions));
 
     return AppScaffold(
       title: 'Events & tournaments',

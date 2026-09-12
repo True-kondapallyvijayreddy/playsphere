@@ -51,9 +51,9 @@ class _GiveRaiseNeedScreenState extends ConsumerState<GiveRaiseNeedScreen> {
       showError(context, 'Add at least one item.');
       return;
     }
-    final uid = ref.read(currentUidProvider);
+    final uid = ref.read(authUidProvider);
     if (uid == null) return;
-    final me = ref.read(currentUserProvider).valueOrNull;
+    final me = ref.read(authUserProvider).valueOrNull;
 
     setState(() => _busy = true);
     try {

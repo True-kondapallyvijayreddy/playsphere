@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -11,6 +14,7 @@ import 'core/l10n/locale_controller.dart';
 import 'core/providers.dart';
 import 'core/router/app_router.dart';
 import 'core/theme/app_theme.dart';
+import 'features/splash/splash_screen.dart';
 import 'firebase_options.dart';
 import 'l10n/app_localizations.dart';
 
@@ -52,6 +56,33 @@ Future<void> main() async {
   // Clean URLs on the web, so a live match can be shared as
   // /org/abc/live/xyz rather than a fragment nobody trusts.
   usePathUrlStrategy();
+
+  // Android 16 (targetSdk 36) draws every app edge-to-edge and removes the
+  // opt-out, so the only choice left is whether the pre-16 devices behave the
+  // same way. Opting in here means one layout to reason about instead of two,
+  // and the system bars are made transparent so the Scaffold's own surface
+  // shows through rather than a grey band. Scaffold, AppBar and NavigationBar
+  // already consume the resulting insets; nothing else in the app positions
+  // itself against the screen edge.
+  if (!kIsWeb) {
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    // Icon brightness has to be stated. Transparent bars mean the clock and
+    // the battery now sit on the app's own surface, and the platform default
+    // is light icons — which on this palette is white on near-white, i.e.
+    // invisible. Dark icons are pinned rather than derived because
+    // `themeMode` below is pinned to light for brand reasons; if that ever
+    // follows the device again, this has to follow it too.
+    SystemChrome.setSystemUIOverlayStyle(
+      const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.dark,
+        statusBarBrightness: Brightness.light,
+        systemNavigationBarColor: Colors.transparent,
+        systemNavigationBarDividerColor: Colors.transparent,
+        systemNavigationBarIconBrightness: Brightness.dark,
+      ),
+    );
+  }
 
   try {
     await Firebase.initializeApp(
@@ -176,6 +207,61 @@ class _PlaySphereAppState extends ConsumerState<PlaySphereApp> {
       supportedLocales: supportedLocales,
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       routerConfig: ref.watch(appRouterProvider),
+      // Draws over whatever the router resolves to — home, sign-in, profile
+      // setup — for a fixed few seconds on every cold start, on the web
+      // exactly as much as on a phone. The router still runs underneath at
+      // full speed, so by the time this lifts, the real destination is
+      // already sitting there rather than only starting to load then.
+      builder: (context, child) =>
+          _SplashGate(child: child ?? const SizedBox.shrink()),
+    );
+  }
+}
+
+/// Holds [SplashScreen] over [child] for a fixed span on every cold start.
+///
+/// Deliberately a flat timer rather than tied to auth or profile resolution:
+/// this is brand, not a loading spinner, and a person on a fast connection
+/// whose session resolves in 200ms should still see it — otherwise the splash
+/// would appear for some people and not others, which reads as a flicker
+/// rather than a screen.
+class _SplashGate extends StatefulWidget {
+  const _SplashGate({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_SplashGate> createState() => _SplashGateState();
+}
+
+class _SplashGateState extends State<_SplashGate> {
+  bool _showSplash = true;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer(const Duration(seconds: 4), () {
+      if (mounted) setState(() => _showSplash = false);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Stacked rather than swapped: the child keeps building (and the router
+    // keeps redirecting) underneath the whole time, so nothing behind the
+    // splash has to restart once it lifts.
+    return Stack(
+      children: [
+        widget.child,
+        if (_showSplash) const SplashScreen(),
+      ],
     );
   }
 }

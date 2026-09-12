@@ -2,11 +2,13 @@ import 'dart:math';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import '../permissions/capability.dart';
 import '../text/ordinal.dart';
 import 'billing.dart';
 import 'enums.dart';
 import 'firestore_codec.dart';
 import 'geo.dart';
+import 'membership_application.dart';
 
 /// A tenant: a residential community, school, college, academy, club,
 /// district association or state council. Stored at `orgs/{orgId}`.
@@ -530,6 +532,8 @@ class Membership {
     this.jerseyNumber,
     this.notes,
     this.grouping = MemberGrouping.empty,
+    this.portfolios = const {},
+    this.application = MembershipApplication.empty,
   });
 
   final String uid;
@@ -552,6 +556,41 @@ class Membership {
   /// for every club that does not split its roster, which is most of them.
   final MemberGrouping grouping;
 
+  /// The departments this person has been put in charge of — see
+  /// [ClubPortfolio]. Stored as a set beside the rank rather than folded into
+  /// it, so a treasurer can be an ordinary member and an admin can run the
+  /// club without touching its money.
+  ///
+  /// Empty for almost everyone, including most admins. Owners are stored with
+  /// an empty set too: they hold every portfolio by rank, and writing them all
+  /// down would leave stale grants behind the moment somebody steps down.
+  final Set<ClubPortfolio> portfolios;
+
+  /// What this person said about themselves when they asked to join — see
+  /// [MembershipApplication] for why the introduction travels with the
+  /// application instead of the reviewer opening a profile.
+  ///
+  /// Written once, by the applicant, at request time. Never edited by the
+  /// club, and deliberately kept after approval: "who approved this person,
+  /// and on what" is exactly the question a club asks six months later when
+  /// something goes wrong.
+  final MembershipApplication application;
+
+  /// Every portfolio this person actually holds, whether granted or implied by
+  /// rank. Ask this, never [portfolios], when deciding what to show.
+  Set<ClubPortfolio> get effectivePortfolios => {
+        ...PermissionMatrix.implicitPortfoliosOf(role),
+        ...portfolios,
+      };
+
+  /// What this person may do in this club, rank and departments together.
+  Set<Capability> get capabilities => PermissionMatrix.effectiveCapabilities(
+        role: role,
+        portfolios: portfolios,
+      );
+
+  bool can(Capability capability) => capabilities.contains(capability);
+
   bool get isActive => status == MembershipStatus.active;
   bool get isPending => status == MembershipStatus.pending;
 
@@ -570,8 +609,32 @@ class Membership {
       jerseyNumber: Fs.strOrNull(d['jerseyNumber']),
       notes: Fs.strOrNull(d['notes']),
       grouping: MemberGrouping.fromMap(Fs.map(d['grouping'])),
+      portfolios: ClubPortfolio.setFrom(Fs.strList(d['portfolios'])),
+      application: MembershipApplication.fromMap(Fs.map(d['application'])),
     );
   }
+
+  Membership copyWith({
+    MembershipRole? role,
+    MembershipStatus? status,
+    Set<ClubPortfolio>? portfolios,
+  }) =>
+      Membership(
+        uid: uid,
+        orgId: orgId,
+        role: role ?? this.role,
+        status: status ?? this.status,
+        displayName: displayName,
+        photoUrl: photoUrl,
+        joinedAt: joinedAt,
+        invitedBy: invitedBy,
+        approvedBy: approvedBy,
+        jerseyNumber: jerseyNumber,
+        notes: notes,
+        grouping: grouping,
+        portfolios: portfolios ?? this.portfolios,
+        application: application,
+      );
 
   Map<String, Object?> toCreate() => {
         'uid': uid,
@@ -583,5 +646,10 @@ class Membership {
         'joinedAt': FieldValue.serverTimestamp(),
         'invitedBy': invitedBy,
         'approvedBy': approvedBy,
+        'portfolios': ClubPortfolio.wiresOf(portfolios),
+        // Omitted entirely when the applicant supplied nothing, rather than
+        // written as an empty map: `firestore.rules` bounds this field, and a
+        // row that carries no introduction should not carry the shape of one.
+        if (application.isNotEmpty) 'application': application.toMap(),
       };
 }

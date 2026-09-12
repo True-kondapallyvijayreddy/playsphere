@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../domain/geo/geohash.dart';
 import 'billing.dart';
 import 'firestore_codec.dart';
+import 'ground_verification.dart';
 
 /// A ground somebody rents out by the hour, at `grounds/{groundId}`.
 ///
@@ -44,8 +45,13 @@ class Ground {
     this.photoUrl,
     this.notes,
     this.isActive = true,
-    this.isVerified = false,
+    this.verificationStatus = GroundVerificationStatus.unverified,
     this.bookingCount = 0,
+    this.checkInCount = 0,
+    this.reportScore = 0,
+    this.riskFlags = const [],
+    this.reviewedAt,
+    this.reviewNote,
     this.createdAt,
   });
 
@@ -115,13 +121,64 @@ class Ground {
   /// it still resolve to a real place.
   final bool isActive;
 
-  /// Set by PlaySphere, never by the owner — the client cannot write it and
-  /// `firestore.rules` enforces that. An owner who could tick their own
-  /// "verified" box makes the badge worthless.
-  final bool isVerified;
+  /// Where this listing stands with PlaySphere — see
+  /// [GroundVerificationStatus].
+  ///
+  /// Set by PlaySphere, never by the owner past the initial submission: the
+  /// client may write `unverified` or `pending` when it creates the listing
+  /// and nothing afterwards, and `firestore.rules` enforces both halves. An
+  /// owner who could tick their own "verified" box makes the badge worthless,
+  /// and one who could clear their own `suspended` makes the kill switch
+  /// worthless, which is the more expensive of the two.
+  final GroundVerificationStatus verificationStatus;
 
+  /// Slots taken. Maintained by the booking transaction.
   final int bookingCount;
+
+  /// Distinct people who have arrived at this ground and whose phone agreed
+  /// it is where the listing says — see [GroundCheckIn].
+  ///
+  /// Read together with [bookingCount] rather than alone. The number that
+  /// means something is the ratio: bookings climbing while this stays at zero
+  /// is what a listing nobody can actually turn up to looks like.
+  final int checkInCount;
+
+  /// The weighted sum of complaints — see [GroundReportReason]. Not a count:
+  /// one credible "they asked me for an advance" outweighs three "the address
+  /// is slightly wrong".
+  final int reportScore;
+
+  /// What the risk trigger noticed when this listing arrived. Ordering
+  /// information for the review queue, not a block on anything.
+  final List<GroundRiskFlag> riskFlags;
+
+  /// When a human last settled this listing's status, and what they said.
+  /// Shown to the owner, so a rejection is something they can act on rather
+  /// than a listing that silently stopped working.
+  final DateTime? reviewedAt;
+  final String? reviewNote;
+
   final DateTime? createdAt;
+
+  /// Kept as a getter so the hundred call sites that only ever asked "does
+  /// this get a tick" did not all have to learn a five-state enum.
+  bool get isVerified =>
+      verificationStatus == GroundVerificationStatus.verified;
+
+  /// What the booker is told about this listing, from PlaySphere's judgement
+  /// and other players' arrivals together.
+  GroundTrust get trust => GroundTrust.of(
+        status: verificationStatus,
+        checkInCount: checkInCount,
+      );
+
+  /// Whether this ground can take a booking right now.
+  ///
+  /// Two separate reasons it might not, deliberately kept as one predicate so
+  /// no call site checks only the half it remembered: the owner has switched
+  /// it off, or PlaySphere has. Mirrored in `firestore.rules` on the booking
+  /// create — the UI hiding a button is a courtesy, the rule is the fence.
+  bool get isBookable => isActive && verificationStatus.isBookable;
 
   /// The lowercased city, for equality queries. Firestore has no
   /// case-insensitive matching, so "Hyderabad" and "hyderabad" are different
@@ -231,8 +288,23 @@ class Ground {
       photoUrl: Fs.strOrNull(d['photoUrl']),
       notes: Fs.strOrNull(d['notes']),
       isActive: Fs.boolean(d['isActive'], true),
-      isVerified: Fs.boolean(d['isVerified']),
+      // Legacy bridge, and the reason `isVerified` is still read at all.
+      // Grounds listed before on-site capture existed carry only the old
+      // boolean; a handful of them were ticked by hand in the console and
+      // dropping that would demote real, checked grounds to unverified on
+      // the day this shipped. A document with neither field reads as
+      // `unverified`, which is exactly what it is.
+      verificationStatus: d['verificationStatus'] == null
+          ? (Fs.boolean(d['isVerified'])
+              ? GroundVerificationStatus.verified
+              : GroundVerificationStatus.unverified)
+          : GroundVerificationStatus.fromWire(Fs.str(d['verificationStatus'])),
       bookingCount: Fs.integer(d['bookingCount']),
+      checkInCount: Fs.integer(d['checkInCount']),
+      reportScore: Fs.integer(d['reportScore']),
+      riskFlags: GroundRiskFlag.listFrom(d['riskFlags']),
+      reviewedAt: Fs.dateOrNull(d['reviewedAt']),
+      reviewNote: Fs.strOrNull(d['reviewNote']),
       createdAt: Fs.dateOrNull(d['createdAt']),
     );
   }
@@ -240,16 +312,36 @@ class Ground {
   Map<String, Object?> toCreate() => {
         ...toUpdate(),
         'ownerUid': ownerUid,
-        // Never from the client. Listed explicitly rather than simply omitted
-        // so the intent survives someone later "tidying up" the create map.
+        // The one status the client is ever allowed to write, and only here.
+        //
+        // `pending` when the listing came through on-site capture and has
+        // proofs behind it, `unverified` when it did not. Anything else is
+        // rejected by `firestore.rules`, so a client cannot publish itself a
+        // verified ground and cannot un-suspend one by re-creating it.
+        'verificationStatus':
+            verificationStatus == GroundVerificationStatus.pending
+                ? GroundVerificationStatus.pending.wire
+                : GroundVerificationStatus.unverified.wire,
+        // Kept in step with the enum for anything still reading the old
+        // field — an export, a BigQuery view, a console query someone has
+        // bookmarked. Always false at create for the same reason it always
+        // was: verification is PlaySphere's word, not the owner's.
         'isVerified': false,
         'bookingCount': 0,
+        'checkInCount': 0,
+        'reportScore': 0,
+        'riskFlags': <String>[],
         'createdAt': FieldValue.serverTimestamp(),
       };
 
-  /// Everything the owner may edit. Excludes [ownerUid], [isVerified] and
-  /// [bookingCount] — one is identity, one is PlaySphere's judgement, and one
-  /// is a counter the booking transaction maintains.
+  /// Everything the owner may edit.
+  ///
+  /// Excludes [ownerUid], [verificationStatus], [bookingCount],
+  /// [checkInCount], [reportScore] and [riskFlags] — identity, PlaySphere's
+  /// judgement, a counter the booking transaction maintains, and three things
+  /// only the server writes. An owner able to edit any of the last four could
+  /// clear their own suspension, and a kill switch the target can flip is not
+  /// a kill switch.
   Map<String, Object?> toUpdate() => {
         'name': name,
         'nameLower': name.toLowerCase(),
@@ -323,8 +415,13 @@ class Ground {
         photoUrl: photoUrl,
         notes: notes ?? this.notes,
         isActive: isActive ?? this.isActive,
-        isVerified: isVerified,
+        verificationStatus: verificationStatus,
         bookingCount: bookingCount,
+        checkInCount: checkInCount,
+        reportScore: reportScore,
+        riskFlags: riskFlags,
+        reviewedAt: reviewedAt,
+        reviewNote: reviewNote,
         createdAt: createdAt,
       );
 }
@@ -362,6 +459,7 @@ class GroundBooking {
     this.amountPaise = 0,
     this.paymentId,
     this.notes,
+    this.checkedInAt,
     this.createdAt,
   });
 
@@ -399,9 +497,32 @@ class GroundBooking {
 
   final String? notes;
   final GroundBookingStatus status;
+
+  /// When the person who booked this stood at the ground and said so.
+  ///
+  /// Denormalized onto the booking as well as living in
+  /// `grounds/{id}/checkIns/{bookingId}`, because "my bookings" needs to
+  /// render a checked-in badge and offer the button on the ones still
+  /// waiting, and doing that from the subcollection would be one extra read
+  /// per row on a screen whose whole job is rows.
+  final DateTime? checkedInAt;
+
   final DateTime? createdAt;
 
   int get hours => endHour - startHour;
+
+  bool get isCheckedIn => checkedInAt != null;
+
+  /// Whether arriving and confirming it makes sense right now.
+  ///
+  /// Only on the day, and only for a slot that is still live. Offering
+  /// "I'm here" for next Tuesday's booking would collect a fix from
+  /// somebody's sofa, which is worse than collecting nothing: it would
+  /// promote a listing to "Location confirmed" on evidence of nothing.
+  bool canCheckInOn(DateTime now) =>
+      !isCheckedIn &&
+      status == GroundBookingStatus.confirmed &&
+      dayKey == dayKeyOf(now);
 
   /// Whether this booking occupies any hour that [other] also would.
   ///
@@ -435,6 +556,7 @@ class GroundBooking {
       paymentId: Fs.strOrNull(d['paymentId']),
       notes: Fs.strOrNull(d['notes']),
       status: GroundBookingStatus.fromWire(Fs.str(d['status'])),
+      checkedInAt: Fs.dateOrNull(d['checkedInAt']),
       createdAt: Fs.dateOrNull(d['createdAt']),
     );
   }
@@ -512,15 +634,56 @@ enum GroundBookingStatus {
 /// rather than re-scanning the list per slot. The search screen offers every
 /// hour the ground is open, so this gets asked sixteen times a ground.
 class DayAvailability {
-  DayAvailability(this.ground, Iterable<GroundBooking> bookings)
-      : _taken = {
+  DayAvailability(
+    this.ground,
+    Iterable<GroundBooking> bookings, {
+    this.day,
+    DateTime? now,
+  })  : _taken = {
           for (final b in bookings)
             if (b.holdsSlot)
               for (var h = b.startHour; h < b.endHour; h++) h,
-        };
+        },
+        _pastBefore = _pastCutoff(day, now);
 
   final Ground ground;
+
+  /// Which day this describes. Optional only because the double-booking
+  /// check does not need it — see [_pastBefore] for the one thing that does.
+  final DateTime? day;
+
   final Set<int> _taken;
+
+  /// The first hour that is still bookable today, or null when the day is not
+  /// today.
+  ///
+  /// ## Why this exists
+  ///
+  /// Nothing else in the booking path looks at the clock. `isWithinHours`
+  /// checks the gates are open and the hour-hold transaction checks nobody
+  /// else has the slot, and between them they will happily sell you 6am on a
+  /// ground at 8pm the same evening. Nobody wants that hour, the owner cannot
+  /// honour it, and it sits in their calendar as a booking that will not be
+  /// turned up for — which is also, unhelpfully, exactly what a fraudulent
+  /// listing's calendar looks like.
+  final int? _pastBefore;
+
+  /// Hours already gone, when [day] is today. Null on any other day, which is
+  /// what makes a booking for next Tuesday morning still possible at 8pm on
+  /// Monday.
+  static int? _pastCutoff(DateTime? day, DateTime? now) {
+    if (day == null) return null;
+    final clock = now ?? DateTime.now();
+    if (GroundBooking.dayKeyOf(day) != GroundBooking.dayKeyOf(clock)) {
+      return null;
+    }
+    // The hour in progress is gone. Somebody at 18:40 booking "18:00–20:00"
+    // is paying for twenty minutes they cannot use.
+    return clock.hour + 1;
+  }
+
+  /// Whether this hour has already passed, on a day where that is a question.
+  bool isHourPast(int hour) => _pastBefore != null && hour < _pastBefore;
 
   /// Whether `[startHour, endHour)` can be booked.
   ///
@@ -530,11 +693,15 @@ class DayAvailability {
   bool isFree(int startHour, int endHour) {
     if (!ground.isWithinHours(startHour, endHour)) return false;
     for (var h = startHour; h < endHour; h++) {
-      if (_taken.contains(h)) return false;
+      if (_taken.contains(h) || isHourPast(h)) return false;
     }
     return true;
   }
 
+  /// Somebody else has this hour. Distinct from [isHourPast] because the two
+  /// need telling apart on screen — "gone" and "taken" are different answers,
+  /// and a grid that greys both the same way makes a ground look busier than
+  /// it is.
   bool isHourTaken(int hour) => _taken.contains(hour);
 
   /// Every start hour at which a slot of [hours] would fit.

@@ -21,7 +21,7 @@ class SponsorListingDetailScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final listingAsync = ref.watch(sponsorshipListingProvider(listingId));
-    final me = ref.watch(currentUserProvider).valueOrNull;
+    final me = ref.watch(authUserProvider).valueOrNull;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Listing')),
@@ -232,7 +232,7 @@ class _PledgeSheetState extends ConsumerState<_PledgeSheet> {
   }
 
   Future<void> _submit() async {
-    final me = ref.read(currentUserProvider).valueOrNull;
+    final me = ref.read(authUserProvider).valueOrNull;
     if (me == null) return;
     setState(() => _busy = true);
     try {

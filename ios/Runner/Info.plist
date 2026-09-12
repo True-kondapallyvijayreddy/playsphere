@@ -51,5 +51,14 @@
 		<false/>
 		<key>NSLocationWhenInUseUsageDescription</key>
 		<string>PlaySphere uses your location to find grounds near you and to help ground owners set a listing's location.</string>
+		<!-- Hands an incoming Universal Link to the app's router instead of
+		     dropping the app on its home screen with the link's payload lost.
+		     Inert until the Runner target gains an Associated Domains
+		     capability of applinks:playsphere-os.web.app and
+		     web/wellknown/apple-app-site-association names the real
+		     TEAMID.BUNDLEID — see that file's README. Declared now so the
+		     remaining work is a capability and one string, not a hunt. -->
+		<key>FlutterDeepLinkingEnabled</key>
+		<true/>
 	</dict>
 </plist>

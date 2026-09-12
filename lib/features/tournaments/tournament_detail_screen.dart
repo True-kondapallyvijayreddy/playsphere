@@ -12,6 +12,7 @@ import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../domain/tournament/tournament_overview.dart';
+import '../competitions/widgets/invited_club_block.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/ui_kit.dart';
 import '../../core/models/draw_config.dart';
@@ -22,6 +23,8 @@ import '../../shared/image_upload.dart';
 import '../../shared/live_dot.dart';
 import '../../shared/ps_banner.dart';
 import 'tournaments_screen.dart' show TournamentEditor;
+import '../competitions/widgets/schedule_export.dart';
+import '../scoring/open_match.dart';
 import 'widgets/invite_clubs_sheet.dart';
 import 'widgets/leaderboard_cards.dart';
 import 'widgets/running_late_card.dart';
@@ -112,6 +115,28 @@ class TournamentDetailScreen extends ConsumerWidget {
                       value: overview,
                       what: 'the matches',
                     ),
+                    // For a member of a club this season's host invited: the
+                    // whole of what they can do here. Above the schedule
+                    // because they are deciding whether to be in it, not
+                    // reading it — and invisible to everybody else, which is
+                    // almost everybody. See [InvitedClubBlock].
+                    InvitedClubBlock(
+                      hostOrgId: orgId,
+                      tournamentId: tournamentId,
+                    ),
+                    // Directly under the header, above everything about
+                    // matches: until entries are open there are no matches,
+                    // and this is the only thing the organizer should be
+                    // doing next.
+                    if (canManage)
+                      _OpenEntriesCard(
+                        orgId: orgId,
+                        tournamentId: tournamentId,
+                        events: ref
+                                .watch(tournamentEventsProvider(key))
+                                .valueOrNull ??
+                            const [],
+                      ),
                     _Progress(
                       tournament: tournament,
                       overview: overview.valueOrNull,
@@ -152,6 +177,16 @@ class TournamentDetailScreen extends ConsumerWidget {
                         orgId: orgId,
                         tournamentId: tournamentId,
                       ),
+                      // Moving a match belongs on the schedule page, where the
+                      // venue calendars are; opening one belongs everywhere the
+                      // match is drawn. Without this the season's own timetable
+                      // was the one place a match could not be opened.
+                      onOpenMatch: (fixture) => openMatch(
+                        context,
+                        fixture: fixture,
+                        myUid: ref.read(currentUidProvider),
+                        canManage: canManage,
+                      ),
                     ),
                     const SizedBox(height: 16),
                     // The sentence under this used to say "Build the
@@ -159,6 +194,21 @@ class TournamentDetailScreen extends ConsumerWidget {
                     // match day". The row is labelled `Officials` and leads to
                     // a screen headed `Officials`; the sentence was a third
                     // telling, and it doubled the row's height to do it.
+                    // Above Officials because it comes first in the work: a
+                    // panel is assigned to a timetable, and the timetable
+                    // cannot be right until the grounds have said when they
+                    // are open.
+                    if (canManage)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: PsLinkTile(
+                          icon: Icons.event_available_outlined,
+                          label: 'Venue planner',
+                          onTap: () => context.push(
+                            Routes.venuePlanner(orgId, tournamentId),
+                          ),
+                        ),
+                      ),
                     if (canManage)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 16),
@@ -303,6 +353,10 @@ class _Header extends ConsumerWidget {
           padding: const EdgeInsets.only(bottom: 12),
           child: PsBanner(
             imageUrl: t.bannerUrl,
+            // The season's own badge, on the artwork beside its name. Drawn
+            // only when there is one — see [PsBanner.logoUrl].
+            logoUrl: t.logoUrl,
+            logoName: t.name,
             sportId: seasonSportId,
             seed: t.id,
             height: 156,
@@ -368,6 +422,29 @@ class _Header extends ConsumerWidget {
                       builder: (_) => ShareSeasonSheet(tournament: t),
                     ),
                   ),
+                  // Beside share, and outside the manage-only menu, for the
+                  // same reason share is: a coach or a parent wants the
+                  // timetable on paper at least as much as the organiser
+                  // does. Renders nothing until there are matches.
+                  ScheduleDownloadButton(
+                    fixtures: ref
+                            .watch(tournamentFixturesProvider(
+                                (orgId: orgId, tournamentId: t.id)))
+                            .valueOrNull ??
+                        const [],
+                    title: t.name,
+                    byDay: true,
+                    sectionOf: (f) => {
+                          for (final e in ref
+                                  .watch(tournamentEventsProvider(
+                                      (orgId: orgId, tournamentId: t.id)))
+                                  .valueOrNull ??
+                              const [])
+                            e.id: e.name,
+                        }[f.compId] ??
+                        'Matches',
+                    compact: true,
+                  ),
                   if (canManage)
                     PsOverflowMenu(
                       actions: [
@@ -410,6 +487,25 @@ class _Header extends ConsumerWidget {
                             builder: (_) =>
                                 TournamentEditor(orgId: orgId, existing: t),
                           ),
+                        ),
+                        // Named, in the menu, as well as reachable by tapping
+                        // the artwork. The camera badge in the corner of the
+                        // banner is only discoverable to somebody who already
+                        // suspects it is a button, and the crest has no badge
+                        // at all until a season has one — so a season with no
+                        // logo had no affordance anywhere for adding one.
+                        PsAction(
+                          label:
+                              t.logoUrl == null ? 'Add logo' : 'Change logo',
+                          icon: Icons.shield_outlined,
+                          onSelected: () => _changeLogo(context, ref),
+                        ),
+                        PsAction(
+                          label: t.bannerUrl == null
+                              ? 'Add banner'
+                              : 'Change banner',
+                          icon: Icons.image_outlined,
+                          onSelected: () => _changeBanner(context, ref),
                         ),
                         // Reversible, so it is not marked destructive and does
                         // not sort down with the ones that end things. A season
@@ -499,6 +595,35 @@ class _Header extends ConsumerWidget {
     );
   }
 
+  /// The season's badge, which is the picture a club usually has ready long
+  /// before it has a header photograph.
+  Future<void> _changeLogo(BuildContext context, WidgetRef ref) {
+    final uid = ref.read(currentUidProvider);
+    if (uid == null) return Future.value();
+    final repo = ref.read(tournamentRepositoryProvider);
+    return pickAndUploadImage(
+      context: context,
+      title: 'Season logo',
+      shape: ImageShape.square,
+      note: 'Shown on the header, in the season list, and on the public link.',
+      successMessage: 'Logo updated.',
+      removedMessage: 'Logo removed.',
+      onUpload: (image) => repo.uploadSeasonLogo(
+        orgId: orgId,
+        tournamentId: tournament.id,
+        uid: uid,
+        bytes: image.bytes,
+        contentType: image.contentType,
+      ),
+      onRemove: tournament.logoUrl == null
+          ? null
+          : () => repo.removeSeasonLogo(
+                orgId: orgId,
+                tournamentId: tournament.id,
+              ),
+    );
+  }
+
   static String _dateRange(Tournament t) {
     String fmt(DateTime d) =>
         '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}';
@@ -536,6 +661,140 @@ class _SeasonBannerButton extends StatelessWidget {
         visualDensity: VisualDensity.compact,
         icon: const Icon(Icons.photo_camera_outlined, color: Colors.white),
         onPressed: onTap,
+      ),
+    );
+  }
+}
+
+/// "Nobody can enter this season yet" — and the one tap that fixes it.
+///
+/// ## Why a card and not a menu item
+///
+/// A season is published as a set of drafts (see
+/// `TournamentRepository.openEntriesForSeason` for why creation cannot do
+/// otherwise), and a draft event takes no registrations. Nothing said so. An
+/// organizer finished the creation flow, sent the link round, and the people
+/// who followed it found events they could not enter — with the organizer's
+/// next step buried one page deep inside each of twelve events.
+///
+/// So the season page states the situation in a sentence and offers the
+/// action beside it. It disappears the moment there is no draft left, which
+/// is the only state in which it has anything to say.
+class _OpenEntriesCard extends ConsumerStatefulWidget {
+  const _OpenEntriesCard({
+    required this.orgId,
+    required this.tournamentId,
+    required this.events,
+  });
+
+  final String orgId;
+  final String tournamentId;
+  final List<Competition> events;
+
+  @override
+  ConsumerState<_OpenEntriesCard> createState() => _OpenEntriesCardState();
+}
+
+class _OpenEntriesCardState extends ConsumerState<_OpenEntriesCard> {
+  bool _busy = false;
+
+  Future<void> _open(int count) async {
+    setState(() => _busy = true);
+    try {
+      final opened =
+          await ref.read(tournamentRepositoryProvider).openEntriesForSeason(
+                orgId: widget.orgId,
+                tournamentId: widget.tournamentId,
+              );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            opened == 1
+                ? 'Entries are open. People can register now.'
+                : 'Entries are open on all $opened events. People can '
+                    'register now.',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (mounted) showError(context, e);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final drafts = [
+      for (final e in widget.events)
+        if (e.status == CompetitionStatus.draft) e,
+    ];
+    if (drafts.isEmpty) return const SizedBox.shrink();
+
+    final theme = Theme.of(context);
+    final all = drafts.length == widget.events.length;
+
+    return Card(
+      color: theme.colorScheme.primaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.how_to_reg_outlined,
+                  color: theme.colorScheme.onPrimaryContainer,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    all
+                        ? 'Nobody can enter this season yet'
+                        : '${drafts.length} '
+                            '${drafts.length == 1 ? 'event is' : 'events are'} '
+                            'not open yet',
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      color: theme.colorScheme.onPrimaryContainer,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              all
+                  ? 'Every event was created as a draft so you could check it '
+                      'first. Open entries and players can start registering.'
+                  : 'These were created as drafts. Open them and players can '
+                      'register for them too.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onPrimaryContainer,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: FilledButton.icon(
+                onPressed: _busy ? null : () => _open(drafts.length),
+                icon: _busy
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.lock_open, size: 18),
+                label: Text(
+                  drafts.length == 1
+                      ? 'Open entries'
+                      : 'Open entries on all ${drafts.length} events',
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -4,6 +4,8 @@ import 'package:share_plus/share_plus.dart';
 import 'package:intl/intl.dart';
 
 import '../../../core/models/tournament.dart';
+import '../../../core/router/app_router.dart';
+import '../../../shared/identity.dart';
 
 /// Modal bottom sheet to share a season/tournament invitation via WhatsApp,
 /// direct link, or system share sheet.
@@ -20,8 +22,18 @@ class ShareSeasonSheet extends StatelessWidget {
     return DateFormat('d MMM yyyy').format(d);
   }
 
+  /// The link that goes into the WhatsApp message.
+  ///
+  /// This used to be `https://playsphere.app/t/<org>/<id>` — a domain the
+  /// project does not own, on a route the router has never had. Every
+  /// tournament invitation this sheet has ever sent carried a dead link.
+  ///
+  /// It is now the public, signed-out tournament page on the origin the app
+  /// actually serves from, which is also the origin the Android App Links
+  /// filter is verified against — so it opens in the app for somebody who has
+  /// it, and in the browser for somebody who does not.
   String get _shareUrl =>
-      'https://playsphere.app/t/${tournament.orgId}/${tournament.id}';
+      Routes.publicTournamentUrl(tournament.orgId, tournament.id);
 
   String get _invitationMessage {
     final dates = tournament.startDate != null
@@ -117,9 +129,27 @@ class ShareSeasonSheet extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  tournament.name,
-                  style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+                // The preview is meant to look like what the recipient will
+                // open, and what they open now leads with the season's crest.
+                Row(
+                  children: [
+                    if ((tournament.logoUrl ?? '').trim().isNotEmpty) ...[
+                      PsCrest(
+                        name: tournament.name,
+                        logoUrl: tournament.logoUrl,
+                        seed: tournament.id,
+                        size: 36,
+                      ),
+                      const SizedBox(width: 10),
+                    ],
+                    Expanded(
+                      child: Text(
+                        tournament.name,
+                        style: theme.textTheme.titleMedium
+                            ?.copyWith(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 4),
                 Text(

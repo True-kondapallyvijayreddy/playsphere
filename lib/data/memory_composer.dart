@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../core/models/memory.dart';
+import 'image_composer.dart';
 
 /// One picked, downscaled, ready-to-upload memory.
 class ComposedMemory {
@@ -68,13 +69,49 @@ class MemoryComposer {
 
     return ComposedMemory(
       bytes: bytes,
-      // `image_picker` re-encodes to JPEG whenever it resizes, so the picked
-      // file's own extension is not a reliable indicator of what we hold.
-      contentType: 'image/jpeg',
+      // Sniffed from the bytes, not assumed.
+      //
+      // This said `image/jpeg` unconditionally, on the reasoning that
+      // `image_picker` re-encodes whenever it resizes. That holds on Android
+      // and iOS. On the WEB `image_picker` ignores `maxWidth`, `maxHeight`
+      // and `imageQuality` outright and returns the chosen file untouched —
+      // so a PNG screenshot or a `.HEIC` straight off an iPhone was stored
+      // under a type it did not have, and a HEIC no browser can decode was
+      // indistinguishable from a photo that simply never appeared.
+      //
+      // `ImageComposer.contentTypeOf` throws a `ValidationException` naming
+      // the format for anything a browser cannot draw, which is what the
+      // pickers upstream already show to the person.
+      contentType: ImageComposer.contentTypeOf(bytes),
       kind: MemoryKind.photo,
       width: size?.width.round() ?? 0,
       height: size?.height.round() ?? 0,
     );
+  }
+
+  /// The container [bytes] actually holds, defaulting to MP4.
+  ///
+  /// Defaulting is safe here in a way it was not for images: the three types
+  /// `storage.rules` accepts are the three this recognises, and an
+  /// unrecognised clip is far more likely to be an MP4 variant this does not
+  /// have a signature for than a format the browser cannot play.
+  static String _videoTypeOf(Uint8List b) {
+    bool at(int offset, List<int> magic) {
+      if (b.length < offset + magic.length) return false;
+      for (var i = 0; i < magic.length; i++) {
+        if (b[offset + i] != magic[i]) return false;
+      }
+      return true;
+    }
+
+    // EBML header — WebM and Matroska.
+    if (at(0, [0x1A, 0x45, 0xDF, 0xA3])) return 'video/webm';
+    // The ISO base-media `ftyp` box, whose brand separates QuickTime from MP4.
+    if (at(4, [0x66, 0x74, 0x79, 0x70]) && b.length >= 12) {
+      final brand = String.fromCharCodes(b.sublist(8, 12)).toLowerCase();
+      if (brand.startsWith('qt')) return 'video/quicktime';
+    }
+    return 'video/mp4';
   }
 
   /// Picks a short clip.
@@ -94,9 +131,14 @@ class MemoryComposer {
     );
     if (file == null) return null;
 
+    final videoBytes = await file.readAsBytes();
     return ComposedMemory(
-      bytes: await file.readAsBytes(),
-      contentType: 'video/mp4',
+      bytes: videoBytes,
+      // Same problem as the photo path, same reason: on the web the picked
+      // file is whatever the person chose, and a `.mov` from an iPhone
+      // labelled `video/mp4` is a clip that will not play. `storage.rules`
+      // accepts all three of these container types.
+      contentType: _videoTypeOf(videoBytes),
       kind: MemoryKind.video,
       // Dimensions need a video decoder to read, and the grid falls back to a
       // square tile when they are absent. Not worth a plugin.

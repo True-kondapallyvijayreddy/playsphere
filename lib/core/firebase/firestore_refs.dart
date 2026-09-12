@@ -45,6 +45,18 @@ class Refs {
   static DocumentReference<Map<String, dynamic>> claimCode(String code) =>
       claimCodes.doc(code);
 
+  /// People who have asked to be findable, id = their uid.
+  ///
+  /// Separate from `users` for the reason `PlayerListing`'s class doc gives:
+  /// a discovery search must not run its filters across the document that
+  /// also holds a birth date and a phone number. Opt-in, adults only, and
+  /// deleted the moment its owner withdraws.
+  static CollectionReference<Map<String, dynamic>> get playerDirectory =>
+      db.collection('playerDirectory');
+
+  static DocumentReference<Map<String, dynamic>> playerListing(String uid) =>
+      playerDirectory.doc(uid);
+
   /// Devices a user has signed in on, so the server can reach them.
   ///
   /// One document per token rather than a single field on the user: a player
@@ -308,6 +320,20 @@ class Refs {
   static Query<Map<String, dynamic>> get myFollowsQuery =>
       db.collectionGroup('followers');
 
+  /// Members of THIS club putting their hand up for a season another club
+  /// invited it into. Nested under the invited club, not the host — see
+  /// [SeasonInterest] for why the host neither needs nor gets this list.
+  static CollectionReference<Map<String, dynamic>> seasonInterest(
+    String orgId,
+  ) =>
+      org(orgId).collection('seasonInterest');
+
+  static DocumentReference<Map<String, dynamic>> seasonInterestDoc(
+    String orgId,
+    String interestId,
+  ) =>
+      seasonInterest(orgId).doc(interestId);
+
   // --- Competitions -----------------------------------------------------
 
   static CollectionReference<Map<String, dynamic>> competitions(String orgId) =>
@@ -333,6 +359,25 @@ class Refs {
     String compId,
   ) =>
       competition(orgId, compId).collection('registrations');
+
+  /// Every entry this person has made, across every club and event.
+  ///
+  /// The only way to answer "what have I entered?" without opening each of a
+  /// club's events in turn and reading its entry list. Two shapes of entry
+  /// answer to one person and both are queried through here: an individual
+  /// entry, whose document id and `uid` are the person, and a TEAM entry,
+  /// whose id is the team's and which names its players in `memberUids` —
+  /// see [Registration.teamId].
+  ///
+  /// Needs the collection-group indexes on `uid` and `memberUids`, and the
+  /// `{path=**}/registrations` read rule: a rule written at the nested
+  /// registrations path does not apply to a collectionGroup query, and that
+  /// rule is deliberately narrower than the nested one — a club's members can
+  /// all read who has entered their own club's event, but a cross-club query
+  /// has no club to be a member of, so the only defensible reader is somebody
+  /// the entry is about. Same reasoning as [allGroupEntriesQuery].
+  static Query<Map<String, dynamic>> get allRegistrationsQuery =>
+      db.collectionGroup('registrations');
 
   /// Groups of members entering an event together. See [GroupEntry].
   static CollectionReference<Map<String, dynamic>> groupEntries(
@@ -429,6 +474,26 @@ class Refs {
     String uid,
   ) =>
       tournamentOfficials(orgId, tournamentId).doc(uid);
+
+  /// How one season is using one venue — its days, sessions, blackouts, match
+  /// length and daily ceiling. Doc id = the venue id, so a season cannot hold
+  /// two conflicting plans for the same ground.
+  ///
+  /// Season-scoped rather than written onto the venue itself: a school lending
+  /// its ground for a fortnight in June is a fact about June, and storing it
+  /// on the building would have August's season inherit June's blackouts.
+  static CollectionReference<Map<String, dynamic>> venuePlans(
+    String orgId,
+    String tournamentId,
+  ) =>
+      tournament(orgId, tournamentId).collection('venuePlans');
+
+  static DocumentReference<Map<String, dynamic>> venuePlan(
+    String orgId,
+    String tournamentId,
+    String venueId,
+  ) =>
+      venuePlans(orgId, tournamentId).doc(venueId);
 
   static CollectionReference<Map<String, dynamic>> standings(
     String orgId,
@@ -634,6 +699,60 @@ class Refs {
   ) =>
       groundHourHolds(groundId).doc('${dayKey}_$hour');
 
+  /// The evidence behind a listing, at
+  /// `grounds/{groundId}/verification/{proofId}`.
+  ///
+  /// ## Why a private subcollection and not fields on the ground
+  ///
+  /// `grounds/{groundId}` is world-readable so that search works for somebody
+  /// who has not signed in. The proofs carry the owner's precise standing
+  /// position at a known time and an electricity bill with their home address
+  /// on it. Hanging those off a public document to power a badge would leak
+  /// more than the fraud it prevents takes.
+  ///
+  /// Readable by the owner who filed it and by an admin reviewing it, and by
+  /// nobody else — see `firestore.rules`.
+  static CollectionReference<Map<String, dynamic>> groundVerification(
+    String groundId,
+  ) =>
+      ground(groundId).collection('verification');
+
+  /// The ownership declaration, at a fixed id because there is exactly one
+  /// per ground and re-submitting after a rejection replaces it rather than
+  /// appending a second claim beside the first.
+  static DocumentReference<Map<String, dynamic>> groundClaim(String groundId) =>
+      groundVerification(groundId).doc('claim');
+
+  /// Arrivals, at `grounds/{groundId}/checkIns/{bookingId}`.
+  ///
+  /// Keyed by the booking rather than by a generated id, which is what makes
+  /// "one check-in per slot" a property of the collection instead of a rule
+  /// somebody has to remember. A second arrival on the same booking
+  /// overwrites the first and the count does not move.
+  static CollectionReference<Map<String, dynamic>> groundCheckIns(
+    String groundId,
+  ) =>
+      ground(groundId).collection('checkIns');
+
+  static DocumentReference<Map<String, dynamic>> groundCheckIn(
+    String groundId,
+    String bookingId,
+  ) =>
+      groundCheckIns(groundId).doc(bookingId);
+
+  /// Complaints about listings, at `groundReports/{reporterUid}_{groundId}`.
+  ///
+  /// Top-level rather than nested under the ground it is about, for the same
+  /// reason grounds are not nested under orgs: the query that matters is the
+  /// admin's — "everything reported, worst first, across every ground" — and
+  /// under a subcollection that is a collectionGroup read of a collection
+  /// whose parents are the very documents under suspicion.
+  static CollectionReference<Map<String, dynamic>> get groundReports =>
+      db.collection('groundReports');
+
+  static DocumentReference<Map<String, dynamic>> groundReport(String id) =>
+      groundReports.doc(id);
+
   /// Every booking a club or a player has made, across every ground.
   ///
   /// The mirror image of [allMemoriesQuery], and needed for the same reason:
@@ -755,6 +874,19 @@ class Refs {
   static DocumentReference<Map<String, dynamic>> sportsMedic(String uid) =>
       sportsMedics.doc(uid);
 
+  /// Local sports shops that have listed themselves, at `sportsShops/{uid}`.
+  ///
+  /// A third selling surface and deliberately none of the other two — see
+  /// `SportsShop`'s class doc. [products] is a curated catalogue with prices,
+  /// [clubProducts] is one club selling to its own members, and this is a
+  /// real shop a club rings about twenty jerseys. Keyed by uid for the same
+  /// reason [coach] and [sportsMedic] are: one account is one listing.
+  static CollectionReference<Map<String, dynamic>> get sportsShops =>
+      db.collection('sportsShops');
+
+  static DocumentReference<Map<String, dynamic>> sportsShop(String uid) =>
+      sportsShops.doc(uid);
+
   // --- Sponsor an Athlete / Sponsor a Team --------------------------------
 
   /// Discoverable sponsorship listings, at `sponsorshipListings/{listingId}`.
@@ -837,4 +969,227 @@ class Refs {
 
   static DocumentReference<Map<String, dynamic>> foodOrder(String orderId) =>
       foodOrders.doc(orderId);
+
+  // --- The operations team -------------------------------------------------
+
+  /// The PlaySphere ops roster, at `platformStaff/{uid}` — see
+  /// `StaffMember`'s class doc for why this exists alongside the `admin`
+  /// custom claim rather than instead of it. Keyed by uid so a member is
+  /// their own document id and adding somebody twice is idempotent.
+  static CollectionReference<Map<String, dynamic>> get platformStaff =>
+      db.collection('platformStaff');
+
+  static DocumentReference<Map<String, dynamic>> staffMember(String uid) =>
+      platformStaff.doc(uid);
+
+  // --- The club owners' network --------------------------------------------
+
+  /// The messages of one conversation between two clubs, at
+  /// `clubThreads/{threadId}/messages/{messageId}`.
+  ///
+  /// Top-level and id-derived — see [ClubThread.idFor] for why the sorted
+  /// pair IS the document id, and why a conversation is between two CLUBS
+  /// rather than two people. There is deliberately no document at
+  /// `clubThreads/{threadId}` itself: the messages are the conversation, and
+  /// each club's summary of it lives on its own side in [clubInbox].
+  static CollectionReference<Map<String, dynamic>> clubMessages(
+    String threadId,
+  ) =>
+      db.collection('clubThreads').doc(threadId).collection('messages');
+
+  /// A thread's messages, newest first and capped. A conversation is read
+  /// from the bottom, and holding a listener over an unbounded history on a
+  /// phone is a bill rather than a feature.
+  static Query<Map<String, dynamic>> clubMessageHistory(
+    String threadId, {
+    int limit = 120,
+  }) =>
+      clubMessages(threadId)
+          .orderBy('createdAt', descending: true)
+          .limit(limit);
+
+  /// One club's inbox, at `orgs/{orgId}/clubThreads/{threadId}` — one row per
+  /// conversation it is part of.
+  ///
+  /// Under the club rather than alongside the messages, and this is the one
+  /// path in the file whose shape is dictated by the security rules rather
+  /// than by the data. Firestore evaluates a `list` against the QUERY, with a
+  /// resource synthesised from its constraints, not against the documents it
+  /// would return — so a top-level collection filtered by
+  /// `orgIds array-contains myClub` cannot be authorised by any rule that
+  /// reads the document, and the inbox would be permission-denied for
+  /// everybody. The club id has to be in the PATH. See `firestore.rules`.
+  ///
+  /// It also means the read marker sits on a document only its own club can
+  /// write, and each club's unread state is its own business.
+  static CollectionReference<Map<String, dynamic>> clubInbox(String orgId) =>
+      org(orgId).collection('clubThreads');
+
+  static DocumentReference<Map<String, dynamic>> clubInboxRow(
+    String orgId,
+    String threadId,
+  ) =>
+      clubInbox(orgId).doc(threadId);
+
+  /// Every conversation one club is part of, most recent first. A single-field
+  /// order, so no composite index is needed.
+  static Query<Map<String, dynamic>> threadsForClub(String orgId) =>
+      clubInbox(orgId)
+          .orderBy('lastMessageAt', descending: true)
+          .limit(80);
+
+  // --- The Arena -----------------------------------------------------------
+
+  /// Board games between two members, at `arenaMatches/{matchId}`.
+  ///
+  /// Top-level and org-free on purpose. An Arena game is between two PEOPLE:
+  /// they may have found each other inside a club and the club is recorded as
+  /// a label, but a game must not disappear because somebody left that club,
+  /// and two members of different clubs must be able to play at all.
+  static CollectionReference<Map<String, dynamic>> get arenaMatches =>
+      db.collection('arenaMatches');
+
+  static DocumentReference<Map<String, dynamic>> arenaMatch(String matchId) =>
+      arenaMatches.doc(matchId);
+
+  /// Every game a member is in, newest activity first. One query for the
+  /// whole Arena home screen: invitations, games in progress and finished
+  /// games are the same documents in different states, so splitting them
+  /// into three queries would cost three indexes to show one list.
+  /// The Arena ladder, at `arenaStats/{uid}`. Readable by any signed-in
+  /// member and written only by `functions/arena.js` — see the rule.
+  static CollectionReference<Map<String, dynamic>> get arenaStats =>
+      db.collection('arenaStats');
+
+  static DocumentReference<Map<String, dynamic>> arenaStatsFor(String uid) =>
+      arenaStats.doc(uid);
+
+  /// The leaderboard: most wins first, most games played breaking the tie so
+  /// somebody with one lucky win does not outrank a regular.
+  ///
+  /// Ordered on the overall totals rather than per game. Firestore would need
+  /// a separate composite index for every game to sort on `byGame.chess.won`,
+  /// which is six indexes to reorder a list of fifty rows the client already
+  /// holds — so the per-game view re-sorts these in memory instead.
+  static Query<Map<String, dynamic>> get arenaLeaderboard => arenaStats
+      .orderBy('won', descending: true)
+      .orderBy('played', descending: true)
+      .limit(50);
+
+  static Query<Map<String, dynamic>> arenaMatchesFor(String uid) =>
+      arenaMatches
+          .where('players', arrayContains: uid)
+          .orderBy('updatedAt', descending: true)
+          .limit(60);
+
+  // --- Player auctions ---------------------------------------------------
+  //
+  // Top-level and org-free, like `giveDonations` and `sponsorships`. See the
+  // header of lib/core/models/auction.dart for why an auction is not nested
+  // under a club even when a club runs it.
+
+  /// Every auction, at `auctions/{auctionId}`.
+  static CollectionReference<Map<String, dynamic>> get auctions =>
+      db.collection('auctions');
+
+  static DocumentReference<Map<String, dynamic>> auction(String auctionId) =>
+      auctions.doc(auctionId);
+
+  /// One document per claimed join code, id = the code itself.
+  ///
+  /// Exactly the trick `playerCodes` uses, for exactly the same two reasons:
+  /// Firestore has no unique constraint, so uniqueness is bought by making
+  /// the code a DOCUMENT ID and claiming it with a create that fails if it is
+  /// taken; and the lookup has to work for somebody who cannot yet read the
+  /// auction at all — an unlisted auction is invisible until you are in it,
+  /// and the code is the whole way in — so it has to be a tiny public
+  /// document holding a name and an id, never the auction itself.
+  static CollectionReference<Map<String, dynamic>> get auctionCodes =>
+      db.collection('auctionCodes');
+
+  static DocumentReference<Map<String, dynamic>> auctionCode(String code) =>
+      auctionCodes.doc(code);
+
+  /// Everyone taking part in one auction, id = their uid.
+  static CollectionReference<Map<String, dynamic>> auctionParticipants(
+    String auctionId,
+  ) =>
+      auction(auctionId).collection('participants');
+
+  static DocumentReference<Map<String, dynamic>> auctionParticipant(
+    String auctionId,
+    String uid,
+  ) =>
+      auctionParticipants(auctionId).doc(uid);
+
+  /// "Which auctions am I in", across every auction in the product.
+  ///
+  /// A collection-group query, authorised by the `/{path=**}/participants`
+  /// rule, which is the same shape as the members and followers groups
+  /// already in firestore.rules. It is the ONLY way to find an unlisted
+  /// auction you have already joined — nothing else the client can query
+  /// names it.
+  static Query<Map<String, dynamic>> get auctionParticipantsGroup =>
+      db.collectionGroup('participants');
+
+  /// The bidding sides, id = the owner's uid. See `AuctionTeam`.
+  static CollectionReference<Map<String, dynamic>> auctionTeams(
+    String auctionId,
+  ) =>
+      auction(auctionId).collection('teams');
+
+  static DocumentReference<Map<String, dynamic>> auctionTeam(
+    String auctionId,
+    String teamId,
+  ) =>
+      auctionTeams(auctionId).doc(teamId);
+
+  /// The player pool, id = the player's uid.
+  static CollectionReference<Map<String, dynamic>> auctionLots(
+    String auctionId,
+  ) =>
+      auction(auctionId).collection('lots');
+
+  static DocumentReference<Map<String, dynamic>> auctionLot(
+    String auctionId,
+    String lotId,
+  ) =>
+      auctionLots(auctionId).doc(lotId);
+
+  /// Sealed bids on one player, id = the bidding team's id.
+  ///
+  /// The id is what keeps a bid secret — see `AuctionBid`. No client ever
+  /// writes here; `placeAuctionBid` does, in a transaction with the team's
+  /// purse.
+  static CollectionReference<Map<String, dynamic>> auctionBids(
+    String auctionId,
+    String lotId,
+  ) =>
+      auctionLot(auctionId, lotId).collection('bids');
+
+  static DocumentReference<Map<String, dynamic>> auctionBid(
+    String auctionId,
+    String lotId,
+    String teamId,
+  ) =>
+      auctionBids(auctionId, lotId).doc(teamId);
+
+  /// One team's own bids across every lot in one auction — the "my bids"
+  /// screen, and the only read that needs a collection group inside a single
+  /// auction. Filtered by `teamId` so the per-bid rule can authorise each
+  /// document it returns.
+  static Query<Map<String, dynamic>> get auctionBidsGroup =>
+      db.collectionGroup('bids');
+
+  /// Proposed exchanges between two squads.
+  static CollectionReference<Map<String, dynamic>> auctionTrades(
+    String auctionId,
+  ) =>
+      auction(auctionId).collection('trades');
+
+  static DocumentReference<Map<String, dynamic>> auctionTrade(
+    String auctionId,
+    String tradeId,
+  ) =>
+      auctionTrades(auctionId).doc(tradeId);
 }

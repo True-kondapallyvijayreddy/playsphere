@@ -1,30 +1,169 @@
 {
-  "hosting": {
-    "site": "playsphere-os",
-    "public": "build/web",
-    "ignore": [
-      "firebase.json",
-      "**/.*",
-      "**/node_modules/**"
-    ],
-    "rewrites": [
-      {
-        "source": "**",
-        "destination": "/index.html"
-      }
-    ],
-    "headers": [
-      {
-        "source": "**",
-        "headers": [
-          {
-            "key": "Cache-Control",
-            "value": "no-cache, max-age=0, must-revalidate"
-          }
-        ]
-      }
-    ]
-  },
+  "hosting": [
+    {
+      "public": "build/web",
+      "ignore": [
+        "firebase.json",
+        "**/.*",
+        "**/node_modules/**"
+      ],
+      "rewrites": [
+        {
+          "source": "/.well-known/assetlinks.json",
+          "destination": "/wellknown/assetlinks.json"
+        },
+        {
+          "source": "/.well-known/apple-app-site-association",
+          "destination": "/wellknown/apple-app-site-association"
+        },
+        {
+          "source": "**",
+          "destination": "/index.html"
+        }
+      ],
+      "headers": [
+        {
+          "source": "/.well-known/**",
+          "headers": [
+            {
+              "key": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "key": "Cache-Control",
+              "value": "public, max-age=3600"
+            }
+          ]
+        },
+        {
+          "source": "**",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "no-cache, max-age=0, must-revalidate"
+            }
+          ]
+        },
+        {
+          "source": "/main.dart.js",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "public, max-age=0, s-maxage=604800, must-revalidate"
+            }
+          ]
+        },
+        {
+          "source": "/flutter.js",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "public, max-age=0, s-maxage=604800, must-revalidate"
+            }
+          ]
+        },
+        {
+          "source": "/manifest.json",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "public, max-age=0, s-maxage=604800, must-revalidate"
+            }
+          ]
+        },
+        {
+          "source": "/favicon.png",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "public, max-age=0, s-maxage=604800, must-revalidate"
+            }
+          ]
+        },
+        {
+          "source": "/canvaskit/**",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "public, max-age=0, s-maxage=604800, must-revalidate"
+            }
+          ]
+        },
+        {
+          "source": "/assets/**",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "public, max-age=0, s-maxage=604800, must-revalidate"
+            }
+          ]
+        },
+        {
+          "source": "/icons/**",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "public, max-age=0, s-maxage=604800, must-revalidate"
+            }
+          ]
+        },
+        {
+          "source": "/flutter_bootstrap.js",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "no-cache, max-age=0, must-revalidate"
+            }
+          ]
+        },
+        {
+          "source": "/flutter_service_worker.js",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "no-cache, max-age=0, must-revalidate"
+            }
+          ]
+        },
+        {
+          "source": "/version.json",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "no-cache, max-age=0, must-revalidate"
+            }
+          ]
+        }
+      ],
+      "target": "app",
+      "appAssociation": "NONE",
+      "predeploy": [
+        "sh scripts/check_web_build.sh",
+        "cp web/sw_selfdestruct.js build/web/flutter_service_worker.js"
+      ]
+    },
+    {
+      "target": "legal",
+      "public": "hosting/legal",
+      "ignore": [
+        "firebase.json",
+        "**/.*",
+        "**/node_modules/**"
+      ],
+      "cleanUrls": true,
+      "headers": [
+        {
+          "source": "**/*.@(html|css|png)",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "public, max-age=3600"
+            }
+          ]
+        }
+      ]
+    }
+  ],
   "firestore": {
     "rules": "firestore.rules",
     "indexes": "firestore.indexes.json"

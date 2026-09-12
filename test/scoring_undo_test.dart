@@ -130,6 +130,16 @@ void main() {
   });
 
   testWidgets('tapping undo withdraws through the service', (tester) async {
+    // Taller than the 800x600 default, because the pad is taller than that.
+    //
+    // `TossResultStrip` now sits above the board and pushed the duel pad's
+    // undo strip to y=611 — off the bottom of the test viewport, where
+    // `tap()` finds the widget, computes a centre outside the render tree and
+    // presses nothing. The test then failed on `undoCalls`, which reads as
+    // "undo is not wired up" and is not: it is a viewport too short for the
+    // screen under test.
+    await tester.binding.setSurfaceSize(const Size(800, 1200));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
     final service = _FakeScoringService();
     await tester.pumpWidget(harness(fixtureWith(lastSeq: 3), service));
     await tester.pumpAndSettle();

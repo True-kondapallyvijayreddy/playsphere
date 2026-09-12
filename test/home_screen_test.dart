@@ -6,24 +6,32 @@ import 'package:go_router/go_router.dart';
 import 'package:playsphere/core/errors/app_exception.dart';
 import 'package:playsphere/core/models/announcement.dart';
 import 'package:playsphere/core/models/app_user.dart';
+import 'package:playsphere/core/models/arena_match.dart';
 import 'package:playsphere/core/models/challenge.dart';
 import 'package:playsphere/core/models/competition.dart';
 import 'package:playsphere/core/models/enums.dart';
 import 'package:playsphere/core/models/fixture.dart';
 import 'package:playsphere/core/models/organization.dart';
 import 'package:playsphere/core/models/scoring_request.dart';
+import 'package:playsphere/core/models/tournament.dart';
 import 'package:playsphere/core/models/tournament_invite.dart';
 import 'package:playsphere/core/notifications/notification_model.dart';
+import 'package:playsphere/core/layout/responsive.dart';
 import 'package:playsphere/core/permissions/capability.dart';
 import 'package:playsphere/core/providers.dart';
+import 'package:playsphere/core/router/app_router.dart';
 import 'package:playsphere/data/career_repository.dart';
+import 'package:playsphere/data/competition_repository.dart';
 import 'package:playsphere/core/models/group_entry.dart';
 import 'package:playsphere/features/home/home_providers.dart';
+import 'package:playsphere/features/home/active_seasons_screen.dart';
+import 'package:playsphere/features/home/open_registrations.dart';
+import 'package:playsphere/features/arena/arena_providers.dart';
 import 'package:playsphere/features/home/home_screen.dart';
+import 'package:playsphere/features/more/more_menu_screen.dart';
 import 'package:playsphere/features/notifications/notifications_screen.dart';
 import 'package:playsphere/shared/account_button.dart';
 import 'package:playsphere/shared/live_dot.dart';
-import 'package:playsphere/shared/module_drawer.dart';
 import 'package:playsphere/shared/playsphere_logo.dart';
 
 /// Covers the screen every signed-in member now lands on.
@@ -101,11 +109,33 @@ void main() {
     required List<Membership> memberships,
     List<Fixture> live = const [],
     List<Competition> competitions = const [],
+    /// Per-club competitions, for the tests where two clubs must not return
+    /// the same events. Wins over [competitions] where a club appears in both.
+    Map<String, List<Competition>> competitionsByOrg = const {},
     List<ScoringRequest> scoringRequests = const [],
     /// Clubs whose live-fixtures read is refused, to exercise Bug #4.
     Set<String> liveReadFailsFor = const {},
     /// Match availability calls, keyed by club — what the RSVP counter counts.
     Map<String, List<Announcement>> rsvps = const {},
+    /// The season documents behind any competition carrying a `tournamentId`,
+    /// keyed by season id. Feeds "Active seasons & tournaments".
+    Map<String, Tournament> seasons = const {},
+    /// Who the account holder is, when it is not [me] — the profile in use.
+    AppUser? profile,
+    /// Children this account still manages, and the clubs each is in. Both are
+    /// what turn a home screen into a PARENT's home screen.
+    List<AppUser> children = const [],
+    Map<String, List<Membership>> childMemberships = const {},
+    /// True when the guardian has switched into a child's profile, which is
+    /// what makes this a CHILD's home page rather than a parent's.
+    bool actingAsChild = false,
+    /// What this household has entered: filed personally, and by a team that
+    /// named them. Two lists because they are two queries — see
+    /// `userTeamEntriesProvider`.
+    List<MyEntry> entries = const [],
+    List<MyEntry> teamEntries = const [],
+    /// Arena games this person is in. Feeds the count on the Arena door.
+    List<ArenaMatch> arenaMatches = const [],
   }) {
     final router = GoRouter(
       initialLocation: '/home',
@@ -118,6 +148,12 @@ void main() {
           path: '/notifications',
           builder: (_, __) => const NotificationsScreen(),
         ),
+        // Also the real screen. The dashboard used to carry an Explore list
+        // and every route in the app carried a drawer; both are gone, and
+        // what they held is here. So "can a member still reach the rules
+        // library / the coach directory / analytics?" is now a question only
+        // this screen can answer.
+        GoRoute(path: '/more', builder: (_, __) => const MoreMenuScreen()),
         // Destinations the dashboard links to. Each renders its own path so a
         // test can assert WHERE a tap landed, not merely that it did not
         // crash.
@@ -133,18 +169,29 @@ void main() {
           '/me/sports',
           '/org/:orgId',
           '/org/:orgId/live',
+          '/org/:orgId/challenges',
+          // The two doors that used to pick a club of their own: quick match
+          // behind "Play sport", and the event flow behind the "New event"
+          // button. Real paths so a test can assert WHICH club they opened.
+          '/org/:orgId/quick-match',
+          '/org/:orgId/new-event',
           '/live',
           '/events/mine',
           // The dashboard's own doors: the sport directory behind "Explore
           // sport", the RSVP page the RSVP counter opens, and the career
           // profile the Explore list links to.
           '/sports',
+          '/arena',
           '/rsvp',
           '/player/:uid',
           '/scout/search',
           '/grounds',
           '/events',
           '/sponsor',
+          // The two boards a row in "Active seasons & tournaments" opens,
+          // and the full list its button opens.
+          '/org/:orgId/tournaments/:tournamentId',
+          '/org/:orgId/event/:compId',
         ])
           GoRoute(
             path: path,
@@ -152,14 +199,66 @@ void main() {
               body: Center(child: Text('AT ${state.uri.path}')),
             ),
           ),
+        // The real screens, not stubs. The section on the dashboard is two
+        // counted buttons now, so every test about what a ROW says or does
+        // has to go through one of these to reach a row at all — a stub here
+        // would leave those tests asserting against nothing.
+        for (final lens in RegistrationLens.values)
+          for (final kind in OpenRegistrationKind.values)
+            GoRoute(
+              path: Routes.entryList((kind: kind, lens: lens)),
+              builder: (_, __) => ActiveSeasonsScreen(kind: kind, lens: lens),
+            ),
       ],
     );
 
     return ProviderScope(
       overrides: [
         currentUidProvider.overrideWithValue('uid_me'),
-        currentUserProvider.overrideWith((ref) => Stream.value(me)),
+        currentUserProvider.overrideWith(
+          (ref) => Stream.value(profile ?? me),
+        ),
         myMembershipsProvider.overrideWith((ref) => Stream.value(memberships)),
+        // Left alone this reads Firestore, which `flutter test` never starts,
+        // so the Arena door would silently show its idle subtitle whatever
+        // the test set up.
+        myArenaMatchesProvider.overrideWith((ref) => Stream.value(arenaMatches)),
+        // The clubs the profile in use follows. Left alone this is a
+        // collection-group query against a Firestore that `flutter test` never
+        // starts, so the feed would be memberships-only by accident rather
+        // than by the harness saying so.
+        myFollowedOrgIdsProvider.overrideWith(
+          (ref) => Stream.value(const <String>[]),
+        ),
+        // The household. Empty by default: most of these tests are one
+        // person's dashboard, and the parent/child split is exercised by the
+        // group that passes children in.
+        myManagedChildrenProvider.overrideWith((ref) => Stream.value(children)),
+        userMembershipsProvider.overrideWith(
+          (ref, uid) => Stream.value(childMemberships[uid] ?? const []),
+        ),
+        userFollowedOrgIdsProvider.overrideWith(
+          (ref, uid) => Stream.value(const <String>[]),
+        ),
+        // Collection-group queries against a Firestore `flutter test` never
+        // starts. Left alone the Registered tiles would read empty by
+        // accident rather than because the harness said so.
+        userEntriesProvider.overrideWith(
+          (ref, uid) => Stream.value(
+            [for (final e in entries) if (e.registration.uid == uid) e],
+          ),
+        ),
+        userTeamEntriesProvider.overrideWith(
+          (ref, uid) => Stream.value(
+            [
+              for (final e in teamEntries)
+                if (e.registration.memberUids.contains(uid)) e,
+            ],
+          ),
+        ),
+        tournamentProvider.overrideWith(
+          (ref, key) => Stream.value(seasons[key.tournamentId]),
+        ),
         organizationProvider.overrideWith(
           (ref, id) => Stream.value(id == orgA ? school : academy),
         ),
@@ -168,7 +267,15 @@ void main() {
             id == orgA ? MembershipRole.member : MembershipRole.eventManager,
           ),
         ),
-        competitionsProvider.overrideWith((ref, id) => Stream.value(competitions)),
+        isActingAsChildProvider.overrideWithValue(actingAsChild),
+        // Both read the FirebaseAuth token, which `flutter test` never
+        // initialises. The More index gates the government dashboard on the
+        // first and the Premium tile's wording on the second.
+        isPlatformAdminProvider.overrideWith((ref) async => false),
+        isPremiumProvider.overrideWithValue(false),
+        competitionsProvider.overrideWith(
+          (ref, id) => Stream.value(competitionsByOrg[id] ?? competitions),
+        ),
         liveFixturesProvider.overrideWith(
           (ref, id) => liveReadFailsFor.contains(id)
               ? Stream<List<Fixture>>.error(
@@ -227,40 +334,51 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
   }
 
-  /// Tall enough for the whole module menu to be laid out at once.
+  /// Tall enough for the whole More index to be laid out at once.
   ///
-  /// The menu is a `ListView`, so its off-screen entries have no elements and
+  /// The index is a `ListView`, so its off-screen tiles have no elements and
   /// no finder can see them. Without the room, "is this module offered?" and
-  /// "is it merely below the fold?" are the same result — which is how the
-  /// menu tests came to be passing against the dashboard's Explore grid
-  /// instead of against the menu.
-  const drawerView = Size(420, 2200);
+  /// "is it merely below the fold?" are the same result.
+  const menuView = Size(420, 2200);
 
+  /// Opens the More tab from the bottom bar.
+  ///
+  /// This used to pull out a drawer, which no longer exists: the product had
+  /// four menus — the bar, the dashboard's Explore list, this index and a
+  /// drawer on every route — and eighteen destinations appeared on two or
+  /// more of them under different names. There is one index now, and the bar
+  /// carries it in its last slot on every screen.
   Future<void> openMenu(WidgetTester tester) async {
-    await tester.tap(find.byTooltip('Open navigation menu'));
+    await tester.tap(find.byIcon(Icons.apps_outlined).first);
     await settle(tester);
   }
 
-  /// Scoped deliberately: the dashboard behind the open drawer carries tiles
-  /// with several of the same labels, so an unscoped `find.text` proves
-  /// nothing about the menu.
-  Finder inDrawer(String label) => find.descendant(
-        of: find.byType(ModuleDrawer),
+  /// Scoped to the tile grids, not to the screen.
+  ///
+  /// The bottom bar is part of `MoreMenuScreen`'s own scaffold and carries
+  /// "Home", "My clubs" and "More" as labels, so scoping at the screen finds
+  /// two of anything the bar also names — which reads as "the index lists it
+  /// twice" when it does not.
+  Finder inMenu(String label) => find.descendant(
+        of: find.descendant(
+          of: find.byType(MoreMenuScreen),
+          matching: find.byType(AdaptiveGrid),
+        ),
         matching: find.text(label),
       );
 
-  /// Scrolls the drawer until [label] is built.
+  /// Scrolls the index until [label] is built.
   ///
-  /// The drawer is a `ListView`, so it only builds what is on screen — an
-  /// entry below the fold genuinely does not exist in the tree yet. As modules
-  /// are added the list outgrows a phone viewport, which is what the scrolling
-  /// is for rather than a sign anything overflowed.
-  Future<void> scrollToInDrawer(WidgetTester tester, String label) async {
+  /// It is a `ListView`, so it only builds what is on screen — a tile below
+  /// the fold genuinely does not exist in the tree yet. The index is the
+  /// whole product now, so it outgrows a phone viewport by design rather than
+  /// as a sign that something overflowed.
+  Future<void> scrollToInMenu(WidgetTester tester, String label) async {
     await tester.dragUntilVisible(
-      inDrawer(label),
+      inMenu(label),
       find
           .descendant(
-            of: find.byType(ModuleDrawer),
+            of: find.byType(MoreMenuScreen),
             matching: find.byType(Scrollable),
           )
           .first,
@@ -307,7 +425,12 @@ void main() {
     // it has room to be complete. This is the whole shape of the screen and
     // the reason it fits above the fold.
     expect(find.text('Clubs'), findsOneWidget);
-    expect(find.text('Nizampet High School'), findsNothing);
+    // The one exception, and it is not a list, and it is not in the body: the
+    // club this person is currently acting AS is named once, in the app bar
+    // chip, because every count under it is a count for that club. The OTHER
+    // club they belong to is not drawn — naming the club you are acting as is
+    // orientation; drawing all of them is the list this screen refuses to be.
+    expect(find.text('Nizampet High School'), findsOneWidget);
     expect(find.text('Kompally Sports Academy'), findsNothing);
 
     // The brand and the account button are the two fixed points of the shell.
@@ -316,7 +439,10 @@ void main() {
     // it matches the one in the app bar.
     expect(find.byType(PlaySphereLogo), findsOneWidget);
     expect(find.text('PlaySphere'), findsOneWidget);
-    expect(find.byTooltip('You and your clubs'), findsOneWidget);
+    // The avatar's tooltip is 'Your profile', not 'You and your clubs': the
+    // account panel behind it stopped carrying a club list when the personal
+    // level board took that space — see [AccountButton].
+    expect(find.byTooltip('Your profile'), findsOneWidget);
   });
 
   testWidgets('counts a live match rather than drawing its scorecard',
@@ -352,42 +478,613 @@ void main() {
     expect(find.text('Clubs'), findsOneWidget);
   });
 
-  testWidgets('the three-lines menu carries the modules that are not on the bar',
+  // Which club the person is acting AS, said in one place and the same place
+  // on every screen.
+  //
+  // Before this, the club was picked for them — most recently joined, never
+  // named — and the only way to work as a different one was to walk into that
+  // club's page and stay there. Then it was named twice, and the app bar copy
+  // showed the SCREEN's club rather than the selection, so the chip gave one
+  // answer on the dashboard and a different one three taps in. These tests
+  // pin what survived: one chip, naming the selection, switchable from
+  // anywhere, and honest about an account that has no club at all.
+  group('the club this person is in', () {
+    testWidgets('names it in the bar, once, and not in the body',
+        (tester) async {
+      await pump(
+        tester,
+        harness(memberships: [membership(orgA, MembershipRole.member)]),
+      );
+
+      expect(find.text('Nizampet High School'), findsOneWidget);
+      // The strip that used to repeat it under the hero is gone. Two controls
+      // for one fact, on the one screen where the bar is already in view.
+      expect(find.text('Playing for'), findsNothing);
+      expect(find.text('Switch'), findsNothing);
+    });
+
+    testWidgets('switches from anywhere, and the switch is the whole app',
+        (tester) async {
+      await pump(
+        tester,
+        harness(
+          memberships: [
+            membership(orgA, MembershipRole.member),
+            membership(orgB, MembershipRole.eventManager),
+          ],
+        ),
+      );
+
+      // Most recently joined stands in until a choice is made, which is the
+      // behaviour every org-scoped link on this screen already had.
+      expect(find.text('Nizampet High School'), findsOneWidget);
+
+      await tester.tap(find.text('Nizampet High School'));
+      await settle(tester);
+      // The sheet, not a route: switching club must not cost the dashboard.
+      expect(find.text('Your club'), findsOneWidget);
+      expect(find.text('AT /orgs'), findsNothing);
+
+      await tester.tap(find.text('Kompally Sports Academy').last);
+      await settle(tester);
+
+      expect(find.text('Kompally Sports Academy'), findsOneWidget);
+      expect(find.text('Nizampet High School'), findsNothing);
+      // And it is a selection, not a navigation — the person is still on the
+      // dashboard, now reading it as the other club.
+      expect(find.text('ALL SPORTS. ONE OS.'), findsOneWidget);
+    });
+
+    testWidgets('what you start is started by the club in the bar',
+        (tester) async {
+      // The school is the selection; the academy is the club this person can
+      // run events at. Before the selection existed, "Play sport" preferred
+      // whichever club they organized for, so the chip said "Nizampet High
+      // School" and the match it started belonged to the academy — a match on
+      // the wrong club's record, with nothing on screen to catch it.
+      await pump(
+        tester,
+        harness(
+          memberships: [
+            membership(orgA, MembershipRole.member),
+            membership(orgB, MembershipRole.eventManager),
+          ],
+        ),
+      );
+
+      expect(find.text('Nizampet High School'), findsOneWidget);
+
+      await tester.tap(find.text('Play sport'));
+      await settle(tester);
+      expect(find.text('AT /org/$orgA/quick-match'), findsOneWidget);
+    });
+
+    testWidgets('and switching the club switches what they start',
+        (tester) async {
+      await pump(
+        tester,
+        harness(
+          memberships: [
+            membership(orgA, MembershipRole.member),
+            membership(orgB, MembershipRole.eventManager),
+          ],
+        ),
+      );
+
+      await tester.tap(find.text('Nizampet High School'));
+      await settle(tester);
+      await tester.tap(find.text('Kompally Sports Academy').last);
+      await settle(tester);
+
+      await tester.tap(find.text('Play sport'));
+      await settle(tester);
+      expect(find.text('AT /org/$orgB/quick-match'), findsOneWidget);
+    });
+
+    testWidgets('a fresh install has no club, and says so', (tester) async {
+      await pump(tester, harness(memberships: const []));
+
+      // Null, not a placeholder and not somebody else's club.
+      expect(find.text('No club'), findsOneWidget);
+      expect(find.text('Nizampet High School'), findsNothing);
+
+      // And the chip is still the door: the sheet it opens is where an
+      // account with nothing joins its first club.
+      await tester.tap(find.text('No club'));
+      await settle(tester);
+      await tester.tap(find.text('Join a club'));
+      await settle(tester);
+      expect(find.text('AT /orgs'), findsOneWidget);
+    });
+  });
+
+  // What a club asks its members has to reach the dashboard, and only the
+  // members it was asked of. Both halves are the RSVP counter's job.
+  group('the RSVP counter', () {
+    Announcement call({
+      required String id,
+      List<String> invitedUids = const [],
+      String authorUid = 'uid_captain',
+    }) =>
+        Announcement(
+          id: id,
+          orgId: orgA,
+          authorUid: authorUid,
+          authorName: 'Captain',
+          title: 'Sunday game',
+          content: '',
+          poll: const Poll(options: Rsvp.options),
+          match: MatchCall(
+            sportId: 'cricket',
+            matchDate: DateTime.now().add(const Duration(days: 2)),
+            invitedUids: invitedUids,
+          ),
+        );
+
+    testWidgets('counts a call put to the whole club', (tester) async {
+      await pump(
+        tester,
+        harness(
+          memberships: [membership(orgA, MembershipRole.member)],
+          rsvps: {
+            orgA: [call(id: 'a1')],
+          },
+        ),
+      );
+
+      expect(find.text('RSVP'), findsOneWidget);
+      expect(find.text('waiting on you'), findsOneWidget);
+    });
+
+    testWidgets('leaves out a call addressed to other people', (tester) async {
+      // A club of 120 asking the twenty who might travel is asking twenty. Put
+      // on the other hundred dashboards it would undo the naming — see
+      // MatchCall.invitedUids. The call is still on the club's board; what it
+      // no longer does is interrupt people it was not addressed to.
+      await pump(
+        tester,
+        harness(
+          memberships: [membership(orgA, MembershipRole.member)],
+          rsvps: {
+            orgA: [call(id: 'a1', invitedUids: const ['uid_other'])],
+          },
+        ),
+      );
+
+      expect(find.text('RSVP'), findsOneWidget);
+      expect(find.text('waiting on you'), findsNothing);
+    });
+
+    testWidgets('still reaches the organizer who asked', (tester) async {
+      // The person who put the call out is named in it by definition. Their
+      // own call must still count on their own dashboard — they are the one
+      // who has to watch the turnout.
+      await pump(
+        tester,
+        harness(
+          memberships: [membership(orgA, MembershipRole.member)],
+          rsvps: {
+            orgA: [
+              call(
+                id: 'a1',
+                authorUid: 'uid_me',
+                invitedUids: const ['uid_other'],
+              ),
+            ],
+          },
+        ),
+      );
+
+      expect(find.text('RSVP'), findsOneWidget);
+      expect(find.text('waiting on you'), findsOneWidget);
+    });
+
+    // The door to "Call a match", which only an organizer has.
+    //
+    // It regressed into invisibility once already: a 17pt hairline glyph in
+    // the tile's own ink colour, floating over white in the corner. It was
+    // laid out and painted the whole time and still got reported as missing,
+    // because nothing about it said "button". These pin down that it is
+    // offered to the right people and that it is a real, sized target.
+    group('the "+"', () {
+      testWidgets('an organizer gets a tappable badge', (tester) async {
+        await pump(
+          tester,
+          harness(
+            memberships: [
+              membership(orgA, MembershipRole.member),
+              // orgB is `eventManager` in the harness's capability override,
+              // so this is the club the "+" is offered on behalf of.
+              membership(orgB, MembershipRole.eventManager),
+            ],
+            rsvps: {
+              orgA: [call(id: 'a1')],
+            },
+          ),
+        );
+
+        final badge = find.byTooltip('Call a match');
+        expect(badge, findsOneWidget);
+
+        // Big enough to hit, and not shaved to nothing by the tile's clip.
+        final box = tester.getRect(badge);
+        expect(box.width, greaterThanOrEqualTo(20));
+        expect(box.height, greaterThanOrEqualTo(20));
+      });
+
+      testWidgets('a plain member gets no "+"', (tester) async {
+        await pump(
+          tester,
+          harness(
+            // orgA is `member` in the harness's capability override.
+            memberships: [membership(orgA, MembershipRole.member)],
+            rsvps: {
+              orgA: [call(id: 'a1')],
+            },
+          ),
+        );
+
+        expect(find.byTooltip('Call a match'), findsNothing);
+        // The tile itself stays whatever the count says — see the comment on
+        // the RSVP tile for why it never disappears.
+        expect(find.text('RSVP'), findsOneWidget);
+      });
+    });
+  });
+
+  // Us against them, on a day the two clubs agree. The third primary action,
+  // and the one whose destination depends on what this person may do.
+  group('the Challenge door', () {
+    testWidgets('sits second, between Play and Arena', (tester) async {
+      await pump(
+        tester,
+        harness(memberships: [membership(orgA, MembershipRole.member)]),
+      );
+
+      expect(find.text('Play sport'), findsOneWidget);
+      expect(find.text('Challenge'), findsOneWidget);
+      expect(find.text('Arena'), findsOneWidget);
+      expect(find.text('Explore sport'), findsOneWidget);
+
+      // Four doors do not fit across a phone, so they wrap two-by-two. Order
+      // is therefore asserted in READING order rather than by left edge —
+      // the left edge only separated them while they shared a single row,
+      // and on a phone Challenge and Explore now sit in the same column.
+      double reading(String label) {
+        final r = tester.getRect(find.text(label));
+        return r.top * 10000 + r.left;
+      }
+
+      expect(reading('Challenge'), greaterThan(reading('Play sport')));
+      expect(reading('Challenge'), lessThan(reading('Arena')));
+      expect(reading('Arena'), lessThan(reading('Explore sport')));
+    });
+
+    testWidgets('opens the board of the club named in the bar', (tester) async {
+      // orgA is `member` and orgB is `eventManager` in the harness, and the
+      // school is the selection. This used to prefer the club they can ACT in
+      // — it opened the academy's board while the bar said the school, which
+      // is the mismatch the club chip exists to end. A member's own club's
+      // challenge board is a real destination: those are their fixtures
+      // against other clubs, whether or not they may issue one.
+      await pump(
+        tester,
+        harness(
+          memberships: [
+            membership(orgA, MembershipRole.member),
+            membership(orgB, MembershipRole.eventManager),
+          ],
+        ),
+      );
+
+      // And the hint is asked of the club being opened rather than inferred
+      // from one they organize at somewhere else.
+      expect(find.text("Your club's fixtures"), findsOneWidget);
+
+      await tester.tap(find.text('Challenge'));
+      await settle(tester);
+
+      expect(find.text('AT /org/$orgA/challenges'), findsOneWidget);
+    });
+
+    testWidgets('and follows the club when it is switched', (tester) async {
+      await pump(
+        tester,
+        harness(
+          memberships: [
+            membership(orgA, MembershipRole.member),
+            membership(orgB, MembershipRole.eventManager),
+          ],
+        ),
+      );
+
+      await tester.tap(find.text('Nizampet High School'));
+      await settle(tester);
+      await tester.tap(find.text('Kompally Sports Academy').last);
+      await settle(tester);
+
+      // The academy is a club they run, so the same button now offers the
+      // thing that club lets them do.
+      expect(find.text('Play another club'), findsOneWidget);
+
+      await tester.tap(find.text('Challenge'));
+      await settle(tester);
+
+      expect(find.text('AT /org/$orgB/challenges'), findsOneWidget);
+    });
+
+    testWidgets('a member of no club is sent to find one first',
+        (tester) async {
+      // A challenge board would refuse them. The club directory is the actual
+      // first step, so that is where the button goes.
+      await pump(tester, harness(memberships: const []));
+
+      expect(find.text('Join a club first'), findsOneWidget);
+
+      await tester.tap(find.text('Challenge'));
+      await settle(tester);
+
+      expect(find.text('AT /orgs'), findsOneWidget);
+    });
+  });
+
+  // Chess, go and the rest. The fourth primary action, and the only one that
+  // leads somewhere deliberately walled off from the rest of the app.
+  group('the Arena door', () {
+    ArenaMatch game({
+      required ArenaStatus status,
+      String challenger = 'uid_them',
+      List<ArenaMoveRecord> moves = const [],
+    }) =>
+        ArenaMatch(
+          id: 'game-${status.wire}-$challenger-${moves.length}',
+          gameId: 'chess',
+          variantId: 'standard',
+          config: const {},
+          players: const ['uid_me', 'uid_them'],
+          names: const {'uid_me': 'Me', 'uid_them': 'Them'},
+          status: status,
+          challengerUid: challenger,
+          moves: moves,
+        );
+
+    testWidgets('opens the Arena', (tester) async {
+      await pump(
+        tester,
+        harness(memberships: [membership(orgA, MembershipRole.member)]),
+      );
+
+      expect(find.text('Chess, go, and more'), findsOneWidget);
+
+      await tester.tap(find.text('Arena'));
+      await settle(tester);
+
+      expect(find.text('AT /arena'), findsOneWidget);
+    });
+
+    testWidgets('needs no club — it is between two people', (tester) async {
+      // Every other primary action either needs a club or sends you to find
+      // one. The Arena does neither, because an Arena game belongs to the two
+      // players and not to any club.
+      await pump(tester, harness(memberships: const []));
+
+      await tester.tap(find.text('Arena'));
+      await settle(tester);
+
+      expect(find.text('AT /arena'), findsOneWidget);
+    });
+
+    testWidgets('counts what is actually waiting on this person',
+        (tester) async {
+      await pump(
+        tester,
+        harness(
+          memberships: [membership(orgA, MembershipRole.member)],
+          arenaMatches: [
+            // An invitation to answer, and a live game where it is this
+            // person's move — an empty move list means players[0] is to play.
+            game(status: ArenaStatus.pending),
+            game(status: ArenaStatus.active),
+            // Neither of these is waiting on them: a challenge THEY sent, and
+            // a finished game.
+            game(status: ArenaStatus.pending, challenger: 'uid_me'),
+            game(status: ArenaStatus.finished),
+          ],
+        ),
+      );
+
+      expect(find.text('2 waiting on you'), findsOneWidget);
+    });
+
+    testWidgets('says what the Arena is when nothing is waiting',
+        (tester) async {
+      await pump(
+        tester,
+        harness(
+          memberships: [membership(orgA, MembershipRole.member)],
+          arenaMatches: [game(status: ArenaStatus.finished)],
+        ),
+      );
+
+      expect(find.text('Chess, go, and more'), findsOneWidget);
+      expect(find.textContaining('waiting on you'), findsNothing);
+    });
+  });
+
+  testWidgets('the More index carries the modules that are not on the bar',
       (tester) async {
     await pump(
       tester,
       harness(memberships: [membership(orgB, MembershipRole.eventManager)]),
-      size: drawerView,
+      size: menuView,
     );
 
     await openMenu(tester);
 
-    expect(inDrawer('Looking for'), findsOneWidget);
-    expect(inDrawer('Coaches'), findsOneWidget);
-    expect(inDrawer('Umpire & scorer registry'), findsOneWidget);
-    expect(inDrawer('Rules library'), findsOneWidget);
-    // An event manager holds viewAnalytics, so it is offered — below the fold
-    // now that the drawer carries rankings, tournaments and venues too.
-    await scrollToInDrawer(tester, 'Analytics');
-    expect(inDrawer('Analytics'), findsOneWidget);
+    expect(inMenu('Looking for'), findsOneWidget);
+    expect(inMenu('Find coaches'), findsOneWidget);
+    // Renamed from "Officials" when registration split out of Discover: the
+    // tile now says what it finds, and the screen it opens carries the same
+    // name. See `MoreMenuScreen`'s Discover/Register comment.
+    expect(inMenu('Umpires & officials'), findsOneWidget);
+    expect(inMenu('Rulebook'), findsOneWidget);
   });
 
-  testWidgets('a member without analytics rights is not offered analytics',
+  testWidgets('the index absorbed the global half of the drawer',
+      (tester) async {
+    // The drawer was deleted, not emptied. Its twenty-seven destinations had
+    // to land somewhere, and a menu entry that quietly stopped existing is
+    // indistinguishable from a feature that was removed — so the ones whose
+    // only other door was the drawer are named here one by one.
+    //
+    // Its CLUB-scoped half is not in this list on purpose: Rankings, Venues,
+    // Files, Gallery, Store and Analytics live on the club's own page now,
+    // where they point at the club on screen instead of at whichever one the
+    // person joined most recently. `org_home_screen_test.dart` holds them.
+    await pump(
+      tester,
+      harness(memberships: [membership(orgB, MembershipRole.eventManager)]),
+      size: menuView,
+    );
+
+    await openMenu(tester);
+
+    for (final label in [
+      'My clubs',
+      'Join a club',
+      'Create a club',
+      'Independent teams',
+      'Sports medicine',
+      'Find events',
+      'Find grounds',
+      'Shop',
+      'List your ground',
+      'Get Premium',
+    ]) {
+      await scrollToInMenu(tester, label);
+      expect(inMenu(label), findsOneWidget, reason: '$label lost its last door');
+    }
+  });
+
+  testWidgets('finding somebody and being findable are separate sections',
+      (tester) async {
+    // The split this guards is the whole navigation model of the menu:
+    // Discover finds other people, Register lists you. Before it, registering
+    // as an official, a coach or a physiotherapist had no door in this menu
+    // at all — each was a button inside the directory you would appear in, so
+    // a physiotherapist wanting to be listed had to first go looking for
+    // physiotherapists, which is the one search they would never run.
+    //
+    // Named one by one rather than asserting the section exists, because a
+    // section heading with the wrong tiles under it is the failure that would
+    // otherwise pass.
+    await pump(
+      tester,
+      harness(memberships: [membership(orgB, MembershipRole.eventManager)]),
+      size: menuView,
+    );
+
+    await openMenu(tester);
+
+    for (final label in [
+      'Umpires & officials',
+      'Doctors & physios',
+      'Sports shops',
+      'Find grounds',
+      'Find coaches',
+    ]) {
+      await scrollToInMenu(tester, label);
+      expect(inMenu(label), findsOneWidget,
+          reason: '$label should be findable under Discover');
+    }
+
+    await scrollToInMenu(tester, 'Become an official');
+    // Checked here, with the section's first tile on screen: the heading sits
+    // directly above it, and `inMenu` deliberately looks only inside the tile
+    // grid, so the heading is not reachable through it.
+    // Uppercased by `_Section`, so the finder has to match what is painted
+    // rather than what the source says.
+    expect(find.text('REGISTER'), findsWidgets,
+        reason: 'the Register heading should sit above its tiles');
+
+    for (final label in [
+      'Become an official',
+      'Become a coach',
+      'List your practice',
+      'List your shop',
+      'List your ground',
+    ]) {
+      await scrollToInMenu(tester, label);
+      expect(inMenu(label), findsOneWidget,
+          reason: '$label should be listed under Register');
+    }
+  });
+
+  testWidgets('a child profile is not offered the registrations',
+      (tester) async {
+    // Standing as a paid official, listing a ground or advertising a practice
+    // are the ACCOUNT's business. A guardian browsing inside their child's
+    // profile is shown none of them, the same way the account menu already
+    // hides Premium and the ground listings.
+    await pump(
+      tester,
+      harness(
+        memberships: [membership(orgB, MembershipRole.eventManager)],
+        actingAsChild: true,
+      ),
+      size: menuView,
+    );
+
+    await openMenu(tester);
+
+    // Discover is untouched — a child may still look for a coach.
+    await scrollToInMenu(tester, 'Find coaches');
+    expect(inMenu('Find coaches'), findsOneWidget);
+
+    for (final label in [
+      'Become an official',
+      'List your ground',
+      'Advertise',
+    ]) {
+      expect(inMenu(label), findsNothing,
+          reason: '$label must not be offered inside a child profile');
+    }
+  });
+
+  testWidgets('and does not carry a second copy of a club', (tester) async {
+    // This screen used to open with six club tiles — Club, Tournaments,
+    // Challenges, Gallery, Members, Store — scoped to the person's DEFAULT
+    // club, which is the one thing a menu reached from inside another club
+    // must not do. They are on the club page now, once each.
+    await pump(
+      tester,
+      harness(memberships: [membership(orgB, MembershipRole.eventManager)]),
+      size: menuView,
+    );
+
+    await openMenu(tester);
+
+    for (final gone in ['Gallery', 'Members', 'Rankings', 'Venues', 'Files']) {
+      expect(inMenu(gone), findsNothing, reason: '$gone is back in the index');
+    }
+  });
+
+  testWidgets('club analytics is not offered from the global index',
       (tester) async {
     await pump(
       tester,
       harness(memberships: [membership(orgA, MembershipRole.member)]),
-      size: drawerView,
+      size: menuView,
     );
 
     await openMenu(tester);
 
-    expect(inDrawer('Analytics'), findsNothing);
-    // The dashboard's own Explore grid must not leak it either — that grid
-    // carries a tile of the same name behind the open drawer, which is what
-    // made the scoped finder above necessary in the first place.
+    // Club analytics is a club section and lives on the club page, gated
+    // there — see `org_home_screen_test.dart`. What this pins down is that
+    // the global index does not offer a second, unscoped door to it.
+    expect(inMenu('Analytics'), findsNothing);
     expect(find.text('Analytics'), findsNothing);
-    expect(inDrawer('Rules library'), findsOneWidget);
+    expect(inMenu('Rulebook'), findsOneWidget);
   });
 
   // -------------------------------------------------------------------------
@@ -540,12 +1237,21 @@ void main() {
     );
     await settle(tester);
 
-    // No event names at all — the list belongs on /events/mine. What is here
-    // is the six that are open, and not the running or scheduled ones.
-    expect(find.textContaining('Event open'), findsNothing);
+    // The COUNTER is six: the open ones, not the running or scheduled ones.
+    // Scoped to its own tile, because those same six are also what the
+    // "Active tournaments" button below counts — deliberately, and it says
+    // six too.
+    expect(
+      find.descendant(of: tileAround('Events'), matching: find.text('6')),
+      findsOneWidget,
+    );
+
+    // An event that is running or merely scheduled is nowhere on this screen.
+    // The full cross-club list still belongs on /events/mine; what the
+    // dashboard carries is the open-for-entry ones, and only those — see
+    // `ActiveSeasonsSection`.
     expect(find.text('Event running'), findsNothing);
     expect(find.text('Event later'), findsNothing);
-    expect(find.text('6'), findsOneWidget);
 
     await tapStatTile(tester, 'Events');
     await settle(tester);
@@ -623,52 +1329,74 @@ void main() {
       lessThan(grid.width / 2),
     );
 
-    // An Explore row is a ListTile, not a 162px card.
-    expect(
-      tester.getSize(tileAround('Career profile')).height,
-      lessThanOrEqualTo(80),
-    );
   });
 
-  testWidgets('the Rules library is in the menu, not on the dashboard',
+  testWidgets('the rulebook is in the index, not on the dashboard',
       (tester) async {
     // Bug #7: reference material somebody opens once a season was taking a
-    // tile in the most valuable space in the app, duplicating a module-menu
-    // entry that was already there.
+    // tile in the most valuable space in the app, duplicating a menu entry
+    // that was already there.
     await pump(
       tester,
       harness(memberships: [membership(orgA, MembershipRole.member)]),
-      size: drawerView,
+      size: menuView,
     );
 
-    expect(find.text('Rules library'), findsNothing);
+    expect(find.text('Rulebook'), findsNothing);
 
     await openMenu(tester);
-    expect(inDrawer('Rules library'), findsOneWidget);
+    expect(inMenu('Rulebook'), findsOneWidget);
   });
 
-  testWidgets('an Explore tile opens its page', (tester) async {
+  testWidgets('the dashboard carries no menu of its own', (tester) async {
+    // The seven-row "Explore" list that used to sit under the three buttons.
+    // Every one of the seven was already in the More index, five were also in
+    // the drawer, and three answered to a different name in each place — so a
+    // person who had found a screen once could not reliably find it twice.
     await pump(
       tester,
       harness(memberships: [membership(orgA, MembershipRole.member)]),
+      size: menuView,
     );
 
-    await tester.scrollUntilVisible(
-      find.text('Career profile'),
-      200,
-      // Named explicitly: the counters and the Explore grid are themselves
-      // scrollables, so an unqualified search finds several.
-      scrollable: find.byType(Scrollable).first,
+    expect(find.text('EXPLORE'), findsNothing);
+    for (final gone in [
+      'Sports analytics',
+      'Career profile',
+      'Find players',
+      'Find coaches',
+      'Find grounds',
+      'Find events',
+      'Sponsorship',
+    ]) {
+      expect(find.text(gone), findsNothing, reason: '$gone is back on home');
+    }
+  });
+
+  testWidgets('a tile in the index opens its page', (tester) async {
+    await pump(
+      tester,
+      harness(memberships: [membership(orgA, MembershipRole.member)]),
+      size: menuView,
     );
-    // scrollUntilVisible stops as soon as any part of the tile is in the
+
+    await openMenu(tester);
+    // "Scout players", not "Find players". The menu now carries two searches
+    // over people and they answer different questions: this one filters on
+    // rating percentile, form and verification over players who have actually
+    // played, while "Clubs & players near me" is the newcomer's search over
+    // whoever has asked to be findable. Two tiles with the same name would
+    // have been the worse outcome.
+    await scrollToInMenu(tester, 'Scout players');
+    // dragUntilVisible stops as soon as any part of the tile is in the
     // viewport, which can leave its centre — where tap aims — off-screen.
-    await tester.ensureVisible(find.text('Career profile'));
+    await tester.ensureVisible(inMenu('Scout players'));
     await settle(tester);
 
-    await tester.tap(find.text('Career profile'));
+    await tester.tap(inMenu('Scout players'));
     await settle(tester);
 
-    expect(find.text('AT /me'), findsOneWidget);
+    expect(find.text('AT /scout/search'), findsOneWidget);
   });
 
   // -------------------------------------------------------------------------
@@ -846,6 +1574,910 @@ void main() {
         find.descendant(of: tileAround('Live'), matching: find.text('0')),
         findsNothing,
       );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Active seasons & tournaments
+  //
+  // The one list on a dashboard of counters, and the reason it earns the
+  // exception is on `open_registrations.dart`. What these pin down is the
+  // wiring the section is: created -> entries open -> on the right home pages
+  // -> tap -> board -> entries close -> gone, with nobody seeing a season they
+  // could not have entered.
+  // -------------------------------------------------------------------------
+  group('Active seasons & tournaments', () {
+    const seasonId = 'season_summer';
+
+    Competition draw({
+      required String id,
+      String orgId = orgA,
+      String name = 'Summer League 2026 — Cricket',
+      String sportId = 'cricket',
+      String sportName = 'Cricket',
+      String? tournamentId = seasonId,
+      CompetitionStatus status = CompetitionStatus.registrationOpen,
+      CompetitionCategory category = const CompetitionCategory(label: 'Open'),
+      DateTime? registrationClosesAt,
+      DateTime? createdAt,
+    }) =>
+        Competition(
+          id: id,
+          orgId: orgId,
+          name: name,
+          sportId: sportId,
+          sportName: sportName,
+          archetype: CompetitionArchetype.versus,
+          entrantType: EntrantType.individual,
+          format: CompetitionFormat.roundRobin,
+          status: status,
+          category: category,
+          scoringPluginKey: 'set_based',
+          tournamentId: tournamentId,
+          registrationClosesAt: registrationClosesAt,
+          createdAt: createdAt,
+        );
+
+    Tournament season({
+      String id = seasonId,
+      String orgId = orgA,
+      String name = 'Summer League 2026',
+      TournamentStatus status = TournamentStatus.entriesOpen,
+      DateTime? entryDeadline,
+      bool isSuspended = false,
+      DateTime? createdAt,
+    }) =>
+        Tournament(
+          id: id,
+          orgId: orgId,
+          name: name,
+          status: status,
+          entryDeadline: entryDeadline,
+          isSuspended: isSuspended,
+          createdAt: createdAt ?? DateTime(2026, 1, 1),
+        );
+
+    /// The whole row, as one sentence. `findRichText` because the three parts
+    /// carry different weights and so are spans of one `Text.rich`, not three
+    /// `Text` widgets.
+    Finder row(String line) => find.text(line, findRichText: true);
+
+    /// The number printed on one of the four tiles.
+    ///
+    /// Read out of the tile rather than asserted globally, because two tiles
+    /// showing "0" are two identical `Text` widgets and the Events counter
+    /// above may be showing the same number again for its own good reasons.
+    String tileCount(
+      WidgetTester tester,
+      RegistrationLens lens,
+      OpenRegistrationKind kind,
+    ) {
+      final tile = find
+          .ancestor(
+            of: find.text(lens.labelFor(kind)),
+            matching: find.byType(Column),
+          )
+          .first;
+      // The count is the first Text in the tile: number, then label, then
+      // the line under it.
+      return tester
+          .widgetList<Text>(
+            find.descendant(of: tile, matching: find.byType(Text)),
+          )
+          .first
+          .data!;
+    }
+
+    /// Renders the dashboard and lets a row finish assembling.
+    ///
+    /// More frames than the rest of the screen needs, because a row resolves
+    /// through a CHAIN of streams rather than one: on a parent's page, the
+    /// managed children arrive, then each child's memberships, then those
+    /// clubs' events, then the season document, and only then does the row ask
+    /// for the club whose name goes at the front. Each link is a frame.
+    ///
+    /// That staging is the design, not a defect — the row draws itself the
+    /// moment it knows it exists and fills the club in when it arrives, which
+    /// is why `_OpenRow` omits the leading segment rather than showing a
+    /// placeholder. `pumpAndSettle` cannot be used to wait it out for the
+    /// reason [settle] gives.
+    Future<void> pumpHome(
+      WidgetTester tester,
+      Widget widget, {
+      Size size = const Size(420, 900),
+      /// Whether to press through to the list.
+      ///
+      /// The rows left the dashboard when the section became two counted
+      /// buttons, so a test about what a row SAYS or DOES has to open the
+      /// list to find one. It presses seasons when there are seasons and
+      /// tournaments otherwise; a test with nothing open finds neither
+      /// button, stays on the dashboard, and asserts about the dashboard.
+      ///
+      /// False for the tests that are about the buttons themselves.
+      bool follow = true,
+    }) async {
+      await pump(tester, widget, size: size);
+      for (var i = 0; i < 4; i++) {
+        await settle(tester);
+      }
+      if (!follow) return;
+      for (final kind in OpenRegistrationKind.values) {
+        final tile = find.text(RegistrationLens.open.labelFor(kind));
+        if (tile.evaluate().isEmpty) continue;
+        // A tile with a zero is on the screen but does nothing, so tapping
+        // one would leave the test on the dashboard asserting about rows
+        // that were never going to be there. Press the one with something
+        // behind it.
+        await tester.tap(tile);
+        await settle(tester);
+        await settle(tester);
+        if (find.byType(HomeScreen).evaluate().isEmpty) break;
+      }
+    }
+
+    testWidgets('an open season reads club — season — sport', (tester) async {
+      await pumpHome(
+        tester,
+        harness(
+          memberships: [membership(orgA, MembershipRole.member)],
+          competitions: [draw(id: 'd1')],
+          seasons: {seasonId: season()},
+        ),
+      );
+
+      expect(
+        row('Nizampet High School — Summer League 2026 — Cricket'),
+        findsOneWidget,
+      );
+      // The season's own name, not the sport-qualified name of its draw.
+      expect(row('Summer League 2026 — Cricket'), findsNothing);
+      // Nothing else on the row: no date, no fee, no entry count, no status.
+      expect(find.text('Entries open'), findsNothing);
+    });
+
+    testWidgets('a season of several sports says only Multi Sport',
+        (tester) async {
+      await pumpHome(
+        tester,
+        harness(
+          memberships: [membership(orgA, MembershipRole.member)],
+          competitions: [
+            draw(id: 'd1'),
+            draw(
+              id: 'd2',
+              name: 'Summer League 2026 — Table Tennis',
+              sportId: 'table_tennis',
+              sportName: 'Table Tennis',
+            ),
+          ],
+          seasons: {seasonId: season()},
+        ),
+      );
+
+      expect(
+        row('Nizampet High School — Summer League 2026 — Multi Sport'),
+        findsOneWidget,
+      );
+      // One row for the season, not one per sport.
+      expect(find.textContaining('Cricket', findRichText: true), findsNothing);
+      expect(
+        find.textContaining('Table Tennis', findRichText: true),
+        findsNothing,
+      );
+    });
+
+    testWidgets('the sport line describes the season, not what is left open',
+        (tester) async {
+      // Four of five draws have closed. The season is still a multi-sport
+      // season; saying "Cricket" because cricket is the only draw still taking
+      // entries would be a lie about what the board opens onto.
+      await pumpHome(
+        tester,
+        harness(
+          memberships: [membership(orgA, MembershipRole.member)],
+          competitions: [
+            draw(id: 'd1'),
+            draw(
+              id: 'd2',
+              name: 'Summer League 2026 — Table Tennis',
+              sportId: 'table_tennis',
+              sportName: 'Table Tennis',
+              status: CompetitionStatus.registrationClosed,
+            ),
+          ],
+          seasons: {seasonId: season()},
+        ),
+      );
+
+      expect(
+        row('Nizampet High School — Summer League 2026 — Multi Sport'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a row opens the season board', (tester) async {
+      await pumpHome(
+        tester,
+        harness(
+          memberships: [membership(orgA, MembershipRole.member)],
+          competitions: [draw(id: 'd1')],
+          seasons: {seasonId: season()},
+        ),
+      );
+
+      await tester.tap(
+        row('Nizampet High School — Summer League 2026 — Cricket'),
+      );
+      await settle(tester);
+
+      // The board, which is where the complete picture and the Register flow
+      // are. Not one of the season's draws.
+      expect(find.text('AT /org/$orgA/tournaments/$seasonId'), findsOneWidget);
+    });
+
+    testWidgets('a standalone tournament opens its own board', (tester) async {
+      // Not every tournament is a season: the tournament event type writes one
+      // draw and no season document, so the board it has is its own.
+      await pumpHome(
+        tester,
+        harness(
+          memberships: [membership(orgA, MembershipRole.member)],
+          competitions: [
+            draw(
+              id: 'open_challenge',
+              name: 'Open Challenge',
+              sportId: 'table_tennis',
+              sportName: 'Table Tennis',
+              tournamentId: null,
+            ),
+          ],
+        ),
+      );
+
+      expect(
+        row('Nizampet High School — Open Challenge — Table Tennis'),
+        findsOneWidget,
+      );
+
+      await tester.tap(row('Nizampet High School — Open Challenge — Table Tennis'));
+      await settle(tester);
+
+      expect(find.text('AT /org/$orgA/event/open_challenge'), findsOneWidget);
+    });
+
+    testWidgets('newest created sits at the top', (tester) async {
+      await pumpHome(
+        tester,
+        harness(
+          memberships: [membership(orgA, MembershipRole.member)],
+          competitions: [
+            // Deliberately handed over oldest-first, so passing cannot be an
+            // accident of input order.
+            draw(
+              id: 'old',
+              name: 'Winter Cup',
+              tournamentId: null,
+              createdAt: DateTime(2026, 1, 5),
+            ),
+            draw(
+              id: 'new',
+              name: 'Monsoon Cup',
+              tournamentId: null,
+              createdAt: DateTime(2026, 6, 5),
+            ),
+          ],
+        ),
+      );
+
+      final newer = tester.getRect(
+        row('Nizampet High School — Monsoon Cup — Cricket'),
+      );
+      final older = tester.getRect(
+        row('Nizampet High School — Winter Cup — Cricket'),
+      );
+      expect(newer.top, lessThan(older.top));
+    });
+
+    // The core rule: home is discovery of currently OPEN registration only.
+    group('leaves', () {
+      testWidgets('when the organizer closes entries', (tester) async {
+        await pumpHome(
+          tester,
+          harness(
+            memberships: [membership(orgA, MembershipRole.member)],
+            competitions: [
+              draw(id: 'd1', status: CompetitionStatus.registrationClosed),
+            ],
+            seasons: {seasonId: season(status: TournamentStatus.entriesClosed)},
+          ),
+        );
+
+        expect(find.textContaining('Summer League', findRichText: true),
+            findsNothing);
+        expect(find.text('ACTIVE SEASONS & TOURNAMENTS'), findsNothing);
+      });
+
+      testWidgets('when the deadline passes, with nothing having written it',
+          (tester) async {
+        // Nothing runs a job over every event when a deadline expires, so the
+        // stored status still says `registration_open`. The section has to
+        // derive the close itself or a season keeps advertising entries it
+        // will refuse — the same reasoning `Competition.displayStatus` records.
+        await pumpHome(
+          tester,
+          harness(
+            memberships: [membership(orgA, MembershipRole.member)],
+            competitions: [
+              draw(
+                id: 'd1',
+                registrationClosesAt:
+                    DateTime.now().subtract(const Duration(days: 1)),
+              ),
+            ],
+            seasons: {seasonId: season()},
+          ),
+        );
+
+        expect(find.textContaining('Summer League', findRichText: true),
+            findsNothing);
+      });
+
+      testWidgets('when the season is paused', (tester) async {
+        await pumpHome(
+          tester,
+          harness(
+            memberships: [membership(orgA, MembershipRole.member)],
+            competitions: [draw(id: 'd1')],
+            seasons: {seasonId: season(isSuspended: true)},
+          ),
+        );
+
+        expect(find.textContaining('Summer League', findRichText: true),
+            findsNothing);
+      });
+
+      testWidgets('when nobody here could enter it', (tester) async {
+        // `me` is an adult. An under-14 draw is not an opportunity for this
+        // household, and a row for it is a tap that ends in a refusal.
+        await pumpHome(
+          tester,
+          harness(
+            memberships: [membership(orgA, MembershipRole.member)],
+            competitions: [
+              draw(
+                id: 'd1',
+                category: const CompetitionCategory(
+                  label: 'U-14 Boys',
+                  dimensions: {
+                    CategoryDimension.age,
+                    CategoryDimension.gender,
+                  },
+                  maxAge: 14,
+                  allowedGenders: {Gender.male},
+                ),
+              ),
+            ],
+            seasons: {seasonId: season()},
+          ),
+        );
+
+        expect(find.textContaining('Summer League', findRichText: true),
+            findsNothing);
+      });
+
+      testWidgets('and takes the heading with it', (tester) async {
+        // An empty block on the most valuable screen in the product, every day
+        // that nothing is open, is a heading people stop reading.
+        await pumpHome(
+          tester,
+          harness(memberships: [membership(orgA, MembershipRole.member)]),
+        );
+
+        expect(find.text('ACTIVE SEASONS & TOURNAMENTS'), findsNothing);
+        // The rest of the dashboard is untouched. Anchored on the counters
+        // rather than on the Explore heading that used to sit below this
+        // section: that list has moved to the More index, and an assertion
+        // that a heading is still there is worth nothing once the heading is
+        // gone from the screen entirely.
+        expect(find.text('Clubs'), findsOneWidget);
+        expect(find.text('Explore sport'), findsOneWidget);
+      });
+    });
+
+    // One phone, several players. The section has to answer a different
+    // question depending on whose home page it is drawn on.
+    group('one profile, not a household', () {
+      const childUid = 'uid_child';
+      const otherChildUid = 'uid_child_two';
+
+      final son = AppUser(
+        uid: childUid,
+        displayName: 'Arjun Kumar',
+        email: '',
+        dateOfBirth: DateTime(2014, 3, 2),
+        gender: Gender.male,
+        profileComplete: true,
+        custodianUid: 'uid_me',
+      );
+
+      final daughter = AppUser(
+        uid: otherChildUid,
+        displayName: 'Meera Kumar',
+        email: '',
+        dateOfBirth: DateTime(2016, 8, 9),
+        gender: Gender.female,
+        profileComplete: true,
+        custodianUid: 'uid_me',
+      );
+
+      const underTwelveBoys = CompetitionCategory(
+        label: 'U-12 Boys',
+        dimensions: {CategoryDimension.age, CategoryDimension.gender},
+        maxAge: 12,
+        allowedGenders: {Gender.male},
+      );
+
+      Membership childMembership(String uid, String orgId) => Membership(
+            uid: uid,
+            orgId: orgId,
+            role: MembershipRole.member,
+            status: MembershipStatus.active,
+            displayName: 'Child',
+            joinedAt: DateTime(2025, 6, 1),
+          );
+
+      testWidgets(
+          "a parent is not shown their child's season on their own page",
+          (tester) async {
+        // The parent belongs to orgA and to nothing at the academy; their son
+        // is in the academy and its under-12 season is his to enter, not
+        // theirs.
+        //
+        // This screen used to fan out across the household and show it here,
+        // on the argument that a parent should not have to switch profiles to
+        // notice an opportunity. The count it produced could not be read: one
+        // number over two people, and no way for the tile to say whose. Every
+        // number on this section now answers for the profile in use and
+        // nobody else, and the son's opportunities are on the son's home
+        // page — one profile switch away, which is what profile switching is
+        // for.
+        await pumpHome(
+          tester,
+          harness(
+            memberships: [membership(orgA, MembershipRole.member)],
+            children: [son],
+            childMemberships: {
+              childUid: [childMembership(childUid, orgB)],
+            },
+            competitionsByOrg: {
+              orgA: const [],
+              orgB: [
+                draw(
+                  id: 'junior',
+                  orgId: orgB,
+                  name: 'Junior Championship',
+                  tournamentId: null,
+                  category: underTwelveBoys,
+                ),
+              ],
+            },
+          ),
+        );
+
+        expect(find.textContaining('Junior Championship', findRichText: true),
+            findsNothing);
+      });
+
+      testWidgets('a parent is not shown a season they cannot enter',
+          (tester) async {
+        // The parent is not twelve, and their daughter's eligibility is not
+        // theirs to borrow — on this page or any other.
+        await pumpHome(
+          tester,
+          harness(
+            memberships: [membership(orgA, MembershipRole.member)],
+            children: [daughter],
+            childMemberships: {
+              otherChildUid: [childMembership(otherChildUid, orgB)],
+            },
+            competitionsByOrg: {
+              orgB: [
+                draw(
+                  id: 'junior',
+                  orgId: orgB,
+                  name: 'Junior Championship',
+                  tournamentId: null,
+                  category: underTwelveBoys,
+                ),
+              ],
+            },
+          ),
+        );
+
+        expect(find.textContaining('Junior Championship', findRichText: true),
+            findsNothing);
+      });
+
+      testWidgets("a child's home page carries only their own", (tester) async {
+        // Switched into the daughter's profile, the app IS the daughter. Her
+        // brother's under-12 boys' championship is not hers to see, even
+        // though the same phone was showing it a moment ago.
+        await pumpHome(
+          tester,
+          harness(
+            profile: daughter,
+            actingAsChild: true,
+            memberships: [
+              Membership(
+                uid: otherChildUid,
+                orgId: orgB,
+                role: MembershipRole.member,
+                status: MembershipStatus.active,
+                displayName: 'Meera Kumar',
+                joinedAt: DateTime(2025, 6, 1),
+              ),
+            ],
+            children: [son, daughter],
+            childMemberships: {
+              childUid: [childMembership(childUid, orgA)],
+            },
+            competitionsByOrg: {
+              orgA: [
+                draw(
+                  id: 'junior',
+                  name: 'Junior Championship',
+                  tournamentId: null,
+                  category: underTwelveBoys,
+                ),
+              ],
+              orgB: [
+                draw(
+                  id: 'girls',
+                  orgId: orgB,
+                  name: 'Girls Open',
+                  tournamentId: null,
+                  category: const CompetitionCategory(
+                    label: 'U-12 Girls',
+                    dimensions: {
+                      CategoryDimension.age,
+                      CategoryDimension.gender,
+                    },
+                    maxAge: 12,
+                    allowedGenders: {Gender.female},
+                  ),
+                ),
+              ],
+            },
+          ),
+        );
+
+        expect(
+          row('Kompally Sports Academy — Girls Open — Cricket'),
+          findsOneWidget,
+        );
+        // Neither the sibling's event nor the sibling's club leaks in.
+        expect(find.textContaining('Junior Championship', findRichText: true),
+            findsNothing);
+      });
+    });
+
+    group('the four tiles', () {
+      /// [count] standalone tournaments, newest first: `Open 1` downwards.
+      List<Competition> tournaments(int count) => [
+            for (var i = 1; i <= count; i++)
+              draw(
+                id: 'e$i',
+                name: 'Open $i',
+                tournamentId: null,
+                createdAt: DateTime(2026, 1, 30 - i),
+              ),
+          ];
+
+      Finder openRow(int i) => row('Nizampet High School — Open $i — Cricket');
+
+      testWidgets('each counts its own kind, and nothing else',
+          (tester) async {
+        // The dashboard says how much is open in four numbers rather than
+        // spending rows saying it — and a season must not be counted as a
+        // tournament, which is half the reason there are four.
+        await pumpHome(
+          tester,
+          harness(
+            memberships: [membership(orgA, MembershipRole.member)],
+            competitions: [...tournaments(7), draw(id: 'd1')],
+            seasons: {seasonId: season()},
+          ),
+          follow: false,
+        );
+
+        expect(find.text('Active seasons'), findsOneWidget);
+        expect(find.text('Active tournaments'), findsOneWidget);
+        expect(find.text('Registered seasons'), findsOneWidget);
+        expect(find.text('Registered tournaments'), findsOneWidget);
+
+        expect(tileCount(tester, RegistrationLens.open,
+            OpenRegistrationKind.season), '1');
+        expect(tileCount(tester, RegistrationLens.open,
+            OpenRegistrationKind.tournament), '7');
+        // Nothing entered: the two Registered tiles say zero rather than
+        // disappearing, so the grid does not reshuffle under the reader.
+        expect(tileCount(tester, RegistrationLens.registered,
+            OpenRegistrationKind.season), '0');
+        expect(tileCount(tester, RegistrationLens.registered,
+            OpenRegistrationKind.tournament), '0');
+
+        // No rows on the dashboard: this is a count, like everything else on
+        // it. The rows are one tap away.
+        expect(openRow(1), findsNothing);
+        expect(
+          row('Nizampet High School — Summer League 2026 — Cricket'),
+          findsNothing,
+        );
+      });
+
+      testWidgets('the tiles sit two by two', (tester) async {
+        await pumpHome(
+          tester,
+          harness(
+            memberships: [membership(orgA, MembershipRole.member)],
+            competitions: tournaments(3),
+          ),
+          follow: false,
+        );
+
+        Rect at(RegistrationLens lens, OpenRegistrationKind kind) =>
+            tester.getRect(find.text(lens.labelFor(kind)));
+
+        final openSeasons = at(RegistrationLens.open,
+            OpenRegistrationKind.season);
+        final openTournaments = at(RegistrationLens.open,
+            OpenRegistrationKind.tournament);
+        final registeredSeasons = at(RegistrationLens.registered,
+            OpenRegistrationKind.season);
+
+        // Side by side on the same line...
+        expect(openTournaments.left, greaterThan(openSeasons.left));
+        expect(openTournaments.top, openSeasons.top);
+        // ...and the second pair below the first, seasons under seasons.
+        expect(registeredSeasons.top, greaterThan(openSeasons.top));
+        expect(registeredSeasons.left, openSeasons.left);
+      });
+
+      testWidgets('a tile with nothing behind it does not open', (tester) async {
+        await pumpHome(
+          tester,
+          harness(
+            memberships: [membership(orgA, MembershipRole.member)],
+            competitions: tournaments(3),
+          ),
+          follow: false,
+        );
+
+        await tester.tap(find.text('Registered tournaments'));
+        await settle(tester);
+
+        // Still on the dashboard: a door onto a blank room does not open.
+        expect(find.byType(HomeScreen), findsOneWidget);
+      });
+
+      testWidgets('the tile opens the whole list of its own kind',
+          (tester) async {
+        await pumpHome(
+          tester,
+          harness(
+            memberships: [membership(orgA, MembershipRole.member)],
+            competitions: [...tournaments(7), draw(id: 'd1')],
+            seasons: {seasonId: season()},
+          ),
+          follow: false,
+        );
+
+        await tester.tap(find.text('Active tournaments'));
+        await settle(tester);
+        await settle(tester);
+
+        // Every one of the seven, not a preview of them.
+        for (var i = 1; i <= 7; i++) {
+          expect(openRow(i), findsOneWidget, reason: 'Open $i');
+        }
+        // `AppScaffold` joins the title and subtitle into one caption line.
+        expect(
+          find.text(
+            'Active tournaments · 7 tournaments open to enter',
+          ),
+          findsOneWidget,
+        );
+        // The season stayed behind its own tile. Someone who pressed "Active
+        // tournaments" asked a narrower question than "what is open".
+        expect(
+          row('Nizampet High School — Summer League 2026 — Cricket'),
+          findsNothing,
+        );
+      });
+
+      testWidgets('the list is newest created first', (tester) async {
+        await pumpHome(
+          tester,
+          harness(
+            memberships: [membership(orgA, MembershipRole.member)],
+            // Fed oldest-first, so passing cannot be an accident of input.
+            competitions: tournaments(3).reversed.toList(),
+          ),
+        );
+
+        final newest = tester.getRect(openRow(1));
+        final oldest = tester.getRect(openRow(3));
+        expect(newest.top, lessThan(oldest.top));
+      });
+    });
+
+    group('what this household has entered', () {
+      /// An entry filed by [uid] in [compId] at [orgA].
+      MyEntry entry(
+        String compId, {
+        String uid = 'uid_me',
+        RegistrationStatus status = RegistrationStatus.confirmed,
+      }) =>
+          MyEntry(
+            orgId: orgA,
+            compId: compId,
+            registration: Registration(
+              uid: uid,
+              displayName: 'Vijay',
+              status: status,
+            ),
+          );
+
+      testWidgets('an entry counts however the event is doing',
+          (tester) async {
+        // The point of the Registered tiles: entries CLOSED on the event I am
+        // in, which is exactly when I most want to see it — the draw is out,
+        // the fixtures are up, and the Active tile has correctly dropped it.
+        await pumpHome(
+          tester,
+          harness(
+            memberships: [membership(orgA, MembershipRole.member)],
+            competitions: [
+              draw(
+                id: 'shut',
+                name: 'Winter Cup',
+                tournamentId: null,
+                status: CompetitionStatus.scheduled,
+              ),
+            ],
+            entries: [entry('shut')],
+          ),
+          follow: false,
+        );
+
+        expect(tileCount(tester, RegistrationLens.registered,
+            OpenRegistrationKind.tournament), '1');
+        expect(tileCount(tester, RegistrationLens.open,
+            OpenRegistrationKind.tournament), '0');
+      });
+
+      testWidgets('a withdrawn entry is not an entry', (tester) async {
+        await pumpHome(
+          tester,
+          harness(
+            memberships: [membership(orgA, MembershipRole.member)],
+            competitions: [
+              draw(id: 'shut', name: 'Winter Cup', tournamentId: null),
+            ],
+            entries: [
+              entry('shut', status: RegistrationStatus.withdrawn),
+            ],
+          ),
+          follow: false,
+        );
+
+        expect(tileCount(tester, RegistrationLens.registered,
+            OpenRegistrationKind.tournament), '0');
+      });
+
+      testWidgets('a finished event drops off', (tester) async {
+        // A record, not a thing to do. The career profile is where a record
+        // belongs.
+        await pumpHome(
+          tester,
+          harness(
+            memberships: [membership(orgA, MembershipRole.member)],
+            competitions: [
+              draw(
+                id: 'done',
+                name: 'Winter Cup',
+                tournamentId: null,
+                status: CompetitionStatus.completed,
+              ),
+              // Something else open, so the section is on the screen at all
+              // — with all four tiles at zero it draws nothing, which would
+              // pass this test for the wrong reason.
+              draw(id: 'other', name: 'Spring Cup', tournamentId: null),
+            ],
+            entries: [entry('done')],
+          ),
+          follow: false,
+        );
+
+        expect(tileCount(tester, RegistrationLens.registered,
+            OpenRegistrationKind.tournament), '0');
+      });
+
+      testWidgets('an entry in one draw counts its season once',
+          (tester) async {
+        await pumpHome(
+          tester,
+          harness(
+            memberships: [membership(orgA, MembershipRole.member)],
+            competitions: [
+              draw(id: 'd1', status: CompetitionStatus.scheduled),
+              draw(
+                id: 'd2',
+                name: 'Summer League 2026 — Table Tennis',
+                sportId: 'table_tennis',
+                sportName: 'Table Tennis',
+                status: CompetitionStatus.scheduled,
+              ),
+            ],
+            seasons: {seasonId: season()},
+            entries: [entry('d1')],
+          ),
+          follow: false,
+        );
+
+        expect(tileCount(tester, RegistrationLens.registered,
+            OpenRegistrationKind.season), '1');
+
+        await tester.tap(find.text('Registered seasons'));
+        await settle(tester);
+        await settle(tester);
+
+        // The season, named as a season and carrying both its sports.
+        expect(
+          row('Nizampet High School — Summer League 2026 — Multi Sport'),
+          findsOneWidget,
+        );
+      });
+
+      testWidgets('a team entry counts for the players it names',
+          (tester) async {
+        // A player whose club entered them in the league has entered the
+        // league. An app that only counted entries they filed personally
+        // would tell them they are in nothing.
+        await pumpHome(
+          tester,
+          harness(
+            memberships: [membership(orgA, MembershipRole.member)],
+            competitions: [
+              draw(
+                id: 'league',
+                name: 'Club League',
+                tournamentId: null,
+                status: CompetitionStatus.scheduled,
+              ),
+            ],
+            teamEntries: [
+              const MyEntry(
+                orgId: orgA,
+                compId: 'league',
+                registration: Registration(
+                  // The document id of a team entry is the TEAM's, which is
+                  // why the second query exists at all.
+                  uid: 'team_abc',
+                  displayName: 'Nizampet A',
+                  status: RegistrationStatus.confirmed,
+                  teamId: 'team_abc',
+                  memberUids: ['uid_me'],
+                ),
+              ),
+            ],
+          ),
+          follow: false,
+        );
+
+        expect(tileCount(tester, RegistrationLens.registered,
+            OpenRegistrationKind.tournament), '1');
+      });
     });
   });
 

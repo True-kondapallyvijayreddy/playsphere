@@ -27,7 +27,7 @@ class CoachDetailScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final coach = ref.watch(coachProvider(uid));
-    final isMe = ref.watch(currentUidProvider) == uid;
+    final isMe = ref.watch(authUidProvider) == uid;
 
     return AsyncView(
       value: coach,

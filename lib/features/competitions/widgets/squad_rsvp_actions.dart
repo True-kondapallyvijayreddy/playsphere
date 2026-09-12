@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/models/announcement.dart';
+import '../../../core/models/enums.dart';
 import '../../../core/models/fixture.dart';
 import '../../../core/models/organization.dart';
 import '../../../core/models/squad_entry.dart';
@@ -66,13 +67,31 @@ class _SquadRsvpActionsState extends ConsumerState<SquadRsvpActions> {
   /// Matched on the fixture id rather than on the date: a club may well have
   /// two calls out for the same evening, and pulling the wrong one's yeses
   /// onto a team sheet is the failure this whole widget exists to prevent.
-  List<Announcement> _callsForThisMatch(WidgetRef ref) => [
-        for (final a in ref.watch(matchRsvpsProvider(widget.orgId)).valueOrNull ??
-            const <Announcement>[])
-          if (a.match?.forFixture?.fixtureId == widget.fixture.id &&
-              a.match?.forFixture?.side == widget.side)
-            a,
-      ];
+  ///
+  /// The second clause is the one that makes the challenge flow whole. A club
+  /// that asked "we have challenged them, who is in?" did so BEFORE this
+  /// fixture existed, so that call can carry no fixture id — it carries the
+  /// challenge's, through [ChallengeCallTarget]. `acceptChallenge` stamps the
+  /// same id onto the fixture as its `sourceId`, so the two ends meet here and
+  /// an organizer who asked a fortnight ago does not have to ask again.
+  ///
+  /// No side test on that clause, and none is needed: a challenge call sits on
+  /// the board of the club that posted it, this widget only ever reads its own
+  /// club's board, and a club is on exactly one side of a challenge.
+  List<Announcement> _callsForThisMatch(WidgetRef ref) {
+    final f = widget.fixture;
+    final challengeId =
+        f.sourceType == MatchSource.challenge ? f.sourceId : null;
+    return [
+      for (final a in ref.watch(matchRsvpsProvider(widget.orgId)).valueOrNull ??
+          const <Announcement>[])
+        if ((a.match?.forFixture?.fixtureId == f.id &&
+                a.match?.forFixture?.side == widget.side) ||
+            (challengeId != null &&
+                a.match?.forChallenge?.challengeId == challengeId))
+          a,
+    ];
+  }
 
   Future<void> _ask() async {
     final me = ref.read(currentUserProvider).valueOrNull;

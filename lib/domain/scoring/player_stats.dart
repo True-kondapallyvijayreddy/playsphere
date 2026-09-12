@@ -167,9 +167,12 @@ class PlayerTally {
   }
 
   /// Every player's tally from this one match, summed into one counter map —
-  /// "the club's total" rather than any one person's. Used by
-  /// `ClubSportStats`, which credits a club with everything either side's
-  /// players did, not any single player's line.
+  /// "the match's total" rather than any one person's.
+  ///
+  /// Both sides, deliberately: this is the whole match's figures. A club's
+  /// own totals are NOT this — see `ClubRecord`, which sums only the players
+  /// who represented that club, because crediting a club with its opponent's
+  /// runs is how a stat page stops meaning anything.
   static Map<String, num> everyone(Map<String, dynamic> state) {
     final all = state[stateKey] as Map? ?? const {};
     final out = <String, num>{};

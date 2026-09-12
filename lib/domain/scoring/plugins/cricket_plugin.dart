@@ -75,8 +75,47 @@ class CricketPlugin extends ScoringPlugin {
   /// rides on the fixture document that all of them are listening to.
   static const _timelineCap = 42;
   int _overs(ScoringContext ctx) => ctx.intConfig('oversPerInnings', 20);
-  int _wicketsAllowed(ScoringContext ctx) =>
-      ctx.intConfig('playersPerTeam', 11) - 1;
+  /// How many wickets the batting side can lose before it is all out.
+  ///
+  /// A side is all out when it cannot put two batters at the crease, so the
+  /// number is one fewer than the players it actually HAS — not one fewer
+  /// than the format's nominal team size. Those are the same figure only in a
+  /// full-strength match. Read from the config alone, a six-a-side game
+  /// scored under the default `playersPerTeam` of 11 kept demanding an
+  /// incoming batter who did not exist: the innings could never reach ten
+  /// wickets, never closed, and the match could not be finished.
+  ///
+  /// The squad only ever tightens the limit, never loosens it — a fifteen-man
+  /// squad in an eleven-a-side match is still all out at ten. A side with
+  /// fewer than two named players is a line-up that was not entered rather
+  /// than a real short-handed team, so the config is trusted there instead of
+  /// closing an innings before a ball is bowled.
+  int _wicketsAllowed(ScoringContext ctx, [Side? battingSide]) {
+    final configured = ctx.intConfig('playersPerTeam', 11) - 1;
+    if (battingSide == null) return configured;
+    final squad = ctx.lineupFor(battingSide).length;
+    if (squad < 2) return configured;
+    final bySquad = squad - 1;
+    return bySquad < configured ? bySquad : configured;
+  }
+
+  /// The batters who can still come in: named for the batting side, not
+  /// already out, and not already standing at the other end.
+  List<String> _availableBatters(
+    Map<String, dynamic> cur,
+    ScoringContext ctx,
+    Side battingSide,
+  ) {
+    final batting = (cur['batting'] as Map?) ?? const {};
+    return ctx
+        .lineupFor(battingSide)
+        .map((p) => p.id)
+        .where((id) =>
+            id != cur['striker'] &&
+            id != cur['nonStriker'] &&
+            (batting[id] as Map?)?['out'] != true)
+        .toList();
+  }
 
   /// The penalty for a wide. Two under most tennis-ball and gully rules, one
   /// under the ICC playing conditions.
@@ -321,9 +360,20 @@ class CricketPlugin extends ScoringPlugin {
         if (who == null) {
           return const ScoringResult.rejected('Choose the incoming batter.');
         }
-        if (cur['striker'] != null) {
+        // The incoming batter fills whichever crease is empty, and which one
+        // that is depends on when the wicket fell. Mid-over it is the
+        // striker's end. On the LAST ball of an over it is the non-striker's:
+        // the surviving batter has already rotated onto strike for the new
+        // over, so the vacancy is at the other end. Filling only the striker
+        // was what deadlocked the pad — it rejected the one batter the scorer
+        // was being asked for, with no way to proceed and no way to end the
+        // innings.
+        final vacantEnd = cur['striker'] == null
+            ? 'striker'
+            : (cur['nonStriker'] == null ? 'nonStriker' : null);
+        if (vacantEnd == null) {
           return const ScoringResult.rejected(
-            'There is already a batter on strike.',
+            'Both batters are already at the crease.',
           );
         }
         if ((batting[who] as Map?)?['out'] == true) {
@@ -331,9 +381,14 @@ class CricketPlugin extends ScoringPlugin {
             'That batter is already out.',
           );
         }
+        if (who == cur['striker'] || who == cur['nonStriker']) {
+          return const ScoringResult.rejected(
+            'That batter is already at the crease.',
+          );
+        }
         batting[who] = batting[who] ?? _newBatting();
         cur
-          ..['striker'] = who
+          ..[vacantEnd] = who
           ..['batting'] = batting;
         innings[idx] = cur;
         return ScoringResult.ok(mutate(state, (s) => s['innings'] = innings));
@@ -489,7 +544,8 @@ class CricketPlugin extends ScoringPlugin {
             'Free hit — the batter can only be run out on this delivery.',
           );
         }
-        if (i(cur['wickets']) >= _wicketsAllowed(ctx)) {
+        if (i(cur['wickets']) >=
+            _wicketsAllowed(ctx, Side.fromWire(cur['battingSide'] as String?))) {
           return const ScoringResult.rejected('All out already.');
         }
 
@@ -788,6 +844,7 @@ class CricketPlugin extends ScoringPlugin {
     // batting-first SO is idx 2 (even) and the chasing SO is idx 3 (odd).
     // The pattern generalises: even indices bat first, odd indices chase.
     final isChasingInnings = idx.isOdd;
+    final battingSide = Side.fromWire(cur['battingSide'] as String?);
 
     // A chase ends the moment the target is passed, mid-over.
     final chaseWon = isChasingInnings && target != null && runs >= target;
@@ -796,7 +853,7 @@ class CricketPlugin extends ScoringPlugin {
     // but we reuse _wicketsAllowed for the regular match. For Super Over,
     // the innings ends on all-out (all available batters) or overs exhausted.
     final inningsOver = cur['closed'] == true ||
-        wickets >= _wicketsAllowed(ctx) ||
+        wickets >= _wicketsAllowed(ctx, battingSide) ||
         legalBalls >= maxBalls ||
         chaseWon;
 
@@ -1290,7 +1347,20 @@ class CricketPlugin extends ScoringPlugin {
     // scorer was sent back through the full opening dialog after every
     // wicket — re-picking a non-striker who was already at the crease, which
     // `apply` then rejects the moment they pick the same name twice.
-    final resuming = cur['bowler'] != null && cur['nonStriker'] != null;
+    // An innings is UNDER WAY the moment anybody has been named to it. Only
+    // an innings with both creases empty and nobody bowling has genuinely not
+    // started, and only that one deserves the full opening dialog.
+    //
+    // This used to read `bowler != null && nonStriker != null`, which missed
+    // the state a wicket on the last ball of an over produces: the surviving
+    // batter rotates onto strike, the non-striker's end is the empty one, and
+    // the bowler has been cleared for the change. All three tests below fell
+    // through to the opening dialog — the one group that offered no way to
+    // end the innings — and the match could not be finished.
+    final underway = cur['striker'] != null ||
+        cur['nonStriker'] != null ||
+        cur['bowler'] != null;
+    final creaseVacant = cur['striker'] == null || cur['nonStriker'] == null;
 
     // The over just ended and nobody has been named to bowl the next one.
     //
@@ -1301,7 +1371,8 @@ class CricketPlugin extends ScoringPlugin {
     //
     // `nonStriker != null` is what separates this from the start of an
     // innings, where nobody is named yet and the full opening dialog belongs.
-    if (cur['bowler'] == null && cur['nonStriker'] != null) {
+    if (cur['bowler'] == null &&
+        (cur['striker'] != null || cur['nonStriker'] != null)) {
       final last = cur['lastBowler'] as String?;
       return [
         ScoreControlGroup(
@@ -1340,7 +1411,14 @@ class CricketPlugin extends ScoringPlugin {
       ];
     }
 
-    if (cur['striker'] == null && resuming) {
+    if (creaseVacant && underway) {
+      // Offer only the batters who can actually come in. An empty pool is
+      // shown as such by the pad rather than as a choice that cannot be
+      // made — and it is the scorer's cue that the side has run out of
+      // batters. Left unrestricted when no line-up was entered at all, where
+      // the pad has no names to filter and the scorer types their own.
+      final available = _availableBatters(cur, ctx, battingSide);
+      final pool = ctx.lineupFor(battingSide).isEmpty ? null : available;
       return [
         ScoreControlGroup(
           title: 'Next batter in',
@@ -1350,8 +1428,12 @@ class CricketPlugin extends ScoringPlugin {
               label: 'Choose the incoming batter',
               style: ControlStyle.primary,
               side: battingSide,
-              prompts: const [
-                PlayerPrompt(key: 'playerId', label: 'Incoming batter'),
+              prompts: [
+                PlayerPrompt(
+                  key: 'playerId',
+                  label: 'Incoming batter',
+                  only: pool,
+                ),
               ],
             ),
           ],
@@ -1389,6 +1471,22 @@ class CricketPlugin extends ScoringPlugin {
                   from: PromptSource.opposingSide,
                 ),
               ],
+            ),
+          ],
+        ),
+        // Every group the pad can land on must offer a way out of the
+        // innings. This was the only one that did not, so any state that
+        // reached it — and a wicket on the last ball of an over reached it
+        // routinely — left the scorer with no button that could move the
+        // match forward.
+        const ScoreControlGroup(
+          title: 'Innings',
+          controls: [
+            ScoreControl(
+              action: 'end_innings',
+              label: 'End innings',
+              style: ControlStyle.danger,
+              shortcut: 'e',
             ),
           ],
         ),

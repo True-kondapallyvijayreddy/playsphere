@@ -1,6 +1,12 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:playsphere/core/models/announcement.dart';
+import 'package:playsphere/core/models/enums.dart';
+import 'package:playsphere/core/models/organization.dart';
+import 'package:playsphere/core/providers.dart';
+import 'package:playsphere/features/community/widgets/match_rsvp_card.dart';
 import 'package:playsphere/features/home/home_providers.dart';
 
 /// Match availability calls: the model, and the clash rule.
@@ -185,6 +191,266 @@ void main() {
       // every vote, so a mismatch silently reads Maybe as In.
       expect(Rsvp.yes, 0);
       expect(Rsvp.options.first, 'In');
+    });
+  });
+
+  Widget harness({
+    required String uid,
+    required String authorUid,
+    bool canOrganize = true,
+    ChallengeCallTarget? forChallenge,
+    FixtureCallTarget? forFixture,
+  }) {
+    final announcement = Announcement(
+      id: 'a1',
+      orgId: 'org1',
+      authorUid: authorUid,
+      authorName: 'Captain Ravi',
+      title: 'Sunday game',
+      content: '',
+      poll: const Poll(
+        options: Rsvp.options,
+        votes: {'p1': Rsvp.yes, 'p2': Rsvp.yes},
+      ),
+      match: MatchCall(
+        sportId: 'cricket',
+        matchDate: DateTime.now().add(const Duration(days: 2)),
+        venue: 'Gymkhana',
+        forChallenge: forChallenge,
+        forFixture: forFixture,
+      ),
+    );
+
+    return ProviderScope(
+      overrides: [
+        currentUidProvider.overrideWithValue(uid),
+        organizationProvider.overrideWith(
+          (ref, id) => Stream.value(
+            const Organization(
+              id: 'org1',
+              name: 'Nizampet High School',
+              orgType: OrgType.school,
+              visibility: OrgVisibility.public,
+              ownerUid: 'owner',
+              inviteCode: 'ABC234',
+            ),
+          ),
+        ),
+        orgMembersProvider.overrideWith(
+          (ref, id) => Stream.value(const <Membership>[]),
+        ),
+      ],
+      child: MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            // `canOrganize` is the club-level capability the screens pass
+            // in. It defaults to true here so that most cases below differ
+            // only in authorship — which is the whole point.
+            child: MatchRsvpCard(
+              announcement: announcement,
+              canOrganize: canOrganize,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Who may call a match OFF, as against who may run it.
+  //
+  // The rule the card enforces: drafting the sides is any organizer's, but
+  // editing and cancelling belong to the person who put the call out. Before
+  // this, every admin in the club saw "Cancel match" on every admin's call —
+  // and cancelling deletes the call and its whole discussion.
+  group('only the author can call a match off', () {
+
+
+    /// The card starts collapsed, so anything past the vote row needs a tap.
+    Future<void> expand(WidgetTester tester) async {
+      await tester.tap(find.textContaining('Who is in'));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('the author gets Edit and Cancel, behind their own menu',
+        (tester) async {
+      await tester.pumpWidget(harness(uid: 'me', authorUid: 'me'));
+      await tester.pump();
+
+      final menu = find.byTooltip('Your call');
+      expect(menu, findsOneWidget);
+
+      await tester.tap(menu);
+      await tester.pumpAndSettle();
+      expect(find.text('Edit call'), findsOneWidget);
+      expect(find.text('Cancel match'), findsOneWidget);
+    });
+
+    testWidgets('another admin gets no menu at all', (tester) async {
+      await tester.pumpWidget(harness(uid: 'me', authorUid: 'someone_else'));
+      await tester.pump();
+
+      expect(find.byTooltip('Your call'), findsNothing);
+      expect(find.text('Cancel match'), findsNothing);
+      expect(find.text('Edit call'), findsNothing);
+    });
+
+    testWidgets('and is told whose call it is when they look', (tester) async {
+      await tester.pumpWidget(harness(uid: 'me', authorUid: 'someone_else'));
+      await tester.pump();
+      await expand(tester);
+
+      expect(
+        find.textContaining('only they can edit or cancel it'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('everybody else still answers it', (tester) async {
+      await tester.pumpWidget(harness(uid: 'me', authorUid: 'someone_else'));
+      await tester.pump();
+
+      // The vote row is never behind the expand — it is the one thing every
+      // recipient of the card has to do. The buttons carry the running tally
+      // alongside the word.
+      expect(find.text('In 2'), findsOneWidget);
+      expect(find.text('Maybe 0'), findsOneWidget);
+      expect(find.text('Out 0'), findsOneWidget);
+    });
+
+    testWidgets('an admin who is not the author can still make the teams',
+        (tester) async {
+      await tester.pumpWidget(harness(uid: 'me', authorUid: 'someone_else'));
+      await tester.pump();
+
+      // Collapsed, one tap from the card. Drafting the sides is the whole
+      // reason the call exists.
+      expect(find.text('Make teams'), findsOneWidget);
+    });
+
+    testWidgets('a plain member is offered neither', (tester) async {
+      await tester.pumpWidget(
+        harness(uid: 'me', authorUid: 'someone_else', canOrganize: false),
+      );
+      await tester.pump();
+
+      expect(find.text('Make teams'), findsNothing);
+      expect(find.byTooltip('Your call'), findsNothing);
+      expect(find.text('In 2'), findsOneWidget);
+    });
+  });
+
+
+  // The three reasons a call gets put out, and the three different next steps
+  // they lead to. Getting this wrong is not cosmetic: offering "Make teams" on
+  // a challenge call builds a second, private match that the club being
+  // challenged is not in and nobody is expecting.
+  group('what happens once the answers are in', () {
+    testWidgets('a club\'s own game deals the yeses into two sides',
+        (tester) async {
+      await tester.pumpWidget(harness(uid: 'me', authorUid: 'me'));
+      await tester.pump();
+
+      expect(find.text('Make teams'), findsOneWidget);
+      expect(find.text('Open challenge'), findsNothing);
+    });
+
+    testWidgets('a challenge call goes to the challenge board instead',
+        (tester) async {
+      await tester.pumpWidget(harness(
+        uid: 'me',
+        authorUid: 'me',
+        forChallenge: const ChallengeCallTarget(
+          challengeId: 'ch1',
+          opponentName: 'Kompally Sports Academy',
+        ),
+      ));
+      await tester.pump();
+
+      expect(find.text('Open challenge'), findsOneWidget);
+      // The wrong button must be gone, not merely deprioritised.
+      expect(find.text('Make teams'), findsNothing);
+    });
+
+    testWidgets('a call for a fixture that exists goes to that match',
+        (tester) async {
+      await tester.pumpWidget(harness(
+        uid: 'me',
+        authorUid: 'me',
+        forFixture: const FixtureCallTarget(
+          orgId: 'org1',
+          compId: 'comp1',
+          fixtureId: 'fx1',
+          side: 'A',
+        ),
+      ));
+      await tester.pump();
+
+      expect(find.text('Open match'), findsOneWidget);
+      expect(find.text('Make teams'), findsNothing);
+    });
+
+    testWidgets('and neither is offered a way to split its own side',
+        (tester) async {
+      await tester.pumpWidget(harness(
+        uid: 'me',
+        authorUid: 'me',
+        forChallenge: const ChallengeCallTarget(
+          challengeId: 'ch1',
+          opponentName: 'Kompally Sports Academy',
+        ),
+      ));
+      await tester.pump();
+      await tester.tap(find.textContaining('Who is in'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Mini-tournament instead'), findsNothing);
+      expect(
+        find.textContaining('is your side for this challenge'),
+        findsOneWidget,
+      );
+    });
+  });
+
+  // "Show me four or five at once." A member in three clubs during a busy week
+  // has five of these waiting, and a card they have to scroll past to reach the
+  // next one is a card they answer late.
+  group('the card is compact enough to stack', () {
+    testWidgets('a collapsed call fits four to five on a phone screen',
+        (tester) async {
+      tester.view.physicalSize = const Size(400, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+        harness(uid: 'me', authorUid: 'me'),
+      );
+      await tester.pump();
+
+      final height = tester.getSize(find.byType(MatchRsvpCard)).height;
+      // 800pt is roughly what a phone leaves for the list once the app bar and
+      // the system insets have taken theirs. Four has to fit; the budget is
+      // set at five so that ordinary drift is caught before it costs a card.
+      expect(height, lessThanOrEqualTo(800 / 4));
+      expect(height, greaterThan(100), reason: 'a card this short is broken');
+    });
+
+    testWidgets('expanding one reveals the detail it was hiding',
+        (tester) async {
+      await tester.pumpWidget(harness(uid: 'me', authorUid: 'me'));
+      await tester.pump();
+
+      // Collapsed: no roster, no discussion.
+      expect(find.textContaining('Discussion'), findsNothing);
+
+      final collapsed = tester.getSize(find.byType(MatchRsvpCard)).height;
+      await tester.tap(find.textContaining('Who is in'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.getSize(find.byType(MatchRsvpCard)).height,
+        greaterThan(collapsed),
+      );
+      expect(find.text('Your call.'), findsOneWidget);
     });
   });
 }

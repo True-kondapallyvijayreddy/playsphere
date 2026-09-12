@@ -17,6 +17,7 @@ import '../../domain/scoring/scoring_plugin.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../core/models/match_player.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/ui_kit.dart';
 import '../profile/widgets/match_memories_section.dart';
 import 'match_setup.dart';
 import 'registered_squad.dart';
@@ -28,6 +29,7 @@ import 'widgets/mat_pad.dart';
 import 'widgets/pad_chrome.dart';
 import 'widgets/scoring_control.dart';
 import 'widgets/share_match_button.dart';
+import 'widgets/win_celebration.dart';
 import 'widgets/point_log.dart';
 import 'widgets/rally_scorecard_table.dart';
 
@@ -221,7 +223,8 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
   /// Errors are swallowed rather than shown. The only ones reachable are
   /// "someone else holds it" and "no connection", and both are already
   /// answered on screen by the pen state the pad is rendering from.
-  void _claimPen(Fixture fixture, String uid, String deviceId, {bool takeOver = false}) {
+  void _claimPen(Fixture fixture, String uid, String deviceId,
+      {bool takeOver = false}) {
     unawaited(
       ref
           .read(umpireRepositoryProvider)
@@ -282,7 +285,9 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
       // filter out players who have already been dismissed (out == true) so out batters
       // do not appear in the selection list.
       if (fixture.scoringPluginKey == 'cricket' &&
-          (prompt.key == 'playerId' || prompt.key == 'striker' || prompt.key == 'nonStriker')) {
+          (prompt.key == 'playerId' ||
+              prompt.key == 'striker' ||
+              prompt.key == 'nonStriker')) {
         final state = fixture.scoreState;
         final curInnings = (state['innings'] as List?)?.lastOrNull as Map?;
         if (curInnings != null) {
@@ -320,6 +325,7 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
     // time of 10.94.
     final everyAnswerForced = control.values.isEmpty &&
         control.choices.isEmpty &&
+        control.texts.isEmpty &&
         control.prompts.every(
           (p) => !p.optional && !p.multiple && candidates(p).length == 1,
         );
@@ -338,9 +344,11 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
         // through to the values.
         title: control.prompts.isNotEmpty
             ? control.prompts.first.label
-            : (control.values.isNotEmpty
+            : control.values.isNotEmpty
                 ? control.values.first.label
-                : control.choices.first.label),
+                : control.choices.isNotEmpty
+                    ? control.choices.first.label
+                    : control.texts.first.label,
         roles: {for (final p in control.prompts) p.key: p.label},
         optionalRoles: {
           for (final p in control.prompts)
@@ -373,6 +381,7 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
         ].where((group) => group.length > 1).toList(),
         values: control.values,
         choices: control.choices,
+        texts: control.texts,
       ),
     );
   }
@@ -467,6 +476,99 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
     }
   }
 
+  /// Takes an official's ruling back off a match, and hands the pad back.
+  ///
+  /// The other end of "match did not play normally". Every option in that
+  /// sheet used to be a one-way door: a walkover awarded to the wrong side, a
+  /// match abandoned for a shower that passed in ten minutes, a retirement
+  /// entered on the wrong player — all of them permanent, with "Restart the
+  /// match" (which throws the score away) as the only thing that looked like
+  /// a way out.
+  ///
+  /// Confirmed, unlike an undo of a point, because it is not a correction of
+  /// a tap — it reverses somebody's decision, and it changes what standings,
+  /// ratings and both players' records say about the match.
+  Future<void> _withdrawRuling(Fixture fixture) async {
+    if (_busy) return;
+
+    final label = fixture.status.isDecision
+        ? fixture.status.label.toLowerCase()
+        : fixture.resultType.label.toLowerCase();
+    final resumes = fixture.status != FixtureStatus.completed;
+
+    final agreed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Withdraw the $label?'),
+        content: Text(
+          [
+            resumes
+                ? 'The match goes back to where it stopped — every point '
+                    'already scored is still there — and scoring carries on.'
+                : 'The $label comes off and the score decides the match '
+                    'instead. Nothing that was scored is lost.',
+            'Standings and both sides\' records stop counting the $label.',
+            // Said out loud rather than quietly not done. Glicko is a
+            // stateful update — a rating carries a deviation and a volatility
+            // that moved with it — so "un-rating" a match is not subtraction
+            // and pretending otherwise would corrupt every rating that has
+            // moved since. A withdrawn RETIREMENT is the only ruling this
+            // applies to; it is the only one that was rated at all.
+            if (fixture.resultType.countsForRating)
+              'Ratings already moved on this result and stay where they are.',
+          ].join(' '),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Keep it'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(resumes ? 'Resume the match' : 'Withdraw'),
+          ),
+        ],
+      ),
+    );
+    if (agreed != true) return;
+
+    setState(() => _busy = true);
+    try {
+      final updated =
+          await ref.read(scoringServiceProvider).clearFixtureOutcome(
+                fixture: fixture,
+                context: fixture.scoringContext(),
+                byUid: ref.read(currentUidProvider) ?? '',
+              );
+      // The pad renders its own projection while it is ahead of the listener,
+      // so this is what makes the controls come back on this frame rather
+      // than whenever Firestore echoes the write. See [_local].
+      if (mounted) {
+        setState(() {
+          _local = updated;
+          // The match is playable again, so the next time the engine finishes
+          // it the announcement must fire. Left alone, `_wasComplete` is
+          // still true from the ruling and the winning point would pass in
+          // silence.
+          _wasComplete = null;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              resumes
+                  ? 'Match resumed from where it stopped.'
+                  : 'Withdrawn. The score decides this match.',
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) showError(context, e);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   /// The ending. Shown once, the moment the engine says the match is over.
   ///
   /// Deliberately a sheet and not a snackbar: this is the last thing that
@@ -485,6 +587,21 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
     final winner = outcome.isDraw || outcome.winnerSide == null
         ? null
         : ctx.nameFor(outcome.winnerSide!);
+
+    // Five seconds of confetti before the paperwork.
+    //
+    // The order matters and is not decoration: the sheet below carries a
+    // DECISION — was that really the last point — and a decision put in front
+    // of somebody in the same instant the match ends is answered by reflex.
+    // The celebration is the beat that separates "it's over" from "confirm
+    // it", and it is also the only thing on this screen the two players
+    // standing at the umpire's chair can see from where they are.
+    await showWinCelebration(
+      context,
+      title: winner == null ? 'Match drawn' : '$winner won',
+      subtitle: plugin.summary(fixture.scoreState, ctx),
+    );
+    if (!mounted) return;
 
     await showModalBottomSheet<void>(
       context: context,
@@ -693,8 +810,8 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
           // score — the privilege escalation the `scorerUids` list exists to
           // prevent. The right answer is the one the product already has: the
           // player is shown `AskToScoreButton` and an admin grants the pen.
-          final hasNativeScoringRight = myUid != null &&
-              fixture.scorerUids.contains(myUid);
+          final hasNativeScoringRight =
+              myUid != null && fixture.scorerUids.contains(myUid);
           final hasImpliedScoringRight =
               canManage || isAssignedOfficial || isEntrantPlayer;
 
@@ -755,8 +872,8 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
             // open in a bag cannot silently steal the match back from the
             // tablet being scored on.
             return _PenOnAnotherDevice(
-              onTakeOver: () => _claimPen(fixture, myUid, deviceId,
-                  takeOver: true),
+              onTakeOver: () =>
+                  _claimPen(fixture, myUid, deviceId, takeOver: true),
             );
           }
 
@@ -827,6 +944,13 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
           final groups = plugin.controls(fixture.scoreState, ctx);
           final outcome = plugin.outcome(fixture.scoreState, ctx);
 
+          // Whether an official has ruled on this match rather than the score
+          // deciding it. Read in four places below and computed once here,
+          // because the four have to agree: the pad it replaces, the finish
+          // bar it silences, the undo it refuses, and the announcement it
+          // must not let fire. See [Fixture.endedByDecision].
+          final ruled = fixture.endedByDecision;
+
           // The moment the result is decided, say so.
           //
           // Everything needed for this was already here and nothing used it:
@@ -840,8 +964,14 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
           // a fixture still marked Live.
           //
           // Post-frame because it is a route push out of a build.
+          //
+          // Never for a match an official has ruled on. A retirement declared
+          // at match point leaves a projection the engine calls complete, and
+          // announcing "A won 21-19" over the top of a retirement states the
+          // wrong result in the loudest way the app has. The ruling's own
+          // announcement is made where the ruling is made — see [_AdminActions].
           final justFinished =
-              outcome.isComplete && _wasComplete == false;
+              outcome.isComplete && _wasComplete == false && !ruled;
           _wasComplete = outcome.isComplete;
           if (justFinished) {
             WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -851,9 +981,14 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
 
           // Nothing to withdraw before the first event, and a completed match
           // is frozen — the rules reject a scorer write to it either way, so
-          // the button says so rather than letting the tap fail.
+          // the button says so rather than letting the tap fail. A match an
+          // official has ruled on is frozen for a different and stronger
+          // reason: the ruling is not in the event log, so an undo would
+          // rebuild the projection, write `status: live` from it, and delete
+          // the ruling as a side effect. See [Fixture.endedByDecision].
           final canUndo = fixture.lastSeq > 0 &&
-              fixture.status != FixtureStatus.completed;
+              fixture.status != FixtureStatus.completed &&
+              !ruled;
 
           // Flatten shortcuts so a keypress on a laptop maps to the same code
           // path as a tap on a phone — one behaviour, two input methods.
@@ -901,7 +1036,43 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      if (board != null)
+                      // Who won the toss and what they took, above everything
+                      // else on the pad. Once it is recorded the app stops
+                      // asking — this line is the whole of what a scorer, or
+                      // anyone reading over their shoulder, needs from it.
+                      TossResultStrip(fixture: fixture),
+                      // A ruled match shows the ruling INSTEAD of the pad.
+                      //
+                      // Not as well as: leaving the scoring controls up under
+                      // a banner is what made "match did not play normally"
+                      // feel unwired. An organizer abandoned a match for rain,
+                      // the sheet closed, and the pad underneath was exactly
+                      // as it had been — every button live, the finish bar
+                      // still asking to be pressed. One tap on any of them
+                      // recomputed the status from the projection and put the
+                      // match back to Live with the abandonment gone (see
+                      // [ScoringService.submit]). So the ruling is the pad
+                      // now, and the way back out of it is on the same card.
+                      if (ruled)
+                        _RulingBar(
+                          fixture: fixture,
+                          enabled: !_busy,
+                          // Offered to whoever `firestore.rules` will actually
+                          // let through — branch (b3). An organizer may
+                          // withdraw any ruling; the scorer holding the pen may
+                          // withdraw only the two they were allowed to declare.
+                          // A button that can only produce a rejection seconds
+                          // after appearing to work is worse than no button,
+                          // and this pad has had that bug before.
+                          canWithdraw: canManage ||
+                              (fixture.status == FixtureStatus.completed &&
+                                  const {
+                                    MatchResultType.retired,
+                                    MatchResultType.disqualified,
+                                  }.contains(fixture.resultType)),
+                          onWithdraw: () => _withdrawRuling(fixture),
+                        )
+                      else if (board != null)
                         DuelPad(
                           board: board,
                           groups: groups,
@@ -958,9 +1129,12 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
                       // match was unfinished. The match stayed Live for
                       // everybody else, permanently. See
                       // [ScoringService.finalizeMatch].
-                      if (!outcome.isComplete)
+                      if (ruled)
+                        const SizedBox.shrink()
+                      else if (!outcome.isComplete)
                         _FinishBar(
-                          control: plugin.finishControl(fixture.scoreState, ctx),
+                          control:
+                              plugin.finishControl(fixture.scoreState, ctx),
                           headline: plugin.headline(fixture.scoreState, ctx),
                           status: plugin.statusLine(fixture.scoreState, ctx),
                           enabled: !_busy,
@@ -970,12 +1144,11 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
                         _ResultBar(
                           headline: plugin.headline(fixture.scoreState, ctx),
                           summary: plugin.summary(fixture.scoreState, ctx),
-                          winnerName: outcome.isDraw ||
-                                  outcome.winnerSide == null
-                              ? null
-                              : ctx.nameFor(outcome.winnerSide!),
-                          recorded:
-                              fixture.status == FixtureStatus.completed,
+                          winnerName:
+                              outcome.isDraw || outcome.winnerSide == null
+                                  ? null
+                                  : ctx.nameFor(outcome.winnerSide!),
+                          recorded: fixture.status == FixtureStatus.completed,
                           enabled: !_busy,
                           reopen: _reopenControl(plugin, fixture, ctx),
                           onFinish: () => _finish(fixture),
@@ -1012,7 +1185,7 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
                       // in reach, not buried in the admin menu below. The
                       // duel pad carries its own, in the strip between the two
                       // halves, so this is only for the stacked one.
-                      if (board == null && crease == null) ...[
+                      if (!ruled && board == null && crease == null) ...[
                         Align(
                           alignment: Alignment.centerRight,
                           child: FilledButton.tonalIcon(
@@ -1250,6 +1423,161 @@ class _FinishBar extends StatelessWidget {
 ///    in the app can get out of this state, because a finished engine offers
 ///    no controls to score with. So this is the button that does, and it is
 ///    the loud one.
+/// What the pad becomes once an official has ruled on the match.
+///
+/// States three things, in the order somebody standing at the ground asks
+/// them: what was recorded, what it does to the tables, and how to take it
+/// back. The last is the one that did not exist — see
+/// [_ScoringScreenState._withdrawRuling].
+class _RulingBar extends StatelessWidget {
+  const _RulingBar({
+    required this.fixture,
+    required this.enabled,
+    required this.canWithdraw,
+    required this.onWithdraw,
+  });
+
+  final Fixture fixture;
+  final bool enabled;
+
+  /// Whether THIS person may take the ruling off. See the call site.
+  final bool canWithdraw;
+  final VoidCallback onWithdraw;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final type = fixture.resultType;
+
+    // The ruling's own name, preferring the result TYPE over the status. Both
+    // exist and they say different things: `walkover` is a status shared by a
+    // no-show, and "No show" is the word the organizer actually chose.
+    final label =
+        type == MatchResultType.normal ? fixture.status.label : type.label;
+
+    final winner = fixture.winnerEntrantId == null
+        ? null
+        : (fixture.winnerEntrantId == fixture.entrantAId
+            ? fixture.entrantAName
+            : fixture.entrantBName);
+
+    final (IconData icon, String meaning) = switch (type) {
+      MatchResultType.walkover => (
+          Icons.directions_walk,
+          'The points are awarded. No rating moves — nobody played.',
+        ),
+      MatchResultType.noShow => (
+          Icons.person_off_outlined,
+          'No winner. This match counts for nobody, anywhere.',
+        ),
+      MatchResultType.abandoned => (
+          Icons.thunderstorm_outlined,
+          'No result. The organizer replays or voids it — it awards no '
+              'league points and moves no rating.',
+        ),
+      MatchResultType.retired => (
+          Icons.healing_outlined,
+          'A real result. The play that happened counts towards ratings and '
+              'both careers.',
+        ),
+      MatchResultType.disqualified => (
+          Icons.block_outlined,
+          'The result stands. No rating moves — it is not evidence of '
+              'anyone\'s playing strength.',
+        ),
+      MatchResultType.conceded => (
+          Icons.flag_outlined,
+          'The entrant withdrew from the competition.',
+        ),
+      MatchResultType.normal => (
+          Icons.gavel_outlined,
+          'Frozen pending a decision. Nothing is counted while it is '
+              'disputed.',
+        ),
+    };
+
+    return Card(
+      margin: const EdgeInsets.only(top: 8),
+      color: scheme.surfaceContainerHighest,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(icon, color: scheme.onSurfaceVariant),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        winner == null ? label : '$label — $winner',
+                        style: theme.textTheme.titleMedium
+                            ?.copyWith(fontWeight: FontWeight.w700),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(meaning, style: theme.textTheme.bodySmall),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            // The reason somebody typed at the time, which is the whole point
+            // of asking for it — a protest three weeks later is argued from
+            // this sentence and nothing else.
+            if (fixture.resultNote case final n? when n.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Container(
+                width: double.infinity,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: scheme.surface,
+                  borderRadius: BorderRadius.circular(Ps.radiusSm),
+                ),
+                child: Text('“$n”', style: theme.textTheme.bodySmall),
+              ),
+            ],
+            const SizedBox(height: 12),
+            Text(
+              'Scoring is closed while this stands. Nothing has been '
+              'deleted — every point already scored is still on the '
+              'scorecard below.',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: scheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 12),
+            // Full width, and a button rather than a row of them: this is the
+            // one thing to do on this card, and a long label on a phone is
+            // exactly the case the pad's narrow chips handle worst.
+            if (canWithdraw)
+              FilledButton.tonalIcon(
+                onPressed: enabled ? onWithdraw : null,
+                icon: const Icon(Icons.settings_backup_restore),
+                label: Text(
+                  fixture.status == FixtureStatus.completed
+                      ? 'Withdraw this decision'
+                      : 'Withdraw and resume the match',
+                ),
+              )
+            else
+              Text(
+                'Only an organizer of this club can take this off. Ask them '
+                'if it was recorded by mistake.',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: scheme.onSurfaceVariant),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _ResultBar extends StatelessWidget {
   const _ResultBar({
     required this.headline,
@@ -1583,30 +1911,28 @@ class _MatchDayActions extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final toss = fixture.tossWonByEntrantId;
-    final tossName = toss == null
-        ? null
-        : (toss == fixture.entrantAId
-            ? fixture.entrantAName
-            : fixture.entrantBName);
 
     return Card(
       child: Column(
         children: [
-          ListTile(
-            leading: const Icon(Icons.casino_outlined),
-            title: Text(
-              toss == null
-                  ? 'Record the toss'
-                  : '$tossName won the toss and chose to '
-                      '${fixture.tossDecision ?? ""}',
+          // Only while there is still a toss to take — the pad's gate is
+          // skippable, so this stays as the way back to it. Once one is
+          // recorded the row goes entirely: [TossResultStrip] states the
+          // result at the top of the pad, and a chevron here would re-open
+          // the dialog on a match already in progress, offering to overwrite
+          // the decision its opening state was built from.
+          if (toss == null) ...[
+            ListTile(
+              leading: const Icon(Icons.monetization_on_outlined),
+              title: const Text('Record the toss'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => showDialog<void>(
+                context: context,
+                builder: (_) => TossDialog(fixture: fixture),
+              ),
             ),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => showDialog<void>(
-              context: context,
-              builder: (_) => TossDialog(fixture: fixture),
-            ),
-          ),
-          const Divider(height: 1),
+            const Divider(height: 1),
+          ],
           ListTile(
             leading: const Icon(Icons.groups_outlined),
             title: const Text('Line-ups'),
@@ -1669,6 +1995,35 @@ class _AdminActions extends ConsumerWidget {
             );
       } catch (e) {
         if (context.mounted) showError(context, e);
+        return;
+      }
+
+      // A ruling that produces a winner is still somebody winning a match.
+      //
+      // A walkover decides a quarter-final; a retirement sends a player
+      // through. Announcing only the endings the ENGINE produces would make
+      // the app silent on exactly the results that most need explaining to
+      // the two people standing at the table, and would leave the pad
+      // switching to a grey ruling card with no acknowledgement that anything
+      // happened at all.
+      if (!context.mounted) return;
+      final winnerName = winnerId == null
+          ? null
+          : (winnerId == fixture.entrantAId
+              ? fixture.entrantAName
+              : fixture.entrantBName);
+      if (winnerName != null) {
+        await showWinCelebration(
+          context,
+          title: '$winnerName won',
+          // The score, only where one was actually played out. A walkover has
+          // no scoreline and inventing one — "0-0" — is worse than silence.
+          subtitle: type == MatchResultType.retired ||
+                  type == MatchResultType.disqualified
+              ? fixture.summary
+              : null,
+          kicker: type.label,
+        );
       }
     }
 
@@ -1768,9 +2123,32 @@ class _AdminActions extends ConsumerWidget {
     // between two outcomes that look identical on the card, and a scorer
     // picking between them is making a decision the hint is the only source
     // for. Explanation that changes what someone chooses is not decoration.
+    // A match that has ALREADY been ruled on must not be offered a second
+    // ruling. Stacking one on another is not a correction — each write
+    // overwrites `resultType` and `winnerEntrantId` outright, so abandoning a
+    // match that was already a walkover silently discarded the walkover and
+    // the side that had been awarded it. The way to change a ruling is to
+    // withdraw it first, which [_RulingBar] offers at the top of the pad.
+    final ruled = fixture.endedByDecision;
+
     return ExpansionTile(
       title: const Text('Match did not play normally'),
+      // Opened by itself on a ruled match: the sheet is where the restart
+      // lives, and a collapsed row is the wrong place to hide the controls
+      // for the one state the pad is stuck in.
+      initiallyExpanded: ruled,
       children: [
+        if (ruled)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+            child: Text(
+              'This match is already recorded as '
+              '${(fixture.resultType == MatchResultType.normal ? fixture.status.label : fixture.resultType.label).toLowerCase()}. '
+              'Withdraw that first — the card at the top of the pad — to '
+              'record something else.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
         // First, because a restart is the only one of these that is usually
         // tapped by mistake, and the way back from it has to be as easy to
         // find as the way in.
@@ -1784,16 +2162,23 @@ class _AdminActions extends ConsumerWidget {
             ),
             onTap: continuePrevious,
           ),
-        ListTile(
-          leading: const Icon(Icons.restart_alt),
-          title: const Text('Restart the match'),
-          subtitle: const Text(
-            'Back to 0. Nothing is deleted — you can bring the old score '
-            'back afterwards',
+        // Offered only where it can actually land. `firestore.rules` admits a
+        // restart through the organizer branch, or — on a match that is
+        // scheduled, live or finished — through the scorer's. It does NOT
+        // admit a plain scorer restarting a match an organizer ABANDONED, and
+        // a button that applies locally and is reversed by the server ten
+        // seconds later is the exact failure this whole change is about.
+        if (canManage || !fixture.status.isDecision)
+          ListTile(
+            leading: const Icon(Icons.restart_alt),
+            title: const Text('Restart the match'),
+            subtitle: const Text(
+              'Back to 0. Nothing is deleted — you can bring the old score '
+              'back afterwards',
+            ),
+            onTap: restart,
           ),
-          onTap: restart,
-        ),
-        if (canManage)
+        if (canManage && !ruled)
           _OutcomeGroup(
             icon: Icons.directions_walk,
             label: 'Walkover',
@@ -1811,49 +2196,50 @@ class _AdminActions extends ConsumerWidget {
               winnerId: fixture.entrantBId,
             ),
           ),
-        _OutcomeGroup(
-          icon: Icons.healing_outlined,
-          label: 'Retired',
-          hint: 'Started and could not continue. A real result — the play '
-              'that happened still counts.',
-          optionA: '$a wins',
-          optionB: '$b wins',
-          onA: () => set(
-            FixtureStatus.completed,
-            MatchResultType.retired,
-            winnerId: fixture.entrantAId,
+        if (!ruled)
+          _OutcomeGroup(
+            icon: Icons.healing_outlined,
+            label: 'Retired',
+            hint: 'Started and could not continue. A real result — the play '
+                'that happened still counts.',
+            optionA: '$a wins',
+            optionB: '$b wins',
+            onA: () => set(
+              FixtureStatus.completed,
+              MatchResultType.retired,
+              winnerId: fixture.entrantAId,
+            ),
+            onB: () => set(
+              FixtureStatus.completed,
+              MatchResultType.retired,
+              winnerId: fixture.entrantBId,
+            ),
           ),
-          onB: () => set(
-            FixtureStatus.completed,
-            MatchResultType.retired,
-            winnerId: fixture.entrantBId,
+        if (!ruled)
+          _OutcomeGroup(
+            icon: Icons.block_outlined,
+            label: 'Disqualified',
+            hint: 'Conduct, eligibility or equipment. The result stands; no '
+                'rating moves.',
+            optionA: '$b disqualified',
+            optionB: '$a disqualified',
+            onA: () => set(
+              FixtureStatus.completed,
+              MatchResultType.disqualified,
+              winnerId: fixture.entrantAId,
+            ),
+            onB: () => set(
+              FixtureStatus.completed,
+              MatchResultType.disqualified,
+              winnerId: fixture.entrantBId,
+            ),
           ),
-        ),
-        _OutcomeGroup(
-          icon: Icons.block_outlined,
-          label: 'Disqualified',
-          hint: 'Conduct, eligibility or equipment. The result stands; no '
-              'rating moves.',
-          optionA: '$b disqualified',
-          optionB: '$a disqualified',
-          onA: () => set(
-            FixtureStatus.completed,
-            MatchResultType.disqualified,
-            winnerId: fixture.entrantAId,
-          ),
-          onB: () => set(
-            FixtureStatus.completed,
-            MatchResultType.disqualified,
-            winnerId: fixture.entrantBId,
-          ),
-        ),
-        if (canManage) ...[
+        if (canManage && !ruled) ...[
           ListTile(
             leading: const Icon(Icons.person_off_outlined),
             title: const Text('Neither side arrived'),
             subtitle: const Text('No winner, and nothing counts anywhere'),
-            onTap: () =>
-                set(FixtureStatus.walkover, MatchResultType.noShow),
+            onTap: () => set(FixtureStatus.walkover, MatchResultType.noShow),
           ),
           ListTile(
             leading: const Icon(Icons.thunderstorm_outlined),
@@ -1862,14 +2248,26 @@ class _AdminActions extends ConsumerWidget {
             onTap: () =>
                 set(FixtureStatus.abandoned, MatchResultType.abandoned),
           ),
+        ],
+        // Deliberately NOT behind `!ruled`, unlike everything above it.
+        //
+        // A dispute is a freeze, not a result: questioning a retirement is
+        // exactly the situation the button exists for, and locking it away
+        // the moment a ruling is on the fixture would leave a contested
+        // retirement with no way to be held while it is argued.
+        if (canManage && fixture.status != FixtureStatus.disputed)
           ListTile(
             leading: const Icon(Icons.gavel_outlined),
             title: const Text('Mark as disputed'),
             subtitle: const Text('Freezes the result pending a decision'),
-            onTap: () =>
-                set(FixtureStatus.disputed, MatchResultType.normal),
+            // The ruling already on the fixture is carried, not replaced.
+            // Disputing a retirement used to overwrite `resultType` with
+            // `normal`, so the retirement was gone the moment somebody
+            // questioned it — and if the dispute was then resolved in its
+            // favour there was nothing left saying what the result had been.
+            onTap: () => set(FixtureStatus.disputed, fixture.resultType),
           ),
-        ] else
+        if (!canManage && !ruled)
           const Padding(
             padding: EdgeInsets.fromLTRB(16, 4, 16, 16),
             child: Text(
@@ -1903,6 +2301,16 @@ class _OutcomeGroup extends StatelessWidget {
   final VoidCallback onA;
   final VoidCallback onB;
 
+  /// The length past which a label stops fitting beside another one.
+  ///
+  /// A character count rather than a text measurement on purpose: this runs
+  /// inside a `LayoutBuilder` on every frame of a scroll, and a `TextPainter`
+  /// laid out twice per group to answer a question whose two answers are
+  /// "side by side" and "stacked" is not worth its cost. Eighteen is where a
+  /// 14pt label stops fitting in half of the narrowest phone this app
+  /// supports.
+  static bool _needsFullWidth(String label) => label.length > 18;
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -1925,13 +2333,48 @@ class _OutcomeGroup extends StatelessWidget {
                 ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
           ),
           const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              OutlinedButton(onPressed: onA, child: Text(optionA)),
-              OutlinedButton(onPressed: onB, child: Text(optionB)),
-            ],
+          // Sized from the longest label, not from the button.
+          //
+          // These two carry team names — "Hyderabad Blues Under-19 wins" —
+          // and they used to be bare `OutlinedButton`s in a `Wrap`, which
+          // lays its children out with unbounded width. A long name pushed
+          // the button past the edge of a phone and Flutter clipped it with
+          // an overflow stripe, so the scorer read "Hyderabad Blues Und" on
+          // one option and could not tell the two apart at all.
+          //
+          // The rule below is the general one this file needed and now
+          // applies wherever an action is labelled with something a human
+          // typed: a short pair sits side by side, and the moment either
+          // label is long enough to need the room, both take a full row each
+          // — the same width, so the pair still reads as one choice.
+          LayoutBuilder(
+            builder: (context, box) {
+              const gap = 8.0;
+              final half = (box.maxWidth - gap) / 2;
+              final wide = _needsFullWidth(optionA) ||
+                  _needsFullWidth(optionB) ||
+                  half < 150;
+              final width = wide ? box.maxWidth : half;
+              return Wrap(
+                spacing: gap,
+                runSpacing: gap,
+                children: [
+                  for (final (label, onTap) in [(optionA, onA), (optionB, onB)])
+                    SizedBox(
+                      width: width,
+                      child: OutlinedButton(
+                        onPressed: onTap,
+                        child: Text(
+                          label,
+                          textAlign: TextAlign.center,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ),
+                ],
+              );
+            },
           ),
           const Divider(height: 24),
         ],
@@ -2041,7 +2484,7 @@ class _TossGate extends ConsumerWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Icon(
-                isChess ? Icons.grid_on : Icons.casino_outlined,
+                isChess ? Icons.grid_on : Icons.monetization_on_outlined,
                 size: 56,
                 color: theme.colorScheme.primary,
               ),
@@ -2087,8 +2530,8 @@ class _TossGate extends ConsumerWidget {
                   // avoids. `false` is Cancel, which keeps the gate.
                   if (done == true) onSkip();
                 },
-                icon: const Icon(Icons.casino_outlined),
-                label: Text(isChess ? 'Record colours' : 'Record the toss'),
+                icon: const Icon(Icons.monetization_on_outlined),
+                label: Text(isChess ? 'Record colours' : 'Take the toss'),
               ),
               const SizedBox(height: 8),
               TextButton(

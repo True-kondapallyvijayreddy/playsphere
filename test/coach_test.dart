@@ -128,6 +128,11 @@ void main() {
       overrides: [
         currentUidProvider.overrideWithValue(me?.uid),
         currentUserProvider.overrideWith((ref) => Stream.value(me)),
+        // A coach listing belongs to the ACCOUNT, not to whichever profile is
+        // open — a guardian inside a child's profile must not be able to list
+        // that child as a coach — so these screens read the auth providers.
+        authUidProvider.overrideWithValue(me?.uid),
+        authUserProvider.overrideWith((ref) => Stream.value(me)),
         myCoachProfileProvider.overrideWith((ref) => Stream.value(listing)),
         coachProvider.overrideWith((ref, uid) => Stream.value(listing)),
       ],

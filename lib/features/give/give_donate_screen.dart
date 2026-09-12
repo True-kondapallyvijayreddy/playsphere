@@ -47,7 +47,7 @@ class _GiveDonateScreenState extends ConsumerState<GiveDonateScreen> {
 
   void _prefillFromProfile() {
     if (_prefilled) return;
-    final me = ref.read(currentUserProvider).valueOrNull;
+    final me = ref.read(authUserProvider).valueOrNull;
     if (me != null) {
       _name.text = me.displayName;
       _phone.text = me.phone ?? '';
@@ -61,7 +61,7 @@ class _GiveDonateScreenState extends ConsumerState<GiveDonateScreen> {
       showError(context, 'Add at least one item.');
       return;
     }
-    final uid = ref.read(currentUidProvider);
+    final uid = ref.read(authUidProvider);
     if (uid == null) return;
 
     setState(() => _busy = true);

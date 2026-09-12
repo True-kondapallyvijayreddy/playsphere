@@ -7,6 +7,7 @@ import '../../core/models/competition.dart';
 import '../../core/models/enums.dart';
 import '../../core/models/fixture.dart';
 import '../../core/models/organization.dart';
+import '../../core/models/team.dart';
 import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
@@ -16,13 +17,17 @@ import '../../domain/draw/seeding.dart';
 import '../../domain/draw/swiss_pairing.dart';
 import '../../domain/tournament/house_roster.dart';
 import '../../domain/standings/standings_calculator.dart';
+import '../../domain/schedule/schedule_view_model.dart';
 import '../../domain/standings/tiebreak.dart';
 import '../../data/image_composer.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/glicko.dart';
 import '../../shared/identity.dart';
 import '../../shared/image_upload.dart';
+import '../../shared/offline_fee_notice.dart';
 import '../../shared/ps_banner.dart';
 import '../../shared/ui_kit.dart';
+import '../scoring/open_match.dart';
 import 'widgets/cancel_event_sheet.dart';
 import 'widgets/competition_rule_editor.dart';
 import 'widgets/houses_editor_sheet.dart';
@@ -30,14 +35,35 @@ import 'widgets/draw_setup_sheet.dart';
 import 'widgets/group_entry_sheet.dart';
 import 'widgets/group_stage_fields.dart';
 import 'widgets/move_match_sheet.dart';
+import 'widgets/invited_club_block.dart';
 import 'widgets/register_team_sheet.dart';
+import 'widgets/schedule_board.dart';
+import 'widgets/schedule_export.dart';
 import 'widgets/team_builder_sheet.dart';
 import '../tournaments/widgets/running_late_card.dart';
 import 'widgets/squad_call_card.dart';
 import 'widgets/start_early_sheet.dart';
 import 'widgets/suspend_sheet.dart';
-import '../scoring/widgets/live_score_card.dart';
 import '../scoring/widgets/share_match_button.dart';
+
+/// Which entrants in this event are the reader's own.
+///
+/// Top-level rather than a method on either widget because the app bar and
+/// the match list both need the same answer, and two copies of "ours" is
+/// exactly the drift [MyEntrants] exists to prevent.
+Set<String> _myEntrantIds(WidgetRef ref, CompRef key) => MyEntrants.resolve(
+      entrants: ref.watch(entrantsProvider(key)).valueOrNull ?? const [],
+      uid: ref.watch(currentUidProvider),
+      myOrgIds: <String>{
+        for (final m in ref.watch(myMembershipsProvider).valueOrNull ??
+            const <Membership>[])
+          m.orgId,
+      },
+      myTeamIds: <String>{
+        for (final t in ref.watch(myTeamsProvider).valueOrNull ?? const <Team>[])
+          t.id,
+      },
+    );
 
 /// The event's control room: entries, the draw, and every fixture.
 ///
@@ -62,9 +88,34 @@ class CompetitionDetailScreen extends ConsumerWidget {
     final caps = ref.watch(myCapabilitiesProvider(orgId));
     final canManage = caps.contains(Capability.manageCompetitions);
 
+    final comp = compAsync.valueOrNull;
+    // Watched here rather than only inside `_Fixtures`, so the schedule can
+    // be downloaded from the top of the page. The first report about this
+    // feature was that the download "isn't anywhere" — it was beside the
+    // "Matches" heading, which on a four-group event is below the entry list
+    // and four standings tables. A schedule you have to find by scrolling is
+    // the problem this screen was just redesigned to solve.
+    final fixtures = ref.watch(fixturesProvider(key)).valueOrNull ?? const [];
+    final downloadable =
+        canManage ? fixtures : fixtures.where((f) => !f.isDraft).toList();
+
     return AppScaffold(
       orgId: orgId,
       title: 'Event',
+      actions: [
+        if (comp != null && downloadable.isNotEmpty)
+          ScheduleDownloadButton(
+            fixtures: downloadable,
+            title: comp.name,
+            subtitle: comp.format.label,
+            note: downloadable.any((f) => f.isDraft)
+                ? 'DRAFT — team names are placeholders until the draw is '
+                    'generated.'
+                : null,
+            mineEntrantIds: _myEntrantIds(ref, key),
+            compact: true,
+          ),
+      ],
       body: AsyncView(
         value: compAsync,
         builder: (comp) {
@@ -181,31 +232,6 @@ class _Header extends ConsumerWidget {
   final Competition competition;
   final bool canManage;
 
-  Future<void> _changeBanner(BuildContext context, WidgetRef ref) {
-    final uid = ref.read(currentUidProvider);
-    if (uid == null) return Future.value();
-    final repo = ref.read(competitionRepositoryProvider);
-    return pickAndUploadImage(
-      context: context,
-      title: 'Event banner',
-      shape: ImageShape.banner,
-      successMessage: 'Banner updated.',
-      removedMessage: 'Banner removed.',
-      onUpload: (image) => repo.uploadEventBanner(
-        orgId: competition.orgId,
-        compId: competition.id,
-        uid: uid,
-        bytes: image.bytes,
-        contentType: image.contentType,
-      ),
-      onRemove: competition.bannerUrl == null
-          ? null
-          : () => repo.removeEventBanner(
-                orgId: competition.orgId,
-                compId: competition.id,
-              ),
-    );
-  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -214,11 +240,17 @@ class _Header extends ConsumerWidget {
       padding: const EdgeInsets.only(bottom: 12),
       child: PsBanner(
         imageUrl: c.bannerUrl,
+        // The event's own badge, on the artwork beside its name. Drawn only
+        // when there is one — see [PsBanner.logoUrl].
+        logoUrl: c.logoUrl,
+        logoName: c.name,
         sportId: c.sportId,
         seed: c.id,
         height: 156,
         trailing: canManage
-            ? _BannerEditButton(onTap: () => _changeBanner(context, ref))
+            ? _BannerEditButton(
+                onTap: () => changeEventBanner(context, ref, c),
+              )
             : null,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -260,6 +292,70 @@ class _Header extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// Puts a photograph across the top of the event, replacing the generated art.
+///
+/// A function rather than a method because two places drive it: the camera
+/// badge on the banner itself, and the named entry in the organizer's menu.
+/// The badge is only discoverable to somebody who already suspects it is a
+/// button, and the menu is where an organizer looks for something they have
+/// not found yet.
+Future<void> changeEventBanner(
+  BuildContext context,
+  WidgetRef ref,
+  Competition c,
+) {
+  final uid = ref.read(currentUidProvider);
+  if (uid == null) return Future.value();
+  final repo = ref.read(competitionRepositoryProvider);
+  return pickAndUploadImage(
+    context: context,
+    title: 'Event banner',
+    shape: ImageShape.banner,
+    successMessage: 'Banner updated.',
+    removedMessage: 'Banner removed.',
+    onUpload: (image) => repo.uploadEventBanner(
+      orgId: c.orgId,
+      compId: c.id,
+      uid: uid,
+      bytes: image.bytes,
+      contentType: image.contentType,
+    ),
+    onRemove: c.bannerUrl == null
+        ? null
+        : () => repo.removeEventBanner(orgId: c.orgId, compId: c.id),
+  );
+}
+
+/// The event's badge — the picture a club usually has ready long before it has
+/// a header photograph.
+Future<void> changeEventLogo(
+  BuildContext context,
+  WidgetRef ref,
+  Competition c,
+) {
+  final uid = ref.read(currentUidProvider);
+  if (uid == null) return Future.value();
+  final repo = ref.read(competitionRepositoryProvider);
+  return pickAndUploadImage(
+    context: context,
+    title: 'Event logo',
+    shape: ImageShape.square,
+    note: 'Shown on the header, in event lists, and on the public link.',
+    successMessage: 'Logo updated.',
+    removedMessage: 'Logo removed.',
+    onUpload: (image) => repo.uploadEventLogo(
+      orgId: c.orgId,
+      compId: c.id,
+      uid: uid,
+      bytes: image.bytes,
+      contentType: image.contentType,
+    ),
+    onRemove: c.logoUrl == null
+        ? null
+        : () => repo.removeEventLogo(orgId: c.orgId, compId: c.id),
+  );
 }
 
 /// The one control that sits on top of a banner.
@@ -317,6 +413,9 @@ class _OrganizerActions extends ConsumerWidget {
                 orgId: c.orgId,
                 compId: c.id,
                 status: CompetitionStatus.registrationOpen,
+                // So a season stops calling itself a draft the moment one of
+                // its draws starts taking entries.
+                seasonId: c.tournamentId,
               )),
         ),
       CompetitionStatus.registrationOpen => (
@@ -502,6 +601,18 @@ class _OrganizerActions extends ConsumerWidget {
             label: 'Send a note',
             icon: Icons.campaign_outlined,
             onSelected: () => EventNoteSheet.show(context, competition: c),
+          ),
+          // Named, because the camera badge on the banner is the only other
+          // way in and an event with no logo shows no crest to tap at all.
+          PsAction(
+            label: c.logoUrl == null ? 'Add logo' : 'Change logo',
+            icon: Icons.shield_outlined,
+            onSelected: () => changeEventLogo(context, ref, c),
+          ),
+          PsAction(
+            label: c.bannerUrl == null ? 'Add banner' : 'Change banner',
+            icon: Icons.image_outlined,
+            onSelected: () => changeEventBanner(context, ref, c),
           ),
           // Above cancelling in the menu, and not destructive: it is the
           // one an organizer actually wants on a wet morning, and the
@@ -1041,6 +1152,31 @@ class _Entries extends ConsumerWidget {
     final enteringAsGuest =
         c.openToNonMembers && me != null && membership?.isActive != true;
 
+    // A draw belonging to a season THIS club was invited into by another.
+    //
+    // The invitation was addressed to the club, so the entry is the club's:
+    // its organizers enter one side, and every other member says they are
+    // available instead — see [InvitedClubBlock] and [SeasonInterest]. Note
+    // this is deliberately not the same question as `enteringAsGuest`: a
+    // guest is one person the host let in through an open door, and an
+    // invited club is a whole club the host asked for by name.
+    final seasonId = c.tournamentId;
+    final invited = seasonId == null
+        ? null
+        : ref.watch(invitedSeasonContextProvider(
+            (hostOrgId: c.orgId, tournamentId: seasonId),
+          ));
+    // Members of the invited club, but not its organizers. Nothing else about
+    // the screen changes for them; only the way in does.
+    final entryIsTheClubs = invited != null && !invited.canEnterForClub;
+    // The invited club's organizers, on the other side of the same rule. They
+    // enter A SIDE and nothing else — never themselves — whatever shape the
+    // draw is, because the host invited a club and a club is what should turn
+    // up. Personal registration is refused to them by the rules anyway: they
+    // are not active members here, and the grant an accepted invitation buys
+    // covers a team document and only a team document.
+    final enteringForClub = invited != null && invited.canEnterForClub;
+
     Future<void> executeRegistration({
       String? houseName,
       String? partnerName,
@@ -1224,9 +1360,11 @@ class _Entries extends ConsumerWidget {
           ),
         );
 
+        final partnerName = hasPartner ? partnerCtrl.text.trim() : null;
+        partnerCtrl.dispose();
         if (confirmed == true) {
           await executeRegistration(
-            partnerName: hasPartner ? partnerCtrl.text.trim() : null,
+            partnerName: partnerName,
             isSoloDoubles: !hasPartner,
           );
         }
@@ -1279,7 +1417,16 @@ class _Entries extends ConsumerWidget {
       if (waitlistedCount > 0) '$waitlistedCount waitlisted',
     ].join(' · ');
 
-    return Card(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // Above the entries card, not inside it: for an invited club's member
+        // this is the only thing on the screen they can act on, and burying
+        // it under a field list they are not in would hide the one door they
+        // have.
+        if (invited != null)
+          InvitedClubBlock(hostOrgId: c.orgId, tournamentId: seasonId!),
+        Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -1312,11 +1459,29 @@ class _Entries extends ConsumerWidget {
                           : myReg.status.label,
                     ),
                   )
+                else if (entryIsTheClubs)
+                  // Said here, on the row where the button used to be, so a
+                  // member is not left inferring "broken" from an absence.
+                  // The block below carries the whole explanation and the
+                  // "I'm interested" button.
+                  const Chip(
+                    avatar: Icon(Icons.groups_2_outlined, size: 16),
+                    label: Text('Your club enters'),
+                  )
                 else if (c.registrationIsOpen && me != null)
                   Wrap(
                     spacing: 6,
                     children: [
-                      if (teamIsTheEntrant) ...[
+                      if (enteringForClub)
+                        FilledButton.icon(
+                          onPressed: () => RegisterTeamSheet.show(
+                            context,
+                            competition: c,
+                          ),
+                          icon: const Icon(Icons.groups_2_outlined, size: 16),
+                          label: Text('Enter ${invited.invite.toOrgName}'),
+                        )
+                      else if (teamIsTheEntrant) ...[
                         // The entry unit is a side, so this is the only
                         // primary action. A personal "Register" here was the
                         // bug: on a 32-team cricket tournament it invited
@@ -1442,7 +1607,20 @@ class _Entries extends ConsumerWidget {
                           seed: r.uid,
                           size: 32,
                         ),
-                  title: Text(r.displayName),
+                  // An entry list is where standings earn their keep: it is
+                  // the moment an organizer seeds a draw and an entrant sizes
+                  // up the field, and until now both were reading a list of
+                  // names with nothing to tell them apart. Individual entries
+                  // only — a team entry is a side, and a side has no Glicko.
+                  title: r.isTeamEntry
+                      ? Text(r.displayName)
+                      : Row(
+                          children: [
+                            Flexible(child: Text(r.displayName)),
+                            const SizedBox(width: 8),
+                            _EntrantGlicko(uid: r.uid, sportId: c.sportId),
+                          ],
+                        ),
                   subtitle: Text(
                     [
                       if (r.status == RegistrationStatus.waitlisted &&
@@ -1501,6 +1679,8 @@ class _Entries extends ConsumerWidget {
           ],
         ),
       ),
+        ),
+      ],
     );
   }
 
@@ -1533,16 +1713,27 @@ class _Entries extends ConsumerWidget {
 /// Register is a limit nobody can plan around. Saying "4 of 13 slots left"
 /// up front is what lets a member decide to register now rather than
 /// discovering on Saturday night that they are third reserve.
-class _SlotsLine extends StatelessWidget {
+class _SlotsLine extends ConsumerWidget {
   const _SlotsLine({required this.competition});
 
   final Competition competition;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final c = competition;
     final theme = Theme.of(context);
     final parts = <String>[];
+
+    // An event inside a season priced as one fee is not free — it is already
+    // paid for, and saying nothing here lets an entrant believe they owe
+    // nothing when they owe the season fee at the gate. See `SeasonFeeMode`.
+    final tid = c.tournamentId;
+    final season = tid == null
+        ? null
+        : ref
+            .watch(tournamentProvider((orgId: c.orgId, tournamentId: tid)))
+            .valueOrNull;
+    final coveredBySeason = season?.seasonFeeCoversEverything ?? false;
 
     final left = c.slotsRemaining;
     if (left == null) {
@@ -1564,7 +1755,17 @@ class _SlotsLine extends StatelessWidget {
       parts.add('waitlist open');
     }
 
-    if (!c.isFree) parts.add('₹${c.entryFeeRupees} entry');
+    // Qualified in the summary line itself, not only in the notice below
+    // it. This line is what gets screenshotted into a WhatsApp group, and a
+    // bare "₹500 entry" travelling on its own reads as a price PlaySphere is
+    // charging — see `FeeSettlement`.
+    if (!c.isFree) {
+      parts.add('₹${c.entryFeeRupees} entry (${FeeSettlement.entryShort})');
+    } else if (coveredBySeason) {
+      parts.add(
+        'covered by the ₹${season!.entryFeeRupees} season entry',
+      );
+    }
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1574,6 +1775,10 @@ class _SlotsLine extends StatelessWidget {
           style: theme.textTheme.bodySmall
               ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
         ),
+        if (!c.isFree || coveredBySeason) ...[
+          const SizedBox(height: 8),
+          const OfflineFeeNotice.entry(),
+        ],
         if (c.rulesNote != null && c.rulesNote!.isNotEmpty) ...[
           const SizedBox(height: 8),
           Text(c.rulesNote!, style: theme.textTheme.bodySmall),
@@ -2451,7 +2656,7 @@ class _Fixtures extends ConsumerWidget {
     final c = competition;
     final key = CompRef(c.orgId, c.id);
     final fixturesAsync = ref.watch(fixturesProvider(key));
-    final fixtures = fixturesAsync.valueOrNull ?? const [];
+    final fixtures = fixturesAsync.valueOrNull ?? const <Fixture>[];
     final myUid = ref.watch(currentUidProvider);
 
     // "No matches yet" is a claim about the draw. Only make it when the read
@@ -2473,182 +2678,115 @@ class _Fixtures extends ConsumerWidget {
       );
     }
 
-    Widget matchRow(Fixture f) => Padding(
-          padding: const EdgeInsets.only(bottom: 10),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Expanded(
-                child: LiveScoreCard(
-                  fixture: f,
-                  dense: true,
-                  // A draft fixture is placeholder teams — there is nothing
-                  // to score or watch yet, so the tap goes straight to
-                  // editing it instead of a scoring pad or scoreboard with
-                  // nobody real on it.
-                  onTap: f.isDraft
-                      ? () => MoveMatchSheet.show(
-                            context,
-                            fixture: f,
-                            siblings: fixtures,
-                          )
-                      : () {
-                          // A match that has not started opens the Match
-                          // Center — `docs/Heart_of_the_playsphere.md` §3/§4:
-                          // tapping a match opens the hub where it is
-                          // prepared and started, not a scoring pad for a
-                          // game with no umpire or an empty scoreboard.
-                          //
-                          // A live or finished match still goes straight to
-                          // the score. Somebody opening a game in progress
-                          // wants the ball-by-ball, not a step in front of
-                          // it.
-                          final started = f.isLiveAt(DateTime.now()) ||
-                              f.status.isResulted;
-                          if (!started) {
-                            context.push(
-                              Routes.matchCenter(c.orgId, c.id, f.id),
-                            );
-                            return;
-                          }
-                          final canScore = myUid != null &&
-                              f.canBeScoredBy(myUid, isOrgManager: canManage);
-                          context.push(
-                            canScore
-                                ? Routes.scoring(c.orgId, c.id, f.id)
-                                : Routes.watch(c.orgId, c.id, f.id),
-                          );
-                        },
-                ),
-              ),
-              // Only while there is something to watch. A link to a match
-              // that has not started shows an empty scoreboard, which is a
-              // worse thing to send someone than nothing.
-              // Bug #1 / #15: use activity-aware isLiveAt rather than the
-              // raw status field, so a match abandoned by its scorer days
-              // ago is not treated as in-progress.
-              if (!f.isDraft && (f.isLiveAt(DateTime.now()) || f.hasResult))
-                ShareMatchButton(fixture: f, compact: true),
-              if (f.isDraft) ...[
-                // Editing is the entire point of a draft match, so the icon
-                // stays even though the tap above already opens the same
-                // sheet — a visible affordance, not just a hidden gesture.
-                IconButton(
-                  tooltip: 'Edit venue, time and court',
-                  icon: const Icon(Icons.edit_calendar_outlined),
-                  onPressed: () => MoveMatchSheet.show(
-                    context,
-                    fixture: f,
-                    siblings: fixtures,
-                  ),
-                ),
-              ] else ...[
-                // A match already played is history; one in progress has a
-                // scorer standing over it. Neither is the organizer's to move.
-                if (canManage &&
-                    !f.hasResult &&
-                    !f.isLiveAt(DateTime.now())) ...[
-                  IconButton(
-                    tooltip: 'Start this match early',
-                    icon: const Icon(Icons.play_circle_outline,
-                        color: Colors.green),
-                    onPressed: () => StartEarlySheet.show(
-                      context,
-                      fixture: f,
-                      sportId: c.sportId,
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: 'Move this match',
-                    icon: const Icon(Icons.edit_calendar_outlined),
-                    onPressed: () => MoveMatchSheet.show(
-                      context,
-                      fixture: f,
-                      siblings: fixtures,
-                    ),
-                  ),
-                ],
-                if (canManage)
-                  IconButton(
-                    tooltip: f.scorerUids.isEmpty
-                        ? 'No scorer assigned'
-                        : '${f.scorerUids.length} scorer(s) assigned',
-                    icon: Icon(
-                      f.scorerUids.isEmpty
-                          ? Icons.person_off_outlined
-                          : Icons.how_to_reg_outlined,
-                      color: f.scorerUids.isEmpty
-                          ? Theme.of(context).colorScheme.error
-                          : null,
-                    ),
-                    onPressed: () => showDialog<void>(
-                      context: context,
-                      builder: (_) => _AssignScorersDialog(fixture: f),
-                    ),
-                  ),
-              ],
-            ],
-          ),
-        );
-
-    // Grouped so the schedule reads the same way the standings already do —
-    // `_StandingsTable` has shown one table per group since groups existed;
-    // this list showing all of "Group A" and "Group B" interleaved, with no
-    // way to tell which match belongs to which table, was the one place the
-    // schedule and the standings disagreed about whether groups exist.
-    final byGroup = <String?, List<Fixture>>{};
-    for (final f in fixtures) {
-      byGroup.putIfAbsent(f.groupId, () => []).add(f);
-    }
-    final groupIds = byGroup.keys.whereType<String>().toList()..sort();
-    final ungrouped = byGroup[null] ?? const <Fixture>[];
-    int byRound(Fixture a, Fixture b) => a.round != b.round
-        ? a.round.compareTo(b.round)
-        : a.matchIndex.compareTo(b.matchIndex);
+    // Which rows go green. `MyEntrants` is the single definition of "ours" —
+    // your account, your squad, your team, or your club — so the screen, the
+    // app bar's download and the printed PDF cannot disagree about which
+    // matches are yours.
+    final mine = _myEntrantIds(ref, key);
 
     // A draft schedule and a real one are never mixed — generating either
     // wipes whatever the competition had before — so one banner is enough
     // rather than marking every row.
-    final isDraftSchedule = fixtures.any((f) => f.isDraft);
+    final isDraftSchedule = visibleFixtures.any((f) => f.isDraft);
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Text('Matches', style: Theme.of(context).textTheme.titleMedium),
-        if (isDraftSchedule) ...[
-          const SizedBox(height: 4),
-          Text(
-            'Draft schedule — "Team A", "Team B" and the rest are '
-            'placeholders. Real entrants replace them once you generate the '
-            'draw after entries close.',
-            style: Theme.of(context)
-                .textTheme
-                .bodySmall
-                ?.copyWith(color: Theme.of(context).colorScheme.primary),
+    // One shared answer, in `openMatch`, so this board and the season's
+    // programme cannot disagree about where a match opens. A draft fixture
+    // goes to its slot editor instead — there is nothing to score yet.
+    void openFixture(Fixture f) => openMatch(
+          context,
+          fixture: f,
+          myUid: myUid,
+          canManage: canManage,
+          onDraft: () =>
+              MoveMatchSheet.show(context, fixture: f, siblings: fixtures),
+        );
+
+    List<ScheduleAction> actionsFor(Fixture f) {
+      if (f.isDraft) {
+        return [
+          ScheduleAction(
+            icon: Icons.edit_calendar_outlined,
+            label: 'Edit venue, time and court',
+            onSelected: () =>
+                MoveMatchSheet.show(context, fixture: f, siblings: fixtures),
+          ),
+        ];
+      }
+      return [
+        // Only while there is something to watch. A link to a match that has
+        // not started shows an empty scoreboard, which is a worse thing to
+        // send someone than nothing.
+        //
+        // Bug #1 / #15: activity-aware `isLiveAt` rather than the raw status
+        // field, so a match abandoned by its scorer days ago is not treated
+        // as in-progress.
+        if (f.isLiveAt(DateTime.now()) || f.hasResult)
+          ScheduleAction(
+            icon: Icons.ios_share,
+            label: 'Share this match',
+            onSelected: () => ShareMatchButton.share(context, f),
+          ),
+        // A match already played is history; one in progress has a scorer
+        // standing over it. Neither is the organizer's to move.
+        if (canManage && !f.hasResult && !f.isLiveAt(DateTime.now())) ...[
+          ScheduleAction(
+            icon: Icons.play_circle_outline,
+            label: 'Start this match early',
+            color: Colors.green,
+            onSelected: () =>
+                StartEarlySheet.show(context, fixture: f, sportId: c.sportId),
+          ),
+          ScheduleAction(
+            icon: Icons.edit_calendar_outlined,
+            label: 'Move this match',
+            onSelected: () =>
+                MoveMatchSheet.show(context, fixture: f, siblings: fixtures),
           ),
         ],
-        const SizedBox(height: 10),
-        if (groupIds.isEmpty)
-          for (final f in [...fixtures]..sort(byRound)) matchRow(f)
-        else ...[
-          for (final id in groupIds) ...[
-            Padding(
-              padding: const EdgeInsets.only(top: 4, bottom: 6),
-              child: Text('Group $id', style: Theme.of(context).textTheme.titleSmall),
+        if (canManage)
+          ScheduleAction(
+            icon: f.scorerUids.isEmpty
+                ? Icons.person_off_outlined
+                : Icons.how_to_reg_outlined,
+            label: f.scorerUids.isEmpty
+                ? 'No scorer assigned'
+                : '${f.scorerUids.length} scorer(s) assigned',
+            color: f.scorerUids.isEmpty
+                ? Theme.of(context).colorScheme.error
+                : null,
+            onSelected: () => showDialog<void>(
+              context: context,
+              builder: (_) => _AssignScorersDialog(fixture: f),
             ),
-            for (final f in [...byGroup[id]!]..sort(byRound)) matchRow(f),
-          ],
-          // The knockout stage of a groups+knockout draw — everything left
-          // once every group bucket above has taken its matches.
-          if (ungrouped.isNotEmpty) ...[
-            Padding(
-              padding: const EdgeInsets.only(top: 4, bottom: 6),
-              child: Text('Knockout', style: Theme.of(context).textTheme.titleSmall),
-            ),
-            for (final f in [...ungrouped]..sort(byRound)) matchRow(f),
-          ],
-        ],
-      ],
+          ),
+      ];
+    }
+
+    return ScheduleBoard(
+      fixtures: visibleFixtures,
+      mineEntrantIds: mine,
+      title: 'Matches',
+      pdfTitle: c.name,
+      pdfSubtitle: [
+        c.format.label,
+        if (c.sportId.isNotEmpty) c.sportId,
+      ].join(' · '),
+      pdfNote: isDraftSchedule
+          ? 'DRAFT — team names are placeholders until the draw is generated.'
+          : null,
+      notice: isDraftSchedule
+          ? Text(
+              'Draft schedule — "Team A", "Team B" and the rest are '
+              'placeholders. Real entrants replace them once you generate the '
+              'draw after entries close.',
+              style: Theme.of(context)
+                  .textTheme
+                  .bodySmall
+                  ?.copyWith(color: Theme.of(context).colorScheme.primary),
+            )
+          : null,
+      onTapFixture: openFixture,
+      actionsBuilder: actionsFor,
     );
   }
 }
@@ -2705,5 +2843,28 @@ Future<void> _resumeEvent(
     );
   } catch (e) {
     if (context.mounted) showError(context, e);
+  }
+}
+
+/// One entrant's standing on the entry list.
+///
+/// Reads [glickoBadgeProvider] — a one-shot fetch, not a listener — because a
+/// full draw is a hundred and twenty-eight of these on one screen. See that
+/// provider for the trade.
+///
+/// Renders nothing at all while the fetch is in flight and nothing if the
+/// person has never played a rated match. A placeholder would make an entry
+/// list flicker as it filled in, and a zero would be a claim about somebody's
+/// ability that no result supports.
+class _EntrantGlicko extends ConsumerWidget {
+  const _EntrantGlicko({required this.uid, required this.sportId});
+
+  final String uid;
+  final String sportId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final badge = ref.watch(glickoBadgeProvider(uid)).valueOrNull;
+    return GlickoChip.forSport(badge, sportId) ?? const SizedBox.shrink();
   }
 }

@@ -145,6 +145,54 @@ class ValuePrompt {
   bool get isInteger => decimals == 0;
 }
 
+/// A short piece of TEXT the pad must collect before an action can be applied.
+///
+/// Chess is why this exists, and until it did, the move list could not be
+/// recorded at all. Every other kind of detail an engine wants is a person, a
+/// number or one of a fixed set of answers, and all three already had a
+/// prompt. A move is none of them: `Nf3` is not a quantity and the set of
+/// legal answers is the set of legal chess moves, which is not a dropdown.
+/// The chess engine had a `move` action and a `takeback` button, and no
+/// control ever emitted the former — so a classical game, whose default
+/// preset turns move recording ON, showed the scorer a Moves group they could
+/// only take back FROM. Nothing could be put into it.
+///
+/// Deliberately generic and deliberately short. This is not a notes field: a
+/// pad is held at the side of a court, so anything wanting a paragraph wants
+/// the match's own discussion instead. A dart checkout, a jersey number
+/// written as text, a stroke code — same shape, no screen change.
+@immutable
+class TextPrompt {
+  const TextPrompt({
+    required this.key,
+    required this.label,
+    this.hint,
+    this.maxLength = 32,
+    this.optional = false,
+    this.autoCapitalize = false,
+  });
+
+  /// Payload key the text is written to — `san`.
+  final String key;
+
+  /// Asked as the recorder would ask it: "Move".
+  final String label;
+
+  /// An example, shown greyed in the field. "Nf3", "e4", "O-O".
+  final String? hint;
+
+  final int maxLength;
+  final bool optional;
+
+  /// Whether the first letter should be capitalised for the scorer.
+  ///
+  /// Off by default because the case that forced this prompt is one where case
+  /// is MEANING: in algebraic notation `b4` is a pawn move and `B4` is not a
+  /// move at all, and an autocapitalising keyboard would corrupt every entry
+  /// a scorer made without them noticing.
+  final bool autoCapitalize;
+}
+
 /// A fixed set of answers the pad must choose between before an action can be
 /// applied.
 ///
@@ -229,6 +277,7 @@ class ScoreControl {
     this.prompts = const [],
     this.values = const [],
     this.choices = const [],
+    this.texts = const [],
     this.variants = const [],
   });
 
@@ -270,9 +319,15 @@ class ScoreControl {
   /// numbers. See [ChoicePrompt].
   final List<ChoicePrompt> choices;
 
+  /// Short text the pad must collect, asked last. See [TextPrompt].
+  final List<TextPrompt> texts;
+
   /// Whether this button needs anything asked before it can be applied.
   bool get needsInput =>
-      prompts.isNotEmpty || values.isNotEmpty || choices.isNotEmpty;
+      prompts.isNotEmpty ||
+      values.isNotEmpty ||
+      choices.isNotEmpty ||
+      texts.isNotEmpty;
 
   /// Action type handed back to [ScoringPlugin.apply].
   final String action;

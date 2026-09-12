@@ -3,8 +3,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/layout/responsive.dart';
+import '../../core/models/enums.dart';
 import '../../core/models/ground.dart';
 import '../../core/models/organization.dart';
+import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../shared/app_scaffold.dart';
@@ -23,6 +25,14 @@ class ClubSettingsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final org = ref.watch(organizationProvider(orgId)).valueOrNull;
+    final caps = ref.watch(myCapabilitiesProvider(orgId));
+    final canManageStaff = caps.contains(Capability.manageMembers);
+    final members = ref.watch(orgMembersProvider(orgId)).valueOrNull;
+    final staffCount = members
+        ?.where((m) =>
+            m.isActive &&
+            (m.role != MembershipRole.member || m.portfolios.isNotEmpty))
+        .length;
 
     return AppScaffold(
       orgId: orgId,
@@ -37,6 +47,47 @@ class ClubSettingsScreen extends ConsumerWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
+                      // First, because it is the setting an owner comes here
+                      // to change most often and the one that decides who can
+                      // change everything else.
+                      if (canManageStaff) ...[
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: Text(
+                            'People',
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: Text(
+                            "You don't have to run ${org.name} on your own. "
+                            'Make someone an admin, or put one person in '
+                            'charge of the money and another in charge of the '
+                            'ground.',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Card(
+                          margin: const EdgeInsets.symmetric(horizontal: 12),
+                          child: ListTile(
+                            leading: const Icon(Icons.workspace_premium_outlined),
+                            title: const Text('Staff & roles'),
+                            subtitle: Text(
+                              staffCount == null
+                                  ? 'Admins, and who looks after what'
+                                  : '$staffCount running the club · '
+                                      'admins, departments, umpires',
+                            ),
+                            trailing: const Icon(Icons.chevron_right),
+                            onTap: () =>
+                                context.push(Routes.clubStaff(orgId)),
+                          ),
+                        ),
+                        const SizedBox(height: 28),
+                      ],
                       Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 16),
                         child: Text(

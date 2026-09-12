@@ -225,6 +225,7 @@ class ActivityCard extends ConsumerWidget {
     NotificationType.tournamentInvite: Icons.mail_outline,
     NotificationType.sponsorPledgeReceived: Icons.volunteer_activism_outlined,
     NotificationType.sponsorPledgeResolved: Icons.handshake_outlined,
+    NotificationType.digest: Icons.inbox_outlined,
   };
 
   @override

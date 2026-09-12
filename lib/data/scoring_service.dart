@@ -170,7 +170,8 @@ class ScoringService {
   // --- Reads ------------------------------------------------------------
 
   /// The one listener a spectator needs.
-  Stream<Fixture?> watchFixture(String orgId, String compId, String fixtureId) =>
+  Stream<Fixture?> watchFixture(
+          String orgId, String compId, String fixtureId) =>
       guardStream(
         () => Refs.fixture(orgId, compId, fixtureId).snapshots().map(
               (doc) => doc.exists ? Fixture.fromDoc(doc) : null,
@@ -323,6 +324,7 @@ class ScoringService {
     required String byUid,
   }) {
     _assertHoldsPen(fixture, byUid);
+    _assertNotDecided(fixture);
     final plugin = ScoringRegistry.resolve(fixture.scoringPluginKey);
 
     // Validate against the current projection first. A rejected action never
@@ -330,7 +332,8 @@ class ScoringService {
     // gets an instant, specific reason.
     final result = plugin.apply(fixture.scoreState, action, context);
     if (!result.isAccepted) {
-      throw ValidationException(result.rejection ?? 'That move is not allowed.');
+      throw ValidationException(
+          result.rejection ?? 'That move is not allowed.');
     }
 
     final nextSeq = fixture.lastSeq + 1;
@@ -447,10 +450,9 @@ class ScoringService {
       _enqueue(fixture, action, byUid, nextSeq, clientEventId)
           .then<void>((_) => batch.commit())
           .then<void>((_) {
-            _dequeue(clientEventId);
-            if (outcome.isComplete) _maybeResolveQualifiers(fixture);
-          })
-          .catchError((Object error) => _report(_translateWriteFailure(error))),
+        _dequeue(clientEventId);
+        if (outcome.isComplete) _maybeResolveQualifiers(fixture);
+      }).catchError((Object error) => _report(_translateWriteFailure(error))),
     );
 
     return updated;
@@ -675,7 +677,8 @@ class ScoringService {
           'match may have been finished or reassigned.',
         ),
       'unavailable' || 'deadline-exceeded' => const NetworkException(),
-      _ => ValidationException(error.message ?? 'That score could not be saved.'),
+      _ =>
+        ValidationException(error.message ?? 'That score could not be saved.'),
     };
   }
 
@@ -837,6 +840,7 @@ class ScoringService {
     String? note,
   }) async {
     _assertHoldsPen(fixture, byUid);
+    _assertNotDecided(fixture);
     final plugin = ScoringRegistry.resolve(fixture.scoringPluginKey);
 
     final events = await fetchAllEvents(
@@ -878,8 +882,7 @@ class ScoringService {
       scoreState: rebuilt,
       lastSeq: nextSeq,
       summary: plugin.summary(rebuilt, context),
-      status:
-          outcome.isComplete ? FixtureStatus.completed : FixtureStatus.live,
+      status: outcome.isComplete ? FixtureStatus.completed : FixtureStatus.live,
       winnerEntrantId: outcome.isComplete
           ? _entrantIdForSide(fixture, outcome.winnerSide)
           : null,
@@ -922,7 +925,8 @@ class ScoringService {
     await _enqueue(fixture, action, byUid, nextSeq, clientEventId);
 
     unawaited(
-      batch.commit()
+      batch
+          .commit()
           .then((_) => _dequeue(clientEventId))
           .catchError((Object error) => _report(_translateWriteFailure(error))),
     );
@@ -936,7 +940,8 @@ class ScoringService {
   /// implementation, so "what undo will remove" can never disagree with "what
   /// the rebuild then drops".
   int? _lastLiveSeq(List<MatchEvent> events) {
-    final sorted = events.map((e) => LoggedAction(seq: e.seq, action: _toAction(e)))
+    final sorted = events
+        .map((e) => LoggedAction(seq: e.seq, action: _toAction(e)))
         .toList()
       ..sort((x, y) => x.seq.compareTo(y.seq));
     final withdrawn = ScoringPlugin.resolveWithdrawn(sorted);
@@ -995,6 +1000,8 @@ class ScoringService {
       status: FixtureStatus.live,
       clearWinner: true,
       isDraw: false,
+      resultType: MatchResultType.normal,
+      clearResultNote: true,
       lastRestartSeq: nextSeq,
     );
 
@@ -1026,6 +1033,16 @@ class ScoringService {
         'isDraw': false,
         'completedAt': null,
         'mvp': null,
+        // The ruling goes with the result it belongs to.
+        //
+        // These two were left behind, and they are the only fields on a
+        // fixture that no rebuild ever recomputes — so a match abandoned for
+        // rain and then restarted when it cleared kept `resultType:
+        // abandoned` forever. `countsForStandings` is false for that value,
+        // so the replayed match was scored to a proper finish and then
+        // awarded nobody anything, with nothing on any screen to say why.
+        'resultType': MatchResultType.normal.wire,
+        'resultNote': null,
         'lastRestartSeq': nextSeq,
         'lastEventAt': FieldValue.serverTimestamp(),
       },
@@ -1034,7 +1051,8 @@ class ScoringService {
     _noteLocalHead(fixture, nextSeq);
     await _enqueue(fixture, action, byUid, nextSeq, clientEventId);
     unawaited(
-      batch.commit()
+      batch
+          .commit()
           .then((_) => _dequeue(clientEventId))
           .catchError((Object error) => _report(_translateWriteFailure(error))),
     );
@@ -1205,12 +1223,146 @@ class ScoringService {
           _ => fixture.summary,
         },
         'resultNote': note,
-        'completedAt': FieldValue.serverTimestamp(),
+        // Only where the match actually ENDED. A dispute freezes a result
+        // pending a decision — it does not finish anything, and stamping a
+        // completion time on it put "Completed 14:32" under a match nobody
+        // had agreed the result of, and moved it to the top of every
+        // most-recent list on the strength of a timestamp that meant the
+        // opposite of what it said.
+        if (status != FixtureStatus.disputed)
+          'completedAt': FieldValue.serverTimestamp(),
       }).catchError((Object error) {
         _report(_translateWriteFailure(error));
       }),
     );
     if (status.isResulted) _maybeResolveQualifiers(fixture);
+  }
+
+  /// Withdraws an official's ruling and gives the match back to the pad.
+  ///
+  /// The other half of [setFixtureOutcome], and the half that was missing.
+  /// Every one of those rulings was a one-way door: an organizer who awarded
+  /// a walkover to the wrong side, or abandoned a match for rain that stopped
+  /// twenty minutes later, had no way back at all — the pad refuses a scoring
+  /// write to a walkover, and nothing anywhere offered to take the ruling
+  /// off. "Restart the match" was the only route, and it throws the score
+  /// away to get there.
+  ///
+  /// ## What it restores, and why none of it is remembered
+  ///
+  /// Nothing is read back from a stored "previous status". The event log is
+  /// the record and it already knows: a match with events was live, one
+  /// without was scheduled ([Fixture.statusWithoutDecision]), and if the
+  /// engine had in fact finished the match before somebody disputed it, the
+  /// projection still says so — so the outcome is recomputed from
+  /// `scoreState` here and the match goes back to `completed` with its own
+  /// winner rather than to a `live` match that is actually over.
+  ///
+  /// Written as an EVENT, for the same reason a retirement is (see the long
+  /// note in [setFixtureOutcome]): the write carries a sequence number, so
+  /// `firestore.rules` admits it through the scorer branch instead of
+  /// refusing it seconds after the local cache has already shown it working.
+  Future<Fixture> clearFixtureOutcome({
+    required Fixture fixture,
+    required ScoringContext context,
+    required String byUid,
+    String? note,
+  }) async {
+    if (!fixture.endedByDecision) {
+      throw const ValidationException(
+        'This match has no ruling on it to withdraw.',
+      );
+    }
+    _assertHoldsPen(fixture, byUid);
+
+    final plugin = ScoringRegistry.resolve(fixture.scoringPluginKey);
+    final outcome = plugin.outcome(fixture.scoreState, context);
+    final nextSeq = fixture.lastSeq + 1;
+    final clientEventId = _clientEventId();
+
+    // The engine's own verdict on the score as it stands, which is the only
+    // honest thing to go back to. A match retired at 21-19, 15-12 in a
+    // best-of-three is NOT finished once the retirement is withdrawn, and a
+    // match disputed after a completing point IS.
+    final status = outcome.isComplete
+        ? FixtureStatus.completed
+        : fixture.statusWithoutDecision;
+    final winnerEntrantId = outcome.isComplete
+        ? _entrantIdForSide(fixture, outcome.winnerSide)
+        : null;
+
+    final updated = fixture.copyWith(
+      status: status,
+      summary: plugin.summary(fixture.scoreState, context),
+      lastSeq: nextSeq,
+      winnerEntrantId: winnerEntrantId,
+      clearWinner: !outcome.isComplete,
+      isDraw: outcome.isComplete && outcome.isDraw,
+      resultType: MatchResultType.normal,
+      clearResultNote: true,
+    );
+
+    unawaited(
+      Refs.matchEvents(fixture.orgId, fixture.compId, fixture.id)
+          .doc(MatchEvent.docId(nextSeq))
+          .set(MatchEvent(
+            seq: nextSeq,
+            type: 'outcome_cleared',
+            payload: {'from': fixture.resultType.wire},
+            byUid: byUid,
+            clientEventId: clientEventId,
+            note: note,
+          ).toCreate())
+          .catchError((Object error) {
+        _report(_translateWriteFailure(error));
+      }),
+    );
+    _noteLocalHead(fixture, nextSeq);
+
+    unawaited(
+      Refs.fixture(fixture.orgId, fixture.compId, fixture.id).update({
+        'lastSeq': nextSeq,
+        'status': status.wire,
+        'resultType': MatchResultType.normal.wire,
+        'resultNote': null,
+        'winnerEntrantId': winnerEntrantId,
+        'isDraw': updated.isDraw,
+        'summary': updated.summary,
+        // Cleared unless the engine says the match really is over. A
+        // resumed match that still reads "completed at 14:32" is the same
+        // lie the dispute path used to tell.
+        'completedAt': outcome.isComplete ? FieldValue.serverTimestamp() : null,
+        // The match is being played again from this moment, so it must not
+        // read as a scoreboard somebody walked away from. See
+        // [Fixture.isLiveAt].
+        'lastEventAt': FieldValue.serverTimestamp(),
+      }).catchError((Object error) {
+        _report(_translateWriteFailure(error));
+      }),
+    );
+
+    return updated;
+  }
+
+  /// Refuses a scoring write to a match an official has ruled on.
+  ///
+  /// Here rather than only in the UI because of what the write would DO. The
+  /// status a scoring write commits is derived from the projection — see
+  /// [submit] — and no ruling is in the projection, so a single tap on an
+  /// abandoned match writes `status: live` and the abandonment is gone, with
+  /// no error anywhere and nothing for the organizer to notice. The pad hides
+  /// its controls in this state; this is what makes the same thing true for a
+  /// queued action replayed from a cold start, a keyboard shortcut, and every
+  /// future caller.
+  void _assertNotDecided(Fixture fixture) {
+    if (!fixture.endedByDecision) return;
+    final what = fixture.status.isDecision
+        ? fixture.status.label.toLowerCase()
+        : fixture.resultType.label.toLowerCase();
+    throw ValidationException(
+      'This match was recorded as $what. Withdraw that decision first and '
+      'the score continues from exactly where it stopped.',
+    );
   }
 
   /// Refuses a write from anybody but the current pen holder.
@@ -1540,7 +1692,8 @@ class ScoringService {
       // nothing is wrong with these entries, they are just being replayed
       // from a stale reading. The next pass re-snapshots the queue, finds the
       // newer taps in it, and rebuilds a projection that includes them.
-      final head = _localHead['${first.orgId}/${first.compId}/${first.fixtureId}'];
+      final head =
+          _localHead['${first.orgId}/${first.compId}/${first.fixtureId}'];
       if (head != null && maxSeq < head) {
         return group.map(_deferForNetwork).toList();
       }
@@ -1624,8 +1777,7 @@ class ScoringService {
           // have been in had it been written live.
           'lastRestartSeq': _liveRestartSeq(combinedLog),
           if (fixture.lastSeq == 0) 'startedAt': FieldValue.serverTimestamp(),
-          if (outcome.isComplete)
-            'completedAt': FieldValue.serverTimestamp(),
+          if (outcome.isComplete) 'completedAt': FieldValue.serverTimestamp(),
           // Same heartbeat as the online path. A match scored in a dead spot
           // and flushed on reconnect is being played now, and must not be
           // read as abandoned just because the server heard about it late.

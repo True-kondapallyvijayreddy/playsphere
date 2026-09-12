@@ -6,7 +6,7 @@ import '../../core/layout/responsive.dart';
 import '../../core/models/competition.dart';
 import '../../core/models/enums.dart';
 import '../../core/models/organization.dart';
-import '../../core/models/sub_group.dart';
+import '../../core/models/team.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
@@ -18,13 +18,22 @@ import '../../shared/identity.dart';
 import '../../shared/image_upload.dart';
 import '../../shared/live_dot.dart';
 import '../../shared/ui_kit.dart';
+import '../../domain/club_events.dart';
 import '../home/event_feed.dart';
+import '../network/club_network_providers.dart';
 import '../scoring/widgets/live_score_card.dart';
+import 'club_events_screen.dart';
+import 'widgets/club_sections_grid.dart';
+import 'widgets/club_stats_section.dart';
 
 class OrgHomeScreen extends ConsumerWidget {
   const OrgHomeScreen({super.key, required this.orgId});
 
   final String orgId;
+
+  /// How many event rows the dashboard shows before handing over to
+  /// `ClubEventsScreen`.
+  static const _eventsPreview = 6;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -42,18 +51,32 @@ class OrgHomeScreen extends ConsumerWidget {
     final live = liveAsync.valueOrNull ?? const [];
     final pending = pendingAsync.valueOrNull ?? const [];
 
+    // A visiting club owner, looking at somebody else's club. The one thing
+    // they want that a member never does is a way to write to it — see
+    // `ClubNetworkScreen`. Offered only to the owner of a DIFFERENT club, so
+    // it never appears on an owner's own page, where it would be an invitation
+    // to talk to themselves.
+    final asClubId = ref.watch(actingClubIdProvider);
+    final canMessage = asClubId != null && asClubId != orgId;
+
     return AppScaffold(
       orgId: orgId,
       title: 'Home',
-      actions: canManage
-          ? [
-              IconButton(
-                tooltip: 'Club settings',
-                icon: const Icon(Icons.settings_outlined),
-                onPressed: () => context.push(Routes.clubSettings(orgId)),
-              ),
-            ]
-          : null,
+      actions: [
+        if (canMessage)
+          IconButton(
+            tooltip: 'Message this club',
+            icon: const Icon(Icons.chat_bubble_outline),
+            onPressed: () =>
+                context.push(Routes.clubThreadWith(asClubId, orgId)),
+          ),
+        if (canManage)
+          IconButton(
+            tooltip: 'Club settings',
+            icon: const Icon(Icons.settings_outlined),
+            onPressed: () => context.push(Routes.clubSettings(orgId)),
+          ),
+      ],
       // Two buttons, and the smaller one is the more used. Starting a match
       // between people who are already standing on the ground is the single
       // most common thing a club does; running a tournament is the rarer,
@@ -82,6 +105,10 @@ class OrgHomeScreen extends ConsumerWidget {
       body: AsyncView(
         value: competitions,
         builder: (comps) {
+          // Grouped once. A season's sports collapse behind one card — see
+          // [groupEventFeed] — and the count, the preview and the "all N
+          // events" button all have to be talking about the same rows.
+          final feed = groupEventFeed(comps);
           return ListView(
             padding: const EdgeInsets.only(bottom: 88),
             children: [
@@ -96,6 +123,16 @@ class OrgHomeScreen extends ConsumerWidget {
                         org: org,
                         competitions: comps,
                       ),
+                    // Outside the header on purpose. The header needs a
+                    // loaded [Organization] and draws nothing without one,
+                    // and these ten doors are the only way to this club's
+                    // gallery, files and venues now that the app-wide drawer
+                    // is gone. Nesting them inside the header would mean a
+                    // club whose document is slow — or unreadable — became a
+                    // club with no sections at all.
+                    const SizedBox(height: 18),
+                    ClubSectionsGrid(orgId: orgId),
+                    const SizedBox(height: 8),
                     AsyncErrorStrip(
                       value: liveAsync,
                       what: 'live matches',
@@ -161,11 +198,22 @@ class OrgHomeScreen extends ConsumerWidget {
                         ),
                       const SizedBox(height: 20),
                     ],
-                    Text(
-                      'Events',
-                      style: Theme.of(context).textTheme.titleMedium,
+                    // The club's record, between who it is and what it is
+                    // running — see [ClubStatsSection] for why it earns the
+                    // place above the events list.
+                    ClubStatsSection(orgId: orgId, competitions: comps),
+                    PsSectionHeader(
+                      title: 'Events',
+                      actionLabel: 'View All',
+                      onAction: comps.isEmpty
+                          ? null
+                          : () => context.push(Routes.clubEvents(orgId)),
                     ),
                     const SizedBox(height: 10),
+                    if (comps.isNotEmpty) ...[
+                      _EventKindStrip(orgId: orgId, competitions: comps),
+                      const SizedBox(height: 12),
+                    ],
                     if (comps.isEmpty)
                       Padding(
                         padding: const EdgeInsets.only(top: 32),
@@ -191,13 +239,19 @@ class OrgHomeScreen extends ConsumerWidget {
                       // of one each — see [groupEventFeed] — so a club that
                       // just ran through `CreateSeasonScreen` sees the season
                       // it created, not a wall of same-named sport rows.
-                      for (final item in groupEventFeed(comps))
+                      // Capped. This is the club's dashboard, not its
+                      // archive: the full, sorted, filterable list is one tap
+                      // away behind "View All", and a club three years in was
+                      // otherwise scrolling past two hundred cards to reach
+                      // anything below the events section.
+                      for (final item
+                          in feed.take(_eventsPreview))
                         switch (item) {
                           EventFeedSingle(:final competition) =>
-                            _CompetitionTile(
-                              orgId: orgId,
-                              competition: competition,
-                            ),
+                            // The same tile the full events list uses, so a
+                            // finished single match opens its scorecard from
+                            // here too rather than a one-match bracket page.
+                            ClubEventTile(competition: competition),
                           EventFeedSeason(
                             :final tournamentId,
                             :final competitions
@@ -209,6 +263,18 @@ class OrgHomeScreen extends ConsumerWidget {
                               showOrg: false,
                             ),
                         },
+                    if (feed.length > _eventsPreview)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton.icon(
+                          onPressed: () =>
+                              context.push(Routes.clubEvents(orgId)),
+                          icon: const Icon(Icons.list_alt_outlined, size: 18),
+                          label: Text(
+                            'All ${feed.length} events',
+                          ),
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -243,7 +309,17 @@ class _ClubHeader extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final teams = ref.watch(subGroupsProvider(orgId)).valueOrNull ?? const [];
+    // `clubTeamsProvider`, not the sub-group list this used to read.
+    //
+    // Two different things were both called "Teams": `orgs/{id}/subgroups`,
+    // the club's own age-group/house buckets, and `teams/` filtered by
+    // `clubId`, which is where `CreateTeamScreen` and every squad the members
+    // screen shows actually write. Nothing in the app has written a subgroup
+    // for a long time, so this counter read an empty collection and showed
+    // "0 Teams" to a club with eleven of them — while the members screen one
+    // tap below, reading `clubTeamsProvider`, showed all eleven. The counter
+    // now reads the same collection as the screen it links to.
+    final teams = ref.watch(clubTeamsProvider(orgId)).valueOrNull ?? const [];
     // Distinct sports the club has actually run something in — not the
     // catalogue, and not what anyone declared. A club is a cricket club
     // because it runs cricket.
@@ -312,12 +388,11 @@ class _ClubHeader extends ConsumerWidget {
             const SizedBox(height: 16),
             PsStatRow(
               stats: [
-                // Both open the members screen: that's where a club's real,
-                // rostered teams actually live and get raised from — see
-                // `_TeamsSection` there. This card's own "Teams" preview
-                // below is the lighter-weight sub-group list and stays as
-                // it was; the count and the tap target agree with the page
-                // they lead to rather than with each other.
+                // Both open the members screen: that's where a club's
+                // rostered teams live and get raised from. The count, the
+                // preview below and that screen now all read
+                // `clubTeamsProvider`, so the three agree — see the note on
+                // `teams` above for what they used to disagree about.
                 PsStat(
                   value: psGrouped(teams.length),
                   label: 'Teams',
@@ -335,10 +410,14 @@ class _ClubHeader extends ConsumerWidget {
                       ? null
                       : () => context.push(Routes.clubStats(orgId)),
                 ),
+                // Counted the way the events list below counts them: a
+                // five-sport season is one thing this club ran, not five.
+                // The label follows suit — it was "Tournaments" over a
+                // number that included every single match and challenge.
                 PsStat(
-                  value: psGrouped(competitions.length),
-                  label: 'Tournaments',
-                  onTap: () => context.push(Routes.tournaments(orgId)),
+                  value: psGrouped(groupEventFeed(competitions).length),
+                  label: 'Events',
+                  onTap: () => context.push(Routes.clubEvents(orgId)),
                 ),
               ],
             ),
@@ -507,7 +586,7 @@ class _SportsStrip extends StatelessWidget {
 class _TeamRow extends StatelessWidget {
   const _TeamRow({required this.team});
 
-  final SubGroup team;
+  final Team team;
 
   @override
   Widget build(BuildContext context) {
@@ -516,19 +595,7 @@ class _TeamRow extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: 8),
       child: Row(
         children: [
-          if (sportId != null)
-            SportBadge(sportId: sportId, size: 32)
-          else
-            Container(
-              width: 32,
-              height: 32,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: Ps.canvas,
-                borderRadius: BorderRadius.circular(9),
-              ),
-              child: const Icon(Icons.groups, size: 16, color: Ps.muted),
-            ),
+          SportBadge(sportId: sportId, size: 32),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
@@ -546,8 +613,8 @@ class _TeamRow extends StatelessWidget {
                 ),
                 Text(
                   [
-                    if (sportId != null) SportCatalog.byId(sportId).name,
-                    if (team.ageGroup != null) team.ageGroup!,
+                    SportCatalog.byId(sportId).name,
+                    team.type.label,
                   ].join(' • '),
                   style: const TextStyle(fontSize: 11.5, color: Ps.muted),
                 ),
@@ -565,71 +632,49 @@ class _TeamRow extends StatelessWidget {
   }
 }
 
-class _CompetitionTile extends StatelessWidget {
-  const _CompetitionTile({required this.orgId, required this.competition});
+/// The four shapes a club's events come in, each carrying its count, each a
+/// way straight into that slice of the list.
+///
+/// The club's events used to be one column ordered by date, which answers
+/// "what is next" and nothing else. An owner hunting an unfinished draft, a
+/// player looking for the tournament still taking entries, and a visitor
+/// wanting to know whether this club actually plays anybody else were all
+/// reading the whole list to find out. Each of those is now one tap — the
+/// counts here are the same ones `ClubEventsScreen` puts on its tabs,
+/// because both come from [ClubEventIndex].
+///
+/// Kinds the club has none of are dropped rather than shown as a zero. A new
+/// club would otherwise open on four empty buckets, which describes the
+/// product rather than the club.
+class _EventKindStrip extends StatelessWidget {
+  const _EventKindStrip({required this.orgId, required this.competitions});
 
   final String orgId;
-  final Competition competition;
+  final List<Competition> competitions;
 
   @override
   Widget build(BuildContext context) {
-    final c = competition;
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: ListTile(
-        leading: SportBadge(sportId: c.sportId, size: 40),
-        title: Text(c.name),
-        subtitle: Text(
-          [
-            c.sportName,
-            c.category.label,
-            '${c.entrantCount} entered',
-          ].join(' · '),
-        ),
-        trailing: _StatusChip(status: c.displayStatus()),
-        onTap: () => context.push(Routes.competition(orgId, c.id)),
-      ),
-    );
-  }
+    final index = ClubEventIndex.of(competitions);
+    final kinds = [
+      for (final kind in ClubEventKind.values)
+        if (index.has(kind)) kind,
+    ];
+    // Nothing to segregate. One kind means the strip would be a single chip
+    // restating the list directly underneath it.
+    if (kinds.length < 2) return const SizedBox.shrink();
 
-}
-
-class _StatusChip extends StatelessWidget {
-  const _StatusChip({required this.status});
-  final CompetitionStatus status;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final (bg, fg) = switch (status) {
-      CompetitionStatus.registrationOpen => (
-          scheme.primaryContainer,
-          scheme.onPrimaryContainer
-        ),
-      CompetitionStatus.inProgress => (
-          scheme.tertiaryContainer,
-          scheme.onTertiaryContainer
-        ),
-      CompetitionStatus.completed => (
-          scheme.surfaceContainerHighest,
-          scheme.onSurfaceVariant
-        ),
-      _ => (scheme.surfaceContainerHighest, scheme.onSurfaceVariant),
-    };
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Text(
-        status.label,
-        style: Theme.of(context)
-            .textTheme
-            .labelSmall
-            ?.copyWith(color: fg, fontWeight: FontWeight.w600),
-      ),
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (final kind in kinds)
+          ActionChip(
+            avatar: Icon(kind.icon, size: 16),
+            label: Text('${kind.label} ${index.count(kind)}'),
+            onPressed: () =>
+                context.push(Routes.clubEvents(orgId, kind: kind)),
+          ),
+      ],
     );
   }
 }

@@ -85,6 +85,22 @@ class TournamentInvite {
   final DateTime? createdAt;
   final DateTime? respondedAt;
 
+  /// The document id for one host/tournament/guest triple.
+  ///
+  /// Deterministic, and it earns that twice over. It makes inviting a club a
+  /// second time overwrite the one row instead of leaving two that can
+  /// disagree about the answer. And it is the only way `firestore.rules` can
+  /// reach this document at all — rules cannot query, so the grant that lets
+  /// an invited club's organizers enter their side into the host's draw is an
+  /// `exists()` on exactly this path. Change the shape and that grant stops
+  /// finding anything.
+  static String idFor({
+    required String fromOrgId,
+    required String tournamentId,
+    required String toOrgId,
+  }) =>
+      '${fromOrgId}_${tournamentId}_$toOrgId';
+
   bool get isPending => status == 'pending';
   bool get isAccepted => status == 'accepted';
   bool get isDeclined => status == 'declined';

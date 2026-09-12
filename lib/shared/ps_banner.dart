@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 
 import 'identity.dart';
@@ -29,6 +31,10 @@ class PsBanner extends StatelessWidget {
   const PsBanner({
     super.key,
     this.imageUrl,
+    this.imageBytes,
+    this.logoUrl,
+    this.logoBytes,
+    this.logoName,
     this.sportId,
     this.seed,
     this.fallbackIcon,
@@ -41,6 +47,29 @@ class PsBanner extends StatelessWidget {
 
   /// Uploaded artwork. Null is normal — see the class comment.
   final String? imageUrl;
+
+  /// Artwork chosen on a create form and not yet uploaded, drawn in place of
+  /// [imageUrl]. See [PsNetworkImage.bytes] for why a create screen needs it.
+  final Uint8List? imageBytes;
+
+  /// The subject's own badge, laid on the artwork rather than behind it.
+  ///
+  /// Absent by default and drawn nowhere when null — deliberately not a
+  /// placeholder square. A banner is already a complete header without a
+  /// crest (that is the whole argument of this class), so an empty slot would
+  /// turn every season that never had a badge into one that looks like it is
+  /// missing something.
+  ///
+  /// When present it sits at the bottom left with [child] beside it, because
+  /// a mark and the name it belongs to have to read as one unit — a crest
+  /// floating in the opposite corner from the title reads as a sponsor.
+  final String? logoUrl;
+
+  /// The crest as staged bytes, for the same reason [imageBytes] exists.
+  final Uint8List? logoBytes;
+
+  /// Only used to letter the crest's monogram while an uploaded one loads.
+  final String? logoName;
 
   /// Which sport's colour and glyph the generated art uses. Null falls back to
   /// the neutral slate [SportVisual] already defines for unknown sports.
@@ -70,11 +99,21 @@ class PsBanner extends StatelessWidget {
 
   final BorderRadius? borderRadius;
 
+  /// Whether there is a badge to draw over the art.
+  bool get _hasLogo =>
+      (logoBytes != null && logoBytes!.isNotEmpty) ||
+      (logoUrl != null && logoUrl!.trim().isNotEmpty);
+
   @override
   Widget build(BuildContext context) {
     final radius = borderRadius ?? BorderRadius.circular(Ps.radius);
     final url = imageUrl;
     final hasUpload = url != null && url.trim().isNotEmpty;
+
+    // The crest scales with the header so one component covers the 156pt
+    // season header and the 110pt card thumbnail without a second set of
+    // numbers, and is bounded so it never eats a short banner.
+    final crestSize = (height * 0.30).clamp(34.0, 56.0);
 
     return ClipRRect(
       borderRadius: radius,
@@ -91,6 +130,7 @@ class PsBanner extends StatelessWidget {
             // grey rectangle with a broken-image glyph in the middle.
             PsNetworkImage(
               url: hasUpload ? url : null,
+              bytes: imageBytes,
               fit: BoxFit.cover,
               fallback: _GeneratedArt(
                 sportId: sportId,
@@ -102,7 +142,7 @@ class PsBanner extends StatelessWidget {
 
             // The scrim. Only ever painted where there is something to read,
             // so a banner with no child keeps its full colour.
-            if (child != null)
+            if (child != null || _hasLogo)
               const DecoratedBox(
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
@@ -114,12 +154,48 @@ class PsBanner extends StatelessWidget {
                 ),
               ),
 
-            if (child != null)
+            if (child != null || _hasLogo)
               Positioned(
                 left: 16,
                 right: 16,
                 bottom: 14,
-                child: child!,
+                child: !_hasLogo
+                    ? child!
+                    : Row(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          // A white plinth behind the badge, because a crest
+                          // is usually dark art on a transparent or white
+                          // ground and would otherwise disappear into a dark
+                          // photograph or into the scrim.
+                          Container(
+                            padding: const EdgeInsets.all(4),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius:
+                                  BorderRadius.circular(crestSize * 0.30),
+                              boxShadow: const [
+                                BoxShadow(
+                                  color: Color(0x40000000),
+                                  blurRadius: 8,
+                                  offset: Offset(0, 2),
+                                ),
+                              ],
+                            ),
+                            child: PsCrest(
+                              name: logoName ?? '',
+                              logoUrl: logoUrl,
+                              logoBytes: logoBytes,
+                              seed: seed,
+                              size: crestSize,
+                            ),
+                          ),
+                          if (child != null) ...[
+                            const SizedBox(width: 12),
+                            Expanded(child: child!),
+                          ],
+                        ],
+                      ),
               ),
 
             if (trailing != null)

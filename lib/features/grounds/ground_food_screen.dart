@@ -23,7 +23,7 @@ class _GroundFoodScreenState extends ConsumerState<GroundFoodScreen> {
   bool _busy = false;
 
   Future<void> _placeOrder(List<GroundMenuItem> menu) async {
-    final me = ref.read(currentUserProvider).valueOrNull;
+    final me = ref.read(authUserProvider).valueOrNull;
     if (me == null || _cart.isEmpty) return;
     final ground = ref.read(groundProvider(widget.groundId)).valueOrNull;
     setState(() => _busy = true);

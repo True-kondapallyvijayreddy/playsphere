@@ -7,10 +7,12 @@ import '../../core/layout/responsive.dart';
 import '../../core/errors/app_exception.dart';
 import '../../core/models/app_user.dart';
 import '../../core/models/enums.dart';
+import '../../core/models/geo.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../l10n/app_localizations.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/location_fields.dart';
 
 /// Collects what Google Sign-In cannot give us.
 ///
@@ -32,6 +34,7 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
   DateTime? _dateOfBirth;
   Gender _gender = Gender.preferNotToSay;
   ProfileVisibility _visibility = ProfileVisibility.community;
+  GeoLocation _geo = GeoLocation.empty;
   bool _busy = false;
   bool _prefilled = false;
 
@@ -73,9 +76,11 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
       final existing = ref.read(currentUserProvider).valueOrNull;
       final phone =
           _phoneController.text.trim().isEmpty ? null : _phoneController.text.trim();
-      // Edits build on the stored profile rather than on a fresh object, so
-      // a field this form still does not show — the location that feeds
-      // the government aggregates — survives a name change.
+      // Edits still build on the stored profile rather than on a fresh
+      // object, so anything this form does not show — the club mirrors, the
+      // plan — survives a name change. Location is no longer in that set: the
+      // form collects it now, and `_geo` is seeded from the stored value
+      // below, so writing it back is a round trip rather than a clobber.
       final profile = existing?.copyWith(
             displayName: _nameController.text.trim(),
             gender: _gender,
@@ -83,6 +88,7 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
             photoUrl: authUser.photoURL,
             profileVisibility: _visibility,
             profileComplete: true,
+            geo: _geo,
           ) ??
           AppUser(
             uid: authUser.uid,
@@ -94,6 +100,7 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
             photoUrl: authUser.photoURL,
             profileVisibility: _visibility,
             profileComplete: true,
+            geo: _geo,
           );
 
       final repo = ref.read(userRepositoryProvider);
@@ -111,7 +118,12 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
       if (context.canPop()) {
         context.pop();
       } else {
-        context.go(Routes.home);
+        // First-time setup, which is what a person who followed a shared
+        // invite link and had no account hits. The destination they were
+        // actually trying to reach was parked when the router bounced them to
+        // sign-in, and this is the only place left that can honour it — the
+        // sign-in screen has already been popped by the time we get here.
+        context.go(PendingDestination.take() ?? Routes.home);
       }
     } catch (e) {
       if (mounted) showError(context, e);
@@ -138,6 +150,7 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
       _visibility = existing?.profileVisibility ?? _visibility;
       _dateOfBirth ??= existing?.dateOfBirth;
       _gender = existing?.gender ?? _gender;
+      _geo = existing?.geo ?? _geo;
       _prefilled = true;
     }
 
@@ -231,7 +244,32 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
                   ],
                   onChanged: (v) => setState(() => _gender = v ?? _gender),
                 ),
-                const SizedBox(height: 20),
+                const SizedBox(height: 28),
+                // Nothing in the app collected this before, and nothing could
+                // work without it: `users/{uid}.geo` was declared, read by the
+                // gov rollups and the scout filters, and written by no screen
+                // at all — so every one of those searches was running against
+                // a field that was empty for every account in the product.
+                // It is also the whole basis of "who is near me", which is the
+                // one question somebody who has just moved has.
+                Text(
+                  'Where you play',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Lets clubs and players near you find you, and places your '
+                  'results in the right district.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: Theme.of(context).hintColor,
+                      ),
+                ),
+                const SizedBox(height: 12),
+                LocationFields(
+                  value: _geo,
+                  onChanged: (g) => setState(() => _geo = g),
+                ),
+                const SizedBox(height: 24),
                 // Nothing anywhere in the app could set this before, so every
                 // account carried the `community` default and no screen ever
                 // told anyone it existed — a privacy control the owner cannot

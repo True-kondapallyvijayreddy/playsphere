@@ -9,6 +9,9 @@ import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/offline_fee_notice.dart';
+import '../../shared/identity.dart';
+import '../../shared/season_branding_field.dart';
 
 /// Every tournament this club runs.
 class TournamentsScreen extends ConsumerWidget {
@@ -98,7 +101,28 @@ class _TournamentCard extends ConsumerWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(t.name, style: theme.textTheme.titleMedium),
+              // The crest leads the row when there is one. A tournament's own
+              // mark is the fastest way to pick it out of a club's list, and
+              // this list is where an organizer running three at once looks
+              // first. Nothing is drawn when there is no logo — an empty
+              // monogram square on every row would be noise, not identity.
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  if ((t.logoUrl ?? '').trim().isNotEmpty) ...[
+                    PsCrest(
+                      name: t.name,
+                      logoUrl: t.logoUrl,
+                      seed: t.id,
+                      size: 40,
+                    ),
+                    const SizedBox(width: 12),
+                  ],
+                  Expanded(
+                    child: Text(t.name, style: theme.textTheme.titleMedium),
+                  ),
+                ],
+              ),
               const SizedBox(height: 8),
               Wrap(
                 spacing: 8,
@@ -164,6 +188,24 @@ class _TournamentEditorState extends ConsumerState<TournamentEditor> {
   late final _description =
       TextEditingController(text: widget.existing?.description ?? '');
 
+  /// The tournament-wide entry fee, in whole rupees. Blank means free.
+  ///
+  /// A tournament created here is a container its events hang off, and an
+  /// event carries its own `Competition.entryFeeRupees`. This is the number
+  /// an entrant is quoted for the tournament as a whole — the one on the
+  /// poster — and it is declared here because the poster goes up before the
+  /// events are built.
+  late final _entryFee = TextEditingController(
+    text: (widget.existing?.entryFeeRupees ?? 0) == 0
+        ? ''
+        : '${widget.existing!.entryFeeRupees}',
+  );
+
+  /// Whether the fee below covers everything or each event is priced on its
+  /// own — see [SeasonFeeMode].
+  late SeasonFeeMode _feeMode =
+      widget.existing?.feeMode ?? SeasonFeeMode.wholeSeason;
+
   late TournamentGrade _grade = widget.existing?.grade ?? TournamentGrade.club;
   late DateTime? _start = widget.existing?.startDate;
   late DateTime? _end = widget.existing?.endDate;
@@ -171,12 +213,22 @@ class _TournamentEditorState extends ConsumerState<TournamentEditor> {
   late int _matchMinutes = widget.existing?.matchMinutesDefault ?? 30;
   late int _changeover = widget.existing?.changeoverMinutes ?? 5;
   late int _restGap = widget.existing?.restGapMinutes ?? 20;
+
+  /// The crest and header art picked in this sheet, uploaded on save.
+  ///
+  /// Staged even when editing an existing tournament, so the sheet has one
+  /// behaviour: nothing this form shows is written until Save is pressed. An
+  /// upload that fired on pick would leave a tournament rebranded by somebody
+  /// who then hit Cancel.
+  final _branding = SeasonBranding();
+
   bool _busy = false;
 
   @override
   void dispose() {
     _name.dispose();
     _description.dispose();
+    _entryFee.dispose();
     super.dispose();
   }
 
@@ -221,6 +273,59 @@ class _TournamentEditorState extends ConsumerState<TournamentEditor> {
                 labelText: 'Description (optional)',
               ),
             ),
+            const SizedBox(height: 20),
+
+            // With the name and the description, because those three are what
+            // a tournament is announced with. The same block both season
+            // forms use, so a tournament created here is brandable in exactly
+            // the way a season created there is.
+            ValueListenableBuilder<TextEditingValue>(
+              valueListenable: _name,
+              builder: (context, value, _) => SeasonBrandingField(
+                branding: _branding,
+                name: value.text,
+                logoUrl: widget.existing?.logoUrl,
+                bannerUrl: widget.existing?.bannerUrl,
+                seed: widget.existing?.id,
+                subject: 'Tournament',
+                title: 'Tournament look',
+                helper: 'Optional. Both show on the tournament page and on '
+                    'the public link you share — the logo on the header, in '
+                    'lists, and beside every result.',
+                onChanged: () => setState(() {}),
+              ),
+            ),
+            const SizedBox(height: 20),
+
+            Text('Entry fee', style: theme.textTheme.titleSmall),
+            for (final mode in SeasonFeeMode.values)
+              RadioListTile<SeasonFeeMode>(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                value: mode,
+                groupValue: _feeMode,
+                title: Text(mode.label),
+                onChanged: (v) => setState(() => _feeMode = v ?? _feeMode),
+              ),
+            if (_feeMode == SeasonFeeMode.wholeSeason)
+              TextField(
+                controller: _entryFee,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Fee for the whole tournament',
+                  hintText: 'Free',
+                  prefixText: '₹ ',
+                ),
+              )
+            else
+              Text(
+                'Each event carries its own fee, set when the event is '
+                'created.',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              ),
+            const SizedBox(height: 8),
+            const OfflineFeeNotice(message: FeeSettlement.organiserHelper),
             const SizedBox(height: 16),
 
             DropdownButtonFormField<TournamentGrade>(
@@ -354,6 +459,14 @@ class _TournamentEditorState extends ConsumerState<TournamentEditor> {
     );
   }
 
+  /// The declared fee in whole rupees, floored at zero. Unparseable text
+  /// reads as free — see `_CategoryDraft.entryFeeRupees` in
+  /// `create_season_screen.dart` for why that direction is deliberate.
+  int get _entryFeeRupees {
+    final n = int.tryParse(_entryFee.text.trim());
+    return (n == null || n < 0) ? 0 : n;
+  }
+
   bool get _canSave =>
       !_busy && _name.text.trim().isNotEmpty && _start != null;
 
@@ -377,17 +490,41 @@ class _TournamentEditorState extends ConsumerState<TournamentEditor> {
       matchMinutesDefault: _matchMinutes,
       changeoverMinutes: _changeover,
       restGapMinutes: _restGap,
+      feeMode: _feeMode,
+      // Zero under per-event pricing, so a fee typed before the mode was
+      // switched cannot go on quoting a price the tournament no longer
+      // charges.
+      entryFeeRupees:
+          _feeMode == SeasonFeeMode.wholeSeason ? _entryFeeRupees : 0,
       createdBy: widget.existing?.createdBy ?? uid,
       createdAt: widget.existing?.createdAt,
     );
 
     try {
-      if (widget.existing == null) {
-        await repo.createTournament(t);
-      } else {
-        await repo.updateTournament(t);
+      final id = widget.existing == null
+          ? await repo.createTournament(t)
+          : await () async {
+              await repo.updateTournament(t);
+              return t.id;
+            }();
+
+      // After the document, because the storage path is keyed on its id and
+      // a new tournament has none until the line above returns. Reports
+      // rather than throws, so a failed picture never costs the tournament —
+      // see [SeasonBranding.uploadTo].
+      final brandingProblem = uid == null
+          ? null
+          : await _branding.uploadTo(
+              repo: repo,
+              orgId: widget.orgId,
+              tournamentId: id,
+              uid: uid,
+            );
+
+      if (mounted) {
+        Navigator.of(context).pop();
+        if (brandingProblem != null) showError(context, brandingProblem);
       }
-      if (mounted) Navigator.of(context).pop();
     } catch (e) {
       if (mounted) showError(context, e);
     } finally {

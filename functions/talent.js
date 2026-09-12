@@ -50,6 +50,7 @@ import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { logger } from 'firebase-functions';
 
 import { playerTrendsFromWarehouse } from './analytics.js';
+import { baseSportId } from './overall_glicko.js';
 
 function db() {
   return getFirestore();
@@ -312,10 +313,21 @@ async function loadPlayerCandidates(now, { requireTrail = true } = {}) {
       continue;
     }
 
-    // The document id is the rating key, which for chess is
-    // `chess_blitz` rather than the bare sport (see `ratingKeyFor`). Boards
-    // are per sport, so the time control is trimmed back off here.
-    const sportId = doc.id.split('_')[0];
+    // The document id is the rating key, which for chess is `chess:blitz`
+    // rather than the bare sport (see `ratingKeyFor`). Boards are per sport,
+    // so the time control is trimmed back off here.
+    //
+    // Split on the COLON, and only the colon. This used to split on `_`,
+    // which was wrong in both directions at once: `chess:blitz` contains no
+    // underscore, so the time control was never actually trimmed and chess
+    // rows landed on a `chess-blitz` board no client ever asks for — while
+    // every sport whose id genuinely contains an underscore was truncated,
+    // putting table tennis on a `table` board, kho-kho on a `kho` board, and
+    // merging `athletics_sprint` with `athletics_field`.
+    //
+    // Board ids therefore change for those sports. `publishBoards` deletes
+    // the documents it no longer writes, so one run repairs it.
+    const sportId = baseSportId(doc.id);
 
     candidates.push({
       ...profile,

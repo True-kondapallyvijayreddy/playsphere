@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import '../../../domain/scoring/scoring_plugin.dart';
 import '../../../shared/ui_kit.dart';
 import 'duel_pad.dart' show DuelPad;
-import 'pad_chrome.dart' show PadButton;
+import 'pad_chrome.dart' show PadButton, padColumnSpan;
 
 /// The scoring pad for a mat sport: kabaddi and kho-kho.
 ///
@@ -265,8 +265,7 @@ class _ScoreHalf extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final accent = DuelPad.accentFor(side);
-    final cross =
-        alignEnd ? CrossAxisAlignment.end : CrossAxisAlignment.start;
+    final cross = alignEnd ? CrossAxisAlignment.end : CrossAxisAlignment.start;
 
     final name = Text(
       data.name.toUpperCase(),
@@ -512,8 +511,7 @@ class _TurnClockState extends State<_TurnClock> {
   @override
   void didUpdateWidget(_TurnClock old) {
     super.didUpdateWidget(old);
-    if (old.restartKey != widget.restartKey ||
-        old.seconds != widget.seconds) {
+    if (old.restartKey != widget.restartKey || old.seconds != widget.seconds) {
       _start();
     }
   }
@@ -779,8 +777,7 @@ class _TurnCard extends StatelessWidget {
               if (turn.change != null) ...[
                 const SizedBox(width: 8),
                 TextButton(
-                  onPressed:
-                      enabled ? () => onControl(turn.change!) : null,
+                  onPressed: enabled ? () => onControl(turn.change!) : null,
                   style: TextButton.styleFrom(
                     visualDensity: VisualDensity.compact,
                     padding: const EdgeInsets.symmetric(horizontal: 10),
@@ -808,8 +805,7 @@ class _TurnCard extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(width: 5),
-                    const Icon(Icons.groups_rounded,
-                        size: 16, color: Ps.muted),
+                    const Icon(Icons.groups_rounded, size: 16, color: Ps.muted),
                   ],
                 ),
               ],
@@ -900,21 +896,28 @@ class _ActionGrid extends StatelessWidget {
             LayoutBuilder(
               builder: (context, box) {
                 const gap = 8.0;
-                final width =
-                    (box.maxWidth - gap * (columns - 1)) / columns;
+                final column = (box.maxWidth - gap * (columns - 1)) / columns;
                 return Wrap(
                   spacing: gap,
                   runSpacing: gap,
                   children: [
                     for (final c in group.controls)
-                      SizedBox(
-                        width: width,
-                        child: _ActionTile(
-                          control: c,
-                          onPressed:
-                              enabled ? () => onControl(c) : null,
-                        ),
-                      ),
+                      Builder(builder: (context) {
+                        // A mat sport's controls are named things a referee
+                        // says out loud — "Technical point", "Super tackle",
+                        // "Do-or-die raid" — not digits, so the even grid this
+                        // used to force squeezed almost every one of them. A
+                        // long label takes the columns it needs; a short one
+                        // is unchanged. See [padColumnSpan].
+                        final span = padColumnSpan(c.label).clamp(1, columns);
+                        return SizedBox(
+                          width: column * span + gap * (span - 1),
+                          child: _ActionTile(
+                            control: c,
+                            onPressed: enabled ? () => onControl(c) : null,
+                          ),
+                        );
+                      }),
                   ],
                 );
               },
@@ -1183,8 +1186,10 @@ class _HistoryRow extends StatelessWidget {
                 ),
                 if (play.actor != null || play.at != null)
                   Text(
-                    [if (play.actor != null) play.actor!, if (play.at != null) play.at!]
-                        .join(' · '),
+                    [
+                      if (play.actor != null) play.actor!,
+                      if (play.at != null) play.at!
+                    ].join(' · '),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(

@@ -43,6 +43,8 @@ class GraphicalScheduleView extends StatefulWidget {
     required this.onRegenerateDraft,
     this.onSetUpWholeSeason,
     required this.onLockSchedule,
+    this.onMoveMatch,
+    this.onOpenMatch,
     this.onOpenFullPage,
     this.embedded = true,
   });
@@ -67,6 +69,17 @@ class GraphicalScheduleView extends StatefulWidget {
   final Future<void> Function(ScheduleTimings timings)? onSetUpWholeSeason;
 
   final VoidCallback onLockSchedule;
+
+  /// Opens the "move this match" flow. Null hides the affordance, which is
+  /// what a spectator's copy of the timetable gets — moving a match is an
+  /// organizer's action and the grid is shown to everybody.
+  final void Function(Fixture fixture)? onMoveMatch;
+
+  /// Opens the match itself — the Match Center before it starts, the pad or
+  /// the scoreboard once it has. Separate from [onMoveMatch] because a live
+  /// or finished match cannot be moved, and those blocks had no tap at all:
+  /// an organizer watching "LIVE" in the grid had no way in from here.
+  final void Function(Fixture fixture)? onOpenMatch;
 
   /// Shown as a "full screen" affordance when this is the embedded copy.
   final VoidCallback? onOpenFullPage;
@@ -378,6 +391,8 @@ class _GraphicalScheduleViewState extends State<GraphicalScheduleView> {
                   _collapsed.add(section.compId);
                 }
               }),
+              onMoveMatch: widget.canManage ? widget.onMoveMatch : null,
+              onOpenMatch: widget.onOpenMatch,
             ),
             const SizedBox(height: 10),
           ],
@@ -697,6 +712,8 @@ class _EventSection extends StatelessWidget {
     required this.fixtures,
     required this.expanded,
     required this.onExpansionChanged,
+    this.onMoveMatch,
+    this.onOpenMatch,
   });
 
   final String title;
@@ -704,6 +721,8 @@ class _EventSection extends StatelessWidget {
   final List<Fixture> fixtures;
   final bool expanded;
   final ValueChanged<bool> onExpansionChanged;
+  final void Function(Fixture fixture)? onMoveMatch;
+  final void Function(Fixture fixture)? onOpenMatch;
 
   @override
   Widget build(BuildContext context) {
@@ -744,7 +763,13 @@ class _EventSection extends StatelessWidget {
                   children: [LiveDot(), SizedBox(width: 8), Icon(Icons.expand_more)],
                 )
               : const Icon(Icons.expand_more),
-          children: [_CourtTimeGrid(fixtures: fixtures)],
+          children: [
+            _CourtTimeGrid(
+              fixtures: fixtures,
+              onMoveMatch: onMoveMatch,
+              onOpenMatch: onOpenMatch,
+            ),
+          ],
         ),
       ),
     );
@@ -753,9 +778,15 @@ class _EventSection extends StatelessWidget {
 
 /// The timetable proper: one column per court, one row per start time.
 class _CourtTimeGrid extends StatelessWidget {
-  const _CourtTimeGrid({required this.fixtures});
+  const _CourtTimeGrid({
+    required this.fixtures,
+    this.onMoveMatch,
+    this.onOpenMatch,
+  });
 
   final List<Fixture> fixtures;
+  final void Function(Fixture fixture)? onMoveMatch;
+  final void Function(Fixture fixture)? onOpenMatch;
 
   static const _cellWidth = 196.0;
   static const _cellHeight = 74.0;
@@ -875,11 +906,21 @@ class _CourtTimeGrid extends StatelessWidget {
         child: const SizedBox.expand(),
       );
     }
-    if (here.length == 1) return _MatchBlock(fixture: here.first);
+    if (here.length == 1) {
+      return _MatchBlock(
+        fixture: here.first,
+        onMove: onMoveMatch,
+        onOpen: onOpenMatch,
+      );
+    }
 
     return Stack(
       children: [
-        _MatchBlock(fixture: here.first),
+        _MatchBlock(
+          fixture: here.first,
+          onMove: onMoveMatch,
+          onOpen: onOpenMatch,
+        ),
         Positioned(
           right: 4,
           top: 4,
@@ -919,9 +960,15 @@ class _CourtTimeGrid extends StatelessWidget {
 
 /// One match, as it appears in a grid cell.
 class _MatchBlock extends StatelessWidget {
-  const _MatchBlock({required this.fixture});
+  const _MatchBlock({required this.fixture, this.onMove, this.onOpen});
 
   final Fixture fixture;
+
+  /// Organizer-only, and only while the match is still movable.
+  final void Function(Fixture fixture)? onMove;
+
+  /// Everybody's way into the match itself.
+  final void Function(Fixture fixture)? onOpen;
 
   /// A slot whose entrants are not yet known — a semi-final before its groups
   /// finish, or a bracket place nobody has registered into. Drawn differently
@@ -956,7 +1003,16 @@ class _MatchBlock extends StatelessWidget {
       background = theme.colorScheme.surfaceContainerLow;
     }
 
-    return Container(
+    final move = onMove;
+    // A played or playing match is not movable, and offering the affordance
+    // on one is offering something that will be refused.
+    final movable = move != null && !isLive && !isDone;
+    // So a block that cannot be moved opens instead of doing nothing. The
+    // grid is where an organizer stands on match day; a LIVE cell that
+    // swallows taps is the reason the pad was unreachable from the season.
+    final open = onOpen;
+
+    final block = Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: BoxDecoration(
         color: background,
@@ -1008,6 +1064,13 @@ class _MatchBlock extends StatelessWidget {
           _name(theme, fixture.displayNameB(), fixture.entrantBId.isNotEmpty),
         ],
       ),
+    );
+
+    if (!movable && open == null) return block;
+    return InkWell(
+      onTap: movable ? () => move(fixture) : () => open!(fixture),
+      borderRadius: BorderRadius.circular(10),
+      child: block,
     );
   }
 

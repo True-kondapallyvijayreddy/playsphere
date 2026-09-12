@@ -135,6 +135,14 @@ class MemoryRepository {
     required String compId,
     required String fixtureId,
     required String uploaderUid,
+
+    /// The ACCOUNT doing the upload, which owns the storage path — the same
+    /// split, and for the same reason, as
+    /// [UserRepository.uploadProfilePhoto]: `storage.rules` cannot read
+    /// Firestore and so cannot see that [uploaderUid] is a child this caller
+    /// has custody of. Defaults to [uploaderUid], which is the answer for
+    /// every account not inside a managed child's profile.
+    String? storageUid,
     required Uint8List bytes,
     required String contentType,
     required MemoryKind kind,
@@ -163,7 +171,8 @@ class MemoryRepository {
     // unguessable, which storage.rules relies on — see its header comment.
     final docRef = Refs.memories(orgId, compId, fixtureId).doc();
     final ext = _extensionFor(contentType);
-    final path = 'memories/$orgId/$fixtureId/$uploaderUid/${docRef.id}$ext';
+    final path =
+        'memories/$orgId/$fixtureId/${storageUid ?? uploaderUid}/${docRef.id}$ext';
 
     try {
       final ref = _bucket.ref(path);

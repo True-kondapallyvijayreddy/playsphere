@@ -58,60 +58,11 @@ Future<bool> pickAndUploadImage({
   String? note,
   ImageComposer? composer,
 }) async {
-  final choice = await showModalBottomSheet<_Choice>(
+  final choice = await _askSource(
     context: context,
-    showDragHandle: true,
-    builder: (sheetContext) => SafeArea(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                    color: Ps.ink,
-                  ),
-                ),
-                if (note != null) ...[
-                  const SizedBox(height: 4),
-                  Text(
-                    note,
-                    style: const TextStyle(fontSize: 12.5, color: Ps.muted),
-                  ),
-                ],
-              ],
-            ),
-          ),
-          ListTile(
-            leading: const Icon(Icons.photo_camera_outlined),
-            title: const Text('Take a photo'),
-            onTap: () => Navigator.pop(sheetContext, _Choice.camera),
-          ),
-          ListTile(
-            leading: const Icon(Icons.photo_library_outlined),
-            title: const Text('Choose from gallery'),
-            onTap: () => Navigator.pop(sheetContext, _Choice.gallery),
-          ),
-          if (onRemove != null)
-            ListTile(
-              leading: const Icon(Icons.delete_outline, color: Ps.live),
-              title: const Text(
-                'Remove current picture',
-                style: TextStyle(color: Ps.live),
-              ),
-              onTap: () => Navigator.pop(sheetContext, _Choice.remove),
-            ),
-          const SizedBox(height: 8),
-        ],
-      ),
-    ),
+    title: title,
+    note: note,
+    offerRemove: onRemove != null,
   );
 
   if (choice == null || !context.mounted) return false;
@@ -163,6 +114,105 @@ Future<bool> pickAndUploadImage({
     return false;
   }
 }
+
+/// Picks and shrinks an image without uploading anything, for the one case
+/// [pickAndUploadImage] cannot serve: a create form.
+///
+/// A season's crest and banner are chosen before the season document exists,
+/// so there is no id to upload them under and no document to link them to.
+/// The form holds what this returns, shows it in a live preview, and uploads
+/// it the moment the create call comes back with an id — see
+/// `SeasonBranding.uploadTo`. Uploading to a staging path first would leave an
+/// orphaned object in the bucket every time somebody backed out of the form.
+///
+/// Returns null when the person cancelled either the source sheet or the
+/// picker, which is the common case and not an error.
+Future<PickedImage?> pickLocalImage({
+  required BuildContext context,
+  required String title,
+  required ImageShape shape,
+  String? note,
+  ImageComposer? composer,
+}) async {
+  final choice = await _askSource(context: context, title: title, note: note);
+  if (choice == null || !context.mounted) return null;
+
+  try {
+    return await (composer ?? ImageComposer()).pick(
+      source:
+          choice == _Choice.camera ? ImageSource.camera : ImageSource.gallery,
+      shape: shape,
+    );
+  } catch (e) {
+    if (context.mounted) showError(context, e);
+    return null;
+  }
+}
+
+/// The "where does this picture come from" sheet, shared by both flows above
+/// so a staged pick and an immediate upload ask the same question the same
+/// way.
+Future<_Choice?> _askSource({
+  required BuildContext context,
+  required String title,
+  String? note,
+  bool offerRemove = false,
+}) =>
+    showModalBottomSheet<_Choice>(
+    context: context,
+    showDragHandle: true,
+    builder: (sheetContext) => SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                    color: Ps.ink,
+                  ),
+                ),
+                if (note != null) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    note,
+                    style: const TextStyle(fontSize: 12.5, color: Ps.muted),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.photo_camera_outlined),
+            title: const Text('Take a photo'),
+            onTap: () => Navigator.pop(sheetContext, _Choice.camera),
+          ),
+          ListTile(
+            leading: const Icon(Icons.photo_library_outlined),
+            title: const Text('Choose from gallery'),
+            onTap: () => Navigator.pop(sheetContext, _Choice.gallery),
+          ),
+          if (offerRemove)
+            ListTile(
+              leading: const Icon(Icons.delete_outline, color: Ps.live),
+              title: const Text(
+                'Remove current picture',
+                style: TextStyle(color: Ps.live),
+              ),
+              onTap: () => Navigator.pop(sheetContext, _Choice.remove),
+            ),
+          const SizedBox(height: 8),
+        ],
+      ),
+    ),
+  );
 
 OverlayEntry _showUploadBarrier(BuildContext context) {
   final entry = OverlayEntry(

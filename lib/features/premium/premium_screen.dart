@@ -36,7 +36,7 @@ class _PremiumScreenState extends ConsumerState<PremiumScreen> {
   bool _busy = false;
 
   Future<void> _subscribe() async {
-    final me = ref.read(currentUserProvider).valueOrNull;
+    final me = ref.read(authUserProvider).valueOrNull;
     if (me == null) return;
 
     setState(() => _busy = true);
@@ -84,7 +84,7 @@ class _PremiumScreenState extends ConsumerState<PremiumScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final me = ref.watch(currentUserProvider).valueOrNull;
+    final me = ref.watch(authUserProvider).valueOrNull;
     final now = DateTime.now();
     final isPremium = me?.hasPremiumAt(now) ?? false;
     final payable = Pricing.memberPricePaise(MemberPlan.premium);

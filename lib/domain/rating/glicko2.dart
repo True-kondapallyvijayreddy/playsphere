@@ -15,6 +15,7 @@ class Rating {
     this.deviation = defaultDeviation,
     this.volatility = defaultVolatility,
     this.gamesPlayed = 0,
+    this.updatedAt,
   });
 
   /// Glickman's defaults for an unrated player.
@@ -30,6 +31,17 @@ class Rating {
 
   final double volatility;
   final int gamesPlayed;
+
+  /// When the server last settled this rating, as it stamps on every write in
+  /// `onMatchSettled`.
+  ///
+  /// Read-only here — [toMap] does not emit it, because nothing on the client
+  /// writes a rating any more and a client-supplied "last settled" time would
+  /// be a claim about the server's own bookkeeping. It exists so
+  /// [OverallGlickoEngine] has a recency signal for a sport that moved a
+  /// rating without writing a career line, which is exactly what a rated
+  /// walkover does.
+  final DateTime? updatedAt;
 
   /// A rating stops being provisional once it is known well enough to be
   /// worth showing without a caveat. 110 is a common threshold and matches
@@ -58,12 +70,14 @@ class Rating {
     double? deviation,
     double? volatility,
     int? gamesPlayed,
+    DateTime? updatedAt,
   }) =>
       Rating(
         rating: rating ?? this.rating,
         deviation: deviation ?? this.deviation,
         volatility: volatility ?? this.volatility,
         gamesPlayed: gamesPlayed ?? this.gamesPlayed,
+        updatedAt: updatedAt ?? this.updatedAt,
       );
 
   Map<String, Object?> toMap() => {
@@ -73,8 +87,11 @@ class Rating {
         'gamesPlayed': gamesPlayed,
       };
 
-  factory Rating.fromMap(Map<String, dynamic>? d) {
-    if (d == null) return const Rating();
+  /// [updatedAt] is passed in already decoded rather than read from [d], for
+  /// the reason `CareerStats.fromMap` does the same with its own timestamp:
+  /// this file is pure domain and knows nothing about Firestore's `Timestamp`.
+  factory Rating.fromMap(Map<String, dynamic>? d, {DateTime? updatedAt}) {
+    if (d == null) return Rating(updatedAt: updatedAt);
     double num_(Object? v, double fallback) =>
         v is num ? v.toDouble() : fallback;
     return Rating(
@@ -82,6 +99,7 @@ class Rating {
       deviation: num_(d['deviation'], defaultDeviation),
       volatility: num_(d['volatility'], defaultVolatility),
       gamesPlayed: (d['gamesPlayed'] as num?)?.toInt() ?? 0,
+      updatedAt: updatedAt,
     );
   }
 }

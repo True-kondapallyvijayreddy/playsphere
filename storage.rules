@@ -91,10 +91,29 @@ service firebase.storage {
     // Publicly readable: a career profile is meant to be shareable, and the
     // photo is the least sensitive thing on it. Write is self-only, so nobody
     // can replace another player's face.
-    match /users/{uid}/profile/{fileName} {
+    //
+    // The `{uploaderUid}` segment is not decoration and must not be collapsed
+    // away again. `MediaUploader` inserts the uploader's uid into every path it
+    // writes — that is the one fact this file can check, and it is what every
+    // other block below relies on. This block used to be
+    // `users/{uid}/profile/{fileName}`, one segment short, so the real path
+    // `users/{uid}/profile/{uid}/{ts}.jpg` matched nothing here and fell
+    // through to the deny-all at the bottom: every profile photo upload was
+    // rejected. Both uids are checked because for a profile they are by
+    // definition the same person, and asserting it makes that explicit rather
+    // than incidental.
+    // `{uploaderUid}` and not `{uid}` is the segment that has to be the
+    // caller's: a guardian may set the photo on a managed child's profile,
+    // and this file cannot see custody — it cannot read Firestore at all (see
+    // the club-logo note below). So the object is owned by whoever uploaded
+    // it, which is a fact checkable here, and WHICH object becomes a
+    // profile's photo stays governed by the `photoUrl` write in
+    // firestore.rules, where custody is knowable. An object nobody linked is
+    // an object nobody sees — the same argument the logo rule makes.
+    match /users/{uid}/profile/{uploaderUid}/{fileName} {
       allow read: if true;
-      allow write: if isSelf(uid) && isImageUnder(8);
-      allow delete: if isSelf(uid);
+      allow write: if isSelf(uploaderUid) && isImageUnder(8);
+      allow delete: if isSelf(uploaderUid);
     }
 
     // --- Club logos -------------------------------------------------------
@@ -199,6 +218,33 @@ service firebase.storage {
       allow delete: if isSelf(uid);
     }
 
+    // --- Season and event crests --------------------------------------------
+    //
+    // The badge that sits on the banner rather than behind it — a school
+    // crest, a league mark, an organiser's logo. A separate object from the
+    // banner above because it is a different picture at a different aspect
+    // ratio, and 4 MB rather than 8 for the same reason the club crest is:
+    // nothing in the app draws it above 96pt, so the client downscales it to
+    // 512px before it uploads.
+    //
+    // World-readable on the banner's argument, unchanged: the public
+    // tournament page is deliberately signed-out, and a crest that needed
+    // auth would be a hole in the middle of the one page aimed at people who
+    // do not have the app. Which object becomes a season's crest stays gated
+    // by `canManageCompetitions(orgId)` on `logoUrl` in firestore.rules — the
+    // same gate the event's own `logoUrl` sits behind.
+    match /tournaments/{tournamentId}/logo/{uid}/{fileName} {
+      allow read: if true;
+      allow write: if isSelf(uid) && isImageUnder(4);
+      allow delete: if isSelf(uid);
+    }
+
+    match /competitions/{compId}/logo/{uid}/{fileName} {
+      allow read: if true;
+      allow write: if isSelf(uid) && isImageUnder(4);
+      allow delete: if isSelf(uid);
+    }
+
     // --- Ground photos -----------------------------------------------------
     //
     // A picture of the ground itself, set by its owner. World-readable: a
@@ -209,6 +255,47 @@ service firebase.storage {
       allow read: if true;
       allow write: if isSelf(uid) && isImageUnder(8);
       allow delete: if isSelf(uid);
+    }
+
+    // --- Ground verification evidence ---------------------------------------
+    //
+    // Photographs taken while standing at a ground, and the document backing the
+    // owner's claim to run it. NOT world-readable, unlike the advertising photo
+    // above — these carry where somebody was standing at a known time, and a bill
+    // with their home address on it.
+    //
+    // This file cannot ask Firestore who the ground's owner is, so the uid segment
+    // does the work: you may write only under your own uid, and you may read only
+    // your own objects. The one thing this file CAN check beyond that is the admin
+    // claim, because custom claims travel on the token — which is what lets a
+    // reviewer see the evidence without the bucket being open to everyone.
+    //
+    // Stated plainly, as the header does for memories: a Firebase download URL
+    // carries its own access token and bypasses these rules for anyone holding it.
+    // The URLs live only on documents that firestore.rules restricts to the owner
+    // and staff, so an object nobody can discover is an object nobody can fetch —
+    // but a leaked URL is a leaked file, and that is the accepted risk here as
+    // elsewhere in this bucket.
+    function isTrustStaff() {
+      return isSignedIn() && request.auth.token.admin == true;
+    }
+
+    match /groundProofs/{groundId}/{proofKind}/{uid}/{fileName} {
+      allow read: if isSelf(uid) || isTrustStaff();
+      allow create: if isSelf(uid) && isImageUnder(8);
+      // Immutable. A proof photo that can be replaced after a listing is approved
+      // would let a ground be verified on one set of pictures and run on another.
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    match /groundDocs/{groundId}/{uid}/{fileName} {
+      allow read: if isSelf(uid) || isTrustStaff();
+      // Documents as well as images: plenty of people have a PDF of their
+      // electricity bill rather than the paper.
+      allow create: if isSelf(uid) && isDocumentUnder(8);
+      allow update: if false;
+      allow delete: if false;
     }
 
     // --- Advertiser creatives ---------------------------------------------

@@ -3,7 +3,7 @@ description: >
   PlaySphere — a sports operating system for schools, colleges, communities
   and associations. One codebase for Android, iOS and the web.
 publish_to: "none"
-version: 1.0.0+1
+version: 1.0.2+10
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
@@ -74,6 +74,16 @@ dependencies:
   # `data/shop_repository.dart` for why the checkout is deliberately theirs
   # and not ours.
   url_launcher: ^6.3.0
+  # The embedded live-stream player on the web — see
+  # `lib/shared/web/inline_frame_web.dart`. Already on the graph as a
+  # transitive dependency of the Firebase web packages; named here because a
+  # direct import must be a direct dependency, and because a transitive
+  # version that moves under us would break a file that imports it.
+  #
+  # Pure Dart with no platform side: on Android and iOS the conditional
+  # import beside that file means it is never compiled in at all.
+  web: ^1.1.0
+
   firebase_crashlytics: ^4.3.10
   qr_flutter: ^4.1.0
   geolocator: ^13.0.0
@@ -95,13 +105,16 @@ flutter:
   # Builds AppLocalizations from lib/l10n/*.arb per l10n.yaml.
   generate: true
 
-  # Only the one file the app actually draws. The rest of assets/branding/ —
-  # the 1024px icon, the adaptive foreground, the splash poster, the master
-  # logo — are SOURCES for the two generators below: they are baked into
-  # android/, ios/ and web/ at build time and would otherwise ride along in
-  # the bundle as ~3.5MB nobody ever loads, on the ₹8k phones §2.8 targets.
+  # The mark is drawn everywhere in the app chrome (app bar, drawer). The
+  # splash poster is now drawn too — [SplashScreen] shows it for real rather
+  # than the launcher-icon-only Android 12+ splash, so it has to ship in the
+  # bundle rather than stay a generator source. The 1024px icon, the adaptive
+  # foreground and the master logo remain SOURCES for the two generators
+  # below only: baked into android/, ios/ and web/ at build time, not shipped
+  # again here.
   assets:
     - assets/branding/mark.png
+    - assets/branding/splash.png
 
 # -----------------------------------------------------------------------------
 # App icon.

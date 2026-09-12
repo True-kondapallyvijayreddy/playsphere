@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/errors/app_exception.dart';
 import '../../core/layout/responsive.dart';
+import '../../core/models/claim_code.dart';
 import '../../core/providers.dart';
 import '../../shared/app_scaffold.dart' show errorMessage;
 
@@ -41,9 +42,18 @@ class _ClaimEntryScreenState extends ConsumerState<ClaimEntryScreen> {
   }
 
   Future<void> _redeem() async {
-    final code = _codeController.text.trim();
-    if (code.isEmpty) {
+    final typed = _codeController.text.trim();
+    if (typed.isEmpty) {
       setState(() => _error = 'Enter the code your guardian gave you.');
+      return;
+    }
+    // Checked here for an instant, specific answer. The server applies the
+    // same normalization and refuses anything else anyway.
+    final code = ClaimCode.normalize(typed);
+    if (code == null) {
+      setState(() => _error =
+          'A code is 12 letters and numbers, like K7M2-Q4XP-Z9AB. Check it '
+          'with your guardian.');
       return;
     }
     setState(() {
@@ -148,16 +158,26 @@ class _ClaimEntryScreenState extends ConsumerState<ClaimEntryScreen> {
         const SizedBox(height: 32),
         TextField(
           controller: _codeController,
-          keyboardType: TextInputType.number,
-          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          // Letters and digits. No autocorrect or suggestions: a keyboard that
+          // "fixes" K7M2 into a word breaks the code silently.
+          keyboardType: TextInputType.text,
+          textCapitalization: TextCapitalization.characters,
+          autocorrect: false,
+          enableSuggestions: false,
+          inputFormatters: [
+            FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9\- ]')),
+          ],
           textAlign: TextAlign.center,
           autofocus: true,
-          style: theme.textTheme.headlineSmall?.copyWith(letterSpacing: 6),
+          style: theme.textTheme.headlineSmall?.copyWith(letterSpacing: 2),
           decoration: const InputDecoration(
             border: OutlineInputBorder(),
             counterText: '',
+            hintText: 'XXXX-XXXX-XXXX',
           ),
-          maxLength: 6,
+          // Twelve characters plus the dashes or spaces somebody types while
+          // it is being read out to them.
+          maxLength: 16,
           onSubmitted: (_) => _busy ? null : _redeem(),
         ),
         const SizedBox(height: 24),

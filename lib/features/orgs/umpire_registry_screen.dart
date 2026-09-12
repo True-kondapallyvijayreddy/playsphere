@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/models/app_user.dart';
+import '../../core/models/geo.dart';
 import '../../core/models/umpire_profile.dart';
 import '../../core/providers.dart';
 
@@ -37,6 +38,7 @@ class _UmpireRegistryScreenState
   late Set<String> _selectedSports;
   late String _badgeLevel;
   late bool _isAvailable;
+  late final TextEditingController _district;
   bool _isSaving = false;
 
   @override
@@ -45,6 +47,22 @@ class _UmpireRegistryScreenState
     _selectedSports = Set.from(widget.existingProfile?.sports ?? ['cricket']);
     _badgeLevel = widget.existingProfile?.badgeLevel ?? 'community';
     _isAvailable = widget.existingProfile?.isAvailable ?? true;
+    // Seeded from the account's own profile so the common case is a glance
+    // and a Save, not a form. An official whose listing already names a
+    // district keeps that — they may officiate somewhere other than where
+    // they live, and re-deriving it from the account would quietly undo
+    // their choice on every edit.
+    _district = TextEditingController(
+      text: widget.existingProfile?.geo.district ??
+          widget.user.geo.district ??
+          '',
+    );
+  }
+
+  @override
+  void dispose() {
+    _district.dispose();
+    super.dispose();
   }
 
   Future<void> _saveProfile() async {
@@ -57,6 +75,7 @@ class _UmpireRegistryScreenState
 
     setState(() => _isSaving = true);
     try {
+      final district = _district.text.trim();
       final profile = UmpireProfile(
         uid: widget.user.uid,
         displayName: widget.user.displayName,
@@ -64,7 +83,18 @@ class _UmpireRegistryScreenState
         phone: widget.user.phone,
         sports: _selectedSports.toList(),
         badgeLevel: _badgeLevel,
-        matchesOfficiated: widget.existingProfile?.matchesOfficiated ?? 0,
+        // Built rather than copyWith'd: `GeoLocation.copyWith` takes plain
+        // nullables, so a null argument means "keep", and clearing a district
+        // through it is impossible. Keeps the account's state/mandal for the
+        // gov aggregates and puts the typed district on top — that is the
+        // only level the directory filters on.
+        geo: GeoLocation(
+          state: widget.user.geo.state,
+          district: district.isEmpty ? null : district,
+          mandal: widget.user.geo.mandal,
+          village: widget.user.geo.village,
+          pincode: widget.user.geo.pincode,
+        ),
         isAvailable: _isAvailable,
       );
 
@@ -167,6 +197,27 @@ class _UmpireRegistryScreenState
               },
             ),
             const SizedBox(height: 24),
+            Text(
+              'District',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Where you can actually reach a ground. Clubs search on this — '
+              'a district left blank means you only appear in unfiltered '
+              'searches.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _district,
+              textCapitalization: TextCapitalization.words,
+              decoration: const InputDecoration(
+                hintText: 'e.g. Nalgonda',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 24),
             SwitchListTile(
               title: const Text('Available for Match Assignments'),
               subtitle: const Text(
@@ -174,7 +225,53 @@ class _UmpireRegistryScreenState
               value: _isAvailable,
               onChanged: (val) => setState(() => _isAvailable = val),
             ),
-            const SizedBox(height: 32),
+            const SizedBox(height: 20),
+
+            // Said plainly because it is now true and was not before. This
+            // form has always copied `AppUser.phone` onto the profile, but
+            // until the officials directory existed nothing ever displayed
+            // it — so a registration that used to be invisible now publishes
+            // a contact route to every signed-in account. Somebody agreeing
+            // to be found by organisers should be told that is what they are
+            // agreeing to. See `OfficialsDirectoryScreen`'s class doc.
+            Card(
+              color: Theme.of(context).colorScheme.surfaceContainerHighest,
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'What organisers will see',
+                      style: Theme.of(context)
+                          .textTheme
+                          .titleSmall
+                          ?.copyWith(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      widget.user.phone == null
+                          ? 'Your name, sports, tier, district and '
+                              'availability appear in the officials '
+                              'directory, along with a count of matches you '
+                              'have officiated. You have no phone number on '
+                              'your profile, so nobody can call you — add one '
+                              'there if you want to be reachable.'
+                          : 'Your name, sports, tier, district, availability '
+                              'and your number (${widget.user.phone}) appear '
+                              'in the officials directory, along with a count '
+                              'of matches you have officiated, so a club with '
+                              'a fixture and no umpire can call you directly. '
+                              'Turn off availability above to stop being '
+                              'offered work.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 24),
             SizedBox(
               width: double.infinity,
               height: 48,

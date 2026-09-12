@@ -67,7 +67,45 @@ enum NotificationType {
   /// out, the more expensive it is for whichever club they let down — a
   /// withdrawal on Friday is an inconvenience, one on Sunday morning is a
   /// forfeited match.
-  matchClash('match_clash', isCritical: true);
+  matchClash('match_clash', isCritical: true),
+
+  /// Something has landed on a staff queue — a donation, a raised need, an
+  /// advertiser's campaign.
+  ///
+  /// Not critical, and the judgement is about the recipient rather than the
+  /// event. These go to the two or three people on `platformStaff` (see
+  /// `StaffMember`), all of whom will work the queue today either way; what
+  /// they must not have is one buzz per arriving donation on a busy Saturday,
+  /// which is how a small team learns to ignore the whole category. The
+  /// digest is exactly the right shape for "four things arrived".
+  giveDonationSubmitted('give_donation_submitted', isCritical: false),
+  giveNeedRaised('give_need_raised', isCritical: false),
+  adCampaignSubmitted('ad_campaign_submitted', isCritical: false),
+
+  /// A donor's kit reached a stage they care about, or an advertiser's
+  /// campaign was decided. Not critical for the same reason
+  /// [sponsorPledgeResolved] is not: it is news about something already
+  /// finished, and it reads the same an hour later.
+  giveDonationAdvanced('give_donation_advanced', isCritical: false),
+  adCampaignReviewed('ad_campaign_reviewed', isCritical: false),
+
+  /// Another club has written to this one in the club owners' network.
+  ///
+  /// Not critical, and for the same reason [challengeReceived] is not: it is
+  /// a message sitting in an inbox addressed to a club's owners, it stays
+  /// there until somebody answers it, and nothing is lost by finding it a day
+  /// later. It is also the one notification here that could plausibly arrive
+  /// several times an hour once two clubs get talking, which is exactly the
+  /// shape the digest exists for.
+  clubMessage('club_message', isCritical: false),
+
+  /// A batched summary of non-critical notifications — sent by the server's
+  /// digest flush instead of one push per event, for exactly the types this
+  /// enum already marks `isCritical: false`. Not critical for the same
+  /// reason its contents individually are not: everything it summarizes
+  /// already sits, in full, on the in-app Notifications screen, unaffected
+  /// by when (or whether) this push arrives.
+  digest('digest', isCritical: false);
 
   const NotificationType(this.wire, {required this.isCritical});
 

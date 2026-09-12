@@ -125,7 +125,12 @@ class ClubFeedTab extends ConsumerWidget {
           ],
         ),
       ),
-    );
+    ).whenComplete(() {
+      // The dialog holds these for its whole lifetime; dispose once it closes.
+      titleCtrl.dispose();
+      contentCtrl.dispose();
+      optionsCtrl.dispose();
+    });
   }
 
   @override
@@ -241,7 +246,11 @@ class _PollBody extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final poll = announcement.poll!;
     final theme = Theme.of(context);
-    final uid = ref.watch(currentUidProvider);
+    // A poll vote is the ACCOUNT's, not the open profile's. One club poll
+    // holds one answer per member, and `firestore.rules` keys that answer on
+    // the caller's own uid — a household must not be able to vote once per
+    // child profile on the phone.
+    final uid = ref.watch(authUidProvider);
     final myVote = uid == null ? null : poll.voteOf(uid);
     final canVote = uid != null && !poll.closed;
 

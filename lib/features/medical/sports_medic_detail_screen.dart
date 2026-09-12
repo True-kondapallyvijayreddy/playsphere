@@ -27,7 +27,7 @@ class SportsMedicDetailScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final medic = ref.watch(sportsMedicProvider(uid));
-    final isMe = ref.watch(currentUidProvider) == uid;
+    final isMe = ref.watch(authUidProvider) == uid;
 
     return AsyncView(
       value: medic,

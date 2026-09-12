@@ -10,6 +10,7 @@ import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/club_context_banner.dart';
+import '../../shared/offline_fee_notice.dart';
 import '../../shared/ui_kit.dart';
 
 /// Ten people turned up for badminton. Make it a tournament, now.
@@ -78,6 +79,9 @@ class _QuickTournamentScreenState
   );
   late final _venue = TextEditingController(text: widget.initialVenue ?? '');
 
+  /// Blank means free — see `FeeSettlement`.
+  final _entryFee = TextEditingController();
+
   /// Who is excluded. Everybody plays unless the organizer says otherwise —
   /// they are all here because they said they were free.
   final Set<String> _dropped = {};
@@ -88,6 +92,7 @@ class _QuickTournamentScreenState
   void dispose() {
     _name.dispose();
     _venue.dispose();
+    _entryFee.dispose();
     super.dispose();
   }
 
@@ -95,6 +100,14 @@ class _QuickTournamentScreenState
         for (final uid in widget.playerUids)
           if (!_dropped.contains(uid)) uid,
       ];
+
+  /// The declared fee in whole rupees, floored at zero. Unparseable text
+  /// reads as free — see `_CategoryDraft.entryFeeRupees` in
+  /// `create_season_screen.dart` for why that direction is deliberate.
+  int get _entryFeeRupees {
+    final n = int.tryParse(_entryFee.text.trim());
+    return (n == null || n < 0) ? 0 : n;
+  }
 
   /// How many matches the chosen format will produce, so the organizer sees
   /// the size of what they are about to commit the afternoon to.
@@ -159,6 +172,7 @@ class _QuickTournamentScreenState
         // round one. The draw engine already knows how; it only has to be
         // told that this is wanted.
         drawConfig: const DrawConfig(seedFromRatings: true),
+        entryFeeRupees: _entryFeeRupees,
       );
 
       final compId = await repo.createCompetition(competition);
@@ -233,6 +247,23 @@ class _QuickTournamentScreenState
               border: OutlineInputBorder(),
             ),
           ),
+          const SizedBox(height: 12),
+          // Small, but it earns its place: "₹50 each for the court" is how
+          // a very large share of club games in India actually work, and an
+          // organizer who cannot say so here has to say it in a WhatsApp
+          // group the event does not know about.
+          TextField(
+            controller: _entryFee,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(
+              labelText: 'Entry fee per player',
+              hintText: 'Free',
+              prefixText: '₹ ',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 8),
+          const OfflineFeeNotice(message: FeeSettlement.organiserHelper),
           const SizedBox(height: 18),
           const _Heading('Format'),
           const SizedBox(height: 8),

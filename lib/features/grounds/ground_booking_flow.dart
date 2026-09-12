@@ -12,6 +12,10 @@ import '../../data/ground_repository.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/identity.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/ground_trust.dart';
+import '../../shared/offline_fee_notice.dart';
+import 'report_ground_sheet.dart';
+import 'widgets/day_slot_grid.dart';
 
 /// What a completed booking hands back to whoever asked for one.
 ///
@@ -133,8 +137,6 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
   int _hours = 2;
 
   Ground? _selected;
-  DayAvailability? _availability;
-  bool _loadingSlots = false;
   bool _booking = false;
 
   @override
@@ -198,34 +200,17 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
     }
   }
 
-  Future<void> _pickGround(Ground g) async {
-    setState(() {
-      _selected = g;
-      _availability = null;
-      _loadingSlots = true;
-    });
-    await _loadSlots();
-  }
-
-  Future<void> _loadSlots() async {
-    final g = _selected;
-    if (g == null) return;
-    setState(() => _loadingSlots = true);
-    try {
-      final availability = await ref
-          .read(groundRepositoryProvider)
-          .availabilityFor(ground: g, day: _date);
-      if (mounted) setState(() => _availability = availability);
-    } catch (e) {
-      if (mounted) showError(context, e);
-    } finally {
-      if (mounted) setState(() => _loadingSlots = false);
-    }
-  }
+  /// Picking a ground no longer loads anything.
+  ///
+  /// `DaySlotGrid` watches the day's bookings itself, so there is no fetch to
+  /// kick off and no loading flag to hold — which is the point: the read this
+  /// method used to make was a snapshot, and a snapshot of a calendar two
+  /// people are booking against is out of date the moment it arrives.
+  void _pickGround(Ground g) => setState(() => _selected = g);
 
   Future<void> _book(int startHour) async {
     final g = _selected;
-    final me = ref.read(currentUserProvider).valueOrNull;
+    final me = ref.read(authUserProvider).valueOrNull;
     if (g == null || me == null) return;
 
     setState(() => _booking = true);
@@ -244,13 +229,10 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
       }
     } catch (e) {
       // Almost always "somebody just took that slot" — thrown by the booking
-      // transaction. Reloading the slots is the useful next thing, so the
-      // person sees what is actually left rather than a stale grid with the
-      // gone slot still on it.
-      if (mounted) {
-        showError(context, e);
-        await _loadSlots();
-      }
+      // transaction. Nothing to reload: the grid is watching the day and has
+      // already redrawn that hour as booked, which is the explanation the
+      // error message on its own does not give.
+      if (mounted) showError(context, e);
     } finally {
       if (mounted) setState(() => _booking = false);
     }
@@ -275,10 +257,7 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
               ),
               if (_selected != null)
                 TextButton(
-                  onPressed: () => setState(() {
-                    _selected = null;
-                    _availability = null;
-                  }),
+                  onPressed: () => setState(() => _selected = null),
                   child: const Text('Change'),
                 ),
               IconButton(
@@ -416,7 +395,6 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
 
   Widget _slotStep(ThemeData theme) {
     final g = _selected!;
-    final availability = _availability;
     final price = g.priceForPaise(_hours);
 
     return ListView(
@@ -439,12 +417,11 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
         ],
         const SizedBox(height: 16),
 
+        // Changing the day re-keys the grid's provider family, which
+        // subscribes to the new day on its own. Nothing to fetch here.
         _DateRow(
           date: _date,
-          onPick: (d) async {
-            setState(() => _date = d);
-            await _loadSlots();
-          },
+          onPick: (d) => setState(() => _date = d),
         ),
         const SizedBox(height: 12),
         _HoursRow(
@@ -453,98 +430,75 @@ class _GroundBookingSheetState extends ConsumerState<_GroundBookingSheet> {
         ),
         const SizedBox(height: 16),
 
-        if (_loadingSlots)
-          const Center(child: Padding(
-            padding: EdgeInsets.all(24),
-            child: CircularProgressIndicator(),
-          ))
-        else if (availability == null)
-          const SizedBox.shrink()
-        else ...[
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'Available start times',
-                  style: theme.textTheme.titleSmall,
-                ),
+        // The trust surface, above the calendar rather than below it. Somebody
+        // deciding whether to give this listing an evening and a phone call
+        // should meet what is known about it before they meet the slots.
+        GroundTrustPanel(
+          ground: g,
+          onReport: () => showReportGroundSheet(context, ground: g),
+        ),
+        const SizedBox(height: 14),
+
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Pick a time',
+                style: theme.textTheme.titleSmall,
               ),
-              Text(
-                price == 0
-                    ? 'Free'
-                    : '${Pricing.formatPaise(price)} for $_hours hr'
-                        '${_hours == 1 ? '' : 's'}',
-                style: theme.textTheme.titleSmall?.copyWith(
-                  color: theme.colorScheme.primary,
-                  fontWeight: FontWeight.w700,
-                ),
+            ),
+            Text(
+              price == 0
+                  ? 'Free'
+                  : '${Pricing.formatPaise(price)} for $_hours hr'
+                      '${_hours == 1 ? '' : 's'}',
+              style: theme.textTheme.titleSmall?.copyWith(
+                color: theme.colorScheme.primary,
+                fontWeight: FontWeight.w700,
               ),
-            ],
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        if (_wantedHour != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Text(
+              'You asked for ${groundHourLabel(_wantedHour!)}.',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
           ),
+        const SizedBox(height: 6),
+
+        DaySlotGrid(
+          ground: g,
+          day: _date,
+          hours: _hours,
+          busy: _booking,
+          onBook: _book,
+        ),
+
+        const SizedBox(height: 16),
+        Text(
+          _booking
+              ? 'Booking…'
+              : 'Tap a free time to hold it. The slot is yours as soon as it '
+                  'is booked — nobody else can take it.',
+          style: theme.textTheme.bodySmall,
+        ),
+        // Sits directly under the tap target that takes the slot, because
+        // this is the exact moment somebody could believe they have just
+        // paid for it. `GroundRepository.book` records the rate as what is
+        // OWED and writes no `payments/` row at all.
+        if (g.hourlyRatePaise > 0) ...[
           const SizedBox(height: 10),
-          Builder(builder: (_) {
-            final starts = availability.startsFitting(_hours);
-            if (starts.isEmpty) {
-              return const EmptyState(
-                icon: Icons.event_busy_outlined,
-                title: 'Nothing free that long',
-                message:
-                    'Try a shorter slot, another day, or a different ground.',
-              );
-            }
-            final wanted = _wantedHour;
-            // The hour they asked for on the way in, answered plainly. They
-            // typed it into the search two screens ago; making them find it
-            // again in a grid of eleven chips is asking twice.
-            final hasWanted = wanted != null && starts.contains(wanted);
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (wanted != null && !hasWanted)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: Text(
-                      '${groundHourLabel(wanted)} is taken here. These are '
-                      'free instead.',
-                      style: theme.textTheme.bodySmall
-                          ?.copyWith(color: theme.colorScheme.error),
-                    ),
-                  ),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    for (final h in starts)
-                      ActionChip(
-                        label: Text(
-                          '${groundHourLabel(h)}\u2013'
-                          '${groundHourLabel(h + _hours)}',
-                        ),
-                        // The one they asked for, marked. Not preselected and
-                        // not auto-booked: an hour of somebody's ground is
-                        // not something to take on their behalf.
-                        avatar: h == wanted
-                            ? Icon(Icons.star,
-                                size: 16, color: theme.colorScheme.primary)
-                            : null,
-                        backgroundColor: h == wanted
-                            ? theme.colorScheme.primaryContainer
-                            : null,
-                        onPressed: _booking ? null : () => _book(h),
-                      ),
-                  ],
-                ),
-              ],
-            );
-          }),
-          const SizedBox(height: 16),
-          Text(
-            _booking
-                ? 'Booking…'
-                : 'Tap a time to hold it. The slot is yours as soon as it is '
-                    'booked — nobody else can take it.',
-            style: theme.textTheme.bodySmall,
-          ),
+          const OfflineFeeNotice.ground(),
+          const SizedBox(height: 10),
+          // And the sentence the fee notice does not say: the fraud in this
+          // marketplace is a phone call asking for an advance, and the person
+          // has to still be carrying this when it comes.
+          const AdvancePaymentWarning(),
         ],
       ],
     );
@@ -598,11 +552,8 @@ class _NearbyResults extends StatelessWidget {
               title: Row(
                 children: [
                   Flexible(child: Text(hit.ground.name)),
-                  if (hit.ground.isVerified) ...[
-                    const SizedBox(width: 4),
-                    Icon(Icons.verified,
-                        size: 14, color: Theme.of(context).colorScheme.primary),
-                  ],
+                  const SizedBox(width: 5),
+                  GroundTrustBadge.of(hit.ground, compact: true),
                 ],
               ),
               subtitle: Text(
@@ -693,12 +644,8 @@ class _Results extends ConsumerWidget {
                   title: Row(
                     children: [
                       Flexible(child: Text(g.name)),
-                      if (g.isVerified) ...[
-                        const SizedBox(width: 4),
-                        Icon(Icons.verified,
-                            size: 14,
-                            color: Theme.of(context).colorScheme.primary),
-                      ],
+                      const SizedBox(width: 5),
+                      GroundTrustBadge.of(g, compact: true),
                     ],
                   ),
                   subtitle: Text(

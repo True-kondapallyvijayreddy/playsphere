@@ -5,11 +5,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../features/arena/arena_board_screen.dart';
+import '../../features/arena/arena_challenge_screen.dart';
+import '../../features/arena/arena_home_screen.dart';
+import '../../features/arena/arena_leaderboard_screen.dart';
 import '../../features/venues/venues_screen.dart';
 import '../../features/rankings/rankings_screen.dart';
 import '../../features/tournaments/certificates_screen.dart';
 import '../../features/tournaments/tournament_schedule_screen.dart';
 import '../../features/tournaments/officials_screen.dart';
+import '../../features/tournaments/venue_planner_screen.dart';
 import '../../features/tournaments/season_entrant_screen.dart';
 import '../../features/tournaments/season_memory_book_screen.dart';
 import '../../features/tournaments/public_tournament_screen.dart';
@@ -23,6 +28,8 @@ import '../../features/family/claim_code_screen.dart';
 import '../../features/family/claim_entry_screen.dart';
 import '../../features/family/managed_children_screen.dart';
 import '../../features/community/looking_for_board_screen.dart';
+import '../../features/network/club_network_screen.dart';
+import '../../features/network/club_thread_screen.dart';
 import '../../features/community/match_rsvp_screen.dart';
 import '../../features/competitions/global_events_screen.dart';
 import '../../features/competitions/challenges_screen.dart';
@@ -34,6 +41,14 @@ import '../../features/competitions/guided_season_screen.dart';
 import '../../features/competitions/create_season_screen.dart';
 import '../../features/competitions/entrant_detail_screen.dart';
 import '../../features/competitions/my_events_screen.dart';
+import '../../features/auctions/auction_create_screen.dart';
+import '../../features/auctions/auction_detail_screen.dart';
+import '../../features/auctions/auction_lot_screen.dart';
+import '../../features/auctions/auction_people_screen.dart';
+import '../../features/auctions/auction_settings_screen.dart';
+import '../../features/auctions/auction_team_screen.dart';
+import '../../features/auctions/auction_trades_screen.dart';
+import '../../features/auctions/auctions_home_screen.dart';
 import '../../features/give/give_collection_centers_screen.dart';
 import '../../features/give/give_donate_screen.dart';
 import '../../features/give/give_home_screen.dart';
@@ -42,10 +57,16 @@ import '../../features/give/give_my_donations_screen.dart';
 import '../../features/give/give_needs_screen.dart';
 import '../../features/give/give_raise_need_screen.dart';
 import '../../features/grounds/grounds_screen.dart';
+import '../../features/grounds/ground_review_screen.dart';
 import '../../features/grounds/my_grounds_screen.dart';
+import '../../features/home/active_seasons_screen.dart';
+import '../../features/home/open_registrations.dart';
 import '../../features/home/home_screen.dart';
 import '../../features/more/more_menu_screen.dart';
 import '../../features/notifications/notifications_screen.dart';
+import '../../features/officials/officials_directory_screen.dart';
+import '../../features/ops/ops_home_screen.dart';
+import '../../features/ops/ops_team_screen.dart';
 import '../../features/sponsor/sponsor_home_screen.dart';
 import '../../features/sponsor/sponsor_browse_screen.dart';
 import '../../features/sponsor/sponsor_create_listing_screen.dart';
@@ -54,9 +75,11 @@ import '../../features/sponsor/sponsor_my_pledges_screen.dart';
 import '../../features/sponsor/sponsor_listing_detail_screen.dart';
 import '../../features/sponsor/sponsor_incoming_offers_screen.dart';
 import '../../features/scout/rising_talent_screen.dart';
+import '../../features/ads/ad_review_screen.dart';
 import '../../features/coaches/coach_detail_screen.dart';
 import '../../features/coaches/coach_profile_edit_screen.dart';
 import '../../features/coaches/coaches_screen.dart';
+import '../../features/give/give_ops_screen.dart';
 import '../../features/medical/sports_emergency_screen.dart';
 import '../../features/medical/sports_injuries_screen.dart';
 import '../../features/medical/sports_medic_detail_screen.dart';
@@ -82,7 +105,9 @@ import '../../features/orgs/club_files_screen.dart';
 import '../../features/orgs/club_gallery_screen.dart';
 import '../../features/orgs/create_org_screen.dart';
 import '../../features/orgs/join_org_screen.dart';
+import '../../features/orgs/club_events_screen.dart';
 import '../../features/orgs/club_settings_screen.dart';
+import '../../features/orgs/club_staff_screen.dart';
 import '../../features/orgs/club_sport_stats_screen.dart';
 import '../../features/orgs/club_stats_screen.dart';
 import '../../features/orgs/members_screen.dart';
@@ -91,6 +116,11 @@ import '../../features/orgs/org_picker_screen.dart';
 import '../../features/orgs/umpire_registry_screen.dart';
 import '../../features/premium/premium_screen.dart';
 import '../../features/shop/shop_screen.dart';
+import '../../features/shops/sports_shop_detail_screen.dart';
+import '../../features/shops/sports_shop_registration_screen.dart';
+import '../../features/shops/sports_shops_screen.dart';
+import '../../features/discover/discover_screen.dart';
+import '../../features/discover/player_listing_edit_screen.dart';
 import '../../features/profile/career_profile_screen.dart';
 import '../../features/profile/leaderboard_screen.dart';
 import '../../features/profile/my_matches_screen.dart';
@@ -112,6 +142,8 @@ import '../../features/scoring/match_center_screen.dart';
 import '../../features/scoring/match_result_screen.dart';
 import '../../features/scoring/scoring_screen.dart';
 import '../../features/scoring/spectator_screen.dart';
+import '../../domain/club_events.dart';
+import '../models/club_thread.dart';
 import '../models/app_user.dart';
 import '../providers.dart';
 
@@ -124,6 +156,21 @@ class Routes {
   /// Where a signed-in member lands: their clubs, their live matches and
   /// whatever is waiting on them, across every club at once.
   static const home = '/home';
+
+  /// The Arena: board games between members. Org-free, because a game
+  /// belongs to the two people playing it and not to a club — see
+  /// `Refs.arenaMatches`.
+  static const arena = '/arena';
+
+  /// The Arena's own ladder. Deliberately not under `/rankings`, which is
+  /// where the numbers that mean something live.
+  static const arenaLadder = '/arena/ladder';
+
+  /// Picking an opponent for one game.
+  static String arenaChallenge(String gameId) => '/arena/new/$gameId';
+
+  /// One game's board.
+  static String arenaBoard(String matchId) => '/arena/game/$matchId';
 
   static const orgs = '/orgs';
   static const rules = '/rules';
@@ -148,6 +195,38 @@ class Routes {
   /// home screen's "More" button opens once there are more open-for-entry
   /// events than fit in its five-item preview.
   static const myEvents = '/events/mine';
+
+  /// The two lists behind the home screen's "Active seasons & tournaments"
+  /// buttons: everything this household can actually enter today, split the
+  /// way the buttons split it.
+  ///
+  /// Both are distinct from [myEvents], which is every event across the clubs
+  /// the profile in use belongs to, in whatever state it is in. These two are
+  /// only the ones open for entry, and they answer for the whole household —
+  /// see `ActiveSeasonsScreen`.
+  static const openSeasons = '/seasons/open';
+  static const openTournaments = '/tournaments/open';
+
+  /// The same two, for what this household has already entered rather than
+  /// what it still could.
+  static const registeredSeasons = '/seasons/registered';
+  static const registeredTournaments = '/tournaments/registered';
+
+  /// The list one of the four home tiles opens.
+  ///
+  /// A function of the tile rather than four constants read at four call
+  /// sites, so a tile cannot be given a destination that does not match what
+  /// it says — and so a third kind or a third lens fails to compile here
+  /// instead of silently sending people to the wrong list.
+  static String entryList(EntryListKey key) => switch ((key.lens, key.kind)) {
+        (RegistrationLens.open, OpenRegistrationKind.season) => openSeasons,
+        (RegistrationLens.open, OpenRegistrationKind.tournament) =>
+          openTournaments,
+        (RegistrationLens.registered, OpenRegistrationKind.season) =>
+          registeredSeasons,
+        (RegistrationLens.registered, OpenRegistrationKind.tournament) =>
+          registeredTournaments,
+      };
   static const createOrg = '/orgs/new';
   static const joinOrg = '/orgs/join';
 
@@ -163,7 +242,28 @@ class Routes {
   /// The absolute link to put in a message, a poster or a QR code.
   static String inviteUrl(String code) => '$publicOrigin${joinWithCode(code)}';
   static const lookingFor = '/community/looking-for';
+
+  /// The officials directory — who has registered to umpire, and how to reach
+  /// them.
+  ///
+  /// This path used to point at the registration form, which meant the
+  /// registry had a way in and no way to look at it: an official could
+  /// describe themselves and then be found by nobody. The form kept the path
+  /// and the directory did not exist. Now the directory owns the front door
+  /// and [umpireRegister] is the form, matching how [coaches]/[myCoachProfile]
+  /// and [sportsMedics]/[mySportsMedicProfile] already split the same pair.
   static const umpireRegistry = '/community/officials';
+
+  /// Same starting-filter query parameter as [coachesIn] and
+  /// [sportsMedicsIn], for the same reason: the sport narrows the list, it is
+  /// not the identity of the screen.
+  static String officialsIn(String sportId) =>
+      '$umpireRegistry?sport=${Uri.encodeComponent(sportId)}';
+
+  /// Registering as an official, or editing the listing you already have.
+  /// Declared as a child path of the directory so the back gesture returns to
+  /// the list somebody was looking at.
+  static const umpireRegister = '/community/officials/register';
 
   static String venues(String orgId) => '/org/$orgId/venues';
 
@@ -182,6 +282,11 @@ class Routes {
 
   static String tournamentOfficials(String orgId, String tournamentId) =>
       '/org/$orgId/tournaments/$tournamentId/officials';
+
+  /// Where the organizer describes when each ground is actually available —
+  /// dates, sessions, blackouts, match length, daily ceiling.
+  static String venuePlanner(String orgId, String tournamentId) =>
+      '/org/$orgId/tournaments/$tournamentId/venues';
 
   static String seasonMemories(String orgId, String tournamentId) =>
       '/org/$orgId/tournaments/$tournamentId/memories';
@@ -220,6 +325,27 @@ class Routes {
   /// a player buying a racket is buying it as themselves.
   static const shop = '/shop';
 
+  /// The local sports-shop directory — real shops on real streets, not the
+  /// [shop] catalogue and not a club's own store. See `SportsShop`.
+  ///
+  /// `/sports-shops` rather than `/shops`, which would sit one character away
+  /// from [shop] and be the kind of near-collision nobody notices until a
+  /// deep link goes to the wrong screen.
+  static const sportsShops = '/sports-shops';
+
+  /// Same starting-filter query parameter as [coachesIn] and
+  /// [sportsMedicsIn], for the same reason.
+  static String sportsShopsIn(String sportId) =>
+      '$sportsShops?sport=${Uri.encodeComponent(sportId)}';
+
+  /// One shop's page. Keyed by uid, because the listing is.
+  static String sportsShop(String uid) => '$sportsShops/$uid';
+
+  /// The form behind "do you run a shop?" — creating a listing and editing
+  /// one are the same screen, under `/me` for the same reason
+  /// [myCoachProfile] is.
+  static const mySportsShop = '/me/shop';
+
   /// A buyer's own club-store orders, across every club — org-free like
   /// [shop], since an order belongs to the person who placed it.
   static const myClubOrders = '/me/club-orders';
@@ -235,6 +361,37 @@ class Routes {
   static const giveRaiseNeed = '/give/needs/raise';
   static const giveImpact = '/give/impact';
 
+  /// Player auctions. Org-free like [give] and [shop], and for a stronger
+  /// reason than either: an auction is called by whoever is running the
+  /// tournament, who may belong to no club at all. See
+  /// lib/core/models/auction.dart.
+  ///
+  /// `auctionCreate` is declared before the `:auctionId` routes for the same
+  /// reason `giveDonate` is declared before `give` — go_router matches in
+  /// order, and `/auctions/new` would otherwise be read as an auction whose
+  /// id is "new".
+  static const auctions = '/auctions';
+  static const auctionCreate = '/auctions/new';
+
+  static String auction(String auctionId) => '/auctions/$auctionId';
+
+  static String auctionPeople(String auctionId) =>
+      '/auctions/$auctionId/people';
+
+  static String auctionSettings(String auctionId) =>
+      '/auctions/$auctionId/settings';
+
+  static String auctionTrades(String auctionId) =>
+      '/auctions/$auctionId/trades';
+
+  /// One player on the block. `lotId` is the player's uid — see `AuctionLot`.
+  static String auctionLot(String auctionId, String lotId) =>
+      '/auctions/$auctionId/player/$lotId';
+
+  /// One side. `teamId` is the owner's uid — see `AuctionTeam`.
+  static String auctionTeam(String auctionId, String teamId) =>
+      '/auctions/$auctionId/side/$teamId';
+
   /// Sponsor an Athlete / Sponsor a Team. Org-free like [give] — a sponsor
   /// acts as themselves, and a listing's owner (athlete, guardian, or team
   /// admin) manages it from here rather than from the club dashboard,
@@ -247,6 +404,48 @@ class Routes {
   static String sponsorListing(String listingId) => '/sponsor/listings/$listingId';
   static String sponsorOffers(String listingId) =>
       '/sponsor/listings/$listingId/offers';
+
+  /// Finding clubs and people you have no connection to yet — the answer for
+  /// somebody who has just moved and has nobody to get an invite code from.
+  ///
+  /// Deliberately NOT under `/scout`. Talent discovery is a scout looking down
+  /// at a pool of players; this is a player looking outward for somewhere to
+  /// play, and the two only look similar from the database's side.
+  static const discover = '/discover';
+
+  /// The same screen opened on the people tab. A query parameter, like
+  /// [scoutSearchIn], because the tab is a starting position rather than the
+  /// identity of the page.
+  static const discoverPeople = '$discover?tab=people';
+
+  /// The club owners' network — a club owner's inbox, and the directory of
+  /// other clubs to open a conversation with.
+  ///
+  /// Under `/network` rather than inside `/org/:orgId/...` even though a
+  /// thread belongs to a club. An owner who runs three clubs has ONE inbox,
+  /// and hanging it off a club id would either split it three ways or make
+  /// the id in the URL a lie about which club the person is reading as. The
+  /// club being acted as is a choice on the screen — see
+  /// `actingClubIdProvider` — not part of the address.
+  static const clubNetwork = '/network';
+
+  /// The same screen opened on the directory tab. A query parameter, like
+  /// [discoverPeople]: the tab is a starting position, not the page.
+  static const clubNetworkFind = '$clubNetwork?tab=find';
+
+  /// One conversation. The id is the derived pair — see [ClubThread.idFor] —
+  /// so a link to a thread is stable and a club cannot be sent to somebody
+  /// else's.
+  static String clubThread(String threadId) => '$clubNetwork/t/$threadId';
+
+  /// The conversation with one named club, which is what "Message this club"
+  /// resolves to once the acting club is known. Takes both ids rather than a
+  /// thread id so the caller does not have to know how the pair is derived.
+  static String clubThreadWith(String myOrgId, String otherOrgId) =>
+      clubThread(ClubThread.idFor(myOrgId, otherOrgId));
+
+  /// This account's own directory listing — the opt-in half of [discover].
+  static const myPlayerListing = '/me/listing';
 
   /// Talent discovery — §6 Module C. Org-free and role-free: nothing gates
   /// who may open a search, because the real gate (a minor's consent) is
@@ -360,6 +559,30 @@ class Routes {
   /// player.
   static const govDashboard = '/gov';
 
+  // --- Operations ---------------------------------------------------------
+  //
+  // Every inbound queue in the product used to land in a `pending` document
+  // that no screen could read, so the answer to "who receives this?" was
+  // nobody. These are the destinations; see `OpsHomeScreen`. All four are
+  // gated on the `admin` claim by `firestore.rules`, and the screens check it
+  // only so they do not present a queue they cannot load.
+
+  /// The staff control room — every queue and its backlog in one place.
+  static const ops = '/ops';
+
+  /// Advertiser campaigns awaiting a decision.
+  static const opsAds = '/ops/ads';
+
+  /// The Give desk. Two deep links rather than one screen with remembered
+  /// state: verifying needs and moving donations are separate jobs, often
+  /// done by different people, and arriving on the wrong one is a wasted tap
+  /// every time.
+  static const opsGive = '/ops/give';
+  static const opsGiveNeeds = '/ops/give/needs';
+
+  /// Who on the team is notified when something lands — see `StaffMember`.
+  static const opsTeam = '/ops/team';
+
   /// Grounds available to hire, searchable by city, sport and time.
   ///
   /// Deliberately org-free and deliberately not under `/org/:id/venues`. A
@@ -369,6 +592,11 @@ class Routes {
 
   /// The other side of the same marketplace: what a ground owner manages.
   static const myGrounds = '/grounds/mine';
+
+  /// PlaySphere staff reviewing listings and acting on reports. Declared
+  /// before the `:groundId` route for the same reason [myGrounds] is — go_router
+  /// matches in declaration order and `review` would otherwise be read as an id.
+  static const groundReview = '/grounds/review';
 
   static String ground(String groundId) => '/grounds/$groundId';
 
@@ -442,6 +670,18 @@ class Routes {
   static String org(String orgId) => '/org/$orgId';
   static String members(String orgId) => '/org/$orgId/members';
 
+  /// A club's events, sorted into seasons, tournaments, single matches and
+  /// challenges — see `ClubEventsScreen`.
+  ///
+  /// The kind rides as a query parameter rather than a path segment because
+  /// it is a view preference, not a different resource: `/events` and
+  /// `/events?kind=challenge` are the same list, and a bookmark to the second
+  /// should keep working if the four kinds are ever re-cut.
+  static String clubEvents(String orgId, {ClubEventKind? kind}) =>
+      kind == null
+          ? '/org/$orgId/events'
+          : '/org/$orgId/events?kind=${kind.name}';
+
   /// A club's record, one row per sport it has played — see
   /// `ClubStatsScreen`.
   static String clubStats(String orgId) => '/org/$orgId/stats';
@@ -451,6 +691,9 @@ class Routes {
       '/org/$orgId/stats/${Uri.encodeComponent(sportId)}';
   static String createTeam(String orgId) => '/org/$orgId/teams/new';
   static String clubSettings(String orgId) => '/org/$orgId/settings';
+
+  /// Who runs the club and which department each of them looks after.
+  static String clubStaff(String orgId) => '/org/$orgId/settings/staff';
   static String analytics(String orgId) => '/org/$orgId/analytics';
   static String live(String orgId) => '/org/$orgId/live';
   static String challenges(String orgId) => '/org/$orgId/challenges';
@@ -595,6 +838,49 @@ class Routes {
       '$publicOrigin${publicTournament(orgId, tournamentId)}';
 }
 
+/// Where somebody was trying to go before the router sent them to sign in.
+///
+/// ## Why this is a static holder and not a provider
+///
+/// It is written from inside `GoRouter.redirect`, which is not a widget build
+/// and must not have provider side effects hung off it — a `StateProvider`
+/// mutated during navigation re-runs the redirect that is still executing.
+/// This is a single nullable string with one writer and one reader, and a
+/// class with two methods is the honest shape for that.
+///
+/// Read-once by design. [take] clears as it returns, so a destination cannot
+/// be replayed on a later sign-in — somebody who signs out and back in a week
+/// later should land on Home, not on the invite they opened once.
+class PendingDestination {
+  const PendingDestination._();
+
+  static String? _location;
+
+  /// Remembers a full location INCLUDING its query string. The query is the
+  /// payload for the links this exists for: `?code=ABC123` is the invite.
+  ///
+  /// Home and the sign-in screen itself are never remembered — resuming to
+  /// either is indistinguishable from the default, and remembering sign-in
+  /// would loop.
+  static void remember(String location) {
+    if (location.isEmpty) return;
+    if (location == Routes.home) return;
+    if (location.startsWith(Routes.signIn)) return;
+    _location = location;
+  }
+
+  /// The remembered destination, cleared. Null when there was none.
+  static String? take() {
+    final location = _location;
+    _location = null;
+    return location;
+  }
+
+  /// Drops anything remembered without navigating to it — for a sign-out,
+  /// where the next person on this device must not inherit it.
+  static void forget() => _location = null;
+}
+
 /// Routes a signed-out visitor may still open.
 ///
 /// Spectating is deliberately public: the entire point of the product is that
@@ -607,6 +893,20 @@ bool _isPublicRoute(String location) {
   if (location.startsWith(Routes.claim)) return true;
   if (RegExp(r'^/org/[^/]+/live-tournament/').hasMatch(location)) return true;
   return RegExp(r'^/org/[^/]+/event/[^/]+/watch/').hasMatch(location);
+}
+
+/// Reads the `kind=` on a club's events link back into a [ClubEventKind].
+///
+/// Null for anything unrecognised, including null itself, which leaves
+/// `ClubEventsScreen` on its own default tab. A shared link is a thing other
+/// people paste, and refusing to open the page because the tab name has moved
+/// on is a worse answer than opening it at the top.
+ClubEventKind? _clubEventKind(String? raw) {
+  if (raw == null || raw.isEmpty) return null;
+  for (final kind in ClubEventKind.values) {
+    if (kind.name == raw) return kind;
+  }
+  return null;
 }
 
 /// Splits the comma-joined uid list a match call hands to the draft screens.
@@ -644,13 +944,28 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       final signedIn = authState.valueOrNull != null;
 
       if (!signedIn) {
-        return _isPublicRoute(location) ? null : Routes.signIn;
+        if (_isPublicRoute(location)) return null;
+        // The whole point of a shared invite is that it reaches somebody who
+        // is NOT in the product yet — so the one person an invite link has to
+        // work for was the one person it did not work for. They were bounced
+        // to sign-in, and after signing in they landed on Home with the club
+        // and its code discarded, having never been told which club they had
+        // been invited to.
+        PendingDestination.remember(state.uri.toString());
+        return Routes.signIn;
       }
 
       // Signed in, but we still need the details Google never gives us —
       // principally a date of birth, without which no age category can be
       // judged. Everything is blocked until that is supplied.
-      final profile = ref.read(currentUserProvider);
+      //
+      // The ACCOUNT's own profile, not whichever profile is open. This gate
+      // is about the human who just signed in, and a managed child is
+      // created complete server-side anyway — reading the open profile here
+      // would also mean a child document that momentarily fails to resolve
+      // could pin the whole app on the setup screen, which is the one screen
+      // with no way back out.
+      final profile = ref.read(authUserProvider);
       if (profile.isLoading) return null;
 
       final complete = profile.valueOrNull?.profileComplete ?? false;
@@ -664,7 +979,12 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       // bounced that tap straight back to home before the screen ever
       // rendered. The first-time setup flow instead navigates itself, in
       // _save(), the moment its own write succeeds.
-      if (location == Routes.signIn) return Routes.home;
+      // Signed in and complete: pick up whatever they were trying to open
+      // before they were sent here, and fall back to Home when there was
+      // nothing — which is every ordinary sign-in.
+      if (location == Routes.signIn) {
+        return PendingDestination.take() ?? Routes.home;
+      }
 
       return null;
     },
@@ -704,10 +1024,43 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         path: Routes.liveNow,
         builder: (_, __) => const LiveNowScreen(),
       ),
+      // The Arena. The two deeper paths are declared BEFORE the list, for the
+      // same reason the umpire register is: go_router matches in declaration
+      // order, and a `/arena/:something` pattern would otherwise swallow them.
+      GoRoute(
+        path: '/arena/new/:gameId',
+        builder: (_, state) => ArenaChallengeScreen(
+          gameId: state.pathParameters['gameId'] ?? '',
+        ),
+      ),
+      GoRoute(
+        path: '/arena/game/:matchId',
+        builder: (_, state) => ArenaBoardScreen(
+          matchId: state.pathParameters['matchId'] ?? '',
+        ),
+      ),
+      GoRoute(
+        path: Routes.arenaLadder,
+        builder: (_, __) => const ArenaLeaderboardScreen(),
+      ),
+      GoRoute(
+        path: Routes.arena,
+        builder: (_, __) => const ArenaHomeScreen(),
+      ),
       GoRoute(
         path: Routes.myEvents,
         builder: (_, __) => const MyEventsScreen(),
       ),
+      // The four lists behind the home screen's four tiles, each declared
+      // from the tile's own key so the route and what the tile says cannot
+      // drift apart.
+      for (final lens in RegistrationLens.values)
+        for (final kind in OpenRegistrationKind.values)
+          GoRoute(
+            path: Routes.entryList((kind: kind, lens: lens)),
+            builder: (_, __) =>
+                ActiveSeasonsScreen(kind: kind, lens: lens),
+          ),
       // Both of these screens take the signed-in user as a constructor
       // argument rather than reading it themselves, so the route resolves it.
       // They existed and worked for months with nothing routed to them, which
@@ -716,9 +1069,41 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         path: Routes.lookingFor,
         builder: (_, __) => const _WithSignedInUser(builder: _lookingForBoard),
       ),
+      // The register form is declared BEFORE the directory: go_router matches
+      // in declaration order, and `/community/officials/register` would
+      // otherwise never be reached past the directory's own path.
+      GoRoute(
+        path: Routes.umpireRegister,
+        builder: (_, __) => const _WithSignedInUser(builder: _umpireRegistry),
+      ),
       GoRoute(
         path: Routes.umpireRegistry,
-        builder: (_, __) => const _WithSignedInUser(builder: _umpireRegistry),
+        builder: (_, state) => OfficialsDirectoryScreen(
+          initialSportId: state.uri.queryParameters['sport'],
+        ),
+      ),
+
+      // --- Operations -----------------------------------------------------
+      GoRoute(
+        path: Routes.opsAds,
+        builder: (_, __) => const AdReviewScreen(),
+      ),
+      GoRoute(
+        path: Routes.opsGiveNeeds,
+        builder: (_, __) =>
+            const GiveOpsScreen(initialTab: GiveOpsTab.needs),
+      ),
+      GoRoute(
+        path: Routes.opsGive,
+        builder: (_, __) => const GiveOpsScreen(),
+      ),
+      GoRoute(
+        path: Routes.opsTeam,
+        builder: (_, __) => const OpsTeamScreen(),
+      ),
+      GoRoute(
+        path: Routes.ops,
+        builder: (_, __) => const OpsHomeScreen(),
       ),
       GoRoute(
         path: Routes.profileSetup,
@@ -783,6 +1168,10 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         builder: (_, __) => const MyGroundsScreen(),
       ),
       GoRoute(
+        path: Routes.groundReview,
+        builder: (_, __) => const GroundReviewScreen(),
+      ),
+      GoRoute(
         path: Routes.grounds,
         builder: (_, __) => const GroundsScreen(),
       ),
@@ -814,6 +1203,24 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         path: Routes.myFoodOrders,
         builder: (_, __) => const MyFoodOrdersScreen(),
       ),
+      // Sports shops. `mySportsShop` lives under `/me`, so only the `:uid`
+      // route needs ordering care — declared after the bare directory for the
+      // same reason the coach routes are.
+      GoRoute(
+        path: Routes.mySportsShop,
+        builder: (_, __) => const SportsShopRegistrationScreen(),
+      ),
+      GoRoute(
+        path: Routes.sportsShops,
+        builder: (_, state) => SportsShopsScreen(
+          initialSportId: state.uri.queryParameters['sport'],
+        ),
+      ),
+      GoRoute(
+        path: '/sports-shops/:uid',
+        builder: (_, state) =>
+            SportsShopDetailScreen(uid: state.pathParameters['uid']!),
+      ),
       GoRoute(
         path: Routes.shop,
         // `?sport=` arrives from a promo banner, and only preselects the
@@ -830,6 +1237,54 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       // declaration order — go_router matches by full path, not prefix, but
       // keeping the hub first in reading order matches how the other module
       // groups (grounds, shop) are laid out above.
+      // Player auctions. `auctionCreate` is declared first so `/auctions/new`
+      // is not matched as `/auctions/:auctionId` with the id "new".
+      GoRoute(
+        path: Routes.auctionCreate,
+        builder: (_, __) => const AuctionCreateScreen(),
+      ),
+      GoRoute(
+        path: Routes.auctions,
+        builder: (_, __) => const AuctionsHomeScreen(),
+      ),
+      GoRoute(
+        path: '/auctions/:auctionId/people',
+        builder: (_, state) => AuctionPeopleScreen(
+          auctionId: state.pathParameters['auctionId']!,
+        ),
+      ),
+      GoRoute(
+        path: '/auctions/:auctionId/settings',
+        builder: (_, state) => AuctionSettingsScreen(
+          auctionId: state.pathParameters['auctionId']!,
+        ),
+      ),
+      GoRoute(
+        path: '/auctions/:auctionId/trades',
+        builder: (_, state) => AuctionTradesScreen(
+          auctionId: state.pathParameters['auctionId']!,
+        ),
+      ),
+      GoRoute(
+        path: '/auctions/:auctionId/player/:lotId',
+        builder: (_, state) => AuctionLotScreen(
+          auctionId: state.pathParameters['auctionId']!,
+          lotId: state.pathParameters['lotId']!,
+        ),
+      ),
+      GoRoute(
+        path: '/auctions/:auctionId/side/:teamId',
+        builder: (_, state) => AuctionTeamScreen(
+          auctionId: state.pathParameters['auctionId']!,
+          teamId: state.pathParameters['teamId']!,
+        ),
+      ),
+      GoRoute(
+        path: '/auctions/:auctionId',
+        builder: (_, state) => AuctionDetailScreen(
+          auctionId: state.pathParameters['auctionId']!,
+        ),
+      ),
       GoRoute(
         path: Routes.give,
         builder: (_, __) => const GiveHomeScreen(),
@@ -892,6 +1347,30 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         builder: (_, state) => SponsorListingDetailScreen(
           listingId: state.pathParameters['listingId']!,
         ),
+      ),
+      GoRoute(
+        path: Routes.discover,
+        builder: (_, state) => DiscoverScreen(
+          initialTab: state.uri.queryParameters['tab'] == 'people' ? 1 : 0,
+        ),
+      ),
+      GoRoute(
+        path: Routes.clubNetwork,
+        builder: (_, state) => ClubNetworkScreen(
+          initialTab: state.uri.queryParameters['tab'] == 'find' ? 1 : 0,
+        ),
+        routes: [
+          GoRoute(
+            path: 't/:threadId',
+            builder: (_, state) => ClubThreadScreen(
+              threadId: state.pathParameters['threadId']!,
+            ),
+          ),
+        ],
+      ),
+      GoRoute(
+        path: Routes.myPlayerListing,
+        builder: (_, __) => const PlayerListingEditScreen(),
       ),
       GoRoute(
         path: Routes.scoutSearch,
@@ -1097,6 +1576,16 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             ],
           ),
           GoRoute(
+            path: 'events',
+            builder: (_, state) => ClubEventsScreen(
+              orgId: state.pathParameters['orgId']!,
+              // An unrecognised `kind=` opens the default tab rather than
+              // failing the route: these links are shared, and a season
+              // renamed in a future version must not 404 somebody's message.
+              initialKind: _clubEventKind(state.uri.queryParameters['kind']),
+            ),
+          ),
+          GoRoute(
             path: 'teams/new',
             builder: (_, state) =>
                 CreateTeamScreen(orgId: state.pathParameters['orgId']!),
@@ -1105,6 +1594,13 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             path: 'settings',
             builder: (_, state) =>
                 ClubSettingsScreen(orgId: state.pathParameters['orgId']!),
+            routes: [
+              GoRoute(
+                path: 'staff',
+                builder: (_, state) =>
+                    ClubStaffScreen(orgId: state.pathParameters['orgId']!),
+              ),
+            ],
           ),
           GoRoute(
             path: 'analytics',
@@ -1177,6 +1673,13 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                   GoRoute(
                     path: 'certificates',
                     builder: (_, state) => CertificatesScreen(
+                      orgId: state.pathParameters['orgId']!,
+                      tournamentId: state.pathParameters['tournamentId']!,
+                    ),
+                  ),
+                  GoRoute(
+                    path: 'venues',
+                    builder: (_, state) => VenuePlannerScreen(
                       orgId: state.pathParameters['orgId']!,
                       tournamentId: state.pathParameters['tournamentId']!,
                     ),

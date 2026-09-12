@@ -33,6 +33,7 @@ class GiveNeed {
     this.fulfilled = const [],
     this.status = GiveNeedStatus.open,
     this.verified = false,
+    this.verifiedAt,
     this.createdByUid,
     this.createdAt,
   });
@@ -75,6 +76,14 @@ class GiveNeed {
 
   final GiveNeedStatus status;
   final bool verified;
+
+  /// When staff confirmed this need. Null on an unverified one, and cleared
+  /// again if confirmation is withdrawn — so the ops queue can sort "waiting
+  /// longest" without treating a re-raised need as freshly arrived. Written
+  /// only by `GiveRepository.setNeedVerified`; the client that raised the
+  /// need cannot set it (see `firestore.rules` on `giveNeeds`).
+  final DateTime? verifiedAt;
+
   final String? createdByUid;
   final DateTime? createdAt;
 
@@ -99,6 +108,7 @@ class GiveNeed {
       fulfilled: GiveItemLine.listFromRaw(d['fulfilled']),
       status: GiveNeedStatus.fromWire(d['status'] as String?),
       verified: Fs.boolean(d['verified']),
+      verifiedAt: Fs.dateOrNull(d['verifiedAt']),
       createdByUid: Fs.strOrNull(d['createdByUid']),
       createdAt: Fs.dateOrNull(d['createdAt']),
     );

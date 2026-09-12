@@ -36,6 +36,49 @@ class UmpireRepository {
     return snap.docs.map((d) => UmpireProfile.fromMap(d.data())).toList();
   }
 
+  /// The public officials directory — every registered official, optionally
+  /// narrowed to one sport and to those saying they are free.
+  ///
+  /// A stream rather than the one-shot [fetchUmpiresForSport] because the two
+  /// callers want different things: the assignment sheets want a snapshot to
+  /// populate a picker right now, and the directory is a screen somebody
+  /// leaves open while a colleague registers. Neither is the other's cache.
+  ///
+  /// Sorting is client-side (available first, then most matches officiated,
+  /// then name). A composite index on three fields to order a list that is
+  /// hundreds of rows at national scale would be paying for something the
+  /// device does for free.
+  Stream<List<UmpireProfile>> watchUmpires({
+    String? sportId,
+    String? district,
+    bool availableOnly = false,
+  }) async* {
+    Query<Map<String, dynamic>> q = Refs.umpires;
+    if (sportId != null && sportId.isNotEmpty) {
+      q = q.where('sports', arrayContains: sportId);
+    }
+    // Matched on the lowercased mirror rather than `geo.district`, the same
+    // trick `Ground.cityKey` and `GiveNeed.cityKey` use: a club typing
+    // "nalgonda" and one typing "Nalgonda" are asking the same question, and
+    // Firestore's equality is case-sensitive.
+    if (district != null && district.trim().isNotEmpty) {
+      q = q.where('districtKey', isEqualTo: district.trim().toLowerCase());
+    }
+    if (availableOnly) {
+      q = q.where('isAvailable', isEqualTo: true);
+    }
+    yield* q.limit(300).snapshots().map((snap) {
+      final rows = snap.docs.map((d) => UmpireProfile.fromMap(d.data())).toList();
+      rows.sort((a, b) {
+        if (a.isAvailable != b.isAvailable) return a.isAvailable ? -1 : 1;
+        final byMatches = b.matchesOfficiated.compareTo(a.matchesOfficiated);
+        if (byMatches != 0) return byMatches;
+        return a.displayName.toLowerCase().compareTo(b.displayName.toLowerCase());
+      });
+      return List<UmpireProfile>.unmodifiable(rows);
+    });
+  }
+
   /// Checks if an official is already assigned to a live or overlapping match.
   Future<void> checkOfficialAvailability({
     required String orgId,

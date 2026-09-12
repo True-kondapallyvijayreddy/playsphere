@@ -39,6 +39,7 @@ class Fixture {
     this.roundLabel,
     this.scheduledAt,
     this.venue,
+    this.streamUrl,
     this.scorerUids = const [],
     this.activeScorerUid,
     this.activeScorerDeviceId,
@@ -74,6 +75,8 @@ class Fixture {
     this.qualifierA,
     this.qualifierB,
     this.courtId,
+    this.venueId,
+    this.courtRefId,
     this.tournamentId,
     this.resultType = MatchResultType.normal,
     this.resultNote,
@@ -138,6 +141,21 @@ class Fixture {
 
   final DateTime? scheduledAt;
   final String? venue;
+
+  /// Where this match is being broadcast, if anywhere.
+  ///
+  /// A pasted link and nothing more — see `StreamLink`, which is the only
+  /// thing allowed to interpret it. Stored raw rather than as a parsed video
+  /// id on purpose: the id is a derivation of the link, and a club that
+  /// corrects a typo should see the correction rather than a stale id nobody
+  /// can trace back to what was typed.
+  ///
+  /// Null is the ordinary state and is not a gap to apologise for. Almost no
+  /// grassroots match is streamed, and the one that is has a volunteer with a
+  /// phone on a tripod behind the bowler's arm — which is exactly why the
+  /// field is a link to somebody else's platform and not a video pipeline of
+  /// our own.
+  final String? streamUrl;
 
   /// Who may score this match. Security rules check membership of this list
   /// on every event write, so an unrelated member cannot alter a score.
@@ -440,7 +458,8 @@ class Fixture {
             ? lineupA
             : [
                 MatchPlayer(
-                  id: entrantAUid ?? (entrantAId.isNotEmpty ? entrantAId : 'entrant_a'),
+                  id: entrantAUid ??
+                      (entrantAId.isNotEmpty ? entrantAId : 'entrant_a'),
                   name: entrantAName.isNotEmpty ? entrantAName : 'Side A',
                   uid: entrantAUid,
                 ),
@@ -449,7 +468,8 @@ class Fixture {
             ? lineupB
             : [
                 MatchPlayer(
-                  id: entrantBUid ?? (entrantBId.isNotEmpty ? entrantBId : 'entrant_b'),
+                  id: entrantBUid ??
+                      (entrantBId.isNotEmpty ? entrantBId : 'entrant_b'),
                   name: entrantBName.isNotEmpty ? entrantBName : 'Side B',
                   uid: entrantBUid,
                 ),
@@ -501,13 +521,33 @@ class Fixture {
   /// court a match is on is not a schedule, it is a start time.
   final String? courtId;
 
+  /// The ids behind [venue] and [courtId], when the match was placed against
+  /// real venue documents.
+  ///
+  /// ## Why the names are not enough
+  ///
+  /// [venue] and [courtId] are what a player reads on their card, and they
+  /// have to stay strings: a club event still types "Court 1" and a historic
+  /// fixture must keep naming the place it was played even after the venue is
+  /// renamed. But *checking* a timetable — is this court open at this hour, is
+  /// it inside its blackout, has it hit its daily maximum — needs the resource
+  /// back, and resolving a resource by matching two display names is wrong the
+  /// first time two grounds each have a "Court 1", which is the normal case.
+  ///
+  /// Null for every fixture placed by hand or before this existed, and every
+  /// reader treats null as "cannot check", never as "no venue".
+  final String? venueId;
+  final String? courtRefId;
+
   /// What to show on a side with no entrant yet — the qualifier it is waiting
   /// on, if it is waiting on one, rather than a bare "To be decided".
-  String displayNameA() =>
-      entrantAId.isNotEmpty ? entrantAName : (qualifierA?.label ?? entrantAName);
+  String displayNameA() => entrantAId.isNotEmpty
+      ? entrantAName
+      : (qualifierA?.label ?? entrantAName);
 
-  String displayNameB() =>
-      entrantBId.isNotEmpty ? entrantBName : (qualifierB?.label ?? entrantBName);
+  String displayNameB() => entrantBId.isNotEmpty
+      ? entrantBName
+      : (qualifierB?.label ?? entrantBName);
 
   /// Whether both sides are known, so this match can actually be played.
   /// A knockout placeholder still waiting on a feeder is not playable, and
@@ -716,14 +756,41 @@ class Fixture {
 
   bool get hasResult => status.isResulted;
 
+  /// Ended by an official's ruling rather than by the score.
+  ///
+  /// A walkover, an abandonment, a dispute, a retirement, a disqualification.
+  /// The defining property is that NONE of it is in the event log: the ruling
+  /// lives on the fixture document and the projection knows nothing about it.
+  /// So a rebuild — a replay on reconnect, or simply the next tap on the pad,
+  /// which derives `status` from `plugin.outcome` — computes `live` and
+  /// overwrites the ruling without anybody touching it. That is the whole
+  /// reason the pad has to lock rather than merely look different: the only
+  /// safe way back into scoring is to withdraw the ruling first, which is
+  /// what [ScoringService.clearFixtureOutcome] is.
+  ///
+  /// A normally completed match is deliberately NOT included. It is frozen by
+  /// `acceptsScoring`, its ending IS in the log, and the engines already
+  /// offer Reopen as the way back.
+  bool get endedByDecision =>
+      status.isDecision || resultType != MatchResultType.normal;
+
+  /// What [ScoringService.clearFixtureOutcome] should put the match back to.
+  ///
+  /// Derived, never remembered. Storing "the status before the ruling" would
+  /// be one more field to keep honest across offline replay; the event log
+  /// already knows — a match with events was live, one without was scheduled,
+  /// and if the engine had finished it the outcome recomputes from
+  /// `scoreState` at the call site.
+  FixtureStatus get statusWithoutDecision =>
+      lastSeq > 0 ? FixtureStatus.live : FixtureStatus.scheduled;
+
   /// Feature #17: Dynamic role-based scoring access.
   /// A fixture can be scored if the user is in [scorerUids] OR holds manager access.
   bool canBeScoredBy(String uid, {bool isOrgManager = false}) =>
       status.acceptsScoring && (scorerUids.contains(uid) || isOrgManager);
 
   /// True when somebody has been handed the pen for this match.
-  bool get penIsHeld =>
-      activeScorerUid != null && activeScorerUid!.isNotEmpty;
+  bool get penIsHeld => activeScorerUid != null && activeScorerUid!.isNotEmpty;
 
   /// True when [uid] is the person the pen was handed to.
   ///
@@ -779,6 +846,7 @@ class Fixture {
       roundLabel: Fs.strOrNull(d['roundLabel']),
       scheduledAt: Fs.dateOrNull(d['scheduledAt']),
       venue: Fs.strOrNull(d['venue']),
+      streamUrl: Fs.strOrNull(d['streamUrl']),
       scorerUids: Fs.strList(d['scorerUids']),
       activeScorerUid: Fs.strOrNull(d['activeScorerUid']),
       activeScorerDeviceId: Fs.strOrNull(d['activeScorerDeviceId']),
@@ -828,6 +896,8 @@ class Fixture {
       qualifierA: QualifierSource.fromWire(Fs.strOrNull(d['qualifierA'])),
       qualifierB: QualifierSource.fromWire(Fs.strOrNull(d['qualifierB'])),
       courtId: Fs.strOrNull(d['courtId']),
+      venueId: Fs.strOrNull(d['venueId']),
+      courtRefId: Fs.strOrNull(d['courtRefId']),
       tournamentId: Fs.strOrNull(d['tournamentId']),
       resultType: MatchResultType.fromWire(Fs.strOrNull(d['resultType'])),
       resultNote: Fs.strOrNull(d['resultNote']),
@@ -859,6 +929,7 @@ class Fixture {
         'roundLabel': roundLabel,
         'scheduledAt': Fs.ts(scheduledAt),
         'venue': venue,
+        'streamUrl': streamUrl,
         'scorerUids': scorerUids,
         'activeScorerUid': activeScorerUid,
         'activeScorerDeviceId': activeScorerDeviceId,
@@ -895,6 +966,8 @@ class Fixture {
         'qualifierA': qualifierA?.wire,
         'qualifierB': qualifierB?.wire,
         'courtId': courtId,
+        'venueId': venueId,
+        'courtRefId': courtRefId,
         'tournamentId': tournamentId,
         'resultType': resultType.wire,
         'resultNote': resultNote,
@@ -922,6 +995,7 @@ class Fixture {
     List<String>? scorerUids,
     String? activeScorerUid,
     String? activeScorerDeviceId,
+
     /// Same reason as [clearWinner]: `?? this.activeScorerUid` cannot say
     /// "nobody holds the pen any more", and releasing it is the whole point
     /// of the handover flow.
@@ -931,9 +1005,23 @@ class Fixture {
     List<MatchOfficial>? officials,
     DateTime? scheduledAt,
     String? venue,
+
+    /// `?? this.streamUrl` cannot say "the stream is over" — same reason as
+    /// [clearWinner]. A match whose organizer takes the link down must lose
+    /// it, or the spectator screen keeps offering a dead broadcast.
+    String? streamUrl,
+    bool clearStreamUrl = false,
     String? courtId,
+    String? venueId,
+    String? courtRefId,
     MatchResultType? resultType,
     String? resultNote,
+
+    /// Same reason as [clearWinner]: `?? this.resultNote` cannot say "there
+    /// is no longer a reason on file", and withdrawing a ruling has to take
+    /// the ruling's note with it or the next screen explains the result with
+    /// a sentence about a decision that no longer stands.
+    bool clearResultNote = false,
     DateTime? lastEventAt,
     Map<String, dynamic>? startedEarly,
     MatchReadiness? readiness,
@@ -958,12 +1046,12 @@ class Fixture {
       roundLabel: roundLabel,
       scheduledAt: scheduledAt ?? this.scheduledAt,
       venue: venue ?? this.venue,
+      streamUrl: clearStreamUrl ? null : (streamUrl ?? this.streamUrl),
       scorerUids: scorerUids ?? this.scorerUids,
       activeScorerUid:
           clearPen ? null : (activeScorerUid ?? this.activeScorerUid),
-      activeScorerDeviceId: clearPen
-          ? null
-          : (activeScorerDeviceId ?? this.activeScorerDeviceId),
+      activeScorerDeviceId:
+          clearPen ? null : (activeScorerDeviceId ?? this.activeScorerDeviceId),
       penGrantedByUid: clearPen ? null : penGrantedByUid,
       penGrantedAt: clearPen ? null : penGrantedAt,
       lastRestartSeq:
@@ -1006,9 +1094,11 @@ class Fixture {
       qualifierA: qualifierA,
       qualifierB: qualifierB,
       courtId: courtId ?? this.courtId,
+      venueId: venueId ?? this.venueId,
+      courtRefId: courtRefId ?? this.courtRefId,
       tournamentId: tournamentId,
       resultType: resultType ?? this.resultType,
-      resultNote: resultNote ?? this.resultNote,
+      resultNote: clearResultNote ? null : (resultNote ?? this.resultNote),
       startedAt: startedAt,
       completedAt: completedAt,
       lastEventAt: lastEventAt ?? this.lastEventAt,

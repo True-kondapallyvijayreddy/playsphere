@@ -1,0 +1,16 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.company.playsphere",
+      "sha256_cert_fingerprints": [
+        "4E:DB:D6:FB:24:DB:98:50:E8:13:70:7E:DB:AF:84:C6:81:DC:21:F5:7D:A9:1D:46:87:A8:AC:5D:40:8F:03:E1",
+        "80:E1:7F:0F:27:43:FF:29:BA:44:2C:6A:7A:68:7D:79:C8:56:52:C6:22:99:65:27:7D:87:79:02:A4:C1:18:BC",
+        "F6:28:84:04:83:F5:1F:FA:32:78:59:42:23:06:FC:40:9C:47:FF:D3:C4:04:38:79:5C:DD:62:CF:E5:0C:FB:4D",
+        "52:B6:38:6F:1D:D6:93:3B:96:B9:8A:02:51:F5:4D:5E:F0:B5:9E:48:32:4A:95:1E:51:AA:8D:B1:40:3E:50:DF",
+        "64:67:87:C7:9B:3A:C4:BE:AC:DA:4F:5E:51:C2:8E:2E:4E:D2:F8:F5:6E:38:3A:50:E3:55:FA:7E:E2:AA:A3:75"
+      ]
+    }
+  }
+]

@@ -123,10 +123,12 @@ class ClubFilesScreen extends ConsumerWidget {
     final bytes = await picked.readAsBytes();
     if (!context.mounted) return;
 
+    // Hoisted out of the builder: created there it was rebuilt (and leaked)
+    // on every dialog rebuild. One controller, disposed once the dialog closes.
+    final controller = TextEditingController(text: picked.name);
     final name = await showDialog<String>(
       context: context,
       builder: (ctx) {
-        final controller = TextEditingController(text: picked.name);
         return AlertDialog(
           title: const Text('Name this file'),
           content: TextField(
@@ -152,6 +154,7 @@ class ClubFilesScreen extends ConsumerWidget {
         );
       },
     );
+    controller.dispose();
     if (name == null || name.trim().isEmpty) return;
 
     try {

@@ -6,6 +6,7 @@ import '../../../domain/scoring/scoring_plugin.dart';
 import '../../../shared/live_dot.dart';
 import '../../../shared/ui_kit.dart';
 import 'duel_pad.dart';
+import 'pad_theme.dart';
 
 /// The scoreboard at the top of a stacked pad, and of the live view somebody
 /// watching a match they are not scoring sees.
@@ -39,12 +40,19 @@ class PadScoreboard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(Ps.radius),
-        border: Border.all(color: Ps.border),
+        borderRadius: BorderRadius.circular(Ps.radius + 2),
+        border: Border.all(color: PadInk.boardEdge),
+        boxShadow: PadInk.board,
+        // The same board the cricket pad states its total on, for the reason
+        // that pad gives: a scoreboard is a readout, and every readout in the
+        // product should be the one dark surface among the input surfaces.
+        // Two scoreboards in two palettes is how a scorer switching sports
+        // has to learn the screen twice.
         gradient: const LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [Color(0xFFFFFFFF), Color(0xFFF1F5F9)],
+          colors: [PadInk.boardTop, PadInk.boardMid, PadInk.boardBottom],
+          stops: [0, 0.55, 1],
         ),
       ),
       child: Column(
@@ -98,11 +106,18 @@ class PadScoreboard extends StatelessWidget {
               child: Text(
                 headline,
                 style: TextStyle(
-                  fontSize: context.isCompact ? 44 : 52,
-                  height: 1.05,
-                  fontWeight: FontWeight.w800,
-                  color: Ps.ink,
+                  fontSize: context.isCompact ? 46 : 54,
+                  height: 1.02,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: -1.5,
+                  color: Colors.white,
                   fontFeatures: const [FontFeature.tabularFigures()],
+                  shadows: [
+                    Shadow(
+                      color: Ps.primary.withValues(alpha: 0.5),
+                      blurRadius: 24,
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -112,8 +127,9 @@ class PadScoreboard extends StatelessWidget {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
               decoration: BoxDecoration(
-                color: Ps.primary.withValues(alpha: 0.09),
+                color: Ps.primary.withValues(alpha: 0.16),
                 borderRadius: BorderRadius.circular(999),
+                border: Border.all(color: Ps.primary.withValues(alpha: 0.35)),
               ),
               child: Text(
                 status!,
@@ -121,7 +137,7 @@ class PadScoreboard extends StatelessWidget {
                 style: const TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w700,
-                  color: Ps.primary,
+                  color: Colors.white,
                 ),
               ),
             ),
@@ -131,7 +147,7 @@ class PadScoreboard extends StatelessWidget {
             Text(
               summary,
               textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 12, color: Ps.muted),
+              style: const TextStyle(fontSize: 12, color: PadInk.boardMuted),
             ),
           ],
         ],
@@ -166,6 +182,12 @@ class _TeamName extends StatelessWidget {
           decoration: BoxDecoration(
             color: accent,
             borderRadius: BorderRadius.circular(2),
+            boxShadow: [
+              BoxShadow(
+                color: accent.withValues(alpha: 0.6),
+                blurRadius: 8,
+              ),
+            ],
           ),
         ),
         const SizedBox(height: 6),
@@ -177,12 +199,37 @@ class _TeamName extends StatelessWidget {
           style: TextStyle(
             fontSize: 13.5,
             fontWeight: won ? FontWeight.w900 : FontWeight.w600,
-            color: Ps.ink,
+            color: won ? Colors.white : const Color(0xFFCBD5E1),
           ),
         ),
       ],
     );
   }
+}
+
+/// How many grid columns a control's label needs to stay readable.
+///
+/// The scoring pads lay their primary controls out as an even grid — a keypad
+/// shape a thumb learns in one match — and an even grid has one width for
+/// every tile. That is right for "0" through "6" and wrong for the moment a
+/// sport hands the same grid "Technical point (defence)": the tile shrank the
+/// type to fit, which on a phone at a boundary in daylight is the same as not
+/// drawing it.
+///
+/// So a long label is given more columns instead of a smaller font. The
+/// thresholds are character counts rather than a measured `TextPainter`,
+/// deliberately: this is called once per control inside a `LayoutBuilder`, on
+/// every frame of a scroll, and the answer only ever needs to be right to the
+/// nearest column.
+///
+/// Shared by every pad so the same label is never one width on the cricket pad
+/// and another on the kabaddi one.
+int padColumnSpan(String label) {
+  final n = label.length;
+  if (n <= 3) return 1;
+  if (n <= 8) return 2;
+  if (n <= 16) return 3;
+  return 4;
 }
 
 /// The stacked pad's controls: one section per group the plugin declared.
@@ -232,17 +279,33 @@ class ControlDeck extends StatelessWidget {
               ),
             ),
           ),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final c in group.controls)
-                PadButton(
-                  control: c,
-                  onPressed: enabled ? () => onControl(c) : null,
-                  showShortcut: showShortcuts,
-                ),
-            ],
+          // The row's width is handed down to every button in it.
+          //
+          // A `Wrap` lays its children out with UNBOUNDED width, so a button
+          // whose label is long — "Wicket — caught behind", "Technical point
+          // (defence)" — grew past the edge of the phone and was clipped with
+          // an overflow stripe. The scorer got a truncated word and no way to
+          // tell two similar controls apart, on the one screen where reading
+          // the wrong button is a wrong scoreline.
+          //
+          // Capping at the row width is what turns that into the behaviour
+          // that was wanted all along: a long label makes the button WIDER,
+          // up to the full width of the pad, and wraps onto a second line only
+          // when even that is not enough. Short labels are unaffected.
+          LayoutBuilder(
+            builder: (context, box) => Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final c in group.controls)
+                  PadButton(
+                    control: c,
+                    maxWidth: box.maxWidth,
+                    onPressed: enabled ? () => onControl(c) : null,
+                    showShortcut: showShortcuts,
+                  ),
+              ],
+            ),
           ),
         ],
       ],
@@ -257,11 +320,19 @@ class PadButton extends StatelessWidget {
     required this.control,
     required this.onPressed,
     this.showShortcut = false,
+    this.maxWidth,
   });
 
   final ScoreControl control;
   final VoidCallback? onPressed;
   final bool showShortcut;
+
+  /// The widest this button may grow before its label wraps.
+  ///
+  /// Null means unbounded, which is only safe where the caller has already
+  /// bounded it — a `SizedBox` in a grid. Inside a `Wrap` it must be the
+  /// row's width, or a long label runs off the screen. See [ControlDeck].
+  final double? maxWidth;
 
   @override
   Widget build(BuildContext context) {
@@ -290,59 +361,79 @@ class PadButton extends StatelessWidget {
             ? Colors.white
             : Ps.ink;
 
+    final radius = BorderRadius.circular(Ps.radiusSm + 2);
+
     return ConstrainedBox(
-      constraints: BoxConstraints(minHeight: minHeight, minWidth: 88),
+      constraints: BoxConstraints(
+        minHeight: minHeight,
+        minWidth: 88,
+        maxWidth: maxWidth ?? double.infinity,
+      ),
       child: Tooltip(
         message: control.tooltip ?? '',
-        child: Material(
-          color: disabled
-              ? Ps.canvas
-              : filled
-                  ? accent
-                  : accent.withValues(alpha: 0.07),
-          borderRadius: BorderRadius.circular(Ps.radiusSm),
-          child: InkWell(
-            onTap: onPressed,
-            borderRadius: BorderRadius.circular(Ps.radiusSm),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(Ps.radiusSm),
-                border: Border.all(
-                  color: filled
-                      ? Colors.transparent
-                      : accent.withValues(alpha: disabled ? 0.15 : 0.3),
-                ),
+        // The same moulded key the cricket pad uses, so a scorer who has kept
+        // one match knows what a control looks like in any sport. See
+        // [PadInk].
+        child: PadPressable(
+          onTap: onPressed,
+          borderRadius: radius,
+          builder: (context, pressed) => AnimatedContainer(
+            duration: const Duration(milliseconds: 90),
+            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+            decoration: BoxDecoration(
+              borderRadius: radius,
+              gradient: disabled
+                  ? null
+                  : filled
+                      ? PadInk.keyFill(accent)
+                      : PadInk.keyGhost(accent),
+              color: disabled ? Ps.canvas : null,
+              border: Border.all(
+                color: filled
+                    ? Colors.black.withValues(alpha: 0.06)
+                    : accent.withValues(alpha: disabled ? 0.15 : 0.28),
               ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    control.label,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: primary ? 16.5 : 14.5,
-                      fontWeight: FontWeight.w800,
-                      color: foreground,
-                    ),
+              boxShadow: disabled
+                  ? null
+                  : pressed
+                      ? PadInk.keyPressed(accent)
+                      : PadInk.key(accent, filled: filled),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  control.label,
+                  textAlign: TextAlign.center,
+                  // Two lines before anything is dropped. With the width cap
+                  // above, a label only reaches a second line once it has
+                  // already taken the full width of the pad — at which point
+                  // wrapping is the honest thing to do and shrinking the
+                  // type would be the alternative.
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: primary ? 16.5 : 14.5,
+                    fontWeight: FontWeight.w800,
+                    color: foreground,
                   ),
-                  if (showShortcut && control.shortcut != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 2),
-                      child: Text(
-                        control.shortcut!.toUpperCase(),
-                        style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.w700,
-                          color: filled
-                              ? Colors.white.withValues(alpha: 0.75)
-                              : Ps.faint,
-                        ),
+                ),
+                if (showShortcut && control.shortcut != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      control.shortcut!.toUpperCase(),
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        color: filled
+                            ? Colors.white.withValues(alpha: 0.75)
+                            : Ps.faint,
                       ),
                     ),
-                ],
-              ),
+                  ),
+              ],
             ),
           ),
         ),
@@ -378,8 +469,7 @@ class MatchMetaStrip extends StatelessWidget {
           'Started',
           TimeOfDay.fromDateTime(started.toLocal()).format(context),
         ),
-      if (started != null)
-        (Icons.timer_outlined, 'Elapsed', _elapsed(started)),
+      if (started != null) (Icons.timer_outlined, 'Elapsed', _elapsed(started)),
     ];
 
     return Container(

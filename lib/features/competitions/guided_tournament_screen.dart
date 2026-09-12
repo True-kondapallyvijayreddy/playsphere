@@ -9,7 +9,10 @@ import '../../core/models/enums.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
+import '../../shared/app_scaffold.dart' show showError;
 import '../../shared/club_context_banner.dart';
+import '../../shared/season_branding_field.dart';
+import '../../shared/offline_fee_notice.dart';
 import '../../shared/ui_kit.dart';
 import '../../shared/wizard.dart';
 import 'widgets/daily_hours_field.dart';
@@ -47,8 +50,17 @@ class GuidedTournamentScreen extends ConsumerStatefulWidget {
 class _GuidedTournamentScreenState
     extends ConsumerState<GuidedTournamentScreen> {
   final _name = TextEditingController();
+
+  /// The tournament's crest and header art, staged until it has an id — see
+  /// [SeasonBranding]. The same block the season forms use, so a tournament
+  /// and a season are brandable in the same way.
+  final _branding = SeasonBranding();
   final _shortName = TextEditingController();
   final _venue = TextEditingController();
+
+  /// Blank means free — see `FeeSettlement`. Kept as text rather than an int
+  /// so an empty field and a typed zero look the same to the organizer.
+  final _entryFee = TextEditingController();
 
   final Set<String> _venueIds = {};
   int _matchMinutes = 30;
@@ -72,6 +84,16 @@ class _GuidedTournamentScreenState
   /// competition, so the draw sheet opens on the organizer's own numbers
   /// instead of the generator's fallback.
   DrawConfig _draw = const DrawConfig();
+
+  /// The declared fee in whole rupees, floored at zero.
+  ///
+  /// Unparseable text reads as free rather than blocking the save — see
+  /// `_CategoryDraft.entryFeeRupees` in `create_season_screen.dart` for why
+  /// the failure direction is deliberate.
+  int get _entryFeeRupees {
+    final n = int.tryParse(_entryFee.text.trim());
+    return (n == null || n < 0) ? 0 : n;
+  }
 
   /// [_draw] clamped to what the format and the expected field allow.
   DrawConfig get _drawToSubmit => GroupStageFields.normalize(
@@ -106,6 +128,7 @@ class _GuidedTournamentScreenState
     _name.dispose();
     _shortName.dispose();
     _venue.dispose();
+    _entryFee.dispose();
     super.dispose();
   }
 
@@ -171,6 +194,7 @@ class _GuidedTournamentScreenState
                   venue:
                       _venue.text.trim().isEmpty ? null : _venue.text.trim(),
                   startDate: _startsAt,
+                  entryFeeRupees: _entryFeeRupees,
                   maxEntrants: _maxEntrants,
                   scheduleConfig: ScheduleConfig(
                     venueIds: _venueIds.toList(),
@@ -187,10 +211,20 @@ class _GuidedTournamentScreenState
                   createdBy: uid,
                 ),
               );
+      // After the document, because the storage path is keyed on its id, and
+      // allowed to fail on its own — see [SeasonBranding.uploadTo].
+      final brandingProblem = await _branding.uploadToEvent(
+        repo: ref.read(competitionRepositoryProvider),
+        orgId: widget.orgId,
+        compId: compId,
+        uid: uid,
+      );
+
       if (!mounted) return;
       // Replace, not push: the tournament exists now, and a back press must
       // not land on a filled-in form that would create a second one.
       context.pushReplacement(Routes.competition(widget.orgId, compId));
+      if (brandingProblem != null) showError(context, brandingProblem);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -284,6 +318,22 @@ class _GuidedTournamentScreenState
                     .firstWhere((c) => c.label == v, orElse: () => _category);
               }),
             ),
+          ),
+          const SizedBox(height: 8),
+          // On the first step with the name and the sport, because the
+          // preview is drawn from all three: the generated header takes the
+          // sport's colour, so a tournament with no artwork still shows the
+          // organizer what they are about to publish.
+          SeasonBrandingField(
+            branding: _branding,
+            name: _name.text,
+            sportId: _sport.id,
+            subject: 'Tournament',
+            title: 'Tournament look',
+            helper: 'Optional. Both show on the tournament page and on the '
+                'public link you share — the logo on the header, in lists, '
+                'and beside every result.',
+            onChanged: () => setState(() {}),
           ),
         ],
       ),
@@ -418,6 +468,27 @@ class _GuidedTournamentScreenState
                   max: 30,
                   onChanged: (v) => setState(() => _minSquad = v),
                 ),
+              const SizedBox(height: 4),
+              // Asked at creation, never at entry: an entrant deciding
+              // whether to play has to see the price before they commit,
+              // and PlaySphere has no way to ask for it later because it
+              // never handles the money — see `FeeSettlement`.
+              WizardField(
+                label: 'Entry Fee',
+                child: TextFormField(
+                  controller: _entryFee,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    hintText: 'Free',
+                    prefixText: '₹ ',
+                    isDense: true,
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ),
+              const OfflineFeeNotice(
+                message: FeeSettlement.organiserHelper,
+              ),
               const SizedBox(height: 4),
               WizardToggle(
                 label: 'Approval Required',
@@ -758,25 +829,15 @@ class _GuidedTournamentScreenState
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        PsCard(
-          child: Row(
-            children: [
-              SportBadge(sportId: _sport.id, size: 44),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Text(
-                  _name.text.trim().isEmpty
-                      ? 'Untitled tournament'
-                      : _name.text.trim(),
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                    color: Ps.ink,
-                  ),
-                ),
-              ),
-            ],
-          ),
+        // The header the tournament will open with, artwork included — see
+        // [SeasonBrandingPreview]. A tournament is one sport, so the
+        // generated art behind an organizer who picked no banner is that
+        // sport's, which is what the tournament page will show too.
+        SeasonBrandingPreview(
+          branding: _branding,
+          name: _name.text,
+          fallbackName: 'Untitled tournament',
+          sportId: _sport.id,
         ),
         const SizedBox(height: 12),
         PsCard(

@@ -73,6 +73,28 @@ class GeoLocation {
 
   bool get isNotEmpty => !isEmpty;
 
+  /// Finest-first, comma joined: "Kazipet, Warangal, Telangana".
+  ///
+  /// Composed in one place so a location reads identically everywhere it is
+  /// shown. The account panel, an applicant's introduction and a directory
+  /// card each used to join their own subset in their own order, which made
+  /// the same person look like they lived in three places.
+  ///
+  /// Empty string when nothing was captured — callers test [isEmpty] on the
+  /// result rather than rendering a stray comma.
+  String get label => [village, mandal, district, state]
+      .where((p) => p != null && p.trim().isNotEmpty)
+      .join(', ');
+
+  /// The coarse half only — "Warangal, Telangana".
+  ///
+  /// What a stranger is shown. A village name places somebody precisely
+  /// enough to find them, which a discovery card has no business doing; the
+  /// district is enough to answer "are they near me".
+  String get areaLabel => [district, state]
+      .where((p) => p != null && p.trim().isNotEmpty)
+      .join(', ');
+
   /// The name at [level], or null if this location was never captured that
   /// granularly (e.g. a user who only ever picked a district has no mandal
   /// to report). Callers must treat null as "cannot place this row at this

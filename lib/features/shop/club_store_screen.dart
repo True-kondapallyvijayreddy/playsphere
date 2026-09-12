@@ -173,7 +173,7 @@ class _BuySheetState extends ConsumerState<_BuySheet> {
   }
 
   Future<void> _placeOrder() async {
-    final me = ref.read(currentUserProvider).valueOrNull;
+    final me = ref.read(authUserProvider).valueOrNull;
     if (me == null) return;
     setState(() => _busy = true);
     try {

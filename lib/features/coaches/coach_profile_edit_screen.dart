@@ -94,7 +94,7 @@ class _CoachProfileEditScreenState
       return;
     }
 
-    final me = ref.read(currentUserProvider).valueOrNull;
+    final me = ref.read(authUserProvider).valueOrNull;
     if (me == null) return;
 
     setState(() => _saving = true);
@@ -147,7 +147,7 @@ class _CoachProfileEditScreenState
 
   @override
   Widget build(BuildContext context) {
-    final me = ref.watch(currentUserProvider).valueOrNull;
+    final me = ref.watch(authUserProvider).valueOrNull;
     final existing = ref.watch(myCoachProfileProvider);
     final profile = existing.valueOrNull;
     if (profile != null && !_loaded) _fill(profile);

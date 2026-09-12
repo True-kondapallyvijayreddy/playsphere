@@ -219,6 +219,33 @@ class Venue {
         'updatedAt': FieldValue.serverTimestamp(),
       };
 
+  /// The same venue under a different document id.
+  ///
+  /// Exists for exactly one flow, and [copyWith] deliberately cannot do it:
+  /// changing a saved venue's id would orphan every fixture, plan and event
+  /// pointing at the old one. A ground typed into the season create form has
+  /// no id until the form is submitted, and the form needs a local key to
+  /// hang a plan and a category restriction on in the meantime — so the
+  /// rekey is a separate, obviously-named method, used only on a venue that
+  /// has never been written.
+  Venue withId(String id) => Venue(
+        id: id,
+        orgId: orgId,
+        name: name,
+        address: address,
+        city: city,
+        district: district,
+        latitude: latitude,
+        longitude: longitude,
+        courts: courts,
+        openHour: openHour,
+        closeHour: closeHour,
+        notes: notes,
+        isArchived: isArchived,
+        createdBy: createdBy,
+        createdAt: createdAt,
+      );
+
   Venue copyWith({
     String? name,
     String? address,

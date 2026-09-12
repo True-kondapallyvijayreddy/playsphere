@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 and below (android:fullBackupContent).
+
+     Auto-backup is left ON so a user replacing their phone keeps their
+     preferences, but two things must never travel: the Firebase installation
+     ID and the FCM registration token. Restoring those onto a second device
+     gives two installations the same identity, and Firebase then delivers
+     each push to whichever one checked in last — the other silently stops
+     receiving notifications. Google's own guidance is to exclude them.
+
+     Auth credentials are excluded for the obvious reason: a restored session
+     would sign the new device in as the old one without a challenge. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="com.google.android.gms.appid.xml" />
+    <exclude domain="sharedpref" path="com.google.firebase.messaging.xml" />
+    <exclude domain="sharedpref" path="com.google.android.gms.measurement.prefs.xml" />
+    <exclude domain="file" path="PersistedInstallation.*.json" />
+    <exclude domain="sharedpref" path="com.google.firebase.auth.api.Store.xml" />
+</full-backup-content>

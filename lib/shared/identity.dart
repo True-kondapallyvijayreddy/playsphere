@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
@@ -111,12 +113,23 @@ class PsNetworkImage extends StatelessWidget {
     super.key,
     required this.url,
     required this.fallback,
+    this.bytes,
     this.width,
     this.height,
     this.fit = BoxFit.cover,
   });
 
   final String? url;
+
+  /// A picture that has been chosen but not uploaded yet, drawn in place of
+  /// [url] whenever it is set.
+  ///
+  /// Exists so a create form can show the same header the created thing will
+  /// have. A season's crest and banner are picked before the season document
+  /// exists — there is no id to upload them under yet — so the form holds the
+  /// bytes and hands them here. Without this the only honest preview a create
+  /// screen could offer was a file name.
+  final Uint8List? bytes;
 
   /// Drawn while loading, on failure, and when [url] is null or blank.
   final Widget fallback;
@@ -127,6 +140,18 @@ class PsNetworkImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final staged = bytes;
+    if (staged != null && staged.isNotEmpty) {
+      return Image.memory(
+        staged,
+        width: width,
+        height: height,
+        fit: fit,
+        gaplessPlayback: true,
+        errorBuilder: (_, __, ___) => fallback,
+      );
+    }
+
     final u = url;
     if (u == null || u.trim().isEmpty) return fallback;
 
@@ -139,7 +164,26 @@ class PsNetworkImage extends StatelessWidget {
       // monogram underneath is already the right shape and the right colour —
       // so the load reads as the photo arriving rather than as a gap filling.
       placeholder: (_, __) => fallback,
-      errorWidget: (_, __, ___) => fallback,
+      errorWidget: (_, url, error) {
+        // Drawing the fallback on failure is right for the person using the
+        // app — a header keeps its art, an avatar keeps its monogram, and the
+        // layout never reflows. It is wrong for the person *building* it: a
+        // failed load and an image that was never set look identical on
+        // screen, which is how a bucket with no CORS configuration went
+        // unnoticed while every uploaded banner in the product silently
+        // rendered as generated art.
+        //
+        // Logged in RELEASE, not behind an `assert`. It was assert-only, and
+        // that is precisely why the next report of "I uploaded a banner and
+        // it is not visible" could not be diagnosed from the affected device:
+        // the one line that would have said whether the fetch failed, and
+        // why, does not exist in the build people actually run. A single
+        // console line per failed image is a rounding error next to the
+        // download it just attempted, and it is the difference between a
+        // reproducible bug and a guess.
+        debugPrint('PsNetworkImage: failed to load $url — $error');
+        return fallback;
+      },
       fadeInDuration: const Duration(milliseconds: 140),
     );
   }
@@ -199,12 +243,18 @@ class PsCrest extends StatelessWidget {
     super.key,
     required this.name,
     this.logoUrl,
+    this.logoBytes,
     this.seed,
     this.size = 44,
   });
 
   final String name;
   final String? logoUrl;
+
+  /// A crest picked on a create form and not yet uploaded — see
+  /// [PsNetworkImage.bytes].
+  final Uint8List? logoBytes;
+
   final String? seed;
   final double size;
 
@@ -218,6 +268,7 @@ class PsCrest extends StatelessWidget {
         height: size,
         child: PsNetworkImage(
           url: logoUrl,
+          bytes: logoBytes,
           width: size,
           height: size,
           // `contain`, not `cover`. A crest is usually a logo on a flat
@@ -236,6 +287,67 @@ class PsCrest extends StatelessWidget {
   }
 }
 
+/// A generated picture for a *thing*, where [PsCrest] makes one for a club and
+/// [PsAvatar] one for a person.
+///
+/// Same recipe as the monogram below — a squircle, a shallow diagonal
+/// gradient, a white mark centred in it — with a glyph in place of initials.
+/// That is deliberate and it is the whole point of putting it here rather than
+/// drawing a coloured box at each call site: a club crest, a player avatar and
+/// a dashboard emblem then read as three members of one family instead of
+/// three people's ideas of a rounded rectangle.
+///
+/// The gradient is not decoration. A flat fill behind a white icon reads as
+/// "no image yet" — the placeholder state of something that failed to load.
+/// The same shape with a gradient reads as artwork somebody chose.
+class PsEmblem extends StatelessWidget {
+  const PsEmblem({
+    super.key,
+    required this.icon,
+    required this.color,
+    this.size = 40,
+  });
+
+  /// Filled, not outlined. An outline glyph on a saturated fill loses its
+  /// interior to the colour behind it and turns to mush below about 20pt;
+  /// every emblem in the app is a solid white shape for that reason.
+  final IconData icon;
+
+  final Color color;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(size * 0.28),
+        gradient: psEmblemGradient(color),
+      ),
+      // A fixed ratio to the tile, so the same emblem at 24pt and at 48pt is
+      // one component at two sizes rather than two components.
+      child: Center(
+        child: Icon(icon, size: size * 0.56, color: Colors.white),
+      ),
+    );
+  }
+}
+
+/// The shared fill: the colour, lifted at the top-left corner.
+///
+/// One function so the crest, the avatar and the emblem cannot drift apart —
+/// three call sites each doing `withLightness(x * 1.18)` is three chances for
+/// one of them to be 1.2 and look subtly wrong beside the others.
+LinearGradient psEmblemGradient(Color color) {
+  final hsl = HSLColor.fromColor(color);
+  final lighter =
+      hsl.withLightness((hsl.lightness * 1.18).clamp(0.0, 1.0)).toColor();
+  return LinearGradient(
+    begin: Alignment.topLeft,
+    end: Alignment.bottomRight,
+    colors: [lighter, color],
+  );
+}
+
 /// The generated mark itself.
 class _Monogram extends StatelessWidget {
   const _Monogram({
@@ -252,21 +364,14 @@ class _Monogram extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hsl = HSLColor.fromColor(color);
-    // A shallow vertical gradient rather than a flat fill. It is the whole
-    // difference between something that reads as designed and something that
-    // reads as "no image".
-    final lighter =
-        hsl.withLightness((hsl.lightness * 1.18).clamp(0.0, 1.0)).toColor();
-
     return DecoratedBox(
       decoration: BoxDecoration(
         borderRadius: borderRadius,
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [lighter, color],
-        ),
+        // A shallow diagonal gradient rather than a flat fill. It is the whole
+        // difference between something that reads as designed and something
+        // that reads as "no image". Shared with [PsEmblem] so the two cannot
+        // drift — see [psEmblemGradient].
+        gradient: psEmblemGradient(color),
       ),
       child: Center(
         child: Text(

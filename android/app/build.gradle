@@ -7,11 +7,27 @@ plugins {
     id "dev.flutter.flutter-gradle-plugin"
 }
 
+// Upload-key credentials. Kept out of the repo (android/.gitignore) because
+// the file holds the keystore password in clear text. Absent on a fresh
+// clone, in which case the release build falls back to the debug key and
+// fails loudly at upload time rather than silently producing an unsignable
+// bundle.
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file("key.properties")
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+
 android {
     namespace = "com.company.playsphere"
-    compileSdk = flutter.compileSdkVersion
+    // Pinned rather than tracking flutter.compileSdkVersion (35 on Flutter
+    // 3.27.4). Play requires new releases to target API 36 from 2026-11-01,
+    // and targetSdk can never exceed compileSdk.
+    compileSdk = 36
+    buildToolsVersion = "36.0.0"
     // Firebase, share_plus, and several other plugins require NDK 27; the
     // Flutter-default ndkVersion resolves lower and fails the plugin check.
+    // NDK 27 is also the first that links 16 KB-aligned native libraries.
     ndkVersion = "27.0.12077973"
 
     compileOptions {
@@ -25,8 +41,6 @@ android {
 
     defaultConfig {
         applicationId = "com.company.playsphere"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
         // Firebase Auth 23.x declares minSdk 23, so Flutter's default of 21
         // fails the manifest merge and the Android app cannot be built at all.
         // Pinned explicitly rather than tracking flutter.minSdkVersion: this
@@ -34,16 +48,72 @@ android {
         // a Flutter upgrade must not silently move it back down.
         // API 23 (Android 6.0) is ~99% of active devices.
         minSdk = 23
-        targetSdk = flutter.targetSdkVersion
+        // Android 16. Google Play stops accepting releases below this on
+        // 2026-11-01. Pinned for the same reason as compileSdk above:
+        // flutter.targetSdkVersion is 35 on this SDK.
+        targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        ndk {
+            // 64-bit only. 32-bit armeabi-v7a cannot satisfy Play's 16 KB
+            // page-size requirement, and every Android device shipped since
+            // 2016 is 64-bit. Dropping it also halves the native payload.
+            abiFilters "arm64-v8a", "x86_64"
+        }
+    }
+
+    // Stores the native .so libraries uncompressed and page-aligned inside the
+    // APK so the loader can mmap them directly. Required for 16 KB page-size
+    // compliance; the legacy path compresses them and cannot be aligned.
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+
+    signingConfigs {
+        release {
+            if (keystorePropertiesFile.exists()) {
+                keyAlias = keystoreProperties["keyAlias"]
+                keyPassword = keystoreProperties["keyPassword"]
+                // rootProject.file, not file(): storeFile is written
+                // relative to android/, where key.properties lives, but a
+                // bare file() here would resolve it against android/app/.
+                storeFile = rootProject.file(keystoreProperties["storeFile"])
+                storePassword = keystoreProperties["storePassword"]
+            }
+        }
     }
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.debug
+            signingConfig = keystorePropertiesFile.exists()
+                ? signingConfigs.release
+                : signingConfigs.debug
+
+            // R8 shrinking and resource stripping. Obfuscation failures in
+            // the Firebase and Play-Services reflection paths surface only at
+            // runtime, so this was turned on against an installed, minified
+            // release build rather than against a green Gradle log: the app
+            // launches, Firebase initialises, and logcat carries no
+            // ClassNotFoundException or NoSuchMethodError. Re-run that check
+            // — not just the build — after any dependency bump.
+            //
+            // Note that minification does not even complete without the
+            // Play Core -dontwarn rule in proguard-rules.pro.
+            minifyEnabled = true
+            shrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+
+            ndk {
+                // Ship the native symbol table to Crashlytics so NDK and
+                // engine crashes symbolicate instead of arriving as addresses.
+                debugSymbolLevel = "SYMBOL_TABLE"
+            }
         }
     }
 }

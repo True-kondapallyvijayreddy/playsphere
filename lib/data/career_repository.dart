@@ -6,6 +6,7 @@ import '../core/models/fixture.dart';
 import '../core/models/firestore_codec.dart';
 import '../domain/career/career_stats.dart';
 import '../domain/rating/glicko2.dart';
+import '../domain/rating/overall_glicko.dart';
 
 /// One sport's line on a career profile: what you played and how you rate.
 ///
@@ -33,6 +34,23 @@ class CareerLine {
   /// someone than a long record does, and Glicko already tells us that through
   /// [Rating.isProvisional].
   int get prominence => matchesPlayed;
+
+  /// This line as the overall-composite engine wants it, or null when the
+  /// sport has no rating to contribute.
+  ///
+  /// The recency fallback is the point of this getter. `lastPlayedAt` comes
+  /// from the career record, which a rated walkover never writes — so without
+  /// the rating document's own `updatedAt` behind it, a sport somebody played
+  /// last week could look like a sport with no timestamp at all.
+  SportRatingEvidence? get ratingEvidence {
+    final r = rating;
+    if (r == null) return null;
+    return SportRatingEvidence(
+      sportId: sportId,
+      rating: r,
+      lastPlayedAt: stats?.lastPlayedAt ?? r.updatedAt,
+    );
+  }
 }
 
 /// Reads the lifelong profile.
@@ -63,7 +81,7 @@ class CareerRepository {
   }
 
   /// Every match played under one club, across every sport and every team —
-  /// the source `ClubSportStats.forFixtures` aggregates into a club record.
+  /// the source `ClubRecord.forFixtures` aggregates into a club record.
   ///
   /// Capped the same way [watchPlayerFixtures] is, for the same reason: a
   /// long-running club's history is unbounded and a stats screen answers
@@ -78,10 +96,10 @@ class CareerRepository {
   Stream<List<Fixture>> watchOrgFixtures(String orgId, {int limit = 300}) {
     return Refs.allFixturesQuery
         .where('orgId', isEqualTo: orgId)
-        // Narrowed to matches that finished, which `ClubSportStats
-        // .forFixtures` was already the only consumer of — it skips anything
-        // failing `countsTowardsRecords` on the very first line — so this
-        // changes no number on any screen.
+        // Narrowed to matches that finished, which `ClubRecord.forFixtures`
+        // was already the only consumer of — it skips anything failing
+        // `countsTowardsRecords` on the very first line — so this changes no
+        // number on any screen.
         //
         // It is also what authorizes the query. `firestore.rules` hides a
         // placeholder fixture from everyone who cannot manage the competition,
@@ -154,7 +172,15 @@ class CareerRepository {
           ),
       };
       final ratingById = <String, Rating>{
-        for (final d in ratingsSnap.docs) d.id: Rating.fromMap(d.data()),
+        for (final d in ratingsSnap.docs)
+          d.id: Rating.fromMap(
+            d.data(),
+            // The server stamps this on every settled rating. It is the only
+            // recency signal for a sport whose result moved a rating without
+            // writing a career line — a rated walkover does exactly that —
+            // and the overall composite needs one per sport.
+            updatedAt: Fs.dateOrNull(d.data()['updatedAt']),
+          ),
       };
 
       // Chess is rated per time control (`chess:blitz`), so a rating id is not

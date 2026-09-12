@@ -13,7 +13,9 @@ import '../../core/router/app_router.dart';
 import '../../data/ground_repository.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/season_branding_field.dart';
 import '../../shared/club_context_banner.dart';
+import '../../shared/offline_fee_notice.dart';
 import '../grounds/ground_booking_flow.dart';
 
 /// Event creation.
@@ -53,6 +55,10 @@ class _CreateCompetitionScreenState
   final _fee = TextEditingController();
   final _teamSize = TextEditingController();
   final _rules = TextEditingController();
+
+  /// The event's crest and header art, staged until the event has an id —
+  /// see [SeasonBranding]. The same block both season forms use.
+  final _branding = SeasonBranding();
 
   SportSpec _sport = SportCatalog.byId('badminton');
   late CompetitionCategory _category = CompetitionCategory.presets().first;
@@ -221,11 +227,22 @@ class _CreateCompetitionScreenState
               createdBy: uid,
             ),
           );
+      // After the document, because the storage path is keyed on its id.
+      // Reports rather than throws, so a picture that fails to upload never
+      // costs the event — see [SeasonBranding.uploadTo].
+      final brandingProblem = await _branding.uploadToEvent(
+        repo: ref.read(competitionRepositoryProvider),
+        orgId: _orgId,
+        compId: compId,
+        uid: uid,
+      );
+
       if (mounted) {
         // Replace rather than push: the event now exists, and a back press
         // from it should return to the club, not to a creation form that
         // would make a second copy if it were submitted again.
         context.pushReplacement(Routes.competition(_orgId, compId));
+        if (brandingProblem != null) showError(context, brandingProblem);
       }
     } catch (e) {
       if (mounted) showError(context, e);
@@ -299,7 +316,27 @@ class _CreateCompetitionScreenState
                         ? 'At least 3 characters'
                         : null,
                   ),
-                  const SizedBox(height: 20),
+                  const SizedBox(height: 24),
+
+                  // With the name, for the reason `CreateSeasonScreen` puts
+                  // it there: what an event is called and what it looks like
+                  // are one question, and artwork asked for below the ground
+                  // booking is artwork nobody scrolls back to.
+                  ValueListenableBuilder<TextEditingValue>(
+                    valueListenable: _name,
+                    builder: (context, value, _) => SeasonBrandingField(
+                      branding: _branding,
+                      name: value.text,
+                      sportId: _sport.id,
+                      subject: 'Event',
+                      title: 'Event look',
+                      helper: 'Optional. Both show on the event page and on '
+                          'the public link you share — the logo on the '
+                          'header, in lists, and beside every result.',
+                      onChanged: () => setState(() {}),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
 
                   DropdownButtonFormField<String>(
                     value: _sport.id,
@@ -647,7 +684,8 @@ class _CreateCompetitionScreenState
                       decoration: const InputDecoration(
                         labelText: 'Entry fee (₹)',
                         hintText: '0',
-                        helperText: 'Leave at 0 for a free event',
+                        helperText: FeeSettlement.organiserHelper,
+                        helperMaxLines: 3,
                         prefixText: '₹ ',
                         border: OutlineInputBorder(),
                       ),

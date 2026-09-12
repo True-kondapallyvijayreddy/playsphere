@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../../../core/layout/responsive.dart';
 import '../../../domain/scoring/scoring_plugin.dart';
 import '../../../shared/ui_kit.dart';
+import 'pad_chrome.dart' show padColumnSpan;
+import 'pad_theme.dart';
 
 /// The scoring pad for cricket: the crease, the recent balls, and a keypad.
 ///
@@ -62,11 +64,11 @@ class CreasePad extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _ScoreHead(board: board),
-        const SizedBox(height: 10),
+        const SizedBox(height: 12),
         _CreaseTable(board: board),
         const SizedBox(height: 10),
         _BallStrip(balls: board.timeline, canUndo: canUndo, onUndo: onUndo),
-        const SizedBox(height: 14),
+        const SizedBox(height: 6),
         for (final group in groups) ...[
           _GroupHeading(group.title),
           _Keypad(
@@ -95,26 +97,58 @@ class _ScoreHead extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const ink = Color(0xFF0B1220);
-
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
       decoration: BoxDecoration(
-        color: ink,
-        borderRadius: BorderRadius.circular(Ps.radius),
+        borderRadius: BorderRadius.circular(Ps.radius + 2),
+        border: Border.all(color: PadInk.boardEdge),
+        boxShadow: PadInk.board,
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [PadInk.boardTop, PadInk.boardMid, PadInk.boardBottom],
+          stops: [0, 0.55, 1],
+        ),
       ),
       child: Column(
         children: [
-          Text(
-            board.battingTeam.toUpperCase(),
-            textAlign: TextAlign.center,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w800,
-              letterSpacing: 1,
-              color: Colors.white,
+          // The batting side, as a lit pill rather than a line of text. It is
+          // the one label on the board that answers "whose innings is this",
+          // and after the break it is the answer that changed.
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(999),
+              color: Ps.primary.withValues(alpha: 0.14),
+              border: Border.all(color: Ps.primary.withValues(alpha: 0.35)),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 6,
+                  height: 6,
+                  decoration: const BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Ps.primary,
+                  ),
+                ),
+                const SizedBox(width: 7),
+                Flexible(
+                  child: Text(
+                    board.battingTeam.toUpperCase(),
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
           if (board.inningsLabel case final label?)
@@ -125,16 +159,44 @@ class _ScoreHead extends StatelessWidget {
                 style: const TextStyle(fontSize: 11.5, color: Ps.faint),
               ),
             ),
-          const SizedBox(height: 6),
-          FittedBox(
-            child: Text(
-              board.score,
-              style: const TextStyle(
-                fontSize: 52,
-                height: 1.05,
-                fontWeight: FontWeight.w900,
-                letterSpacing: -1.5,
-                color: Ps.primary,
+          const SizedBox(height: 8),
+          // The total changes on nearly every press, so it animates. A scorer
+          // glancing up from the pitch catches the movement well before they
+          // read the number — and on a board this size, movement is the only
+          // confirmation that a tap landed at all.
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 220),
+            transitionBuilder: (child, animation) => FadeTransition(
+              opacity: animation,
+              child: ScaleTransition(
+                scale: Tween<double>(begin: 0.88, end: 1).animate(
+                  CurvedAnimation(parent: animation, curve: Curves.easeOutBack),
+                ),
+                child: child,
+              ),
+            ),
+            child: FittedBox(
+              key: ValueKey(board.score),
+              child: Text(
+                board.score,
+                style: TextStyle(
+                  fontSize: 56,
+                  height: 1.02,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: -2,
+                  color: Colors.white,
+                  fontFeatures: PadInk.figures,
+                  // The green is the glow rather than the fill. As a fill it
+                  // sat at about 3:1 on near-black; as light behind white
+                  // numerals it keeps the brand on the board and the total at
+                  // full contrast.
+                  shadows: [
+                    Shadow(
+                      color: Ps.primary.withValues(alpha: 0.55),
+                      blurRadius: 24,
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -147,53 +209,91 @@ class _ScoreHead extends StatelessWidget {
               children: [for (final n in board.notes) _NoteChip(n)],
             ),
           ],
-          const SizedBox(height: 12),
+          const SizedBox(height: 14),
           // The three numbers that qualify the total. Every scoreboard in
           // cricket carries them and none of them fits in the total itself.
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              if (board.extras case final e?) _HeadStat('Ex', '$e'),
-              _HeadStat(
-                'Ov',
-                board.oversOf == null
-                    ? board.overs
-                    : '${board.overs} / ${board.oversOf}',
-                emphasis: true,
-              ),
-              if (board.runRate case final rr?) _HeadStat('CRR', rr),
-            ],
+          //
+          // Set on their own inset rail, divided. Spread across the bare
+          // board they read as three loose labels; boxed and ruled they read
+          // as an instrument panel, and the eye finds "Ov" in one move.
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 6),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.05),
+              borderRadius: BorderRadius.circular(Ps.radiusSm),
+              border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
+            ),
+            child: Row(
+              children: [
+                if (board.extras case final e?) ...[
+                  Expanded(child: _HeadStat('Ex', '$e')),
+                  const _StatRule(),
+                ],
+                Expanded(
+                  child: _HeadStat(
+                    'Ov',
+                    board.oversOf == null
+                        ? board.overs
+                        : '${board.overs} / ${board.oversOf}',
+                    emphasis: true,
+                  ),
+                ),
+                if (board.runRate case final rr?) ...[
+                  const _StatRule(),
+                  Expanded(child: _HeadStat('CRR', rr)),
+                ],
+              ],
+            ),
           ),
           if (board.chaseLine != null || board.chaseNeed != null) ...[
             const SizedBox(height: 12),
             Container(
               width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+              padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
               decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.06),
                 borderRadius: BorderRadius.circular(Ps.radiusSm),
+                border: Border.all(color: PadInk.amber.withValues(alpha: 0.3)),
+                gradient: LinearGradient(
+                  colors: [
+                    PadInk.amber.withValues(alpha: 0.16),
+                    PadInk.amber.withValues(alpha: 0.06),
+                  ],
+                ),
               ),
               child: Column(
                 children: [
-                  if (board.chaseLine case final line?)
-                    Text(
-                      line,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w800,
-                        color: Colors.white,
-                      ),
-                    ),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.flag_rounded,
+                          size: 14, color: PadInk.amber),
+                      const SizedBox(width: 6),
+                      if (board.chaseLine case final line?)
+                        Flexible(
+                          child: Text(
+                            line,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w800,
+                              color: Colors.white,
+                              fontFeatures: PadInk.figures,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
                   if (board.chaseNeed case final need?)
                     Padding(
-                      padding: const EdgeInsets.only(top: 2),
+                      padding: const EdgeInsets.only(top: 3),
                       child: Text(
                         need,
                         textAlign: TextAlign.center,
                         style: const TextStyle(
                           fontSize: 12,
-                          color: Ps.faint,
+                          fontWeight: FontWeight.w600,
+                          color: PadInk.boardMuted,
+                          fontFeatures: PadInk.figures,
                         ),
                       ),
                     ),
@@ -220,24 +320,41 @@ class _HeadStat extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         Text(
-          label,
+          label.toUpperCase(),
           style: const TextStyle(
-            fontSize: 9.5,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 0.6,
-            color: Ps.faint,
+            fontSize: 9,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 1.1,
+            color: PadInk.boardMuted,
           ),
         ),
-        const SizedBox(height: 2),
-        Text(
-          value,
-          style: TextStyle(
-            fontSize: emphasis ? 15 : 13.5,
-            fontWeight: FontWeight.w800,
-            color: Colors.white,
+        const SizedBox(height: 3),
+        FittedBox(
+          child: Text(
+            value,
+            style: TextStyle(
+              fontSize: emphasis ? 16 : 14,
+              fontWeight: FontWeight.w800,
+              color: emphasis ? Colors.white : const Color(0xFFE2E8F0),
+              fontFeatures: PadInk.figures,
+            ),
           ),
         ),
       ],
+    );
+  }
+}
+
+/// The hairline between two head stats.
+class _StatRule extends StatelessWidget {
+  const _StatRule();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 1,
+      height: 24,
+      color: Colors.white.withValues(alpha: 0.09),
     );
   }
 }
@@ -284,10 +401,12 @@ class _CreaseTable extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
+      clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         color: Ps.surface,
         borderRadius: BorderRadius.circular(Ps.radius),
         border: Border.all(color: Ps.border),
+        boxShadow: PadInk.panel,
       ),
       child: Column(
         children: [
@@ -299,8 +418,7 @@ class _CreaseTable extends StatelessWidget {
           if (board.batters.isEmpty)
             const _EmptyRow('Nobody at the crease yet')
           else
-            for (final b in board.batters)
-              _BatterRow(batter: b),
+            for (final b in board.batters) _BatterRow(batter: b),
           const Divider(height: 1, color: Ps.border),
           const _TableHead(
             icon: Icons.sports_baseball_outlined,
@@ -311,8 +429,13 @@ class _CreaseTable extends StatelessWidget {
             _StatRow(
               name: b.name,
               highlight: false,
-              cells: [b.overs, '${b.maidens}', '${b.runs}', '${b.wickets}',
-                  b.economy],
+              cells: [
+                b.overs,
+                '${b.maidens}',
+                '${b.runs}',
+                '${b.wickets}',
+                b.economy
+              ],
             )
           else
             const _EmptyRow('Nobody named to bowl'),
@@ -335,19 +458,21 @@ class _TableHead extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      color: Ps.canvas,
       child: Row(
         children: [
-          Icon(icon, size: 15, color: Ps.primary),
+          Icon(icon, size: 14, color: Ps.primary),
           const SizedBox(width: 6),
           Expanded(
             child: Text(
-              label,
+              label.toUpperCase(),
               style: const TextStyle(
-                fontSize: 12,
+                fontSize: 10.5,
                 fontWeight: FontWeight.w800,
-                color: Ps.ink,
+                letterSpacing: 0.9,
+                color: Ps.muted,
               ),
             ),
           ),
@@ -358,8 +483,9 @@ class _TableHead extends StatelessWidget {
                 c,
                 textAlign: TextAlign.end,
                 style: const TextStyle(
-                  fontSize: 10.5,
+                  fontSize: 10,
                   fontWeight: FontWeight.w800,
+                  letterSpacing: 0.4,
                   color: Ps.faint,
                 ),
               ),
@@ -410,10 +536,33 @@ class _StatRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-      color: highlight ? Ps.primary.withValues(alpha: 0.08) : null,
+      padding: const EdgeInsets.fromLTRB(0, 8, 12, 8),
+      decoration: BoxDecoration(
+        gradient: highlight
+            ? LinearGradient(
+                colors: [
+                  Ps.primary.withValues(alpha: 0.12),
+                  Ps.primary.withValues(alpha: 0.02),
+                ],
+              )
+            : null,
+      ),
       child: Row(
         children: [
+          // The striker's rail. The asterisk is the notation, and it stays —
+          // but it is four pixels wide at arm's length, and the row it marks
+          // is the one fact on this panel the scorer must never lose.
+          Container(
+            width: 3,
+            height: 22,
+            decoration: BoxDecoration(
+              color: highlight ? Ps.primary : Colors.transparent,
+              borderRadius: const BorderRadius.horizontal(
+                right: Radius.circular(3),
+              ),
+            ),
+          ),
+          const SizedBox(width: 9),
           Expanded(
             child: Text(
               name,
@@ -435,7 +584,8 @@ class _StatRow extends StatelessWidget {
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: highlight ? FontWeight.w800 : FontWeight.w600,
-                  color: Ps.ink,
+                  color: highlight ? Ps.ink : Ps.muted,
+                  fontFeatures: PadInk.figures,
                 ),
               ),
             ),
@@ -493,11 +643,12 @@ class _BallStrip extends StatelessWidget {
         balls.length <= _shown ? balls : balls.sublist(balls.length - _shown);
 
     return Container(
-      padding: const EdgeInsets.fromLTRB(10, 8, 6, 8),
+      padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
       decoration: BoxDecoration(
         color: Ps.surface,
         borderRadius: BorderRadius.circular(Ps.radius),
         border: Border.all(color: Ps.border),
+        boxShadow: PadInk.panel,
       ),
       child: Row(
         children: [
@@ -515,7 +666,7 @@ class _BallStrip extends StatelessWidget {
                     child: Row(
                       children: [
                         for (final ball in recent) ...[
-                          _BallDot(ball),
+                          _BallDot(ball, newest: ball == recent.last),
                           if (ball.endsOver && ball != recent.last)
                             const _OverBreak(),
                         ],
@@ -523,11 +674,56 @@ class _BallStrip extends StatelessWidget {
                     ),
                   ),
           ),
-          IconButton(
-            onPressed: canUndo ? onUndo : null,
-            icon: const Icon(Icons.backspace_outlined),
-            tooltip: 'Undo the last ball',
-            style: IconButton.styleFrom(foregroundColor: Ps.live),
+          const SizedBox(width: 4),
+          // Undo is a labelled key, not a bare glyph.
+          //
+          // It is the most consequential control on the pad — it deletes a
+          // recorded ball in front of the players — and as a borderless icon
+          // it looked like a decoration on the end of the strip. Given the
+          // same moulded treatment as the keypad, it reads as a control, and
+          // its red says what kind.
+          Tooltip(
+            message: 'Undo the last ball',
+            child: PadPressable(
+              onTap: canUndo ? onUndo : null,
+              builder: (context, pressed) => AnimatedContainer(
+                duration: const Duration(milliseconds: 90),
+                height: 38,
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(Ps.radiusSm),
+                  color: canUndo ? null : Ps.canvas,
+                  gradient: canUndo ? PadInk.keyGhost(Ps.live) : null,
+                  border: Border.all(
+                    color: Ps.live.withValues(alpha: canUndo ? 0.3 : 0.12),
+                  ),
+                  boxShadow: !canUndo
+                      ? null
+                      : pressed
+                          ? PadInk.keyPressed(Ps.live)
+                          : PadInk.key(Ps.live, filled: false),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.undo_rounded,
+                      size: 16,
+                      color: canUndo ? Ps.live : Ps.faint,
+                    ),
+                    const SizedBox(width: 5),
+                    Text(
+                      'Undo',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w800,
+                        color: canUndo ? Ps.live : Ps.faint,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ),
         ],
       ),
@@ -536,9 +732,13 @@ class _BallStrip extends StatelessWidget {
 }
 
 class _BallDot extends StatelessWidget {
-  const _BallDot(this.ball);
+  const _BallDot(this.ball, {this.newest = false});
 
   final BallChip ball;
+
+  /// The ball just bowled. Ringed, so the scorer's eye lands on the ball they
+  /// are most likely to want to undo without counting along the strip.
+  final bool newest;
 
   @override
   Widget build(BuildContext context) {
@@ -554,18 +754,38 @@ class _BallDot extends StatelessWidget {
       BallKind.extra => (const Color(0xFFF59E0B), Colors.white),
     };
 
-    return Container(
-      margin: const EdgeInsets.only(right: 6),
+    final solid = ball.kind != BallKind.dot;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 180),
+      margin: EdgeInsets.only(right: 6, top: newest ? 0 : 1),
       constraints: const BoxConstraints(minWidth: 34),
-      height: 34,
-      padding: const EdgeInsets.symmetric(horizontal: 7),
+      height: newest ? 36 : 34,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
       alignment: Alignment.center,
       decoration: BoxDecoration(
-        color: bg,
-        shape: BoxShape.rectangle,
         borderRadius: BorderRadius.circular(100),
-        border: ball.kind == BallKind.dot
-            ? Border.all(color: Ps.border)
+        gradient: solid
+            ? LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Color.lerp(bg, Colors.white, 0.16)!, bg],
+              )
+            : null,
+        color: solid ? null : bg,
+        border: Border.all(
+          color: newest
+              ? (solid ? Colors.white.withValues(alpha: 0.85) : Ps.muted)
+              : (solid ? Colors.transparent : Ps.border),
+          width: newest ? 1.6 : 1,
+        ),
+        boxShadow: solid
+            ? [
+                BoxShadow(
+                  color: bg.withValues(alpha: newest ? 0.45 : 0.28),
+                  blurRadius: newest ? 8 : 5,
+                  offset: const Offset(0, 2),
+                ),
+              ]
             : null,
       ),
       child: Text(
@@ -574,6 +794,7 @@ class _BallDot extends StatelessWidget {
           fontSize: 13,
           fontWeight: FontWeight.w800,
           color: fg,
+          fontFeatures: PadInk.figures,
         ),
       ),
     );
@@ -586,10 +807,13 @@ class _OverBreak extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 1,
-      height: 18,
-      margin: const EdgeInsets.only(right: 6),
-      color: Ps.border,
+      width: 2,
+      height: 14,
+      margin: const EdgeInsets.only(right: 8, left: 2),
+      decoration: BoxDecoration(
+        color: Ps.faint.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(2),
+      ),
     );
   }
 }
@@ -602,15 +826,33 @@ class _GroupHeading extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(top: 8, bottom: 8, left: 2),
-      child: Text(
-        title.toUpperCase(),
-        style: const TextStyle(
-          fontSize: 11,
-          fontWeight: FontWeight.w800,
-          letterSpacing: 0.8,
-          color: Ps.faint,
-        ),
+      padding: const EdgeInsets.only(top: 12, bottom: 8, left: 2),
+      child: Row(
+        children: [
+          Text(
+            title.toUpperCase(),
+            style: const TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 1.2,
+              color: Ps.muted,
+            ),
+          ),
+          const SizedBox(width: 10),
+          // The rule carries the eye across to the keys the heading names,
+          // which is what separates four stacked groups into four groups
+          // rather than one wall of keys with words in it.
+          Expanded(
+            child: Container(
+              height: 1,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [Ps.border, Ps.border.withValues(alpha: 0)],
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -638,9 +880,15 @@ class _Keypad extends StatelessWidget {
   Widget build(BuildContext context) {
     // Each control is one tile; one with a drawer is two — itself, and the
     // `+` that opens the rest. See [ScoreControl.variants].
-    final tiles = <Widget>[];
+    // A tile and the number of columns its LABEL needs. "4" and "W" want one
+    // each; "Wicket — run out" wants three, and squeezing it into one is what
+    // the `FittedBox` inside [_PadTile] used to do — shrinking 17pt type to
+    // about 7pt, on a pad held at arm's length in daylight. The keypad shape
+    // is worth keeping for the digits, so the fix is to let a long label take
+    // the room it needs rather than to abandon the grid.
+    final tiles = <(Widget, int)>[];
     for (final c in controls) {
-      tiles.add(
+      tiles.add((
         _PadTile(
           label: c.label,
           shortcut: showShortcuts ? c.shortcut : null,
@@ -648,9 +896,10 @@ class _Keypad extends StatelessWidget {
           style: c.style,
           onTap: enabled ? () => onControl(c) : null,
         ),
-      );
+        padColumnSpan(c.label),
+      ));
       if (c.variants.isNotEmpty) {
-        tiles.add(
+        tiles.add((
           _PadTile(
             label: '${c.label}+',
             tooltip: 'More ${c.label.toLowerCase()} options',
@@ -658,7 +907,8 @@ class _Keypad extends StatelessWidget {
             outlined: true,
             onTap: enabled ? () => _openDrawer(context, c) : null,
           ),
-        );
+          padColumnSpan('${c.label}+'),
+        ));
       }
     }
     if (tiles.isEmpty) return const SizedBox.shrink();
@@ -667,13 +917,20 @@ class _Keypad extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, constraints) {
         const gap = 8.0;
-        final width =
-            (constraints.maxWidth - gap * (perRow - 1)) / perRow;
+        final column = (constraints.maxWidth - gap * (perRow - 1)) / perRow;
         return Wrap(
           spacing: gap,
           runSpacing: gap,
           children: [
-            for (final tile in tiles) SizedBox(width: width, child: tile),
+            for (final (tile, span) in tiles)
+              SizedBox(
+                // A span never exceeds the row, so a very long label on a
+                // narrow phone becomes a full-width button rather than one
+                // that runs off the side.
+                width: column * span.clamp(1, perRow) +
+                    gap * (span.clamp(1, perRow) - 1),
+                child: tile,
+              ),
           ],
         );
       },
@@ -743,6 +1000,10 @@ class _Keypad extends StatelessWidget {
 }
 
 /// One key. Square-ish, big, and labelled by what it records.
+///
+/// Drawn as a moulded key rather than a flat rectangle: a gradient fill, a
+/// shadow tinted with the key's own accent, and a sink under the thumb. See
+/// [PadInk] for why a pad earns depth the rest of the app does not.
 class _PadTile extends StatelessWidget {
   const _PadTile({
     required this.label,
@@ -771,7 +1032,7 @@ class _PadTile extends StatelessWidget {
         ? Ps.live
         : primary
             ? Ps.primary
-            : const Color(0xFF334155);
+            : PadInk.slate;
 
     final disabled = onTap == null;
     final filled = (primary || danger) && !outlined;
@@ -781,6 +1042,7 @@ class _PadTile extends StatelessWidget {
             ? Colors.white
             : accent;
 
+    final radius = BorderRadius.circular(Ps.radiusSm + 2);
     final height = context.responsive<double>(
       compact: 58,
       medium: 54,
@@ -789,60 +1051,79 @@ class _PadTile extends StatelessWidget {
 
     return Tooltip(
       message: tooltip ?? '',
-      child: Material(
-        color: disabled
-            ? Ps.canvas
-            : filled
-                ? accent
-                : accent.withValues(alpha: outlined ? 0.04 : 0.08),
-        borderRadius: BorderRadius.circular(Ps.radiusSm),
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(Ps.radiusSm),
-          child: Container(
-            height: height,
-            alignment: Alignment.center,
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(Ps.radiusSm),
-              border: Border.all(
-                color: filled
-                    ? Colors.transparent
-                    : accent.withValues(alpha: disabled ? 0.15 : 0.35),
-                width: outlined ? 1.4 : 1,
-              ),
+      child: PadPressable(
+        onTap: onTap,
+        borderRadius: radius,
+        builder: (context, pressed) => AnimatedContainer(
+          duration: const Duration(milliseconds: 90),
+          height: height,
+          alignment: Alignment.center,
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          decoration: BoxDecoration(
+            borderRadius: radius,
+            gradient: disabled
+                ? null
+                : filled
+                    ? PadInk.keyFill(accent)
+                    : PadInk.keyGhost(accent),
+            color: disabled ? Ps.canvas : null,
+            border: Border.all(
+              color: filled
+                  ? Colors.black.withValues(alpha: 0.06)
+                  : accent.withValues(alpha: disabled ? 0.12 : 0.28),
+              width: outlined ? 1.4 : 1,
             ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                FittedBox(
+            boxShadow: disabled
+                ? null
+                : pressed
+                    ? PadInk.keyPressed(accent)
+                    : PadInk.key(accent, filled: filled),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              FittedBox(
+                child: Text(
+                  label,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 18,
+                    height: 1.1,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: -0.2,
+                    color: foreground,
+                    fontFeatures: PadInk.figures,
+                    // A solid key carries its label over a mid-tone fill. The
+                    // shadow is what keeps a white "4" legible on green in
+                    // direct sun, which is the light this pad is used in.
+                    shadows: filled
+                        ? const [
+                            Shadow(
+                              color: Color(0x33000000),
+                              blurRadius: 2,
+                              offset: Offset(0, 1),
+                            ),
+                          ]
+                        : null,
+                  ),
+                ),
+              ),
+              if (shortcut != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 1),
                   child: Text(
-                    label,
-                    textAlign: TextAlign.center,
+                    shortcut!.toUpperCase(),
                     style: TextStyle(
-                      fontSize: 17,
-                      fontWeight: FontWeight.w800,
-                      color: foreground,
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w700,
+                      color: filled
+                          ? Colors.white.withValues(alpha: 0.7)
+                          : Ps.faint,
                     ),
                   ),
                 ),
-                if (shortcut != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 1),
-                    child: Text(
-                      shortcut!.toUpperCase(),
-                      style: TextStyle(
-                        fontSize: 9.5,
-                        fontWeight: FontWeight.w700,
-                        color: filled
-                            ? Colors.white.withValues(alpha: 0.7)
-                            : Ps.faint,
-                      ),
-                    ),
-                  ),
-              ],
-            ),
+            ],
           ),
         ),
       ),

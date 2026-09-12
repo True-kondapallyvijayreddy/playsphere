@@ -159,7 +159,7 @@ class _ProductEditorSheetState extends ConsumerState<_ProductEditorSheet> {
   }
 
   Future<void> _pickPhoto() async {
-    final me = ref.read(currentUserProvider).valueOrNull;
+    final me = ref.read(authUserProvider).valueOrNull;
     if (me == null) return;
     await pickAndUploadImage(
       context: context,
@@ -180,7 +180,7 @@ class _ProductEditorSheetState extends ConsumerState<_ProductEditorSheet> {
   }
 
   Future<void> _save() async {
-    final me = ref.read(currentUserProvider).valueOrNull;
+    final me = ref.read(authUserProvider).valueOrNull;
     if (me == null) return;
     if (_name.text.trim().isEmpty) {
       showError(context, 'Give it a name.');

@@ -139,7 +139,12 @@ class _LookingForBoardScreenState
           ],
         ),
       ),
-    );
+    ).whenComplete(() {
+      // The dialog holds these for its whole lifetime; dispose once it closes.
+      descCtrl.dispose();
+      districtCtrl.dispose();
+      mandalCtrl.dispose();
+    });
   }
 
   @override

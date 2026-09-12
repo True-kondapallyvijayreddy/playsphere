@@ -162,6 +162,121 @@ class CommunityRepository {
         ),
       );
 
+  /// Asks a club who is in for a challenge that has not been agreed yet.
+  ///
+  /// ## Why this happens before the opponent answers
+  ///
+  /// A challenge used to be settled entirely between two admins: one issued
+  /// it, the other accepted, and the members of both clubs found out they had
+  /// a match when somebody messaged them. By then the date was fixed, and a
+  /// captain who then could not raise eleven had to go back and apologise for
+  /// a fixture their own club had agreed to.
+  ///
+  /// Asking first inverts that. The call goes out on the challenging club's
+  /// own board the moment the challenge is sent, so by the time the opponent
+  /// replies the captain already knows who is travelling — and the accept is
+  /// a decision made with the squad in hand rather than a hope.
+  ///
+  /// [invitedUids] is the other half of it. See [MatchCall.invitedUids]: a
+  /// club with a hundred members asking all hundred about an eleven-a-side
+  /// match gets a hundred answers and a squad it still has to choose by hand.
+  /// Empty asks everybody, which stays the default.
+  ///
+  /// Posted on [orgId]'s board — whichever of the two clubs is asking. Both
+  /// can, independently, and neither sees the other's answers.
+  Future<void> createChallengeRsvp({
+    required String orgId,
+    required String authorUid,
+    required String authorName,
+    required String title,
+    required String content,
+    required MatchCall match,
+    required ChallengeCallTarget target,
+    List<String> invitedUids = const [],
+  }) =>
+      createMatchRsvp(
+        orgId: orgId,
+        authorUid: authorUid,
+        authorName: authorName,
+        title: title,
+        content: content,
+        match: MatchCall(
+          sportId: match.sportId,
+          matchDate: match.matchDate,
+          venue: match.venue,
+          maxPlayers: match.maxPlayers,
+          forChallenge: target,
+          invitedUids: invitedUids,
+        ),
+      );
+
+  /// Corrects a call that is already out.
+  ///
+  /// ## Why the answers survive an edit
+  ///
+  /// The obvious alternative — cancel and re-post — throws away every vote,
+  /// and the votes are the expensive part: fourteen people have already read
+  /// a notification and tapped. A ground moved from one end of the village to
+  /// the other does not un-ask "are you free on Sunday", so the poll is left
+  /// exactly where it is and only the facts about the match change.
+  ///
+  /// Written as dotted field paths rather than as a whole `match` map, for the
+  /// same reason [voteInPoll] is: a wholesale write of the block would carry
+  /// back the `invitedUids` and `forChallenge` the editor never saw and had no
+  /// business restating.
+  ///
+  /// The clock is the one thing an edit must be careful with. `onMatchRsvp`
+  /// deliberately re-notifies nobody on an update — see its `if (!before)`
+  /// guard — so a member whose Sunday just moved to Saturday finds out from
+  /// the card, not from a push. Callers say so on screen.
+  Future<void> updateMatchCall({
+    required String orgId,
+    required String announcementId,
+    String? title,
+    String? content,
+    DateTime? matchDate,
+    String? venue,
+    int? maxPlayers,
+  }) async {
+    final patch = <String, dynamic>{
+      if (title != null) 'title': title,
+      if (content != null) 'content': content,
+      if (matchDate != null) 'match.matchDate': Timestamp.fromDate(matchDate),
+      if (venue != null) 'match.venue': venue,
+      if (maxPlayers != null) 'match.maxPlayers': maxPlayers,
+    };
+    if (patch.isEmpty) return;
+    await Refs.announcement(orgId, announcementId).update(patch);
+  }
+
+  /// Calls a match off.
+  ///
+  /// Deletes rather than closes, and that is the distinction against
+  /// [closePoll]. A closed poll is a decision the club made and wants to keep
+  /// reading; a cancelled match is a question that turned out not to apply,
+  /// and leaving it on the feed with a "cancelled" badge means every member
+  /// who opens their home screen for the next four days has to re-read a
+  /// fixture that is not happening to work out that it is not happening.
+  ///
+  /// The discussion under it goes too — Firestore does not cascade, so the
+  /// subcollection is cleared first, or its messages would outlive the card
+  /// they belong to and be unreachable forever.
+  Future<void> cancelMatchCall({
+    required String orgId,
+    required String announcementId,
+  }) async {
+    final comments =
+        await Refs.matchComments(orgId, announcementId).limit(400).get();
+    if (comments.docs.isNotEmpty) {
+      final batch = _firestore.batch();
+      for (final d in comments.docs) {
+        batch.delete(d.reference);
+      }
+      await batch.commit();
+    }
+    await Refs.announcement(orgId, announcementId).delete();
+  }
+
   /// The club's match calls, newest first, with the ones already played
   /// dropped.
   ///
@@ -266,8 +381,17 @@ class CommunityRepository {
 
   // --- Inter-Club Challenges --------------------------------------------
 
-  Future<void> createChallenge(Challenge challenge) async {
-    await Refs.challenges.add(challenge.toCreate());
+  /// Issues a challenge and hands back the id it was written under.
+  ///
+  /// The id is returned rather than discarded because the caller's very next
+  /// act is to ask its own club who is in, and a [ChallengeCallTarget] cannot
+  /// be built without it. Before this returned anything, the availability call
+  /// could only be posted later, by hand, from the challenge card — which is
+  /// how a club ended up agreeing a date its members had never been asked
+  /// about.
+  Future<String> createChallenge(Challenge challenge) async {
+    final doc = await Refs.challenges.add(challenge.toCreate());
+    return doc.id;
   }
 
   /// Challenges involving [orgId], in either direction.

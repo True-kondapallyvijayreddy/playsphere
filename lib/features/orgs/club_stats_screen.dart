@@ -5,16 +5,23 @@ import 'package:go_router/go_router.dart';
 import '../../core/layout/responsive.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
-import '../../domain/career/club_stats.dart';
-import '../../domain/scoring/scoring_registry.dart';
+import '../../domain/career/club_honours.dart';
+import '../../domain/career/club_record.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/club_context_banner.dart';
 import '../../shared/ui_kit.dart';
+import 'widgets/club_honours_card.dart';
+import 'widgets/club_record_widgets.dart';
 
-/// A club's record, one row per sport it has played — the club-scoped
-/// counterpart to [MySportsScreen], reached from the "Sports" counter on the
-/// club's own home screen the same way that counter reaches [MySportsScreen]
-/// from a player's profile.
+/// A club's whole record: what it has played, how it has done, and one row
+/// per sport into the detail — the club-scoped counterpart to
+/// [MySportsScreen], reached from the "Full stats" link on the club's own
+/// home screen and from the "Sports" counter on its header.
+///
+/// The summary at the top is the thing this screen gained. It used to open
+/// straight onto a list of sports, which answers "what does this club play"
+/// but leaves "and are they any good" to be worked out by opening each sport
+/// in turn and adding up.
 class ClubStatsScreen extends ConsumerWidget {
   const ClubStatsScreen({super.key, required this.orgId});
 
@@ -24,6 +31,12 @@ class ClubStatsScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final org = ref.watch(organizationProvider(orgId));
     final fixtures = ref.watch(orgFixturesProvider(orgId));
+    // Honours need the events as well as the matches: a title is a
+    // competition somebody won, and the fixtures alone cannot say which
+    // competition finished. Read without blocking — a club's record still
+    // renders while its events are in flight.
+    final competitions =
+        ref.watch(competitionsProvider(orgId)).valueOrNull ?? const [];
 
     return Scaffold(
       appBar: AppBar(
@@ -33,8 +46,14 @@ class ClubStatsScreen extends ConsumerWidget {
         value: fixtures,
         onRetry: () => ref.invalidate(orgFixturesProvider(orgId)),
         builder: (allFixtures) {
-          final rows = ClubSportStats.forFixtures(allFixtures);
-          if (rows.isEmpty) {
+          final record =
+              ClubRecord.forFixtures(fixtures: allFixtures, orgId: orgId);
+          final honours = ClubHonours.forClub(
+            competitions: competitions,
+            fixtures: allFixtures,
+            orgId: orgId,
+          );
+          if (record.isEmpty) {
             return const EmptyState(
               icon: Icons.query_stats_outlined,
               title: 'No matches yet',
@@ -56,8 +75,29 @@ class ClubStatsScreen extends ConsumerWidget {
                     // id. A district with two "Sunrise" clubs is exactly
                     // where somebody screenshots the wrong one's numbers.
                     ClubContextBanner(orgId: orgId, label: 'Analytics for'),
-                    for (final row in rows)
-                      _ClubSportRow(orgId: orgId, stats: row),
+                    _OverallCard(record: record, honours: honours),
+                    const SizedBox(height: 18),
+                    // Every title, not the three the club's home page
+                    // previews — this is the page somebody came to in order
+                    // to read the whole cabinet.
+                    ClubHonoursCard(
+                      orgId: orgId,
+                      honours: honours,
+                      limit: honours.titles.length,
+                    ),
+                    const Text(
+                      'By sport',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: Ps.ink,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    for (final sport in record.sports)
+                      ClubSportRecordRow(orgId: orgId, record: sport),
+                    const SizedBox(height: 8),
+                    _MembersLink(orgId: orgId, record: record),
                   ],
                 ),
               ),
@@ -69,76 +109,87 @@ class ClubStatsScreen extends ConsumerWidget {
   }
 }
 
-class _ClubSportRow extends StatelessWidget {
-  const _ClubSportRow({required this.orgId, required this.stats});
+/// Everything the club has done, across every sport, in one card.
+class _OverallCard extends StatelessWidget {
+  const _OverallCard({required this.record, required this.honours});
 
-  final String orgId;
-  final ClubSportStats stats;
+  final ClubRecord record;
+  final ClubHonours honours;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final sport = SportCatalog.byId(stats.sportId);
-    final topCounters = stats.tally.entries.where((e) => e.value != 0).toList()
-      ..sort((a, b) => b.value.abs().compareTo(a.value.abs()));
-
-    return Card(
-      margin: const EdgeInsets.only(bottom: 10),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: () =>
-            context.push(Routes.clubSportStats(orgId, stats.sportId)),
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Text(sport.icon, style: const TextStyle(fontSize: 22)),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(sport.name, style: theme.textTheme.titleMedium),
-                        Text(
-                          '${stats.matches} '
-                          '${stats.matches == 1 ? 'match' : 'matches'}',
-                          style: theme.textTheme.bodySmall,
-                        ),
-                      ],
-                    ),
-                  ),
-                  Icon(Icons.chevron_right, color: theme.hintColor),
-                ],
+    return PsCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ClubRecordStats.of(record),
+          if (record.decided > 0) ...[
+            const SizedBox(height: 14),
+            ClubFormBar(
+              won: record.won,
+              lost: record.lost,
+              drawn: record.drawn,
+            ),
+          ],
+          const SizedBox(height: 14),
+          PsStatRow(
+            stats: [
+              PsStat(
+                value: psGrouped(record.sports.length),
+                label: record.sports.length == 1 ? 'Sport' : 'Sports',
               ),
-              if (topCounters.isNotEmpty) ...[
-                const SizedBox(height: 12),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    for (final e in topCounters.take(6))
-                      Chip(
-                        visualDensity: VisualDensity.compact,
-                        side: BorderSide.none,
-                        backgroundColor: theme.colorScheme.surfaceContainerHighest,
-                        label: Text(
-                          '${psHumanizeCounter(e.key)} ${_format(e.value)}',
-                          style: theme.textTheme.bodySmall,
-                        ),
-                      ),
-                  ],
+              PsStat(
+                value: psGrouped(record.playerCount),
+                label: record.playerCount == 1 ? 'Player' : 'Players',
+              ),
+              if (honours.titles.isNotEmpty)
+                PsStat(
+                  value: psGrouped(honours.titles.length),
+                  label: honours.titles.length == 1 ? 'Title' : 'Titles',
                 ),
-              ],
+              if (record.mvps > 0)
+                PsStat(value: psGrouped(record.mvps), label: 'Awards'),
             ],
           ),
-        ),
+          ClubRecordNote.of(record),
+        ],
       ),
     );
   }
+}
 
-  static String _format(num v) =>
-      v is int || v == v.roundToDouble() ? psGrouped(v.round()) : v.toStringAsFixed(2);
+/// The line under the sports list that turns a stat page into a recruiting
+/// one.
+///
+/// A stranger who has read this far has decided they like the look of the
+/// club; the next thing they want is its people, and the members screen is
+/// where the club's teams and roster live. Without this the page dead-ends
+/// on numbers.
+class _MembersLink extends StatelessWidget {
+  const _MembersLink({required this.orgId, required this.record});
+
+  final String orgId;
+  final ClubRecord record;
+
+  @override
+  Widget build(BuildContext context) {
+    return PsCard(
+      onTap: () => context.push(Routes.members(orgId)),
+      child: Row(
+        children: [
+          const Icon(Icons.groups_outlined, size: 20, color: Ps.muted),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              '${psGrouped(record.playerCount)} '
+              '${record.playerCount == 1 ? 'person has' : 'people have'} '
+              'played for this club. See the teams and the roster.',
+              style: const TextStyle(fontSize: 13, color: Ps.ink, height: 1.4),
+            ),
+          ),
+          const Icon(Icons.chevron_right, size: 20, color: Ps.faint),
+        ],
+      ),
+    );
+  }
 }

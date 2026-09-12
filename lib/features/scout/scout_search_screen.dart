@@ -10,6 +10,7 @@ import '../../domain/gov/age_group.dart';
 import '../../domain/scout/player_verification_tier.dart';
 import '../../domain/scout/talent_profile.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/glicko.dart';
 import '../../shared/identity.dart';
 
 const _sports = [
@@ -258,15 +259,22 @@ class _ScoutSearchScreenState extends ConsumerState<ScoutSearchScreen> {
   }
 }
 
-class _ResultCard extends StatelessWidget {
+class _ResultCard extends ConsumerWidget {
   const _ResultCard({required this.result});
 
   final ScoutSearchResult result;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final profile = result.profile;
+    // The scout board's own percentile below says where this player stands
+    // inside ONE sport's population. This says how strong they are as a
+    // competitor overall, which is the thing a scout reading a shortlist of
+    // twenty names is actually sorting on, and the two are complementary
+    // rather than redundant — see `OverallGlicko` on why a composite is not
+    // a percentile.
+    final badge = ref.watch(glickoBadgeProvider(profile.uid)).valueOrNull;
     return Card(
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 10),
       child: ListTile(
@@ -275,14 +283,43 @@ class _ResultCard extends StatelessWidget {
           photoUrl: result.photoUrl,
           seed: result.profile.uid,
         ),
-        title: Text(result.displayName, style: const TextStyle(fontWeight: FontWeight.w700)),
-        subtitle: Text(
-          [
-            if (profile.geo.district != null) profile.geo.district!,
-            '${profile.ratingPercentile.round()}th percentile',
-            if (profile.lastMatchAt != null) 'Active',
-          ].join(' · '),
+        title: Row(
+          children: [
+            Flexible(
+              child: Text(result.displayName,
+                  style: const TextStyle(fontWeight: FontWeight.w700)),
+            ),
+            if (GlickoChip.forBadge(badge) case final chip?) ...[
+              const SizedBox(width: 8),
+              chip,
+            ],
+          ],
         ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              [
+                if (profile.geo.district != null) profile.geo.district!,
+                '${profile.ratingPercentile.round()}th percentile',
+                if (profile.lastMatchAt != null) 'Active',
+              ].join(' · '),
+            ),
+            // What the person actually plays, and how well. A shortlist row
+            // that says only "82nd percentile" leaves the reader to open the
+            // profile to find out percentile *of what* — and a scout looking
+            // for a left-arm spinner is filtering on the sports before
+            // anything else.
+            if (badge != null && badge.sports.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              SportGlickoStrip(
+                sports: badge.sports,
+                hiddenCount: badge.hiddenSportCount,
+              ),
+            ],
+          ],
+        ),
+        isThreeLine: badge != null && badge.sports.isNotEmpty,
         trailing: const Icon(Icons.chevron_right),
         onTap: () => context.push(Routes.profile(profile.uid)),
         tileColor: theme.colorScheme.surface,

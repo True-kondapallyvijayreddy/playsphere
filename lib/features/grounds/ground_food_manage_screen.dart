@@ -137,7 +137,7 @@ class _ItemEditorSheetState extends ConsumerState<_ItemEditorSheet> {
   }
 
   Future<void> _save() async {
-    final me = ref.read(currentUserProvider).valueOrNull;
+    final me = ref.read(authUserProvider).valueOrNull;
     if (me == null) return;
     if (_name.text.trim().isEmpty) {
       showError(context, 'Give it a name.');

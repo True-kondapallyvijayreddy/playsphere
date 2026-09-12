@@ -6,6 +6,7 @@ import '../../../core/models/competition.dart';
 import '../../../core/models/enums.dart';
 import '../../../core/providers.dart';
 import '../../../core/router/app_router.dart';
+import '../../../shared/identity.dart';
 import '../../../shared/section_header.dart';
 import '../../../shared/ui_kit.dart';
 
@@ -33,7 +34,14 @@ class EventCard extends ConsumerWidget {
         // Android build and glossy 3D on another. `SportBadge` is the app's
         // own sport mark and looks the same on every device — the reasoning
         // is written out in `ui_kit.dart`, and this row was ignoring it.
-        leading: SportBadge(sportId: c.sportId, size: 40),
+        //
+        // The event's own crest displaces it where there is one: an organizer
+        // who put a badge on their tournament expects to see it on the row,
+        // and the sport is already named on the line below. Nothing is
+        // invented when there is no logo — the sport mark stays.
+        leading: (c.logoUrl ?? '').trim().isEmpty
+            ? SportBadge(sportId: c.sportId, size: 40)
+            : PsCrest(name: c.name, logoUrl: c.logoUrl, seed: c.id, size: 40),
         title: Text(c.name),
         subtitle: Text(
           [
@@ -47,15 +55,27 @@ class EventCard extends ConsumerWidget {
           overflow: TextOverflow.ellipsis,
         ),
         isThreeLine: true,
-        trailing: _StatusChip(status: c.displayStatus()),
+        trailing: EventStatusChip(status: c.displayStatus()),
         onTap: () => context.push(Routes.competition(c.orgId, c.id)),
       ),
     );
   }
 }
 
-class _StatusChip extends StatelessWidget {
-  const _StatusChip({required this.status});
+/// Where an event is up to, as a chip on its card.
+///
+/// Public, and shared. Three screens had a private copy of this — the club
+/// dashboard, this card, and the club's events list — and they had already
+/// drifted: one of them coloured a cancelled event exactly like a completed
+/// one, so a club could not tell a tournament it called off from one it
+/// finished without opening both.
+///
+/// Always pass `Competition.displayStatus()`, never the raw `status` field.
+/// A registration whose deadline has passed is closed whether or not anybody
+/// has written that down, and a chip that says "Registration Open" over a
+/// closed form is the one thing this chip must not do.
+class EventStatusChip extends StatelessWidget {
+  const EventStatusChip({super.key, required this.status});
 
   final CompetitionStatus status;
 
@@ -70,6 +90,10 @@ class _StatusChip extends StatelessWidget {
       CompetitionStatus.inProgress => (
           scheme.tertiaryContainer,
           scheme.onTertiaryContainer
+        ),
+      CompetitionStatus.cancelled => (
+          scheme.errorContainer,
+          scheme.onErrorContainer
         ),
       _ => (scheme.surfaceContainerHighest, scheme.onSurfaceVariant),
     };

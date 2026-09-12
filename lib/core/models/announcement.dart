@@ -59,6 +59,16 @@ class Announcement {
   /// voting buttons that write nowhere.
   bool get isMatchRsvp => match != null && poll != null;
 
+  /// Whether [uid] is one of the people this post is asking.
+  ///
+  /// True for every member of an ordinary notice or an open call — see
+  /// [MatchCall.invitedUids] for why a call may name its audience instead.
+  /// The author is always addressed even when they did not put themselves on
+  /// the list: they are the one waiting on the answers, and a captain who asks
+  /// twelve players and then cannot find their own call is looking at a bug.
+  bool isAddressedTo(String uid) =>
+      uid == authorUid || (match?.isAddressedTo(uid) ?? true);
+
   factory Announcement.fromDoc(Map<String, dynamic> d, String docId) =>
       Announcement(
         id: docId,
@@ -202,6 +212,8 @@ class MatchCall {
     this.venue = '',
     this.maxPlayers = 0,
     this.forFixture,
+    this.forChallenge,
+    this.invitedUids = const [],
   });
 
   /// The sport, by catalogue id. Drives the icon, the squad arithmetic and
@@ -245,6 +257,52 @@ class MatchCall {
 
   bool get isForFixture => forFixture != null;
 
+  /// The challenge this call is asking about, before there is a match to ask
+  /// about.
+  ///
+  /// ## Why a challenge needed its own target
+  ///
+  /// [forFixture] can only be set once a challenge has been ACCEPTED — that is
+  /// the moment a fixture exists. But the question a club wants to put to its
+  /// members is older than that: "we have challenged Gachibowli for the 26th,
+  /// who is in?". Asking it before the opponent replies is what lets a captain
+  /// answer with a real squad instead of a guess, and it is what stops a club
+  /// accepting a fixture it turns out it cannot field eleven for.
+  ///
+  /// The two targets are not alternatives so much as two ends of the same
+  /// thread. `Fixture.sourceId` carries the challenge id, so once the match
+  /// exists `SquadRsvpActions` finds this call by matching that id and moves
+  /// the yeses onto the team sheet — no second call, and nobody retyped.
+  final ChallengeCallTarget? forChallenge;
+
+  bool get isForChallenge => forChallenge != null;
+
+  /// The members this call is addressed to. Empty means the whole club, which
+  /// is the default and the common case.
+  ///
+  /// ## Why a call needed an audience
+  ///
+  /// A village club with 120 members that challenges another club does not
+  /// want 120 answers to a question about an eleven-a-side match — it wants
+  /// the twenty people who might actually travel on Saturday. Asking everyone
+  /// produces a poll nobody trusts, and a captain who then has to explain to
+  /// eighty people why they said In and are not playing.
+  ///
+  /// This is ADDRESSING, not access control. The announcement is still
+  /// readable by the club, as `firestore.rules` has always allowed and as a
+  /// notice board should be — a member who hears about the match can go and
+  /// look. What it changes is whose home screen it lands on, whose phone it
+  /// notifies and whose RSVP count it raises, which is the part that was
+  /// costing people their attention.
+  final List<String> invitedUids;
+
+  bool get isTargeted => invitedUids.isNotEmpty;
+
+  /// Whether [uid] is one of the people being asked. See [Announcement.isAddressedTo],
+  /// which is what callers should use — it also lets the author through.
+  bool isAddressedTo(String uid) =>
+      invitedUids.isEmpty || invitedUids.contains(uid);
+
   /// Whether more people have said yes than this match can seat.
   ///
   /// False whenever no target was set: without a number there is no such
@@ -269,6 +327,12 @@ class MatchCall {
             ? Map<String, dynamic>.from(d['forFixture'] as Map)
             : null,
       ),
+      forChallenge: ChallengeCallTarget.fromMap(
+        d['forChallenge'] is Map
+            ? Map<String, dynamic>.from(d['forChallenge'] as Map)
+            : null,
+      ),
+      invitedUids: Fs.strList(d['invitedUids']),
     );
   }
 
@@ -278,6 +342,47 @@ class MatchCall {
         'venue': venue,
         'maxPlayers': maxPlayers,
         'forFixture': forFixture?.toMap(),
+        'forChallenge': forChallenge?.toMap(),
+        'invitedUids': invitedUids,
+      };
+}
+
+/// Which challenge an availability call is asking about.
+///
+/// Deliberately thinner than [FixtureCallTarget]. A challenge is a top-level
+/// document — `challenges/{challengeId}` — so one id addresses it, and there
+/// is no side to name yet because there is no team sheet to have sides on.
+/// The club asking is the one whose board the call sits on, which is the only
+/// club that can post there.
+///
+/// [opponentName] is denormalized so a card can say "against Gachibowli Club"
+/// without a second read from a screen that has the announcement and nothing
+/// else — the same reason `Challenge` carries both clubs' names.
+class ChallengeCallTarget {
+  const ChallengeCallTarget({
+    required this.challengeId,
+    required this.opponentName,
+  });
+
+  final String challengeId;
+  final String opponentName;
+
+  static ChallengeCallTarget? fromMap(Map<String, dynamic>? d) {
+    if (d == null) return null;
+    final id = Fs.str(d['challengeId']);
+    // A target that cannot address a challenge is not a target — the same
+    // degradation [FixtureCallTarget] makes, and for the same reason: better
+    // an ordinary availability call than a card whose buttons lead nowhere.
+    if (id.isEmpty) return null;
+    return ChallengeCallTarget(
+      challengeId: id,
+      opponentName: Fs.str(d['opponentName'], 'the other club'),
+    );
+  }
+
+  Map<String, Object?> toMap() => {
+        'challengeId': challengeId,
+        'opponentName': opponentName,
       };
 }
 
