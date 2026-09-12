@@ -195,30 +195,46 @@ class RatingService {
 
     for (final player in sideAPlayers) {
       final uid = player.uid!;
-      projected[uid] = _glicko2.rate(
-        currentRatings[uid] ?? const Rating(),
+      final rawWeight = weightsA[player.id] ?? 1.0;
+      final effectiveWeight = fixture.isDraw
+          ? 1.0
+          : (scoreA == 1.0 ? rawWeight : (2.0 - rawWeight).clamp(0.2, 1.8));
+      final before = currentRatings[uid] ?? const Rating();
+      final after = _glicko2.rate(
+        before,
         [
           RatingGame(
             opponent: opponentRatingForA,
             score: scoreA,
-            weight: weightsA[player.id] ?? 1.0,
+            weight: effectiveWeight,
           ),
         ],
       );
+      const maxSwing = 50.0;
+      final delta = (after.rating - before.rating).clamp(-maxSwing, maxSwing);
+      projected[uid] = after.copyWith(rating: before.rating + delta);
     }
 
     for (final player in sideBPlayers) {
       final uid = player.uid!;
-      projected[uid] = _glicko2.rate(
-        currentRatings[uid] ?? const Rating(),
+      final rawWeight = weightsB[player.id] ?? 1.0;
+      final effectiveWeight = fixture.isDraw
+          ? 1.0
+          : (scoreB == 1.0 ? rawWeight : (2.0 - rawWeight).clamp(0.2, 1.8));
+      final before = currentRatings[uid] ?? const Rating();
+      final after = _glicko2.rate(
+        before,
         [
           RatingGame(
             opponent: opponentRatingForB,
             score: scoreB,
-            weight: weightsB[player.id] ?? 1.0,
+            weight: effectiveWeight,
           ),
         ],
       );
+      const maxSwing = 50.0;
+      final delta = (after.rating - before.rating).clamp(-maxSwing, maxSwing);
+      projected[uid] = after.copyWith(rating: before.rating + delta);
     }
 
     return projected;

@@ -53,6 +53,43 @@ jobs:
         working-directory: test/security
         run: npm install
 
+      # Fails on the size of the ruleset that actually DEPLOYS, not the
+      # annotated source — the annotated file is allowed to grow, because
+      # scripts/strip_rules_comments.mjs removes the comments on the way out.
+      # See that file for why the limit is a real cliff and not a guideline.
+      - name: Check ruleset size against Firestore's 256 KiB limit
+        run: node scripts/strip_rules_comments.mjs --check firestore.rules storage.rules
+
+      # The stripper stands between the reviewed rules and the rules that
+      # enforce anything, so it is tested before it is trusted.
+      - name: Test the ruleset stripper
+        run: node --test scripts/strip_rules_comments.test.mjs
+
+      # `pretest` regenerates build/rules/ first, so the emulator loads the
+      # stripped ruleset. Testing the annotated file and deploying the stripped
+      # one would mean the suite never covers what ships.
       - name: Run rules suite against the emulator
         working-directory: test/security
+        run: npm test
+
+  # The half of the system that writes ratings, careers and money had no gate
+  # at all: 154 tests across 38 suites existed and CI never invoked them.
+  functions:
+    name: Cloud Functions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: functions/package-lock.json
+
+      - name: Install
+        working-directory: functions
+        run: npm ci
+
+      - name: Test
+        working-directory: functions
         run: npm test

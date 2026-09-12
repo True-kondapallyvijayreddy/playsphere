@@ -144,9 +144,12 @@ class ScoutRepository {
 
     // The population this batch's percentiles are computed against — see
     // the class doc on why this is a sample, not the true global figure.
+    // Uses displayScore so provisional 1-match debutants don't outrank proven veterans.
     final population = SportPopulation(
       sportId: sportId,
-      ratings: [for (final (_, rating, _) in candidates) rating.rating],
+      ratings: [
+        for (final (_, rating, _) in candidates) rating.displayScore.toDouble()
+      ],
     );
 
     final results = <ScoutSearchResult>[];
@@ -156,7 +159,8 @@ class ScoutRepository {
         dateOfBirth: user.dateOfBirth,
         sportId: sportId,
         geo: user.geo,
-        ratingPercentile: population.percentileOf(rating.rating),
+        ratingPercentile:
+            population.percentileOf(rating.displayScore.toDouble()),
         verificationTier: PlayerVerificationTier.self,
         lastMatchAt: lastPlayedAt,
       );

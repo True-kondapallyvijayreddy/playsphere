@@ -81,7 +81,7 @@ class PersonalLevelBoard extends ConsumerWidget {
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
                     Text(
-                      '${overall.overall.round()}',
+                      '${overall.displayScore}',
                       style: const TextStyle(
                         fontSize: 22,
                         fontWeight: FontWeight.w700,
@@ -90,7 +90,7 @@ class PersonalLevelBoard extends ConsumerWidget {
                       ),
                     ),
                     const Text(
-                      'XP',
+                      '/ 100',
                       style: TextStyle(fontSize: 11, color: Ps.faint),
                     ),
                   ],

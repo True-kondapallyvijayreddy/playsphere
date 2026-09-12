@@ -63,23 +63,28 @@ class GlickoChip extends StatelessWidget {
   /// The chip for a person in the context of ONE sport — a team roster, a
   /// squad sheet, an entry list for a badminton tournament.
   ///
-  /// Shows that sport's own rating where the travelling badge carries it, and
+  /// Shows that sport's own 0–100 score where the travelling badge carries it, and
   /// falls back to the overall standing where it does not, labelled so the
-  /// two can never be mistaken for each other. Showing nothing would be the
-  /// wrong fallback: a person on a volleyball roster who is rated in
-  /// volleyball but ranks it fourth among their sports has a standing, and a
-  /// blank beside their name says they do not.
-  static GlickoChip? forSport(GlickoBadge? badge, String sportId) {
+  /// two can never be mistaken for each other.
+  static GlickoChip? forSport(
+    GlickoBadge? badge,
+    String sportId, {
+    bool? isProvisional,
+    GlickoChipSize size = GlickoChipSize.compact,
+  }) {
     if (badge == null) return null;
-    final inSport = badge.ratingFor(sportId);
+    final inSport = badge.scoreFor(sportId);
     if (inSport == null) {
-      return GlickoChip(rating: badge.overall, provisional: badge.provisional);
+      return GlickoChip(
+        rating: badge.overall,
+        provisional: isProvisional ?? badge.provisional,
+        size: size,
+      );
     }
     return GlickoChip(
       rating: inSport,
-      // The per-sport figure in the travelling badge is the authoritative
-      // rating for that sport, not the composite — so the composite's
-      // "still settling" flag does not apply to it.
+      provisional: isProvisional ?? badge.provisional,
+      size: size,
       label: SportCatalog.byId(sportId.split(':').first).name,
     );
   }
@@ -240,7 +245,7 @@ class GlickoBreakdown extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final overall = result.overall.round();
+    final overallScore = result.displayScore;
     final leading = result.components.first;
 
     return PsCard(
@@ -255,7 +260,7 @@ class GlickoBreakdown extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Overall Glicko',
+                      'Overall PlaySphere Score',
                       style: theme.textTheme.labelLarge?.copyWith(
                         color: Ps.muted,
                       ),
@@ -266,13 +271,21 @@ class GlickoBreakdown extends StatelessWidget {
                       textBaseline: TextBaseline.alphabetic,
                       children: [
                         Text(
-                          '$overall',
+                          '$overallScore',
                           style: theme.textTheme.displaySmall?.copyWith(
                             fontWeight: FontWeight.w700,
                             color: Ps.ink,
                             fontFeatures: const [
                               FontFeature.tabularFigures()
                             ],
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          '/ 100',
+                          style: theme.textTheme.titleMedium?.copyWith(
+                            color: Ps.muted,
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
                         const SizedBox(width: 10),
@@ -292,7 +305,7 @@ class GlickoBreakdown extends StatelessWidget {
               ),
               if (result.isProvisional)
                 GlickoChip(
-                  rating: overall,
+                  rating: overallScore,
                   provisional: true,
                   label: 'Settling',
                 ),
@@ -303,7 +316,7 @@ class GlickoBreakdown extends StatelessWidget {
             result.isProvisional
                 ? (isMe
                     ? 'Still settling — ${_matches(result)} rated so far. '
-                        'Play more and this number sharpens.'
+                        'Play more and this score sharpens.'
                     : 'Still settling — ${_matches(result)} rated so far.')
                 : 'Across ${result.components.length} '
                     '${result.components.length == 1 ? 'sport' : 'sports'}, '
@@ -321,15 +334,15 @@ class GlickoBreakdown extends StatelessWidget {
           ],
 
           const SizedBox(height: 14),
-          // The composite is not a Glicko rating and the profile says so in
+          // The composite is not a bare Glicko rating and the profile says so in
           // its own words rather than in a footnote nobody reads. §3 of the
           // brief is explicit about this: the sport numbers are authoritative,
-          // this one is PlaySphere's index across them.
+          // this one is PlaySphere's index across them mapped 0-100.
           Text(
-            'Each sport above carries its own Glicko rating — those are the '
-            'authoritative numbers. The overall is PlaySphere\'s cross-sport '
-            'index, led by your strongest sport and weighted by how recent and '
-            'how settled each rating is.',
+            'Each sport above carries its own rating — those are the '
+            'authoritative numbers. The overall score is PlaySphere\'s cross-sport '
+            'index mapped to an easy-to-read 0–100 scale, led by your strongest sport '
+            'and weighted by how recent and how settled each rating is.',
             style: theme.textTheme.bodySmall?.copyWith(color: Ps.faint),
           ),
         ],
@@ -371,7 +384,7 @@ class _ComponentRow extends StatelessWidget {
           ),
         ),
         Text(
-          '${component.rating.round()}',
+          '${component.displayScore} / 100',
           style: theme.textTheme.titleMedium?.copyWith(
             fontWeight: FontWeight.w700,
             fontFeatures: const [FontFeature.tabularFigures()],

@@ -284,7 +284,7 @@ class _Identity extends ConsumerWidget {
                   if (ref.watch(overallGlickoProvider(user.uid)).valueOrNull
                       case final g?)
                     GlickoChip(
-                      rating: g.overall.round(),
+                      rating: g.displayScore,
                       provisional: g.isProvisional,
                       size: GlickoChipSize.prominent,
                     ),
@@ -725,12 +725,12 @@ class _RatingBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final (low, high) = rating.confidenceInterval;
+    final score = rating.displayScore;
 
     return Semantics(
       label: rating.isProvisional
-          ? '${rating.tier}, provisional rating ${rating.rating.round()}'
-          : '${rating.tier}, rating ${rating.rating.round()}',
+          ? '${rating.tier}, provisional score $score of 100'
+          : '${rating.tier}, score $score of 100',
       excludeSemantics: true,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,
@@ -741,7 +741,8 @@ class _RatingBadge extends StatelessWidget {
                 Padding(
                   padding: const EdgeInsets.only(right: 4),
                   child: Tooltip(
-                    message: 'Provisional — needs a few more matches to settle',
+                    message:
+                        'Provisional (${rating.gamesPlayed} ${rating.gamesPlayed == 1 ? 'match' : 'matches'}) — needs more play to settle',
                     child: Icon(
                       Icons.hourglass_empty,
                       size: 14,
@@ -749,12 +750,22 @@ class _RatingBadge extends StatelessWidget {
                     ),
                   ),
                 ),
-              Text(rating.tier, style: theme.textTheme.titleSmall),
+              Text(
+                '$score / 100',
+                style: theme.textTheme.titleSmall?.copyWith(
+                  fontWeight: FontWeight.w700,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
             ],
           ),
           Text(
-            '${rating.rating.round()}  ·  ${low.round()}–${high.round()}',
-            style: theme.textTheme.bodySmall,
+            rating.isProvisional
+                ? '${rating.tier} · Settling'
+                : rating.tier,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: Ps.muted,
+            ),
           ),
         ],
       ),

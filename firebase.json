@@ -165,11 +165,17 @@
     }
   ],
   "firestore": {
-    "rules": "firestore.rules",
-    "indexes": "firestore.indexes.json"
+    "rules": "build/rules/firestore.rules",
+    "indexes": "firestore.indexes.json",
+    "predeploy": [
+      "sh scripts/build_rules.sh"
+    ]
   },
   "storage": {
-    "rules": "storage.rules"
+    "rules": "build/rules/storage.rules",
+    "predeploy": [
+      "sh scripts/build_rules.sh"
+    ]
   },
   "emulators": {
     "firestore": {

@@ -52,6 +52,41 @@ class Rating {
   (double low, double high) get confidenceInterval =>
       (rating - 2 * deviation, rating + 2 * deviation);
 
+  /// Maps an unbounded Glicko rating (e.g. 800 - 2400) to a clean 0–100 display score.
+  static int glickoToScore(double glicko) {
+    if (glicko.isNaN) return 50;
+    double score;
+    if (glicko <= 1000) {
+      score = math.max(1.0, (glicko / 1000.0) * 35.0);
+    } else if (glicko <= 1200) {
+      score = 35.0 + ((glicko - 1000.0) / 200.0) * 15.0;
+    } else if (glicko <= 1400) {
+      score = 50.0 + ((glicko - 1200.0) / 200.0) * 13.0;
+    } else if (glicko <= 1600) {
+      score = 63.0 + ((glicko - 1400.0) / 200.0) * 12.0;
+    } else if (glicko <= 1800) {
+      score = 75.0 + ((glicko - 1600.0) / 200.0) * 10.0;
+    } else if (glicko <= 2000) {
+      score = 85.0 + ((glicko - 1800.0) / 200.0) * 7.0;
+    } else if (glicko <= 2200) {
+      score = 92.0 + ((glicko - 2000.0) / 200.0) * 5.0;
+    } else {
+      score = math.min(99.0, 97.0 + ((glicko - 2200.0) / 300.0) * 2.0);
+    }
+    return score.round();
+  }
+
+  /// The user-facing 0–100 score, mapped from Glicko and discounted for
+  /// provisional uncertainty so a 1-match player cannot outrank an established veteran.
+  int get displayScore {
+    if (gamesPlayed <= 0) return 50;
+    final evidence = 1.0 - math.exp(-gamesPlayed / 8.0);
+    final conf = (1.0 - deviation / defaultDeviation).clamp(0.0, 1.0);
+    final trust = math.min(evidence, conf);
+    final effectiveGlicko = defaultRating + (rating - defaultRating) * trust;
+    return glickoToScore(effectiveGlicko);
+  }
+
   /// Human band, because a raw number means nothing to someone who has just
   /// played their first match. The spec asks for tiers by default with the
   /// number available on the profile.

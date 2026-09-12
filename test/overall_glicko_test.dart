@@ -286,7 +286,8 @@ void _badgeTests() {
       })!;
 
       expect(badge.sports.keys.toList(), ['cricket', 'badminton', 'football']);
-      expect(badge.overall, 1717);
+      expect(badge.overall, 81);
+      expect(badge.overallGlicko, 1717);
       expect(badge.hiddenSportCount, 1);
     });
 
@@ -311,9 +312,10 @@ void _badgeTests() {
         'sportCount': 2,
       })!;
 
-      expect(badge.ratingFor('chess'), 1900);
-      expect(badge.ratingFor('chess:blitz'), 1900);
-      expect(badge.ratingFor('chess:classical'), 1900);
+      expect(badge.ratingFor('chess'), 89);
+      expect(badge.sportsGlicko?['chess'], 1900);
+      expect(badge.ratingFor('chess:blitz'), 89);
+      expect(badge.ratingFor('chess:classical'), 89);
       // The colon is the ONLY separator. `Fixture.ratingKey` never writes an
       // underscore, and real sport ids contain them, so an underscore has to
       // be part of the id rather than a delimiter.
@@ -321,6 +323,15 @@ void _badgeTests() {
       // Not carried is not the same as unrated — the caller falls back to the
       // overall rather than showing a blank. See `GlickoChip.forSport`.
       expect(badge.ratingFor('kabaddi'), isNull);
+    });
+
+    test('1-match debutant displayScore is lower than 100-match veteran', () {
+      const rookie = Rating(rating: 1734, deviation: 260, gamesPlayed: 1);
+      const veteran = Rating(rating: 1650, deviation: 55, gamesPlayed: 100);
+
+      expect(rookie.isProvisional, isTrue);
+      expect(veteran.isProvisional, isFalse);
+      expect(veteran.displayScore, greaterThan(rookie.displayScore));
     });
   });
 }

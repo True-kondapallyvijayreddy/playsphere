@@ -1504,18 +1504,35 @@ export const onMatchSettled = onDocumentUpdated(
         // Already paid for this match.
         if (player.settled.includes(fixtureId)) continue;
 
+        const rawWeight = weights.get(uid) ?? 1;
+        // In a win, high individual performance (rawWeight > 1) increases reward.
+        // In a loss, high individual performance protects the player by dampening
+        // rating loss (rawWeight 1.8 -> effectiveWeight 0.2), while a poor performer
+        // (rawWeight 0.2 -> effectiveWeight 1.8) absorbs the loss impact.
+        const effectiveWeight = isDraw
+          ? 1.0
+          : won
+            ? rawWeight
+            : Math.max(0.2, 2.0 - rawWeight);
+
         const next = rate(player, [
           {
             opponent: { rating: opponentAvg, deviation: opponentRd },
             score,
-            weight: weights.get(uid) ?? 1,
+            weight: effectiveWeight,
           },
         ]);
+
+        // Cap single-match rating swing to prevent fabricated/outlier spikes
+        // from moving a rating implausibly far in a single fixture.
+        const MAX_SWING = 50;
+        const delta = Math.max(-MAX_SWING, Math.min(MAX_SWING, next.rating - player.rating));
+        const finalRating = player.rating + delta;
 
         batch.set(
           db.doc(`users/${uid}/ratings/${ratingKey}`),
           {
-            rating: next.rating,
+            rating: finalRating,
             deviation: next.deviation,
             volatility: next.volatility,
             gamesPlayed: next.gamesPlayed,
@@ -1541,7 +1558,7 @@ export const onMatchSettled = onDocumentUpdated(
             // longer than the 90-day window the boards measure over.
             trail: [
               ...player.trail,
-              { r: next.rating, t: settledAt.toISOString() },
+              { r: finalRating, t: settledAt.toISOString() },
             ].slice(-TRAIL_LENGTH),
             updatedAt: new Date(),
           },

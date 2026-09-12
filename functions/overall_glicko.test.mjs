@@ -200,7 +200,7 @@ test('the constants themselves', () => {
   assert.ok(evidenceWeight(30) > 0.97);
 });
 
-test('the denormalised badge is small, rounded and honest about what it drops', () => {
+test('the denormalised badge carries 0-100 display scores and preserves raw Glicko', () => {
   const r = overallGlicko(
     [
       established('cricket', 1842),
@@ -212,15 +212,56 @@ test('the denormalised badge is small, rounded and honest about what it drops', 
   );
   const badge = denormalise(r, NOW);
 
-  assert.equal(badge.overall, 1717);
+  // 0-100 display scores for intuitive readability
+  assert.equal(badge.overall, 81);
+  assert.equal(badge.overallGlicko, 1717);
   assert.equal(badge.provisional, false);
   // Three sports travel; the fourth is counted but not carried, so a card can
   // say "+1 more" instead of implying these are all of them.
   assert.deepEqual(badge.sports, {
+    cricket: 84,
+    badminton: 75,
+    football: 69,
+  });
+  assert.deepEqual(badge.sportsGlicko, {
     cricket: 1842,
     badminton: 1618,
     football: 1497,
   });
   assert.equal(badge.sportCount, 4);
   assert.equal(badge.computedAt, NOW);
+});
+
+test('1-match century debutant cannot outscore a 100-match established veteran', () => {
+  // Rookie plays 1 match, scores a century (even if rating jumped to 1734 with high uncertainty)
+  const rookie = overallGlicko(
+    [
+      {
+        ratingKey: 'cricket',
+        rating: 1734,
+        deviation: 260,
+        gamesPlayed: 1,
+        lastPlayedAt: NOW,
+      },
+    ],
+    NOW,
+  );
+  const rookieBadge = denormalise(rookie, NOW);
+
+  // Veteran plays 100 matches with strong, consistent club performance
+  const veteran = overallGlicko([established('cricket', 1650, { matches: 100, deviation: 55 })], NOW);
+  const veteranBadge = denormalise(veteran, NOW);
+
+  assert.equal(rookieBadge.provisional, true);
+  assert.equal(veteranBadge.provisional, false);
+
+  // The 100-match veteran rightfully ranks higher on the 0-100 scale!
+  assert.ok(
+    veteranBadge.overall > rookieBadge.overall,
+    `Veteran score ${veteranBadge.overall} should be > rookie score ${rookieBadge.overall}`,
+  );
+  assert.ok(
+    veteranBadge.sports.cricket > rookieBadge.sports.cricket,
+    `Veteran cricket score ${veteranBadge.sports.cricket} should be > rookie ${rookieBadge.sports.cricket}`,
+  );
 });

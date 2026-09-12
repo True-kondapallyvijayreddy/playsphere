@@ -108,6 +108,9 @@ class OverallGlicko {
   /// The same tier vocabulary the per-sport badge uses, so a profile does not
   /// speak two languages about the same scale.
   String get tier => Rating(rating: overall).tier;
+
+  /// The user-facing 0–100 score for the composite.
+  int get displayScore => Rating.glickoToScore(overall);
 }
 
 /// What one sport contributed, kept so the profile can answer "why is my
@@ -145,6 +148,14 @@ class OverallGlickoComponent {
 
   /// How much this sport steered the composite, before normalisation.
   double get weight => confidence * recency * rankFactor;
+
+  /// The user-facing 0–100 score for this component sport.
+  int get displayScore {
+    final evidence = 1.0 - math.exp(-matches / 8.0);
+    final trust = math.min(evidence, confidence);
+    final effectiveGlicko = 1500.0 + (rating - 1500.0) * trust;
+    return Rating.glickoToScore(effectiveGlicko);
+  }
 }
 
 /// One sport's rating as the engine wants it.

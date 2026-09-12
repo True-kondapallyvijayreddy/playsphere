@@ -132,9 +132,8 @@ class _Headline extends StatelessWidget {
               if (rating != null)
                 Text(
                   rating.isProvisional
-                      ? '${rating.tier} · ${rating.rating.round()} '
-                          '(still settling)'
-                      : '${rating.tier} · ${rating.rating.round()}',
+                      ? '${rating.tier} · ${rating.displayScore}/100 (still settling)'
+                      : '${rating.tier} · ${rating.displayScore}/100',
                   style: theme.textTheme.bodyMedium,
                 ),
             ],

@@ -1,3 +1,4 @@
+import '../../domain/rating/glicko2.dart';
 import 'firestore_codec.dart';
 
 /// The Overall PlaySphere Glicko as it travels — a handful of numbers
@@ -27,20 +28,27 @@ class GlickoBadge {
     required this.provisional,
     required this.sports,
     required this.sportCount,
+    this.overallGlicko,
+    this.sportsGlicko,
     this.computedAt,
   });
 
-  /// The composite, rounded, on the Glicko scale.
+  /// The composite score (0–100) on the user-friendly scale.
   final int overall;
+
+  /// The raw composite Glicko rating (e.g. 1717), if carried.
+  final int? overallGlicko;
 
   /// True while there is not yet enough play behind the number for it to be
   /// stated plainly. Every surface that shows [overall] must show this too —
   /// see [OverallGlicko.isProvisional].
   final bool provisional;
 
-  /// The top few sports by rating, strongest first. Display only: the
-  /// authoritative per-sport ratings are the rating documents.
+  /// The top few sports by score (0–100), strongest first. Display only.
   final Map<String, int> sports;
+
+  /// Raw per-sport Glicko ratings, if carried.
+  final Map<String, int>? sportsGlicko;
 
   /// How many sports the composite was actually built from, which is often
   /// more than [sports] holds. Lets a card say "and 2 more" honestly.
@@ -52,19 +60,12 @@ class GlickoBadge {
   int get hiddenSportCount =>
       (sportCount - sports.length).clamp(0, sportCount);
 
-  /// This person's rating in one named sport, or null if the travelling copy
+  /// This person's 0–100 score in one named sport, or null if the travelling copy
   /// does not carry it.
-  ///
-  /// Null does NOT mean unrated — [sports] holds only the top few — so a
-  /// caller that wants a number regardless should fall back to [overall]
-  /// rather than treating this as "has never played". A roster for a sport
-  /// somebody plays as their fourth is the case that makes this matter: the
-  /// honest thing to show there is the overall standing, not a blank.
-  ///
-  /// Rating keys are collapsed to base sports server-side, so `chess` answers
-  /// for `chess:blitz` too. The colon is the only separator to strip — sport
-  /// ids like `table_tennis` contain underscores of their own.
-  int? ratingFor(String sportId) => sports[sportId.split(':').first];
+  int? scoreFor(String sportId) => sports[sportId.split(':').first];
+
+  /// Alias for [scoreFor], retained so existing call sites continue compiling.
+  int? ratingFor(String sportId) => scoreFor(sportId);
 
   /// Null when the map is absent or malformed, which is the ordinary state for
   /// anybody who has not played a rated match. Callers render null as "no
@@ -76,30 +77,59 @@ class GlickoBadge {
     final overall = raw['overall'];
     if (overall is! num) return null;
 
+    final overallNum = overall.toDouble();
+    final overallGlickoRaw = raw['overallGlicko'] as num?;
+    final int? overallGlicko = overallGlickoRaw != null
+        ? overallGlickoRaw.round()
+        : (overallNum > 100 ? overallNum.round() : null);
+    final int overallScore = overallNum > 100
+        ? Rating.glickoToScore(overallNum)
+        : overallNum.round();
+
+    final rawSportsGlicko = raw['sportsGlicko'] as Map?;
+    final sportsGlicko = <String, int>{};
+    if (rawSportsGlicko is Map) {
+      for (final e in rawSportsGlicko.entries) {
+        if (e.value is num) {
+          sportsGlicko[e.key.toString()] = (e.value as num).round();
+        }
+      }
+    }
+
     final rawSports = raw['sports'];
     // Re-sorted here, and it has to be. The server writes these in rank order,
     // but a Firestore map is not an ordered structure — it comes back off the
     // wire keyed alphabetically — so "strongest first" would have quietly
     // become "alphabetically first" on every card in the app, which reads as
     // a bug in the rating rather than in the decoding.
-    final entries = <MapEntry<String, int>>[
-      if (rawSports is Map)
-        for (final e in rawSports.entries)
-          if (e.value is num)
-            MapEntry(e.key.toString(), (e.value as num).round()),
-    ]..sort((a, b) {
-        final byRating = b.value.compareTo(a.value);
-        return byRating != 0 ? byRating : a.key.compareTo(b.key);
-      });
+    final entries = <MapEntry<String, int>>[];
+    if (rawSports is Map) {
+      for (final e in rawSports.entries) {
+        if (e.value is num) {
+          final v = (e.value as num).toDouble();
+          final score = v > 100 ? Rating.glickoToScore(v) : v.round();
+          if (v > 100 && !sportsGlicko.containsKey(e.key.toString())) {
+            sportsGlicko[e.key.toString()] = v.round();
+          }
+          entries.add(MapEntry(e.key.toString(), score));
+        }
+      }
+    }
+    entries.sort((a, b) {
+      final byScore = b.value.compareTo(a.value);
+      return byScore != 0 ? byScore : a.key.compareTo(b.key);
+    });
     final sports = Map<String, int>.fromEntries(entries);
 
     return GlickoBadge(
-      overall: overall.round(),
+      overall: overallScore,
+      overallGlicko: overallGlicko,
       // Absent means absent, not false: an old document written before the
       // flag existed should read as provisional rather than silently claim a
       // confidence nothing measured.
       provisional: raw['provisional'] != false,
       sports: sports,
+      sportsGlicko: sportsGlicko.isEmpty ? null : sportsGlicko,
       sportCount: (raw['sportCount'] as num?)?.toInt() ?? sports.length,
       computedAt: Fs.dateOrNull(raw['computedAt']),
     );

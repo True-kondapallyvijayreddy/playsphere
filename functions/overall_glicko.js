@@ -171,6 +171,7 @@ export function overallGlicko(entries, asOf = new Date()) {
     components.push({
       sportId: r.sportId,
       rating: r.rating,
+      deviation: r.deviation,
       confidence: r.confidence,
       recency: r.recency,
       rankFactor,
@@ -198,14 +199,71 @@ export function overallGlicko(entries, asOf = new Date()) {
   };
 }
 
+/**
+ * Maps an unbounded Glicko rating (e.g. 800 - 2400) to a clean 0-100 display score.
+ *
+ * Tiers:
+ * < 1000: 1 - 35 (Novice)
+ * 1000 - 1200: 36 - 49 (Beginner)
+ * 1200 - 1400: 50 - 62 (Developing)
+ * 1400 - 1600: 63 - 74 (Club; 1500 -> 69)
+ * 1600 - 1800: 75 - 84 (Strong)
+ * 1800 - 2000: 85 - 91 (District)
+ * 2000 - 2200: 92 - 96 (State)
+ * > 2200: 97 - 99 (Elite)
+ */
+export function glickoToScore(glicko) {
+  if (typeof glicko !== 'number' || isNaN(glicko)) return 50;
+  let score;
+  if (glicko <= 1000) {
+    score = Math.max(1, (glicko / 1000) * 35);
+  } else if (glicko <= 1200) {
+    score = 35 + ((glicko - 1000) / 200) * 15;
+  } else if (glicko <= 1400) {
+    score = 50 + ((glicko - 1200) / 200) * 13;
+  } else if (glicko <= 1600) {
+    score = 63 + ((glicko - 1400) / 200) * 12;
+  } else if (glicko <= 1800) {
+    score = 75 + ((glicko - 1600) / 200) * 10;
+  } else if (glicko <= 2000) {
+    score = 85 + ((glicko - 1800) / 200) * 7;
+  } else if (glicko <= 2200) {
+    score = 92 + ((glicko - 2000) / 200) * 5;
+  } else {
+    score = Math.min(99, 97 + ((glicko - 2200) / 300) * 2);
+  }
+  return Math.round(score);
+}
+
+/**
+ * Calculates a player's user-facing 0-100 score, applying confidence & evidence
+ * discounting for provisional ratings so unproven 1-match players cannot outrank
+ * established veterans.
+ */
+export function toDisplayScore(rating, deviation = DEFAULT_DEVIATION, gamesPlayed = 0) {
+  if (typeof rating !== 'number' || isNaN(rating)) return 50;
+  if (!(gamesPlayed > 0)) return 50;
+
+  const evidence = 1 - Math.exp(-gamesPlayed / 8);
+  const conf = Math.min(1, Math.max(0, 1 - (deviation ?? DEFAULT_DEVIATION) / DEFAULT_DEVIATION));
+  const trust = Math.min(evidence, conf);
+  const effectiveGlicko = DEFAULT_RATING + (rating - DEFAULT_RATING) * trust;
+  return glickoToScore(effectiveGlicko);
+}
+
 /** The shape written to `users/{uid}.glicko`. */
 export function denormalise(result, computedAt) {
+  const displayOverall = glickoToScore(result.overall);
   return {
-    overall: Math.round(result.overall),
+    overall: displayOverall,
+    overallGlicko: Math.round(result.overall),
     provisional: result.provisional,
-    // Rounded, because this map is for display and a card showing
-    // "1842.3719" would be the only place in the product that did.
     sports: Object.fromEntries(
+      result.components
+        .slice(0, DENORM_SPORTS)
+        .map((c) => [c.sportId, toDisplayScore(c.rating, c.deviation, c.matches)]),
+    ),
+    sportsGlicko: Object.fromEntries(
       result.components
         .slice(0, DENORM_SPORTS)
         .map((c) => [c.sportId, Math.round(c.rating)]),

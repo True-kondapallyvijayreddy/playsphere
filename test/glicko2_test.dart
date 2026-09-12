@@ -153,6 +153,22 @@ void main() {
       expect(const Rating(rating: 2100).tier, 'State');
       expect(const Rating(rating: 2400).tier, 'Elite');
     });
+
+    test('displayScore maps to intuitive 0-100 values and discounts provisional play', () {
+      expect(Rating.glickoToScore(1000), 35);
+      expect(Rating.glickoToScore(1200), 50);
+      expect(Rating.glickoToScore(1400), 63);
+      expect(Rating.glickoToScore(1500), 69);
+      expect(Rating.glickoToScore(1600), 75);
+      expect(Rating.glickoToScore(1800), 85);
+      expect(Rating.glickoToScore(2000), 92);
+      expect(Rating.glickoToScore(2200), 97);
+
+      const rookie = Rating(rating: 1734, deviation: 260, gamesPlayed: 1);
+      const veteran = Rating(rating: 1650, deviation: 55, gamesPlayed: 100);
+
+      expect(rookie.displayScore, lessThan(veteran.displayScore));
+    });
   });
 
   group('anti-gaming', () {
