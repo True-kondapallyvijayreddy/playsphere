@@ -147,6 +147,7 @@
       "target": "app",
       "appAssociation": "NONE",
       "predeploy": [
+        "sh scripts/normalize_web_bootstrap.sh",
         "sh scripts/check_web_build.sh",
         "sh scripts/hash_web_bundle.sh",
         "cp web/sw_selfdestruct.js build/web/flutter_service_worker.js"

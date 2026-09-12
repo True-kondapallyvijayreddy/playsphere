@@ -27,11 +27,18 @@ fi
 if ! grep -q 'serviceWorkerVersion: null' "$BOOTSTRAP"; then
   echo "REFUSING TO DEPLOY: this build registers a service worker."
   echo
-  echo "  $BOOTSTRAP does not contain 'serviceWorkerVersion: null', so it was"
-  echo "  built without the no-PWA flag. Deploying it reload-loops the app and"
-  echo "  the site renders nothing. Rebuild with:"
+  echo "  $BOOTSTRAP does not contain 'serviceWorkerVersion: null'."
+  echo "  Deploying it reload-loops the app and the site renders nothing."
   echo
-  echo "      flutter build web --release --pwa-strategy=none"
+  echo "  NOTE: rebuilding with --pwa-strategy=none does NOT fix this on"
+  echo "  Flutter 3.27.4. That flag only empties flutter_service_worker.js;"
+  echo "  the bootstrap's version is an unconditional random number --"
+  echo "  see web.dart:597 and the long comment in"
+  echo "  scripts/normalize_web_bootstrap.sh, which is what actually sets it"
+  echo "  to null and is supposed to have run immediately before this guard."
+  echo
+  echo "  So this failing means that script did not run, or failed. Check the"
+  echo "  predeploy list for the 'app' hosting target in firebase.json."
   echo
   exit 1
 fi
