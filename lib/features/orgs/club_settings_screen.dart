@@ -47,6 +47,45 @@ class ClubSettingsScreen extends ConsumerWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
+                      if (canManageStaff) ...[
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: Text(
+                            'Club details',
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Card(
+                          margin: const EdgeInsets.symmetric(horizontal: 12),
+                          child: ListTile(
+                            leading: const Icon(Icons.badge_outlined),
+                            title: Text(org.name),
+                            subtitle: Text([
+                              org.visibility == OrgVisibility.public
+                                  ? 'Public'
+                                  : 'Unlisted',
+                              org.requiresApprovalToJoin
+                                  ? 'joining needs approval'
+                                  : 'anyone may join',
+                              if ((org.city ?? '').isNotEmpty) org.city!,
+                            ].join(' · ')),
+                            trailing: const Icon(Icons.edit_outlined),
+                            onTap: () => showModalBottomSheet<void>(
+                              context: context,
+                              isScrollControlled: true,
+                              showDragHandle: true,
+                              useSafeArea: true,
+                              builder: (_) => _ClubDetailsSheet(
+                                org: org,
+                                isOwner: caps
+                                    .contains(Capability.manageOrganization),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 28),
+                      ],
                       // First, because it is the setting an owner comes here
                       // to change most often and the one that decides who can
                       // change everything else.
@@ -199,6 +238,154 @@ class ClubSettingsScreen extends ConsumerWidget {
     } catch (e) {
       if (context.mounted) showError(context, e);
     }
+  }
+}
+
+/// Editing a club's name and how people find and join it.
+///
+/// Visibility is shown to everybody who can open this sheet and editable by the
+/// owner alone — it decides who can read the whole club, which the rules keep
+/// out of an admin's hands.
+class _ClubDetailsSheet extends ConsumerStatefulWidget {
+  const _ClubDetailsSheet({required this.org, required this.isOwner});
+
+  final Organization org;
+  final bool isOwner;
+
+  @override
+  ConsumerState<_ClubDetailsSheet> createState() => _ClubDetailsSheetState();
+}
+
+class _ClubDetailsSheetState extends ConsumerState<_ClubDetailsSheet> {
+  late final _name = TextEditingController(text: widget.org.name);
+  late final _description =
+      TextEditingController(text: widget.org.description ?? '');
+  late final _city = TextEditingController(text: widget.org.city ?? '');
+  late final _district = TextEditingController(text: widget.org.district ?? '');
+  late bool _approval = widget.org.requiresApprovalToJoin;
+  late bool _public = widget.org.visibility == OrgVisibility.public;
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _description.dispose();
+    _city.dispose();
+    _district.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    final repo = ref.read(orgRepositoryProvider);
+    try {
+      await repo.updateOrganization(widget.org.copyWith(
+        name: _name.text.trim(),
+        description: _description.text.trim(),
+        city: _city.text.trim(),
+        district: _district.text.trim(),
+        requiresApprovalToJoin: _approval,
+      ));
+      final visibility = _public ? OrgVisibility.public : OrgVisibility.unlisted;
+      if (widget.isOwner && visibility != widget.org.visibility) {
+        await repo.setVisibility(widget.org.id, visibility);
+      }
+      if (mounted) Navigator.of(context).pop();
+    } catch (e) {
+      if (mounted) showError(context, e);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      child: ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+        children: [
+          Text('Club details', style: theme.textTheme.titleLarge),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _name,
+            maxLength: 120,
+            textCapitalization: TextCapitalization.words,
+            decoration: const InputDecoration(
+              labelText: 'Club name',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _description,
+            maxLines: 3,
+            maxLength: 500,
+            decoration: const InputDecoration(
+              labelText: 'About the club',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _city,
+                  textCapitalization: TextCapitalization.words,
+                  decoration: const InputDecoration(
+                    labelText: 'City or town',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: TextField(
+                  controller: _district,
+                  textCapitalization: TextCapitalization.words,
+                  decoration: const InputDecoration(
+                    labelText: 'District',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            value: _approval,
+            onChanged: (v) => setState(() => _approval = v),
+            title: const Text('Approve people before they join'),
+            subtitle: const Text(
+              'Off lets anyone with the club link or code join straight away '
+              '(public clubs only).',
+            ),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            value: _public,
+            onChanged: widget.isOwner ? (v) => setState(() => _public = v) : null,
+            title: const Text('Listed publicly'),
+            subtitle: Text(
+              widget.isOwner
+                  ? 'Public clubs appear in search, and their seasons, scores '
+                      'and invitations can be opened by anyone.'
+                  : 'Only the owner can change who can find the club.',
+            ),
+          ),
+          const SizedBox(height: 12),
+          FilledButton(
+            onPressed: _busy ? null : _save,
+            child: Text(_busy ? 'Saving…' : 'Save'),
+          ),
+        ],
+      ),
+    );
   }
 }
 

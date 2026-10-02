@@ -34,7 +34,7 @@ class ShareMatchButton extends StatelessWidget {
 
   String get _message =>
       '${fixture.entrantAName} v ${fixture.entrantBName}'
-      '${fixture.summary.isEmpty ? '' : ' — ${fixture.summary}'}\n'
+      '${fixture.summary.isEmpty ? '' : ' — ${fixture.scoreLine}'}\n'
       'Follow it live: $_url';
 
   Future<void> _share(BuildContext context) => share(context, fixture);

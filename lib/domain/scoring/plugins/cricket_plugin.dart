@@ -469,7 +469,11 @@ class CricketPlugin extends ScoringPlugin {
             'That batter is already at the crease.',
           );
         }
-        batting[who] = batting[who] ?? _newBatting();
+        // A retired batter resuming keeps their runs; only the note goes.
+        batting[who] = batting[who] == null
+            ? _newBatting()
+            : (Map<String, dynamic>.from(batting[who] as Map)
+              ..remove('dismissal'));
         cur
           ..[vacantEnd] = who
           ..['batting'] = batting;
@@ -566,6 +570,33 @@ class CricketPlugin extends ScoringPlugin {
         '${ctx.playerName(bowler, 'That bowler')} has bowled their '
         '$quota ${quota == 1 ? 'over' : 'overs'}. '
         'Choose another bowler before the next ball.',
+      );
+    }
+
+    // A retirement is not a delivery and not a wicket: the batter walks off
+    // not out and may resume. Counting it as either moved the over on a ball
+    // and ended a short-handed innings on a wicket that never fell.
+    if (action.type == 'wicket' && action.payload['type'] == 'retired') {
+      final who = action.payload['playerId'] as String? ?? striker;
+      if (who != striker && who != cur['nonStriker']) {
+        return const ScoringResult.rejected(
+          'The retiring player must be one of the two batters at the crease.',
+        );
+      }
+      final line = who == striker
+          ? bat
+          : Map<String, dynamic>.from(batting[who] as Map? ?? _newBatting());
+      line['dismissal'] = _dismissalText(action, ctx);
+      batting[who] = line;
+      if (who == striker) {
+        cur['striker'] = null;
+      } else {
+        cur['nonStriker'] = null;
+      }
+      cur['batting'] = batting;
+      innings[idx] = cur;
+      return ScoringResult.ok(
+        _settle(mutate(state, (s) => s['innings'] = innings), ctx),
       );
     }
 

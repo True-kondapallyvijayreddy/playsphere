@@ -198,6 +198,18 @@ class Refs {
   ) =>
       tournamentInvites.doc(inviteId);
 
+  /// An uninvited club asking to bring a side into an open season. Top-level
+  /// for the same two-tenant reason as [tournamentInvites] — see
+  /// [ClubRegistrationRequest].
+  static CollectionReference<Map<String, dynamic>>
+      get clubRegistrationRequests =>
+          db.collection('clubRegistrationRequests');
+
+  static DocumentReference<Map<String, dynamic>> clubRegistrationRequest(
+    String requestId,
+  ) =>
+      clubRegistrationRequests.doc(requestId);
+
   /// Teams, top-level and org-free.
   ///
   /// Not `orgs/{orgId}/teams` on purpose: Rule 4 says a team does not need a
@@ -361,6 +373,20 @@ class Refs {
   ) =>
       seasonInterest(orgId).doc(interestId);
 
+  /// The club's answer to the hands that went up: who it picked. Beside
+  /// [seasonInterest] and under the same club, for the same reasons. See
+  /// [SeasonNomination].
+  static CollectionReference<Map<String, dynamic>> seasonNominations(
+    String orgId,
+  ) =>
+      org(orgId).collection('seasonNominations');
+
+  static DocumentReference<Map<String, dynamic>> seasonNominationDoc(
+    String orgId,
+    String nominationId,
+  ) =>
+      seasonNominations(orgId).doc(nominationId);
+
   // --- Competitions -----------------------------------------------------
 
   static CollectionReference<Map<String, dynamic>> competitions(String orgId) =>
@@ -437,6 +463,21 @@ class Refs {
     String uid,
   ) =>
       registrations(orgId, compId).doc(uid);
+
+  /// Players asking to move houses within one event. See
+  /// [HouseTransferRequest] for why this is a queue and not a direct write.
+  static CollectionReference<Map<String, dynamic>> houseTransferRequests(
+    String orgId,
+    String compId,
+  ) =>
+      competition(orgId, compId).collection('houseTransferRequests');
+
+  static DocumentReference<Map<String, dynamic>> houseTransferRequest(
+    String orgId,
+    String compId,
+    String uid,
+  ) =>
+      houseTransferRequests(orgId, compId).doc(uid);
 
   static CollectionReference<Map<String, dynamic>> entrants(
     String orgId,

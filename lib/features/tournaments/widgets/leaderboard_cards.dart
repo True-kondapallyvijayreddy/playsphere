@@ -435,7 +435,10 @@ class _PlayerBoardsCardState extends State<PlayerBoardsCard> {
                 children: [
                   const Icon(Icons.insights_outlined, size: 20),
                   const SizedBox(width: 8),
-                  Text('Player charts', style: theme.textTheme.titleMedium),
+                  Text(
+                    'Top performers',
+                    style: theme.textTheme.titleMedium,
+                  ),
                 ],
               ),
               const SizedBox(height: 4),

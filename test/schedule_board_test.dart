@@ -264,4 +264,62 @@ void main() {
       expect(find.text('Start this match early'), findsOneWidget);
     });
   });
+
+  group('MatchRow tells played, on and still-to-come apart', () {
+    Future<void> row(WidgetTester t, Fixture f) =>
+        pump(t, MatchRow(fixture: f));
+
+    testWidgets('a retired match shows a tick and its score marked (R)',
+        (t) async {
+      await row(
+        t,
+        const Fixture(
+          id: 'f',
+          orgId: 'o',
+          compId: 'c',
+          entrantAId: 'a',
+          entrantBId: 'b',
+          entrantAName: 'Asha',
+          entrantBName: 'Bina',
+          status: FixtureStatus.completed,
+          summary: '21-15, 8-3',
+          lastSeq: 30,
+          resultType: MatchResultType.retired,
+          winnerEntrantId: 'a',
+        ),
+      );
+      expect(find.byIcon(Icons.check_circle), findsOneWidget);
+      expect(find.text('21-15, 8-3 (R)'), findsOneWidget);
+      expect(find.text('LIVE'), findsNothing);
+    });
+
+    testWidgets('a match whose start time has gone by is tagged LATE',
+        (t) async {
+      await row(
+        t,
+        fixture(
+          id: 'f',
+          a: 'A',
+          b: 'B',
+          at: DateTime.now().subtract(const Duration(hours: 1)),
+        ),
+      );
+      expect(find.text('LATE'), findsOneWidget);
+    });
+
+    testWidgets('a match still to come carries no tag at all', (t) async {
+      await row(
+        t,
+        fixture(
+          id: 'f',
+          a: 'A',
+          b: 'B',
+          at: DateTime.now().add(const Duration(hours: 1)),
+        ),
+      );
+      expect(find.text('LATE'), findsNothing);
+      expect(find.text('LIVE'), findsNothing);
+      expect(find.byIcon(Icons.check_circle), findsNothing);
+    });
+  });
 }

@@ -128,7 +128,7 @@ class SeasonCard extends ConsumerWidget {
     DateTime? earliest;
     for (final c in competitions) {
       icons.add(SportCatalog.byId(c.sportId).icon);
-      entered += c.entrantCount;
+      entered += c.enteredCount;
       final start = c.startDate;
       if (start != null && (earliest == null || start.isBefore(earliest))) {
         earliest = start;

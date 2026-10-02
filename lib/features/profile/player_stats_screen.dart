@@ -96,7 +96,13 @@ class _PlayerStatsScreenState extends ConsumerState<PlayerStatsScreen> {
         onRetry: () => ref.invalidate(playerFixturesProvider(widget.uid)),
         builder: (fixtures) {
           final byScope = ScopedStats.forPlayer(
-            fixtures: fixtures,
+            // Only matches they took the field in. The list also carries
+            // their teams' matches (`squadUids`), and a match sat out is not
+            // one played.
+            fixtures: [
+              for (final f in fixtures)
+                if (f.playerUids.contains(widget.uid)) f,
+            ],
             uid: widget.uid,
             sportId: widget.sportId,
           );

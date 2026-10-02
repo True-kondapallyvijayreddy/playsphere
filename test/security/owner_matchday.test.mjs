@@ -21,8 +21,8 @@ import {
   assertFails, assertSucceeds, initializeTestEnvironment,
 } from '@firebase/rules-unit-testing';
 import {
-  collection, doc, getDocs, query, serverTimestamp, setDoc, updateDoc, where,
-  writeBatch,
+  collection, collectionGroup, doc, getDocs, query, serverTimestamp, setDoc,
+  updateDoc, where, writeBatch,
 } from 'firebase/firestore';
 
 let testEnv;
@@ -31,6 +31,7 @@ const MEMBER = 'uid_member';
 const ORG = 'org_new';
 const COMP = 'comp1';
 const FIX = 'fix1';
+const TOUR = 'tour1';
 
 before(async () => {
   testEnv = await initializeTestEnvironment({
@@ -211,6 +212,44 @@ describe('a new owner setting up their first match', () => {
         scheduledAt: new Date('2026-09-01T10:00:00Z'),
         venue: 'Main ground',
       }));
+    });
+
+    // The rain-delay tool: read every match of the season, then move the ones
+    // still to be played. The WRITE above was never the problem — this READ
+    // was, and it is the shape of the query that decides it.
+    describe('the whole-day shift ("Running late? +15 min")', () => {
+      beforeEach(async () => {
+        await seed(async (db) => {
+          await setDoc(
+            doc(db, 'orgs', ORG, 'competitions', COMP, 'fixtures', FIX),
+            { ...fixture(ORG, COMP), tournamentId: TOUR },
+          );
+        });
+      });
+
+      it('is REFUSED when the query names only the season', async () => {
+        // A collection-group `list` is authorised against the query, not the
+        // documents it would return, so the rules' `orgIsReadable(
+        // resource.data.orgId)` clause has no `orgId` to read and the whole
+        // list is refused — even for the owner, on their own season. This is
+        // what reached them as "You do not have permission to do that in this
+        // organization" (test run TC-ADM-023).
+        const db = testEnv.authenticatedContext(OWNER).firestore();
+        await assertFails(getDocs(query(
+          collectionGroup(db, 'fixtures'),
+          where('tournamentId', '==', TOUR),
+        )));
+      });
+
+      it('is allowed once the query names the org too', async () => {
+        // Exactly `TournamentRepository.shiftSchedule` after the fix.
+        const db = testEnv.authenticatedContext(OWNER).firestore();
+        await assertSucceeds(getDocs(query(
+          collectionGroup(db, 'fixtures'),
+          where('orgId', '==', ORG),
+          where('tournamentId', '==', TOUR),
+        )));
+      });
     });
   });
 

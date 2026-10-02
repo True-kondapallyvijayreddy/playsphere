@@ -42,6 +42,11 @@ class ClubSectionsGrid extends ConsumerWidget {
     final caps = ref.watch(myCapabilitiesProvider(orgId));
     final pending =
         ref.watch(pendingMembersProvider(orgId)).valueOrNull?.length ?? 0;
+    final invitesWaiting = ref
+            .watch(incomingTournamentInvitesProvider(orgId))
+            .valueOrNull
+            ?.length ??
+        0;
 
     // `(icon, label, route, badge)`. Pending join requests are the one thing
     // in this grid that expires if nobody looks, so they are the one count.
@@ -51,6 +56,17 @@ class ClubSectionsGrid extends ConsumerWidget {
         'Tournaments',
         Routes.tournaments(orgId),
         0,
+      ),
+      // Club-to-club invitations — received and sent — beside the club's
+      // own seasons, because inviting clubs is how those seasons fill. The
+      // count is invitations still waiting on this club's answer.
+      (
+        Icons.mark_email_unread_outlined,
+        'Invitations',
+        caps.contains(Capability.manageCompetitions) && invitesWaiting == 0
+            ? Routes.invitationsSend
+            : Routes.invitations,
+        invitesWaiting,
       ),
       (Icons.people_alt_outlined, 'Members', Routes.members(orgId), pending),
       (Icons.collections_outlined, 'Gallery', Routes.gallery(orgId), 0),

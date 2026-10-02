@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 
 import '../../l10n/app_localizations.dart';
 import '../models/enums.dart';
+import '../models/fixture.dart';
 
 /// Turns stored result tokens into text in the reader's language.
 ///
@@ -33,7 +34,27 @@ extension FixtureStatusLabel on FixtureStatus {
 /// get translated. Anything unrecognised is shown as-is rather than blanked,
 /// so a summary written by a future build still displays.
 String localizedSummary(BuildContext context, String summary) {
+  // A score, or nothing, needs no translation — and no localizations lookup,
+  // which a list row must not depend on just to print "21-18".
+  if (!Fixture.outcomeTokens.contains(summary)) return summary;
   final status = FixtureStatus.fromWire(summary);
-  final translated = status.localizedLabel(context);
-  return translated.isEmpty ? summary : translated;
+  final translated =
+      status.wire == summary ? status.localizedLabel(context) : '';
+  if (translated.isNotEmpty) return translated;
+  // The two outcome tokens that are result types rather than statuses. No
+  // translation exists for them yet, but "Conceded" is still better than the
+  // raw wire token "conceded" on a scorecard.
+  if (summary == MatchResultType.conceded.wire ||
+      summary == MatchResultType.noShow.wire) {
+    return MatchResultType.fromWire(summary).label;
+  }
+  return summary;
 }
+
+/// A fixture's score as a list row shows it: translated where the summary is
+/// an outcome token, and marked — "21-15, 8-3 (R)" — where a ruling ended a
+/// match that had a score. See [Fixture.scoreLine].
+String localizedScoreLine(BuildContext context, Fixture fixture) =>
+    fixture.summaryIsScore
+        ? fixture.scoreLine
+        : localizedSummary(context, fixture.summary);

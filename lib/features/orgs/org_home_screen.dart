@@ -24,6 +24,7 @@ import '../network/club_network_providers.dart';
 import '../scoring/widgets/live_score_card.dart';
 import 'club_events_screen.dart';
 import 'widgets/club_sections_grid.dart';
+import 'widgets/leave_club_flow.dart';
 import 'widgets/club_stats_section.dart';
 
 class OrgHomeScreen extends ConsumerWidget {
@@ -59,6 +60,12 @@ class OrgHomeScreen extends ConsumerWidget {
     final asClubId = ref.watch(actingClubIdProvider);
     final canMessage = asClubId != null && asClubId != orgId;
 
+    // Leaving is offered to every active member, on the club itself — not
+    // only on their own row of a roster most members never open.
+    final me = ref.watch(myMembershipProvider(orgId)).valueOrNull;
+    final isMember = me != null && me.isActive;
+    final iOwn = isMember && me.role == MembershipRole.owner;
+
     return AppScaffold(
       orgId: orgId,
       title: 'Home',
@@ -75,6 +82,33 @@ class OrgHomeScreen extends ConsumerWidget {
             tooltip: 'Club settings',
             icon: const Icon(Icons.settings_outlined),
             onPressed: () => context.push(Routes.clubSettings(orgId)),
+          ),
+        if (isMember)
+          PopupMenuButton<String>(
+            tooltip: 'Your membership',
+            icon: const Icon(Icons.more_vert),
+            itemBuilder: (context) => [
+              if (iOwn)
+                const PopupMenuItem(
+                  value: 'handOver',
+                  child: ListTile(
+                    leading: Icon(Icons.swap_horiz),
+                    title: Text('Hand over the club'),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
+              const PopupMenuItem(
+                value: 'leave',
+                child: ListTile(
+                  leading: Icon(Icons.logout),
+                  title: Text('Leave club'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+            ],
+            onSelected: (choice) => choice == 'handOver'
+                ? startHandOverClub(context, ref, orgId: orgId)
+                : startLeaveClub(context, ref, orgId: orgId),
           ),
       ],
       // Two buttons, and the smaller one is the more used. Starting a match
@@ -244,8 +278,7 @@ class OrgHomeScreen extends ConsumerWidget {
                       // away behind "View All", and a club three years in was
                       // otherwise scrolling past two hundred cards to reach
                       // anything below the events section.
-                      for (final item
-                          in feed.take(_eventsPreview))
+                      for (final item in feed.take(_eventsPreview))
                         switch (item) {
                           EventFeedSingle(:final competition) =>
                             // The same tile the full events list uses, so a
@@ -508,8 +541,7 @@ class _Crest extends ConsumerWidget {
         bytes: image.bytes,
         contentType: image.contentType,
       ),
-      onRemove:
-          org.logoUrl == null ? null : () => repo.removeClubLogo(org.id),
+      onRemove: org.logoUrl == null ? null : () => repo.removeClubLogo(org.id),
     );
   }
 
@@ -671,8 +703,7 @@ class _EventKindStrip extends StatelessWidget {
           ActionChip(
             avatar: Icon(kind.icon, size: 16),
             label: Text('${kind.label} ${index.count(kind)}'),
-            onPressed: () =>
-                context.push(Routes.clubEvents(orgId, kind: kind)),
+            onPressed: () => context.push(Routes.clubEvents(orgId, kind: kind)),
           ),
       ],
     );
@@ -706,7 +737,9 @@ class _FollowButton extends ConsumerWidget {
     if (org.visibility != OrgVisibility.public) return const SizedBox.shrink();
 
     final membership = ref.watch(myMembershipProvider(orgId)).valueOrNull;
-    if (membership != null && membership.isActive) return const SizedBox.shrink();
+    if (membership != null && membership.isActive) {
+      return const SizedBox.shrink();
+    }
 
     final following = ref.watch(isFollowingOrgProvider(orgId)).valueOrNull;
     // Nothing until the answer is known. A button that says "Follow" and then

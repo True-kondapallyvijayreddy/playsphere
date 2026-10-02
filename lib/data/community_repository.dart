@@ -23,10 +23,6 @@ class CommunityRepository {
 
   // --- Sub-Groups --------------------------------------------------------
 
-  Future<void> createSubGroup(SubGroup group) async {
-    await Refs.subGroups(group.orgId).add(group.toCreate());
-  }
-
   Stream<List<SubGroup>> watchSubGroups(String orgId) {
     return Refs.subGroups(orgId).snapshots().map((snap) =>
         snap.docs.map((d) => SubGroup.fromDoc(d.data(), d.id)).toList());
@@ -344,41 +340,6 @@ class CommunityRepository {
     );
   }
 
-  // --- RSVP & Waitlist Auto-Promotion ------------------------------------
-
-  /// Withdraws or cancels a user's registration and automatically promotes
-  /// the oldest waitlisted registration to confirmed.
-  Future<void> withdrawAndPromoteWaitlist({
-    required String orgId,
-    required String compId,
-    required String uid,
-  }) async {
-    final regRef = Refs.registration(orgId, compId, uid);
-    final doc = await regRef.get();
-    if (!doc.exists) return;
-
-    final currentStatus = doc.data()?['status'] as String?;
-
-    await regRef.update({'status': RegistrationStatus.withdrawn.wire});
-
-    // If the withdrawing user occupied a confirmed slot, promote oldest waitlisted
-    if (currentStatus == RegistrationStatus.confirmed.wire ||
-        currentStatus == RegistrationStatus.pending.wire) {
-      final waitlistedSnap = await Refs.registrations(orgId, compId)
-          .where('status', isEqualTo: RegistrationStatus.waitlisted.wire)
-          .orderBy('createdAt')
-          .limit(1)
-          .get();
-
-      if (waitlistedSnap.docs.isNotEmpty) {
-        final oldestWaitlistDoc = waitlistedSnap.docs.first;
-        await oldestWaitlistDoc.reference.update({
-          'status': RegistrationStatus.confirmed.wire,
-        });
-      }
-    }
-  }
-
   // --- Inter-Club Challenges --------------------------------------------
 
   /// Issues a challenge and hands back the id it was written under.
@@ -466,11 +427,29 @@ class CommunityRepository {
   /// One batch for all of it. A partial accept — two of three matches created,
   /// the challenge left `pending` — would leave both clubs looking at
   /// different truths about what they had agreed to play.
+  ///
+  /// [acceptingOrgId] is the club answering: the challenged club answers a
+  /// challenge, and the challenger answers a counter-offer. The match is hosted
+  /// by whichever of them accepts — `firestore.rules` lets a club write
+  /// competitions only in its own tenant, and refuses a club accepting its own
+  /// offer. [acceptedByUid] must be the signed-in account: it is recorded as
+  /// the creator, and the rules compare it to the caller.
   Future<Competition> acceptChallenge({
     required Challenge challenge,
     required DateTime selectedSlot,
     required String acceptedByUid,
+    required String acceptingOrgId,
   }) async {
+    final answering = challenge.isCountered
+        ? challenge.fromOrgId
+        : challenge.toOrgId;
+    if (acceptingOrgId != answering) {
+      throw ValidationException(
+        challenge.isCountered
+            ? 'The counter-offer is waiting on ${challenge.fromOrgName}.'
+            : 'This challenge is waiting on ${challenge.toOrgName}.',
+      );
+    }
     // Accepting a date that was never on the table would produce a fixture
     // one club never agreed to. Checked against `liveSlots` so that after a
     // counter-offer it is the counter's dates that count — the original
@@ -484,12 +463,10 @@ class CommunityRepository {
       );
     }
 
-    // The club that accepted hosts; the club that issued the challenge is the
-    // visitor. Side A is the challenger, which keeps "A v B" reading the same
-    // way the challenge itself was worded.
-    final hostOrgId = challenge.toOrgId;
-    final guestOrgId = challenge.fromOrgId;
-    final participants = [guestOrgId, hostOrgId];
+    // The club that accepted hosts. Side A is always the challenger, which
+    // keeps "A v B" reading the same way the challenge itself was worded.
+    final hostOrgId = acceptingOrgId;
+    final participants = [challenge.fromOrgId, challenge.toOrgId];
 
     final legs = challenge.resolvedLegs((id) => SportCatalog.byId(id).name);
     final batch = _firestore.batch();
@@ -502,7 +479,8 @@ class CommunityRepository {
       tournamentId = tRef.id;
       batch.set(tRef, {
         'orgId': hostOrgId,
-        'name': '${challenge.fromOrgName} v ${challenge.toOrgName}',
+        // Bounded to the season-name limit the rules hold every tournament to.
+        'name': _fit('${challenge.fromOrgName} v ${challenge.toOrgName}', 120),
         'status': TournamentStatus.scheduled.wire,
         'startDate': Fs.ts(selectedSlot),
         'endDate': Fs.ts(selectedSlot),
@@ -569,8 +547,8 @@ class CommunityRepository {
         id: fixRef.id,
         orgId: hostOrgId,
         compId: compRef.id,
-        entrantAId: guestOrgId,
-        entrantBId: hostOrgId,
+        entrantAId: challenge.fromOrgId,
+        entrantBId: challenge.toOrgId,
         entrantAName: challenge.fromOrgName,
         entrantBName: challenge.toOrgName,
         status: FixtureStatus.scheduled,
@@ -613,6 +591,9 @@ class CommunityRepository {
     await batch.commit();
     return first;
   }
+
+  static String _fit(String text, int max) =>
+      text.length <= max ? text : '${text.substring(0, max - 1)}…';
 
   /// Declines a challenge. Recorded rather than deleted so a club cannot
   /// re-issue the same challenge repeatedly and claim it was never answered.

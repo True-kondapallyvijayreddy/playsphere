@@ -527,6 +527,7 @@ class Membership {
     required this.displayName,
     this.photoUrl,
     this.joinedAt,
+    this.decidedAt,
     this.invitedBy,
     this.approvedBy,
     this.jerseyNumber,
@@ -547,6 +548,21 @@ class Membership {
   final String? photoUrl;
 
   final DateTime? joinedAt;
+
+  /// When a club last decided on this row — approved or declined. Written by
+  /// `OrgRepository.decideMembership`; null for anybody who joined an
+  /// open club directly, and for rows older than the field.
+  final DateTime? decidedAt;
+
+  /// When this person actually became a member, or null if they are not one.
+  ///
+  /// `joinedAt` is when the row was CREATED, which for a club that approves
+  /// joiners is the day they applied; somebody left waiting a fortnight was
+  /// not a member for that fortnight. So an approved row counts from the
+  /// decision, and falls back to `joinedAt` where there was none.
+  DateTime? get memberSince =>
+      isActive ? (decidedAt ?? joinedAt) : null;
+
   final String? invitedBy;
   final String? approvedBy;
   final String? jerseyNumber;
@@ -604,6 +620,7 @@ class Membership {
       displayName: Fs.str(d['displayName'], 'Member'),
       photoUrl: Fs.strOrNull(d['photoUrl']),
       joinedAt: Fs.dateOrNull(d['joinedAt']),
+      decidedAt: Fs.dateOrNull(d['decidedAt']),
       invitedBy: Fs.strOrNull(d['invitedBy']),
       approvedBy: Fs.strOrNull(d['approvedBy']),
       jerseyNumber: Fs.strOrNull(d['jerseyNumber']),
@@ -627,6 +644,7 @@ class Membership {
         displayName: displayName,
         photoUrl: photoUrl,
         joinedAt: joinedAt,
+        decidedAt: decidedAt,
         invitedBy: invitedBy,
         approvedBy: approvedBy,
         jerseyNumber: jerseyNumber,

@@ -53,6 +53,14 @@ class CompetitionCategory {
       dimensions.length == 1 &&
       dimensions.contains(CategoryDimension.openCategory);
 
+  /// Whether this category keeps anybody out on who they are — an age band or
+  /// a gender. Same test as `categoryRestricts` in
+  /// functions/team_eligibility.js; weight and grade are not checked anywhere.
+  bool get restrictsEntry =>
+      (dimensions.contains(CategoryDimension.age) &&
+          (minAge != null || maxAge != null)) ||
+      allowedGenders.isNotEmpty;
+
   /// Decides whether [user] may enter, returning a human-readable reason when
   /// they may not. Returning the reason rather than a bare bool matters: an
   /// organizer rejecting an entry has to be able to tell the player why.
@@ -79,6 +87,29 @@ class CompetitionCategory {
     }
 
     return const CategoryEligibility.eligible();
+  }
+
+  /// This category measured on [cutOff] instead of whatever date it was
+  /// picked against.
+  ///
+  /// A season form offers age presets the moment a category is added, which
+  /// is often before the start date is final. Rebuilt at creation from the
+  /// start the season is actually saved with, so "U-14 on the season's first
+  /// day" means that day and not the one on screen when the chip was tapped.
+  /// Categories with no age bound are returned unchanged.
+  CompetitionCategory withAgeCutOff(DateTime cutOff) {
+    if (!dimensions.contains(CategoryDimension.age)) return this;
+    return CompetitionCategory(
+      label: label,
+      dimensions: dimensions,
+      minAge: minAge,
+      maxAge: maxAge,
+      ageCutOffDate: DateTime(cutOff.year, cutOff.month, cutOff.day),
+      allowedGenders: allowedGenders,
+      minWeightKg: minWeightKg,
+      maxWeightKg: maxWeightKg,
+      grade: grade,
+    );
   }
 
   static String _fmt(DateTime d) =>
@@ -199,6 +230,7 @@ class Competition {
     this.teamSize,
     this.teamEntryMode = TeamEntryMode.individual,
     this.presetHouses = const [],
+    this.allowHouseTransferRequests = false,
     this.rulesNote,
     this.confirmedCount = 0,
     this.waitlistCount = 0,
@@ -235,6 +267,12 @@ class Competition {
   final EntrantType entrantType;
   final TeamEntryMode teamEntryMode;
   final List<String> presetHouses;
+
+  /// Whether a player may put in a self-service ask to move houses —
+  /// TC-CLUB-003. Off by default: most events want house placement to be
+  /// entirely the organizer's own call, and the request queue this unlocks
+  /// is dead weight on an event nobody ever wanted it for.
+  final bool allowHouseTransferRequests;
   final CompetitionFormat format;
   final CompetitionStatus status;
   final CompetitionCategory category;
@@ -489,6 +527,7 @@ class Competition {
         scoringConfig: scoringConfig ?? this.scoringConfig,
         teamEntryMode: teamEntryMode,
         presetHouses: presetHouses,
+        allowHouseTransferRequests: allowHouseTransferRequests,
         cancelReason: cancelReason,
         cancelledAt: cancelledAt,
         cancelledBy: cancelledBy,
@@ -512,6 +551,7 @@ class Competition {
     EntrantType? entrantType,
     TeamEntryMode? teamEntryMode,
     List<String>? presetHouses,
+    bool? allowHouseTransferRequests,
     CompetitionFormat? format,
     CompetitionStatus? status,
     CompetitionCategory? category,
@@ -568,6 +608,8 @@ class Competition {
         entrantType: entrantType ?? this.entrantType,
         teamEntryMode: teamEntryMode ?? this.teamEntryMode,
         presetHouses: presetHouses ?? this.presetHouses,
+        allowHouseTransferRequests:
+            allowHouseTransferRequests ?? this.allowHouseTransferRequests,
         format: format ?? this.format,
         status: status ?? this.status,
         category: category ?? this.category,
@@ -735,6 +777,9 @@ class Competition {
   int? get openSlots {
     final cap = maxEntrants;
     if (cap == null) return null;
+    // In a house event people register and houses compete: the cap is on
+    // houses, which the organizer fixes up front, not on the people in them.
+    if (teamEntryMode == TeamEntryMode.houseBatch) return null;
     if (participationModel != ParticipationModel.hybrid) return cap;
     final open = cap - preselectedSlots;
     return open < 0 ? 0 : open;
@@ -757,12 +802,39 @@ class Competition {
     return left != null && left == 0;
   }
 
+  /// How many have entered, for anything that puts "N entered" on a card.
+  ///
+  /// ## Why not [entrantCount]
+  ///
+  /// They are different fields with different jobs, and three cards were
+  /// reading the wrong one. [confirmedCount] is the live tally, maintained in
+  /// the same transaction as the registration it counts — it is what capacity
+  /// is enforced against and it moves the moment somebody enters.
+  /// [entrantCount] is written by the DRAW (`seedEntrants` and `_closeEntries`)
+  /// and is zero until the draw is made.
+  ///
+  /// So a season with two confirmed teams and no draw yet read "0 entered",
+  /// and one with three badminton entries read "2" — both correct readings of
+  /// a field that was not answering the question. A card asks "how many have
+  /// entered", which is this.
+  ///
+  /// Falls back to [entrantCount] only where there is no live tally to use but
+  /// a draw has been seeded: an event that predates [confirmedCount] would
+  /// otherwise report zero entrants for a completed competition.
+  int get enteredCount => confirmedCount > 0 ? confirmedCount : entrantCount;
+
+  /// When entries actually stop — [registrationClosesAt] read as the end of
+  /// the chosen day when it carries no time of its own. See
+  /// [endOfDeadlineDay]: a deadline of "19 Sep" means all of the 19th, and
+  /// taking it literally closed entries before the day it named had begun.
+  DateTime? get entriesCloseAt => endOfDeadlineDay(registrationClosesAt);
+
   /// Whether the registration deadline has passed at [now].
   ///
   /// False when no deadline was set — an event with no cut-off closes when
   /// the organizer says so, not on its own.
   bool registrationDeadlinePassed([DateTime? now]) {
-    final closes = registrationClosesAt;
+    final closes = entriesCloseAt;
     if (closes == null) return false;
     return (now ?? DateTime.now()).isAfter(closes);
   }
@@ -803,8 +875,7 @@ class Competition {
     // case joining the queue is a legitimate thing to be able to do.
     if (openSlotsFull && !waitlistEnabled) return false;
     if (isFull && !waitlistEnabled) return false;
-    final closes = registrationClosesAt;
-    if (closes != null && DateTime.now().isAfter(closes)) return false;
+    if (registrationDeadlinePassed()) return false;
     return true;
   }
 
@@ -820,6 +891,35 @@ class Competition {
     if (openSlotsFull) return RegistrationStatus.waitlisted;
     return RegistrationStatus.confirmed;
   }
+
+  /// A season opened to other clubs vets the outsiders, not the host: its
+  /// own members and teams go straight in, as the season wizard promises.
+  /// Mirrored by `hostEntryBypassesApproval` in `firestore.rules`.
+  bool get hostEntriesAutoConfirm =>
+      tournamentId != null &&
+      participationModel == ParticipationModel.approval &&
+      openToNonMembers;
+
+  RegistrationStatus outcomeOfEntering({required bool fromHost}) {
+    if (!(fromHost && hostEntriesAutoConfirm)) return outcomeOfRegisteringNow;
+    return openSlotsFull
+        ? RegistrationStatus.waitlisted
+        : RegistrationStatus.confirmed;
+  }
+
+  /// Whether the thing that enters this event is a TEAM DOCUMENT, so nobody
+  /// may register as themselves.
+  ///
+  /// Not simply `entrantType == team`: houses, a doubles draw and a player
+  /// pool all produce team-shaped entrants assembled from registrations that
+  /// individual people make. What is left — a pre-formed side, and the
+  /// `individual` default an older cricket event carried — is the case where a
+  /// person registering alone produces nothing that can play. The same test
+  /// guards the self-registration clause in `firestore.rules`.
+  bool get entersAsTeams =>
+      entrantType == EntrantType.team &&
+      (teamEntryMode == TeamEntryMode.preformedTeam ||
+          teamEntryMode == TeamEntryMode.individual);
 
   bool get isFree => entryFeeRupees <= 0;
 
@@ -856,6 +956,7 @@ class Competition {
       teamSize: d['teamSize'] == null ? null : Fs.integer(d['teamSize']),
       teamEntryMode: TeamEntryMode.fromWire(Fs.strOrNull(d['teamEntryMode'])),
       presetHouses: d['presetHouses'] is List ? Fs.strList(d['presetHouses']) : const [],
+      allowHouseTransferRequests: Fs.boolean(d['allowHouseTransferRequests']),
       rulesNote: Fs.strOrNull(d['rulesNote']),
       confirmedCount: Fs.integer(d['confirmedCount']),
       waitlistCount: Fs.integer(d['waitlistCount']),
@@ -899,7 +1000,12 @@ class Competition {
     );
   }
 
-  Map<String, Object?> toCreate() => {
+  /// [openForEntries] stores the event already taking entries. Only a season
+  /// or a one-sport tournament passes it: those are published the moment they
+  /// are created (see `SeasonBlueprint`), so their events must not wait on a
+  /// second "open entries" step. Every other creation path stays a draft, and
+  /// the rules accept `registration_open` on create from organizers only.
+  Map<String, Object?> toCreate({bool openForEntries = false}) => {
         'orgId': orgId,
         'name': name,
         'nameLower': name.toLowerCase(),
@@ -909,10 +1015,12 @@ class Competition {
         'entrantType': entrantType.wire,
         'teamEntryMode': teamEntryMode.wire,
         'presetHouses': presetHouses,
+        'allowHouseTransferRequests': allowHouseTransferRequests,
         'format': format.wire,
         'status': switch (true) {
           _ when isInterClub => CompetitionStatus.scheduled.wire,
           _ when format.isSingleMatch => CompetitionStatus.inProgress.wire,
+          _ when openForEntries => CompetitionStatus.registrationOpen.wire,
           _ => CompetitionStatus.draft.wire,
         },
         'category': category.toMap(),
@@ -955,6 +1063,14 @@ class Competition {
   Map<String, Object?> toUpdate() => Fs.prune({
         'name': name,
         'nameLower': name.toLowerCase(),
+        // The arrangement of the matches, alongside the `drawConfig` below
+        // that configures it. Absent here until it was noticed that the edit
+        // dialog's Format dropdown moved, reported success and changed
+        // nothing — the same silent no-op as the status field, which is
+        // deliberately still absent (see the note at the foot of this map).
+        // Fixtures already drawn freeze their own arrangement onto
+        // themselves, so this only governs matches not yet created.
+        'format': format.wire,
         'description': description,
         'venue': venue,
         'startDate': Fs.ts(startDate),
@@ -967,6 +1083,7 @@ class Competition {
         'teamSize': teamSize,
         'teamEntryMode': teamEntryMode.wire,
         'presetHouses': presetHouses,
+        'allowHouseTransferRequests': allowHouseTransferRequests,
         'rulesNote': rulesNote,
         'category': category.toMap(),
         'pointsForWin': pointsForWin,
@@ -985,6 +1102,14 @@ class Competition {
         // The suspension fields are deliberately absent, as they are on
         // `Tournament`: `suspendCompetition`/`resumeCompetition` own them, and
         // an edit made to fix a typo must not resume a paused event.
+        //
+        // `status` is absent for the same reason and stays absent:
+        // [CompetitionRepository.setStatus] owns the lifecycle, because
+        // opening entries also has to lift the season out of draft
+        // (`_liftSeasonOutOfDraft`) and a plain field write would skip it. A
+        // screen that lets someone CHANGE the status must therefore call
+        // `setStatus` itself — the event edit dialog did not, which is why
+        // closing registrations reported success and reverted (TC-ADM-009).
       });
 }
 
@@ -1012,6 +1137,7 @@ class Registration {
     this.teamId,
     this.memberUids = const [],
     this.registeredByUid,
+    this.groupId,
   });
 
   final String uid;
@@ -1051,6 +1177,13 @@ class Registration {
   /// Who submitted a team entry — a captain, a manager, or a club organizer.
   /// Null on a self-registration, where [uid] already answers it.
   final String? registeredByUid;
+
+  /// The group entry this registration came from, when an organizer approved
+  /// a group rather than the person registering alone. Every member of a group
+  /// accepted their own place, so the row is still theirs — `firestore.rules`
+  /// admits the organizer's write only while that group is approved in the
+  /// same batch and names this member as having accepted.
+  final String? groupId;
 
   /// Whether this row is a side rather than a person.
   bool get isTeamEntry => teamId != null && teamId!.isNotEmpty;
@@ -1094,6 +1227,7 @@ class Registration {
       teamId: Fs.strOrNull(d['teamId']),
       memberUids: Fs.strList(d['memberUids']),
       registeredByUid: Fs.strOrNull(d['registeredByUid']),
+      groupId: Fs.strOrNull(d['groupId']),
     );
   }
 
@@ -1122,6 +1256,7 @@ class Registration {
         'teamId': teamId,
         'memberUids': memberUids,
         'registeredByUid': registeredByUid,
+        if (groupId != null) 'groupId': groupId,
         'createdAt': FieldValue.serverTimestamp(),
       };
 }
@@ -1150,6 +1285,18 @@ class Entrant {
   final String id;
   final String displayName;
   final EntrantType entrantType;
+
+  /// The id prefix `generateDraftSchedule` gives an open slot — "Team A",
+  /// "Open slot 11" — that no registration has filled yet.
+  static const placeholderIdPrefix = 'draft_';
+
+  /// Whether [entrantId] names an open slot rather than somebody entered.
+  ///
+  /// The id, not the fixture's `isDraft` flag, is what says so: publishing a
+  /// draft schedule clears `isDraft` but leaves its matches naming the same
+  /// slots, and a published group of open slots is still a group with rows.
+  static bool isPlaceholderId(String entrantId) =>
+      entrantId.startsWith(placeholderIdPrefix);
 
   /// Set for individual entrants; null for teams.
   final String? uid;

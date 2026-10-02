@@ -149,11 +149,12 @@ class GroupStageFields extends StatelessWidget {
     // "About four" hid the uneven split that an organizer has to explain to
     // whoever drew the group of five.
     final size = smallest == largest ? '$smallest' : '$smallest–$largest';
+    final noun = groups == 1 ? 'group' : 'groups';
     if (!feedsKnockout(format, config)) {
-      return '$groups groups of $size, each playing its own table.';
+      return '$groups $noun of $size, each playing its own table.';
     }
     final qualifiers = groups * config.qualifiersPerGroup;
-    return '$groups groups of $size — everyone plays everyone in their own '
+    return '$groups $noun of $size — everyone plays everyone in their own '
         'group, then the top ${config.qualifiersPerGroup} of each '
         '($qualifiers sides) go into the knockout.';
   }

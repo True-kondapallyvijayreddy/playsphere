@@ -279,10 +279,10 @@ class ClubEventTile extends ConsumerWidget {
           [
             c.sportName,
             if (fixture != null && fixture.summary.isNotEmpty)
-              localizedSummary(context, fixture.summary)
+              localizedScoreLine(context, fixture)
             else
               c.category.label,
-            if (fixture == null) '${c.entrantCount} entered',
+            if (fixture == null) '${c.enteredCount} entered',
             if (c.startDate != null) friendlyDate(c.startDate!),
           ].join(' · '),
           maxLines: 2,

@@ -202,7 +202,19 @@ class _SideBlock extends ConsumerWidget {
                 seed: e.uid,
                 size: 28,
               ),
-              title: Text(e.displayName),
+              title: Row(
+                children: [
+                  Flexible(child: Text(e.displayName)),
+                  if (e.isCaptain) ...[
+                    const SizedBox(width: 6),
+                    const _RoleChip(label: 'C'),
+                  ],
+                  if (e.isWicketKeeper) ...[
+                    const SizedBox(width: 4),
+                    const _RoleChip(label: 'WK'),
+                  ],
+                ],
+              ),
               subtitle: Text(
                 [
                   if (e.status == RegistrationStatus.waitlisted &&
@@ -213,6 +225,30 @@ class _SideBlock extends ConsumerWidget {
                   if (e.addedByAdmin) 'picked by the club',
                 ].join(' · '),
               ),
+              // TC-CLUB-025: role assignment is the club's own call, so it's
+              // offered only to the side's own admin, and only while there is
+              // still a squad to edit — same gate as the RSVP-pull button
+              // above, not the visiting side's read-only view.
+              trailing: isMine && !_locked && canManage && e.isPlaying
+                  ? _RoleMenu(
+                      entry: e,
+                      showWicketKeeper: competition.sportId == 'cricket',
+                      onSetCaptain: (v) => _setRole(
+                        context,
+                        ref,
+                        e,
+                        'isCaptain',
+                        v,
+                      ),
+                      onSetWicketKeeper: (v) => _setRole(
+                        context,
+                        ref,
+                        e,
+                        'isWicketKeeper',
+                        v,
+                      ),
+                    )
+                  : null,
             ),
 
         // Only your own club's controls. The other side is somebody else's
@@ -321,6 +357,26 @@ class _SideBlock extends ConsumerWidget {
     }
   }
 
+  Future<void> _setRole(
+    BuildContext context,
+    WidgetRef ref,
+    SquadEntry entry,
+    String roleField,
+    bool value,
+  ) async {
+    try {
+      await ref.read(competitionRepositoryProvider).setSquadRole(
+            fixture: fixture,
+            side: side,
+            uid: entry.uid,
+            roleField: roleField,
+            value: value,
+          );
+    } catch (e) {
+      if (context.mounted) showError(context, e);
+    }
+  }
+
   Future<void> _lock(BuildContext context, WidgetRef ref) async {
     try {
       await ref.read(competitionRepositoryProvider).lockSquadFromEntries(
@@ -353,6 +409,72 @@ class _SideBlock extends ConsumerWidget {
     } catch (e) {
       if (context.mounted) showError(context, e);
     }
+  }
+}
+
+/// A small "C" / "WK" badge next to a squad member's name.
+class _RoleChip extends StatelessWidget {
+  const _RoleChip({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.primaryContainer,
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(
+        label,
+        style: theme.textTheme.labelSmall?.copyWith(
+          color: theme.colorScheme.onPrimaryContainer,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+}
+
+/// Lets the club's admin assign or clear this player's captain / wicket-keeper
+/// chip — TC-CLUB-025. A menu rather than two always-visible toggles: most
+/// rows have neither role, and eleven rows of blank switches would outweigh
+/// the two that ever get tapped.
+class _RoleMenu extends StatelessWidget {
+  const _RoleMenu({
+    required this.entry,
+    required this.showWicketKeeper,
+    required this.onSetCaptain,
+    required this.onSetWicketKeeper,
+  });
+
+  final SquadEntry entry;
+  final bool showWicketKeeper;
+  final ValueChanged<bool> onSetCaptain;
+  final ValueChanged<bool> onSetWicketKeeper;
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<VoidCallback>(
+      tooltip: 'Set role',
+      icon: const Icon(Icons.more_vert, size: 18),
+      onSelected: (action) => action(),
+      itemBuilder: (context) => [
+        CheckedPopupMenuItem<VoidCallback>(
+          checked: entry.isCaptain,
+          value: () => onSetCaptain(!entry.isCaptain),
+          child: const Text('Captain'),
+        ),
+        if (showWicketKeeper)
+          CheckedPopupMenuItem<VoidCallback>(
+            checked: entry.isWicketKeeper,
+            value: () => onSetWicketKeeper(!entry.isWicketKeeper),
+            child: const Text('Wicket-keeper'),
+          ),
+      ],
+    );
   }
 }
 

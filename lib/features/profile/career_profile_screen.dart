@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart';
 
 import '../../core/layout/responsive.dart';
 import '../../core/models/app_user.dart';
@@ -14,10 +15,12 @@ import '../../data/image_composer.dart';
 import '../../domain/career/head_to_head.dart';
 import '../../domain/rating/glicko2.dart';
 import '../../domain/scoring/scoring_registry.dart';
+import '../home/home_providers.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/glicko.dart';
 import '../../shared/identity.dart';
 import '../../shared/image_upload.dart';
+import '../../shared/member_since.dart';
 import '../../shared/ui_kit.dart';
 import 'widgets/memory_grid.dart';
 
@@ -329,6 +332,7 @@ class _Identity extends ConsumerWidget {
                   },
                 ),
               ],
+              _MemberSince(uid: user.uid),
               if (user.isMinor) ...[
                 const SizedBox(height: 6),
                 Chip(
@@ -343,6 +347,46 @@ class _Identity extends ConsumerWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// "Member of Nizampet CC since Mar 2024 · 2 yrs", for the club selected in
+/// the app bar.
+///
+/// That club and no other — see `scopedOrgIdsProvider`. A roster is where the
+/// question comes from, and the roster a person opened this profile from is
+/// the selected club's. Nothing at all when this person is not an active
+/// member there.
+class _MemberSince extends ConsumerWidget {
+  const _MemberSince({required this.uid});
+
+  final String uid;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final orgId = ref.watch(currentClubIdProvider);
+    if (orgId == null) return const SizedBox.shrink();
+    final since = ref
+        .watch(clubMembershipProvider((orgId: orgId, uid: uid)))
+        .valueOrNull
+        ?.memberSince;
+    if (since == null) return const SizedBox.shrink();
+    final club = ref.watch(organizationProvider(orgId)).valueOrNull?.name;
+    final theme = Theme.of(context);
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Chip(
+        avatar: const Icon(Icons.event_available_outlined, size: 16),
+        label: Text(
+          '${club == null ? 'Member' : 'In $club'} since '
+          '${DateFormat('MMM y').format(since)} · ${clubTenure(since)}',
+        ),
+        visualDensity: VisualDensity.compact,
+        side: BorderSide.none,
+        backgroundColor: theme.colorScheme.tertiaryContainer,
+      ),
     );
   }
 }

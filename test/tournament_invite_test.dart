@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
@@ -98,6 +99,15 @@ void main() {
               orgId: state.pathParameters['orgId']!,
               tournamentId: state.pathParameters['tournamentId']!,
             ),
+            routes: [
+              GoRoute(
+                path: 'desk',
+                builder: (_, state) => SeasonDeskScreen(
+                  orgId: state.pathParameters['orgId']!,
+                  tournamentId: state.pathParameters['tournamentId']!,
+                ),
+              ),
+            ],
           ),
         ],
       );
@@ -105,6 +115,17 @@ void main() {
       return ProviderScope(
         overrides: [
           currentUidProvider.overrideWithValue('uid_owner'),
+          myMembershipsProvider.overrideWith(
+            (ref) => Stream.value(const [
+              Membership(
+                uid: 'uid_owner',
+                orgId: hostOrg,
+                role: MembershipRole.owner,
+                status: MembershipStatus.active,
+                displayName: 'Owner',
+              ),
+            ]),
+          ),
           organizationProvider.overrideWith(
             (ref, id) => Stream.value(const Organization(
               id: hostOrg,
@@ -172,13 +193,20 @@ void main() {
 
       await tester.tap(find.byTooltip('More actions'));
       await tester.pumpAndSettle();
+      expect(find.text('Edit'), findsOneWidget);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
 
+      // The season page itself carries no organizer tools — one door to the
+      // desk, where inviting clubs lives with the rest of the work.
+      expect(find.text('Invite clubs'), findsNothing);
+      await tester.tap(find.text('Organizer desk'));
+      await tester.pumpAndSettle();
       expect(
         find.text('Invite clubs'),
         findsOneWidget,
         reason: 'the public link broadcasts; this is how named clubs are asked',
       );
-      expect(find.text('Edit'), findsOneWidget);
     });
   });
 }

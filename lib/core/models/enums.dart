@@ -768,6 +768,26 @@ enum MatchResultType {
 
   /// Whether a human should be told why. A normal result explains itself.
   bool get wantsNote => this != MatchResultType.normal;
+
+  /// The letter a scoreline carries when the match did not end the ordinary
+  /// way: "21-15, 8-3 (R)".
+  ///
+  /// The score that was on the board when the official stepped in is kept —
+  /// see `ScoringService.setFixtureOutcome` — and this is what stops that
+  /// score reading as a finished match. Null where there is no marker to add:
+  /// a normal result, and a no-show, which never has a score.
+  ///
+  /// Never stored. The summary holds the score and `resultType` holds how it
+  /// ended; the marker is joined at render time (`Fixture.scoreLine`), so
+  /// withdrawing a ruling cannot leave a stale "(R)" behind on the score.
+  String? get marker => switch (this) {
+        MatchResultType.retired => 'R',
+        MatchResultType.disqualified => 'D',
+        MatchResultType.walkover => 'W/O',
+        MatchResultType.conceded => 'C',
+        MatchResultType.abandoned => 'A',
+        MatchResultType.normal || MatchResultType.noShow => null,
+      };
 }
 
 /// Whether a result was produced under conditions we trust enough to move

@@ -362,6 +362,17 @@ service cloud.firestore {
               'penGrantedAt'].toSet();
     }
 
+    // Named in the first four official slots — the umpires, not the entrants
+    // isFixtureOfficial also admits.
+    function isAssignedOfficial(data) {
+      let offs = data.get('officials', []);
+      let n = offs.size();
+      return (n > 0 && offs[0].uid == uid())
+        || (n > 1 && offs[1].uid == uid())
+        || (n > 2 && offs[2].uid == uid())
+        || (n > 3 && offs[3].uid == uid());
+    }
+
     function isFixtureOfficial(data) {
       let offs = data.get('officials', []);
       let n = offs.size();
@@ -737,8 +748,11 @@ service cloud.firestore {
     }
 
     // An uncapped event (no maxEntrants, or an explicit null) can never fill.
+    // Nor can a house event by head count: its cap is on houses, not people.
+    // Same test as `Competition.openSlots`.
     function hasCapacity(comp) {
-      return comp.get('maxEntrants', null) is int;
+      return comp.get('maxEntrants', null) is int
+        && comp.get('teamEntryMode', 'individual') != 'house_batch';
     }
 
     function slotIsFree(comp) {
@@ -752,13 +766,30 @@ service cloud.firestore {
       return participationModelOf(comp) == 'approval'
         // An approval event's registrations are applications.
         ? status == 'pending'
-        : (
-          status == 'confirmed'
-            ? slotIsFree(comp)
-            : (status == 'waitlisted'
-               && comp.get('waitlistEnabled', false) == true
-               && !slotIsFree(comp))
-        );
+        : openEntryStatusValid(comp, status);
+    }
+
+    function openEntryStatusValid(comp, status) {
+      return status == 'confirmed'
+        ? slotIsFree(comp)
+        : (status == 'waitlisted'
+           && comp.get('waitlistEnabled', false) == true
+           && !slotIsFree(comp));
+    }
+
+    // A season opened to other clubs vets outsiders, not the host: the host's
+    // own members and teams enter as if it were open. Same test as
+    // `Competition.hostEntriesAutoConfirm`.
+    function hostEntryBypassesApproval(comp) {
+      return comp.get('tournamentId', null) != null
+        && participationModelOf(comp) == 'approval'
+        && comp.get('openToNonMembers', false) == true;
+    }
+
+    function entryStatusValid(comp, status, fromHost) {
+      return fromHost && hostEntryBypassesApproval(comp)
+        ? openEntryStatusValid(comp, status)
+        : selfRegistrationStatusValid(comp, status);
     }
 
     // A member registering themselves moves exactly one counter by exactly one, and
@@ -774,7 +805,12 @@ service cloud.firestore {
     function isRegistrationCounterBump() {
       return request.resource.data.diff(resource.data).affectedKeys()
                .hasOnly(['confirmedCount', 'waitlistCount'])
-        && (
+        && counterBumpOk();
+    }
+
+    // One counter up by exactly one, the other untouched, and only into room.
+    function counterBumpOk() {
+      return (
           (request.resource.data.get('confirmedCount', 0)
              == resource.data.get('confirmedCount', 0) + 1
            && request.resource.data.get('waitlistCount', 0)
@@ -805,7 +841,11 @@ service cloud.firestore {
     function isWithdrawalCounterDrop() {
       return request.resource.data.diff(resource.data).affectedKeys()
                .hasOnly(['confirmedCount', 'waitlistCount'])
-        && request.resource.data.get('confirmedCount', 0) >= 0
+        && counterDropOk();
+    }
+
+    function counterDropOk() {
+      return request.resource.data.get('confirmedCount', 0) >= 0
         && request.resource.data.get('waitlistCount', 0) >= 0
         && (
           (request.resource.data.get('confirmedCount', 0)
@@ -853,6 +893,39 @@ service cloud.firestore {
     function isRuledFixture(data) {
       return data.status in ['walkover', 'abandoned', 'disputed']
         || data.get('resultType', 'normal') != 'normal';
+    }
+
+    // What settlement records onto a fixture. functions/settlement.js reverses
+    // career and officiating credit from these, so a client that could write them
+    // could subtract from anybody's record. Server-written only.
+    function settlementKeys() {
+      return ['careerSettledAt', 'careerSettlement', 'officialsSettledAt',
+              'officialsSettlement', 'ratingSettledAt', 'ratingSettlement'];
+    }
+
+    function settlementUntouched() {
+      return !request.resource.data.diff(resource.data).affectedKeys()
+               .hasAny(settlementKeys());
+    }
+
+    // Everything a scoring write (an event appended, a ruling recorded or
+    // withdrawn, a restart, an undo) may change. An allowlist: a field added to a
+    // fixture later is not writable through the pen by default.
+    function scoringKeysOnly() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'scoreState', 'lastSeq', 'summary', 'status', 'winnerEntrantId', 'isDraw',
+        'startedAt', 'completedAt', 'lastEventAt', 'mvp', 'resultType',
+        'resultNote', 'lastRestartSeq', 'resultState', 'updatedAt'])
+        // A scorer may hand a result to an official; certifying it is not theirs.
+        && request.resource.data.get('resultState', 'none') != 'finalized';
+    }
+
+    // Pre-match set-up by the pen: team sheets, the toss, starting early.
+    function setupKeysOnly() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'lineupA', 'lineupB', 'playerUids', 'squadLockedA', 'squadLockedB',
+        'tossWonByEntrantId', 'tossDecision', 'scoringConfig', 'scoreState',
+        'scheduledAt', 'startedEarly', 'updatedAt']);
     }
 
     function scoreFieldsUnchanged() {
@@ -1380,8 +1453,17 @@ service cloud.firestore {
                // fixture) is unaffected, since its status does not change.
                && (
                  request.resource.data.status == resource.data.status
-                 || !(request.resource.data.status in ['accepted', 'declined'])
-                 || resource.data.status in ['pending', 'countered']
+                 // Moving an agreed or open fixture to new terms, by either club.
+                 || (request.resource.data.status == 'rescheduled'
+                     && resource.data.status in ['pending', 'countered', 'accepted', 'rescheduled'])
+                 // An answer belongs to the club being asked: the challenged club
+                 // answers a challenge, the challenger answers a counter-offer.
+                 // Nobody accepts their own offer.
+                 || (request.resource.data.status in ['accepted', 'declined']
+                     && ((resource.data.status == 'pending'
+                          && canManageCompetitions(resource.data.toOrgId))
+                         || (resource.data.status == 'countered'
+                          && canManageCompetitions(resource.data.fromOrgId))))
                ))
         );
 
@@ -1721,7 +1803,26 @@ service cloud.firestore {
               // makes it true.
               (appendsOneMove()
                 && resource.data.turnUid == uid()
-                && serverTimed('lastMoveAt'))
+                && serverTimed('lastMoveAt')
+                // Only what a move changes. A standing draw offer is cleared, never
+                // re-pointed, and nothing else rides along.
+                && request.resource.data.diff(resource.data).affectedKeys()
+                     .hasOnly(['moves', 'turnUid', 'lastMoveAt', 'updatedAt',
+                               'drawOfferBy', 'status', 'result'])
+                && request.resource.data.get('drawOfferBy', null) == null
+                && (
+                  // The game goes on, with one of the two players to move (the same
+                  // player again after a checkers capture that can continue).
+                  (request.resource.data.status == 'active'
+                    && !('result' in request.resource.data)
+                    && request.resource.data.turnUid in resource.data.players)
+                  // The move ended it. Rules cannot replay a board, so who won is the
+                  // engine's word (see ArenaRepository.submitMove); resultWellFormed
+                  // keeps the winner one of the two players.
+                  || (request.resource.data.status == 'finished'
+                    && request.resource.data.get('turnUid', null) == null
+                    && 'result' in request.resource.data)
+                ))
               // Ending it without a move. Three ways, and each has to be
               // checked separately — an earlier version of this rule allowed
               // any player to write any finished result, which let a losing
@@ -1989,8 +2090,9 @@ service cloud.firestore {
         allow create: if runsAuction(auctionId)
           && request.resource.data.ownerUid == teamId
           && request.resource.data.auctionId == auctionId
-          && exists(auctionPartPath(auctionId, teamId))
-          && get(auctionPartPath(auctionId, teamId)).data.status == 'approved'
+          // getAfter: the approval and the side it creates are one batch.
+          && getAfter(auctionPartPath(auctionId, teamId)) != null
+          && getAfter(auctionPartPath(auctionId, teamId)).data.status == 'approved'
           && request.resource.data.pursePaise is int
           && request.resource.data.pursePaise >= 0
           && request.resource.data.pursePaise <= 100000000000
@@ -2045,8 +2147,9 @@ service cloud.firestore {
         allow create: if runsAuction(auctionId)
           && request.resource.data.playerUid == lotId
           && request.resource.data.auctionId == auctionId
-          && exists(auctionPartPath(auctionId, lotId))
-          && get(auctionPartPath(auctionId, lotId)).data.status == 'approved'
+          // getAfter: the approval and the lot it creates are one batch.
+          && getAfter(auctionPartPath(auctionId, lotId)) != null
+          && getAfter(auctionPartPath(auctionId, lotId)).data.status == 'approved'
           && request.resource.data.status == 'pool'
           && request.resource.data.basePricePaise is int
           && request.resource.data.basePricePaise >= 0
@@ -2067,6 +2170,10 @@ service cloud.firestore {
                 || auctionDoc(auctionId).status == 'registration')
             && request.resource.data.basePricePaise is int
             && request.resource.data.basePricePaise >= 0
+            // Pool and withdrawn only, both ways: a sold or unsold lot is the
+            // reveal's record, and moving it back into the pool would re-sell a
+            // player whose price is already on a team's spend.
+            && resource.data.status in ['pool', 'withdrawn']
             && request.resource.data.status in ['pool', 'withdrawn']
           ) || (
             lotId == uid()
@@ -2080,6 +2187,11 @@ service cloud.firestore {
           && unchanged('playerUid')
           && unchanged('auctionId')
           && unchanged('bidCount')
+          // Not out of the pool with sealed bids on it: the reveal only opens
+          // lots in the pool, so those bids' money would stay locked forever.
+          && (request.resource.data.status != 'withdrawn'
+              || resource.data.status == 'withdrawn'
+              || resource.data.get('bidCount', 0) == 0)
           && unchangedIfPresent('soldToTeamId')
           && unchangedIfPresent('soldPricePaise')
           && unchangedIfPresent('soldInRound')
@@ -2202,6 +2314,20 @@ service cloud.firestore {
     // Cross-club tournament invitations (top-level cross-tenant)
     // -------------------------------------------------------------------
     match /tournamentInvites/{inviteId} {
+      // The letter and the facts copied onto it — a display payload, bounded
+      // so one invitation cannot carry a novel into forty clubs' inboxes.
+      function inviteLetterValid() {
+        return (request.resource.data.get('message', null) == null
+            || (request.resource.data.message is string
+                && request.resource.data.message.size() <= 2000))
+          && (request.resource.data.get('place', null) == null
+            || (request.resource.data.place is string
+                && request.resource.data.place.size() <= 200))
+          && (!('sportNames' in request.resource.data)
+            || (request.resource.data.sportNames is list
+                && request.resource.data.sportNames.size() <= 30));
+      }
+
       // Both clubs, and nobody else — the same boundary a challenge draws, for the
       // same reason.
       allow read: if isMember(resource.data.fromOrgId)
@@ -2215,9 +2341,29 @@ service cloud.firestore {
         && request.resource.data.tournamentId is string
         && request.resource.data.tournamentId.size() > 0
         && canManageCompetitions(request.resource.data.fromOrgId)
+        // The id IS the host/season/guest triple — `inviteAccepted` reads it by
+        // that id alone, so an invite filed under any other id would vouch for
+        // a guest the host never asked.
+        && inviteId == request.resource.data.fromOrgId + '_'
+             + request.resource.data.tournamentId + '_' + request.resource.data.toOrgId
+        && exists(/databases/$(database)/documents/orgs/$(request.resource.data.fromOrgId)/tournaments/$(request.resource.data.tournamentId))
+        && inviteLetterValid()
         && request.resource.data.status == 'pending'
         && request.resource.data.invitedBy == uid()
         && serverTimed('createdAt');
+
+      // Asking again: the host re-sends an invitation the guest declined or the
+      // host withdrew. A fresh letter, a fresh clock, back to pending.
+      allow update: if isSignedIn()
+        && unchanged('fromOrgId')
+        && unchanged('toOrgId')
+        && unchanged('tournamentId')
+        && resource.data.status in ['declined', 'withdrawn']
+        && request.resource.data.status == 'pending'
+        && canManageCompetitions(resource.data.fromOrgId)
+        && request.resource.data.invitedBy == uid()
+        && serverTimed('createdAt')
+        && inviteLetterValid();
 
       // Answering belongs to the invited club; withdrawing belongs to the host, and
       // only while the offer is unanswered.
@@ -2227,6 +2373,15 @@ service cloud.firestore {
         && unchanged('tournamentId')
         && unchangedIfPresent('createdAt')
         && unchangedIfPresent('invitedBy')
+        // The host's words and the facts under them are the host's. An answer
+        // changes the status and nothing the host wrote — otherwise accepting
+        // could rewrite the letter the host's own list reads back.
+        && unchangedIfPresent('message')
+        && unchangedIfPresent('sportNames')
+        && unchangedIfPresent('place')
+        && unchangedIfPresent('kind')
+        && unchangedIfPresent('tournamentName')
+        && unchangedIfPresent('fromOrgName')
         && (
           request.resource.data.status == 'withdrawn'
             ? (canManageCompetitions(resource.data.fromOrgId)
@@ -2240,6 +2395,55 @@ service cloud.firestore {
                && resource.data.status == 'pending'
                && request.resource.data.status in ['accepted', 'declined'])
         );
+
+      allow delete: if false;
+    }
+
+    // -------------------------------------------------------------------
+    // Club registration requests (top-level) — TC-CLUB-034. An uninvited
+    // club asking to enter someone else's open season. See
+    // ClubRegistrationRequest for why approval sends a TournamentInvite
+    // rather than this document unlocking entry by itself.
+    // -------------------------------------------------------------------
+    match /clubRegistrationRequests/{requestId} {
+      allow read: if isMember(resource.data.hostOrgId)
+        || isMember(resource.data.requestingOrgId);
+
+      // Only an organizer of the REQUESTING club may ask, only against a
+      // season that genuinely has an open door — the specific competition
+      // named must exist under the host and have `openToNonMembers` on, so a
+      // request cannot be filed against an invite-only season no discovery
+      // screen would have surfaced in the first place.
+      allow create: if isSignedIn()
+        && request.resource.data.hostOrgId is string
+        && request.resource.data.requestingOrgId is string
+        && request.resource.data.hostOrgId != request.resource.data.requestingOrgId
+        && request.resource.data.tournamentId is string
+        && request.resource.data.tournamentId.size() > 0
+        && canManageCompetitions(request.resource.data.requestingOrgId)
+        && requestId == request.resource.data.hostOrgId + '_'
+             + request.resource.data.tournamentId + '_'
+             + request.resource.data.requestingOrgId
+        && exists(/databases/$(database)/documents/orgs/$(request.resource.data.hostOrgId)/tournaments/$(request.resource.data.tournamentId))
+        && request.resource.data.viaCompId is string
+        && compDoc(request.resource.data.hostOrgId, request.resource.data.viaCompId)
+             .get('openToNonMembers', false) == true
+        && request.resource.data.status == 'pending'
+        && request.resource.data.requestedBy == uid()
+        && serverTimed('createdAt');
+
+      // The host's decision — approve or decline — and nothing else about
+      // the ask is theirs to rewrite.
+      allow update: if isSignedIn()
+        && canManageCompetitions(resource.data.hostOrgId)
+        && resource.data.status == 'pending'
+        && request.resource.data.status in ['approved', 'declined']
+        && unchanged('hostOrgId')
+        && unchanged('requestingOrgId')
+        && unchanged('tournamentId')
+        && unchanged('viaCompId')
+        && unchanged('requestedBy')
+        && unchanged('createdAt');
 
       allow delete: if false;
     }
@@ -2334,8 +2538,27 @@ service cloud.firestore {
       allow create: if isSignedIn()
         && isSelfOrCustodian(request.resource.data.createdByUid)
         && teamShapeValid(request.resource.data)
-        // The creator must be on the roster they are creating.
-        && request.resource.data.createdByUid in request.resource.data.memberUids
+        // The creator must be on the roster they are creating — UNLESS they
+        // are raising it for a club they run.
+        //
+        // The plain rule is right for the ordinary case: five friends enter a
+        // tournament, and the one who typed the name is one of the five.
+        // Putting a stranger's name on a roster you are not part of is how a
+        // team page fills with people who never agreed to be on it.
+        //
+        // A club's manager is the exception, and a common one. A cricket club
+        // invited to a season asks who is available, gets thirty hands up, and
+        // raises three sides from them — the manager plays in none of the
+        // three. Forcing them onto every roster they build is not a safety
+        // property, it is a wrong squad: `memberUids` is the list an
+        // Under-19 eligibility check reads, the list a captain checks for
+        // eleven, and the snapshot the entry freezes. So the authority that
+        // already lets them edit any of their club's rosters — `canManageOrg`,
+        // the same check the clause below makes — is what stands in for
+        // membership here, and the people named are their own club's members.
+        && (request.resource.data.createdByUid in request.resource.data.memberUids
+            || (request.resource.data.get('clubId', null) != null
+                && canManageOrg(request.resource.data.clubId)))
         // Claiming a club requires the right to act for that club.
         && (request.resource.data.get('clubId', null) == null
             || canManageOrg(request.resource.data.clubId));
@@ -2653,20 +2876,15 @@ service cloud.firestore {
               && getAfter(/databases/$(database)/documents/orgs/$(orgId))
                    .data.ownerUid == uid()
             )
-            || (
-              // Admin directly adding/inviting someone, but never at a rank above
-              // their own.
-              canManageMembers(orgId)
-              && request.resource.data.role != 'owner'
-              // They may seed department briefs on the new row, but only ones
-              // they hold themselves.
-              && portfoliosAfter().hasOnly(grantablePortfolios(orgId))
-            )
+            // No branch lets an admin write a row for somebody else. A membership
+            // is the member's own act (or their guardian's), which is what lets the
+            // server treat an active membership as a real relationship with the club
+            // when it decides whose rating a match may move.
           )
           // Nobody joins holding a brief they were not given. The self-join
           // branches above never grant one, and this is the line that makes
           // that true rather than merely intended.
-          && (canManageMembers(orgId) || portfoliosAfter().size() == 0)
+          && portfoliosAfter().size() == 0
           && applicationBounded();
 
         allow update: if (
@@ -2747,9 +2965,17 @@ service cloud.firestore {
             && applicationBounded()
           );
 
-        allow delete: if canManageMembers(orgId)
-          && memberUid != uid()
-          && resource.data.role != 'owner';
+        allow delete: if (
+            canManageMembers(orgId)
+            && memberUid != uid()
+            && resource.data.role != 'owner'
+          )
+          // Leaving a club yourself (or taking a managed child out). Owners step
+          // down first, so a club is never left without one by a stray tap.
+          || (
+            isSelfOrCustodian(memberUid)
+            && resource.data.role != 'owner'
+          );
       }
 
       // Sub-groups / age & gender sub-teams inside a club
@@ -2907,6 +3133,51 @@ service cloud.firestore {
           && (resource.data.uid == uid() || canManageCompetitions(orgId));
       }
 
+      // The other half of the same conversation: the club's answer.
+      //
+      // `seasonInterest` is what a member says; this is what the club decides. Written
+      // only by whoever runs the club's competitions, because being selected to
+      // represent the club is the club's call and nobody else's — a member who could
+      // write their own row here would be selecting themselves.
+      //
+      // Deliberately NOT an entry, and it cannot become one: the registration rules
+      // below still refuse an invited club's individual entries, which is correct.
+      // Entering a singles draw commits the PLAYER to be somewhere on a Sunday, so it
+      // stays their own act. This records the selection and gets them told about it —
+      // see `SeasonNomination` and functions/nominations.js.
+      match /seasonNominations/{nominationId} {
+        // Every member reads the list, as with seasonInterest and for the same
+        // reason: a squad list nobody can see is a squad list nobody trusts.
+        allow read: if isMember(orgId);
+
+        allow create, update: if canManageCompetitions(orgId)
+          && request.resource.data.orgId == orgId
+          && request.resource.data.uid is string
+          && request.resource.data.uid.size() > 0
+          // Only the club's own people. Picking somebody who is not a member is
+          // selecting a stranger to represent a club they have no part in.
+          && isActiveAs(request.resource.data.uid, orgId)
+          && request.resource.data.nominatedByUid == uid()
+          && request.resource.data.hostOrgId is string
+          && request.resource.data.hostOrgId != orgId
+          && request.resource.data.tournamentId is string
+          && request.resource.data.tournamentId.size() > 0
+          && request.resource.data.compId is string
+          && request.resource.data.compId.size() > 0
+          // The deterministic id is what makes re-picking somebody a rewrite rather
+          // than a second notification.
+          && nominationId == request.resource.data.hostOrgId + '_'
+             + request.resource.data.tournamentId + '_'
+             + request.resource.data.compId + '_' + request.resource.data.uid
+          && serverTimed('createdAt');
+
+        // Un-picking somebody. The organizer's to undo; also the player's own, because
+        // a selection they have declined should not keep standing in the club's list
+        // as though they were coming.
+        allow delete: if isMember(orgId)
+          && (canManageCompetitions(orgId) || resource.data.uid == uid());
+      }
+
       // -----------------------------------------------------------------
       // Venues — where matches are played
       // -----------------------------------------------------------------
@@ -2944,16 +3215,44 @@ service cloud.firestore {
       match /tournaments/{tournamentId} {
         allow read: if orgIsReadable(orgId);
 
+        // A season is written in one batch with its events, so eventCount is
+        // true from the first moment. Over-claiming only makes a season harder
+        // to delete; the unsafe direction (fewer than it holds) is not helped by
+        // any bound here, which is why createSeason writes both atomically.
+        // Current clients publish a season as they create it ('entries_open', with
+        // its events 'registration_open' in the same batch). 'draft' is still
+        // accepted for builds already on phones, which create drafts.
         allow create: if canManageCompetitions(orgId)
           && request.resource.data.orgId == orgId
           && request.resource.data.name is string
           && request.resource.data.name.size() > 0
-          && request.resource.data.eventCount == 0;
+          && request.resource.data.name.size() <= 120
+          && (request.resource.data.status in ['draft', 'entries_open']
+              // The container an accepted multi-sport challenge is written into:
+              // agreed and timetabled the moment it exists.
+              || (request.resource.data.status == 'scheduled'
+                  && isInterClub(request.resource.data)
+                  && orgId in request.resource.data.participantOrgIds))
+          && request.resource.data.createdBy == uid()
+          && serverTimed('createdAt')
+          && request.resource.data.eventCount is int
+          && request.resource.data.eventCount >= 0
+          && request.resource.data.eventCount <= 500;
 
         allow update: if canManageCompetitions(orgId)
           && unchanged('orgId')
           && unchangedIfPresent('createdAt')
           && unchangedIfPresent('createdBy')
+          // Who runs each sport: {sportId: [{uid, name}]}. Assigns no authority.
+          && request.resource.data.get('sportLeads', {}) is map
+          // {sportId: timestamp} — when each sport's timetable was published.
+          && request.resource.data.get('sportSchedulesReleasedAt', {}) is map
+          // A rename is held to the create bounds. Only when the name changes, so a
+          // season from before the bound existed can still be scheduled.
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['name'])
+              || (request.resource.data.name is string
+                  && request.resource.data.name.size() > 0
+                  && request.resource.data.name.size() <= 120))
           // A completed tournament is a historical record.
           && resource.data.status != 'completed';
 
@@ -3020,9 +3319,13 @@ service cloud.firestore {
           && request.resource.data.createdBy == uid()
           && serverTimed('createdAt')
           // An ordinary competition starts as a draft so the organizer can configure
-          // it before entries open.
+          // it before entries open. A season or tournament is published as it is
+          // created, so an organizer may create its events already open — they
+          // could open them a moment later anyway.
           && (
             request.resource.data.status == 'draft'
+            || (request.resource.data.status == 'registration_open'
+                && canManageCompetitions(orgId))
             || (request.resource.data.status == 'scheduled'
                 && isInterClub(request.resource.data))
             || (request.resource.data.status == 'in_progress'
@@ -3055,6 +3358,21 @@ service cloud.firestore {
               && resource.data.status != 'completed')
           );
 
+        // An INVITED club's organizer entering or withdrawing its side moves the
+        // same counters, naming the club it acts for so the invitation can be
+        // checked. Mirrors the member branch above.
+        allow update: if resource.data.get('tournamentId', null) is string
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['confirmedCount', 'waitlistCount', 'lastInvitedEntryOrgId'])
+          && request.resource.data.get('lastInvitedEntryOrgId', null) is string
+          && canManageCompetitions(request.resource.data.lastInvitedEntryOrgId)
+          && inviteAccepted(orgId, resource.data.tournamentId,
+               request.resource.data.lastInvitedEntryOrgId)
+          && (
+            (counterBumpOk() && resource.data.status == 'registration_open')
+            || (counterDropOk() && resource.data.status != 'completed')
+          );
+
         allow update: if canManageCompetitions(orgId)
           && unchanged('orgId')
           && unchanged('createdAt')
@@ -3071,8 +3389,21 @@ service cloud.firestore {
           // A cancellation must say why.
           && cancellationExplained();
 
+        // Draft is always safe to delete outright — nobody has ever been able
+        // to register. Beyond draft, deletion still requires zero entrants
+        // (TC-ADM-013's delete-vs-cancel guard): the moment even one person
+        // is in, `cancelCompetition` — a soft, reason-required, auditable
+        // status change — is the only path, enforced here and not only by
+        // the client hiding the button.
         allow delete: if canManageCompetitions(orgId)
-          && resource.data.status == 'draft';
+          && (
+            resource.data.status == 'draft'
+            || (
+              resource.data.get('entrantCount', 0) == 0
+              && resource.data.get('confirmedCount', 0) == 0
+              && resource.data.get('waitlistCount', 0) == 0
+            )
+          );
 
         // ---------------------------------------------------------------
         // Registrations. Doc id is the entrant's uid for individual events,
@@ -3161,6 +3492,11 @@ service cloud.firestore {
                              || compDoc(orgId, compId).get('openToNonMembers', false) == true)
             && isSelfOrCustodian(regId)
             && request.resource.data.uid == regId
+            // Nobody enters a team event as themselves — the team is the entry.
+            // Same test as `Competition.entersAsTeams`.
+            && !(compDoc(orgId, compId).get('entrantType', 'individual') == 'team'
+                 && compDoc(orgId, compId).get('teamEntryMode', 'individual')
+                      in ['preformed_team', 'individual'])
             // Defaulted, not required: the currently deployed web build writes
             // registrations without this field, and a rule that demanded it would
             // break registration for everyone between the rules deploy and the hosting
@@ -3168,9 +3504,10 @@ service cloud.firestore {
             && request.resource.data.get('preselected', false) == false
             && serverTimed('createdAt')
             && compDoc(orgId, compId).status == 'registration_open'
-            && selfRegistrationStatusValid(
+            && entryStatusValid(
                  compDoc(orgId, compId),
-                 request.resource.data.status
+                 request.resource.data.status,
+                 isActiveAs(regId, orgId)
                )
             // ...and the slot it claims must actually be paid for by the same write.
             && registrationClaimsItsSlot(
@@ -3196,14 +3533,18 @@ service cloud.firestore {
                              || compDoc(orgId, compId).get('openToNonMembers', false) == true)
             && request.resource.data.get('teamId', '') == regId
             && teamRuns(get(/databases/$(database)/documents/teams/$(regId)).data)
+            // The squad on the entry is the team's squad, not a list typed in here.
+            && request.resource.data.get('memberUids', [])
+                 == get(/databases/$(database)/documents/teams/$(regId)).data.memberUids
             && request.resource.data.uid == regId
             && request.resource.data.get('registeredByUid', '') == uid()
             && request.resource.data.get('preselected', false) == false
             && serverTimed('createdAt')
             && compDoc(orgId, compId).status == 'registration_open'
-            && selfRegistrationStatusValid(
+            && entryStatusValid(
                  compDoc(orgId, compId),
-                 request.resource.data.status
+                 request.resource.data.status,
+                 get(/databases/$(database)/documents/teams/$(regId)).data.get('clubId', null) == orgId
                )
             && registrationClaimsItsSlot(
                  orgId, compId, request.resource.data.status
@@ -3231,14 +3572,17 @@ service cloud.firestore {
             && request.resource.data.uid == regId
             && request.resource.data.get('registeredByUid', '') == uid()
             && request.resource.data.get('preselected', false) == false
+            && get(/databases/$(database)/documents/teams/$(regId)).data.get('clubId', null) is string
             && inviteAccepted(
                  orgId,
                  compDoc(orgId, compId).get('tournamentId', ''),
-                 get(/databases/$(database)/documents/teams/$(regId)).data.orgId
+                 get(/databases/$(database)/documents/teams/$(regId)).data.clubId
                )
             && canManageCompetitions(
-                 get(/databases/$(database)/documents/teams/$(regId)).data.orgId
+                 get(/databases/$(database)/documents/teams/$(regId)).data.clubId
                )
+            && request.resource.data.get('memberUids', [])
+                 == get(/databases/$(database)/documents/teams/$(regId)).data.memberUids
             && serverTimed('createdAt')
             && compDoc(orgId, compId).status == 'registration_open'
             && selfRegistrationStatusValid(
@@ -3248,6 +3592,19 @@ service cloud.firestore {
             && registrationClaimsItsSlot(
                  orgId, compId, request.resource.data.status
                );
+
+          // A member of a group entry the organizer is approving in this same batch.
+          // Every member accepted their own place (groupEntries rules), so this is
+          // their registration, not an organizer's pick.
+          allow create: if canManageCompetitions(orgId)
+            && request.resource.data.uid == regId
+            && request.resource.data.get('preselected', false) == false
+            && request.resource.data.status == 'confirmed'
+            && request.resource.data.groupId is string
+            && getAfter(/databases/$(database)/documents/orgs/$(orgId)/competitions/$(compId)/groupEntries/$(request.resource.data.groupId)).data.status == 'approved'
+            && regId in getAfter(/databases/$(database)/documents/orgs/$(orgId)/competitions/$(compId)/groupEntries/$(request.resource.data.groupId)).data.acceptedUids
+            && request.resource.data.get('teamId', null) == null
+            && serverTimed('createdAt');
 
           // An organizer putting someone in the field directly — the preselected block
           // of a hybrid event, or a late change at the ground.
@@ -3262,12 +3619,46 @@ service cloud.firestore {
               canManageCompetitions(orgId)
               && unchanged('uid')
               && unchanged('createdAt')
+              // Who entered, and as what, is the entry's provenance — the server
+              // trusts it when deciding whose rating a match may move.
+              && frozen('memberUids')
+              && frozen('teamId')
+              && frozen('groupId')
+              && frozen('registeredByUid')
+              && request.resource.data.get('preselected', false)
+                   == resource.data.get('preselected', false)
             ) || (
               isSelfOrCustodian(regId)
               && request.resource.data.status == 'withdrawn'
               && resource.data.status != 'rejected'
               && unchanged('uid')
               && unchanged('createdAt')
+              && frozen('memberUids')
+              && frozen('teamId')
+            ) || (
+              // Re-entering after withdrawing: the same checks as a first entry,
+              // written over the withdrawn document rather than a new one.
+              resource.data.status == 'withdrawn'
+              && resource.data.get('teamId', null) == null
+              && (isActiveAs(regId, orgId)
+                  || compDoc(orgId, compId).get('openToNonMembers', false) == true)
+              && isSelfOrCustodian(regId)
+              && request.resource.data.uid == regId
+              && request.resource.data.get('teamId', null) == null
+              && request.resource.data.get('preselected', false) == false
+              && !(compDoc(orgId, compId).get('entrantType', 'individual') == 'team'
+                   && compDoc(orgId, compId).get('teamEntryMode', 'individual')
+                        in ['preformed_team', 'individual'])
+              && serverTimed('createdAt')
+              && compDoc(orgId, compId).status == 'registration_open'
+              && entryStatusValid(
+                   compDoc(orgId, compId),
+                   request.resource.data.status,
+                   isActiveAs(regId, orgId)
+                 )
+              && registrationClaimsItsSlot(
+                   orgId, compId, request.resource.data.status
+                 )
             ) || (
               // A team pulling out. Same right as entering them: whoever runs
               // the team. Without this a captain could enter a side and then
@@ -3279,6 +3670,8 @@ service cloud.firestore {
               && resource.data.status != 'rejected'
               && unchanged('uid')
               && unchanged('createdAt')
+              && frozen('memberUids')
+              && frozen('teamId')
             ) || (
               // Promotion off the waitlist.
               (isActive(orgId)
@@ -3293,6 +3686,36 @@ service cloud.firestore {
             );
 
           allow delete: if false; // Withdrawals are a status, not a deletion.
+        }
+
+        // ---------------------------------------------------------------
+        // House transfer requests — TC-CLUB-003. See HouseTransferRequest.
+        // ---------------------------------------------------------------
+        match /houseTransferRequests/{requesterUid} {
+          allow read: if isSelfOrCustodian(requesterUid)
+            || canManageCompetitions(orgId);
+
+          // Only for yourself, only while the organizer has this on, only
+          // into a house the event actually has, and only naming the house
+          // your OWN registration is really in — read from the registration
+          // doc itself rather than trusted from the client, so a request
+          // cannot be forged to claim a move from a house you are not in.
+          allow create: if isSelfOrCustodian(requesterUid)
+            && request.resource.data.uid == requesterUid
+            && compDoc(orgId, compId)
+                 .get('allowHouseTransferRequests', false) == true
+            && request.resource.data.toHouse
+                 in compDoc(orgId, compId).get('presetHouses', [])
+            && request.resource.data.fromHouse
+                 == get(/databases/$(database)/documents/orgs/$(orgId)/competitions/$(compId)/registrations/$(requesterUid)).data.get('houseName', null)
+            && request.resource.data.fromHouse != request.resource.data.toHouse
+            && serverTimed('createdAt');
+
+          // Withdrawing your own ask, or the organizer resolving it — either
+          // by granting it (a separate write to `registrations`, batched
+          // client-side) or declining it. Same shape as `teams/joinRequests`.
+          allow delete: if isSelfOrCustodian(requesterUid)
+            || canManageCompetitions(orgId);
         }
 
         // ---------------------------------------------------------------
@@ -3375,6 +3798,7 @@ service cloud.firestore {
             && request.resource.data.compId == compId
             && request.resource.data.orgId == orgId
             && request.resource.data.lastSeq == 0
+            && !request.resource.data.keys().hasAny(settlementKeys())
             && interClubShapeValid(request.resource.data, orgId);
 
           // ---------------------------------------------------------
@@ -3429,46 +3853,29 @@ service cloud.firestore {
               && (resource.data.status != 'completed'
                   || scoreFieldsUnchanged())
               // Nor may an organizer overwrite the score of a LIVE match while
-              // somebody else is scoring it.
-              && (scoreFieldsUnchanged() || holdsPen(resource.data))
+              // somebody else is scoring it. A ruling (walkover, abandonment,
+              // dispute) is the organizer's call whoever holds the pen, and moves
+              // no score.
+              && (scoreFieldsUnchanged() || holdsPen(resource.data)
+                  || (request.resource.data.status in ['walkover', 'abandoned', 'disputed']
+                      && unchanged('scoreState') && unchanged('lastSeq')))
               // A squad the OTHER club has locked is not the host's to change, however
               // broad their authority over the fixture otherwise is.
               && lockedSquadsRespected()
               // Where a match came from is not an organizer's to rewrite either.
               && frozen('sourceType')
-              && frozen('sourceId');
+              && frozen('sourceId')
+              && settlementUntouched();
 
-          // (b) The assigned scorer advancing the live projection.
+          // (b) The assigned scorer advancing the live projection. An allowlist
+          // (scoringKeysOnly): sides, accounts, officials, player lists, the pen,
+          // readiness, provenance, the stream link and settlement are all outside it.
           allow update: if
             request.resource.data.lastSeq > resource.data.lastSeq
             && resource.data.status in ['scheduled', 'live']
             && request.resource.data.status in ['live', 'completed']
-            && unchanged('compId')
-            && unchanged('orgId')
-            && unchanged('entrantAId')
-            && unchanged('entrantBId')
-            // The account behind a side is frozen for the same reason its id is, and
-            // needs saying separately because this statement freezes named fields
-            // rather than allow-listing them (see the note below) — so a field added
-            // to a fixture is writable here by default.
-            && frozen('entrantAUid')
-            && frozen('entrantBUid')
-            && unchanged('scorerUids')
-            // The pen.
+            && scoringKeysOnly()
             && holdsPen(resource.data)
-            && frozen('activeScorerUid')
-            && frozen('activeScorerDeviceId')
-            && frozen('penGrantedByUid')
-            && frozen('penGrantedAt')
-            && participantsUnchanged()
-            // A scorer submits a result; they do not certify it.
-            && request.resource.data.get('resultState', 'none') != 'finalized'
-            // Readiness is the organizer's axis — who is umpiring, is the match good
-            // to go.
-            && unchangedIfPresent('readiness')
-            // Where the match came from is fixed at creation.
-            && frozen('sourceType')
-            && frozen('sourceId')
             && (
               uid() in resource.data.scorerUids
               // The match official / entrant-player path, and the fix for a failure
@@ -3489,10 +3896,17 @@ service cloud.firestore {
             && (
               // An organizer may move it to anyone.
               canManageCompetitions(orgId)
-              // Or the intended holder claiming it themselves.
+              // Or the intended holder claiming it themselves, adding nobody but
+              // themselves to the scorers and removing nobody.
               || (
                 request.resource.data.activeScorerUid == uid()
                 && holdsPen(resource.data)
+                && request.resource.data.get('scorerUids', []).toSet()
+                     .difference(resource.data.get('scorerUids', []).toSet())
+                     .hasOnly([uid()])
+                && resource.data.get('scorerUids', []).toSet()
+                     .difference(request.resource.data.get('scorerUids', []).toSet())
+                     .size() == 0
                 && (
                   uid() in resource.data.scorerUids
                   || isFixtureOfficial(resource.data)
@@ -3507,31 +3921,17 @@ service cloud.firestore {
             && unchanged('scoreState');
 
           // (c) The assigned scorer recording who is playing and who won the toss,
-          // before the first ball.
+          // before the first ball. Allowlisted (setupKeysOnly): which account a side
+          // IS, the scorers, readiness, provenance, the stream link and settlement
+          // are not a team sheet.
           allow update: if
             resource.data.lastSeq == 0
             && request.resource.data.lastSeq == 0
             && request.resource.data.status == resource.data.status
-            && unchanged('compId')
-            && unchanged('orgId')
-            && unchanged('entrantAId')
-            && unchanged('entrantBId')
-            // Naming a team sheet does not include deciding which account a side IS —
-            // that is settled when the slot is filled, by the draw or by an
-            // advancement.
-            && frozen('entrantAUid')
-            && frozen('entrantBUid')
-            && unchanged('scorerUids')
+            && setupKeysOnly()
             // A squad a contesting club has declared final is not the scorer's to
             // change either.
             && lockedSquadsRespected()
-            // Same reasoning as the scoring statement above: naming a team sheet is
-            // not certifying a result, nor deciding what competition this match
-            // belongs to.
-            && request.resource.data.get('resultState', 'none') != 'finalized'
-            && unchangedIfPresent('readiness')
-            && frozen('sourceType')
-            && frozen('sourceId')
             && (
               uid() in resource.data.scorerUids
               // Officials and entrant players may also set up a match before the first
@@ -3573,19 +3973,7 @@ service cloud.firestore {
             && !isRuledFixture(request.resource.data)
             && request.resource.data.lastSeq == resource.data.lastSeq + 1
             && unchanged('scoreState')
-            && unchanged('compId')
-            && unchanged('orgId')
-            && unchanged('entrantAId')
-            && unchanged('entrantBId')
-            && frozen('entrantAUid')
-            && frozen('entrantBUid')
-            && unchanged('scorerUids')
-            && participantsUnchanged()
-            && lockedSquadsRespected()
-            && request.resource.data.get('resultState', 'none') != 'finalized'
-            && unchangedIfPresent('readiness')
-            && frozen('sourceType')
-            && frozen('sourceId')
+            && scoringKeysOnly()
             && (
               canManageCompetitions(orgId)
               || (
@@ -3643,28 +4031,12 @@ service cloud.firestore {
             && request.resource.data.winnerEntrantId == null
             && request.resource.data.isDraw == false
             && !isRuledFixture(request.resource.data)
-            && unchanged('compId')
-            && unchanged('orgId')
-            && unchanged('entrantAId')
-            && unchanged('entrantBId')
-            && frozen('entrantAUid')
-            && frozen('entrantBUid')
-            && unchanged('scorerUids')
-            && participantsUnchanged()
-            && lockedSquadsRespected()
+            && scoringKeysOnly()
             && holdsPen(resource.data)
-            && frozen('activeScorerUid')
-            && frozen('activeScorerDeviceId')
-            && frozen('penGrantedByUid')
-            && frozen('penGrantedAt')
             // A finalized result is the umpire's certification. Reopening one
             // is a protest, not a correction, and goes through the dispute
             // flow.
             && resource.data.get('resultState', 'none') != 'finalized'
-            && request.resource.data.get('resultState', 'none') != 'finalized'
-            && unchangedIfPresent('readiness')
-            && frozen('sourceType')
-            && frozen('sourceId')
             && (
               canManageCompetitions(orgId)
               || (
@@ -3689,6 +4061,22 @@ service cloud.firestore {
           // (g) A competitor protesting the result.
           allow update: if isProtestFlag(orgId, compId, fixtureId)
             && (isActive(orgId) || isParticipantMember(resource.data));
+
+          // (h) The broadcast link, alone: organizers, this match's scorers and
+          // officials, or the season's umpire panel. Not a watcher, not an entrant,
+          // not the club-wide scorer rank. Mirrors `Fixture.canSetStreamBy`.
+          allow update: if
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['streamUrl'])
+            && (!('streamUrl' in request.resource.data)
+                || (request.resource.data.streamUrl is string
+                    && request.resource.data.streamUrl.size() <= 500))
+            && (
+              canManageCompetitions(orgId)
+              || uid() in resource.data.get('scorerUids', [])
+              || isAssignedOfficial(resource.data)
+              || (resource.data.get('tournamentId', null) is string
+                  && exists(/databases/$(database)/documents/orgs/$(orgId)/tournaments/$(resource.data.tournamentId)/officials/$(uid())))
+            );
 
           // (d) A scorer advancing their winner into the next round of a knockout.
           allow update: if
@@ -3960,6 +4348,8 @@ service cloud.firestore {
               && serverTimed('at')
               && request.resource.data.seq is int
               && request.resource.data.seq > 0
+              // The document id IS the sequence number; the field may not disagree.
+              && request.resource.data.seq == int(seq)
               // Idempotency key, so an offline queue replaying after a reconnect
               // cannot double-count a delivery.
               && request.resource.data.clientEventId is string;
@@ -4146,9 +4536,15 @@ service cloud.firestore {
     match /{path=**}/fixtures/{fixtureId} {
       // The placeholder clause has to be repeated here, and forgetting it was the
       // whole bug the first time.
+      // `squadUids` is every member of a TEAM entrant on either side, kept by
+      // `syncFixtureSquads` (functions). Not `playerUids`: that one gates
+      // rating settlement, and a squad member who never took the field must
+      // not be rated. Read access only — it is what puts a team match on a
+      // player's own list (test run TC-31).
       allow get: if (
           (isSignedIn() && includesSelfOrWard(resource.data.scorerUids))
           || (isSignedIn() && includesSelfOrWard(resource.data.playerUids))
+          || (isSignedIn() && includesSelfOrWard(resource.data.get('squadUids', [])))
           || orgIsReadable(resource.data.orgId)
         )
         && (resource.data.isDraft == false
@@ -4156,6 +4552,9 @@ service cloud.firestore {
 
       allow list: if (isSignedIn() && includesSelfOrWard(resource.data.scorerUids))
         || (isSignedIn() && includesSelfOrWard(resource.data.playerUids))
+        // Plain field access here, as for `playerUids`: a list is authorised
+        // against the query, and the query's array-contains is what proves it.
+        || (isSignedIn() && includesSelfOrWard(resource.data.squadUids))
         || orgIsReadable(resource.data.orgId);
     }
 
@@ -4196,10 +4595,17 @@ service cloud.firestore {
     // before the field existed do not carry it, and a rule that demanded it would
     // refuse to return the entries this button most needs.
     // -------------------------------------------------------------------
+    // A third way an entry is about you: you FILED it. A club owner entering
+    // the club's side is usually not in that squad, so neither `uid` (the
+    // team's id on a team row) nor `memberUids` names them — and without this
+    // clause the one person who did the registering is the one person who
+    // cannot read the registration back, which is why the season kept
+    // offering them a Register button for a draw they had already entered.
     match /{path=**}/registrations/{regId} {
       allow read: if isSignedIn()
         && (isSelfOrWard(resource.data.uid)
-            || includesSelfOrWard(resource.data.get('memberUids', [])));
+            || includesSelfOrWard(resource.data.get('memberUids', []))
+            || isSelfOrWard(resource.data.get('registeredByUid', '')));
     }
 
     // -------------------------------------------------------------------
@@ -5068,7 +5474,19 @@ service cloud.firestore {
                get(/databases/$(database)/documents/grounds/$(groundId))
                  .data.hourlyRatePaise
                * (request.resource.data.endHour - request.resource.data.startHour)
-          && serverTimed('createdAt');
+          && serverTimed('createdAt')
+          // Every hour it covers is held for it in the same write. The holds are
+          // the exclusivity (their ids are day+hour, so a second claim fails on
+          // existence); a booking written without them would double-book.
+          && hourHeldFor(0) && hourHeldFor(1) && hourHeldFor(2) && hourHeldFor(3)
+          && hourHeldFor(4) && hourHeldFor(5) && hourHeldFor(6) && hourHeldFor(7)
+          && hourHeldFor(8) && hourHeldFor(9) && hourHeldFor(10) && hourHeldFor(11);
+
+        function hourHeldFor(i) {
+          return request.resource.data.startHour + i >= request.resource.data.endHour
+            || getAfter(/databases/$(database)/documents/grounds/$(groundId)/hourHolds/$(request.resource.data.dayKey + '_' + string(request.resource.data.startHour + i)))
+                 .data.bookingId == bookingId;
+        }
 
         // Either side may release a slot: the club that booked it, or the owner whose
         // ground it is.
@@ -5208,11 +5626,14 @@ service cloud.firestore {
 
         // Released when the booking behind it is cancelled — by whoever could cancel
         // that booking: the person who made it, or the ground's owner.
+        // Only once the booking behind it is cancelled in the same write — a hold
+        // released under a live booking is a slot somebody else can then take.
         allow delete: if isSignedIn()
           && (
             get(/databases/$(database)/documents/grounds/$(groundId)/bookings/$(resource.data.bookingId)).data.bookedByUid == uid()
             || groundOwnerUid(groundId) == uid()
-          );
+          )
+          && getAfter(/databases/$(database)/documents/grounds/$(groundId)/bookings/$(resource.data.bookingId)).data.status == 'cancelled';
 
         allow update: if false;
       }

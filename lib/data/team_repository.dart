@@ -72,7 +72,19 @@ class TeamRepository {
   /// [createdByUid] is put on the roster and made captain unless the caller
   /// says otherwise. A team of nobody is not a useful document, and the
   /// person creating it is on it in every case the product actually has —
-  /// including a club admin raising a squad, who is a club member either way.
+  /// with one exception, which is what [rosterIsExact] is for.
+  ///
+  /// ## [rosterIsExact]: the manager who does not play
+  ///
+  /// A club's manager raising three sides from the thirty members who said
+  /// they were available plays in none of them. Folding them into each roster
+  /// would put one person in three squads in the same draw, and `memberUids`
+  /// is not decoration: it is what the Under-19 check reads, what a captain
+  /// counts to eleven, and what the entry freezes as the squad that played.
+  ///
+  /// So [rosterIsExact] takes [memberUids] literally. `firestore.rules` admits
+  /// it on the same condition this flow is offered on — the creator runs the
+  /// club the team belongs to.
   Future<String> createTeam({
     required String name,
     required String sportId,
@@ -86,9 +98,12 @@ class TeamRepository {
     String? baseTeamId,
     String? homeArea,
     String? joinCode,
+    bool rosterIsExact = false,
   }) =>
       guard(() async {
-        final roster = <String>{createdByUid, ...memberUids}.toList();
+        final roster = rosterIsExact
+            ? memberUids.toSet().toList()
+            : <String>{createdByUid, ...memberUids}.toList();
         final team = Team(
           id: '',
           name: name,
@@ -96,7 +111,14 @@ class TeamRepository {
           type: type,
           createdByUid: createdByUid,
           clubId: clubId,
-          captainUid: captainUid ?? createdByUid,
+          // The creator captains by default — but not when they are not on
+          // the roster. A captain who is not in the squad is a name on the
+          // team sheet with nobody behind it, so an exact roster captains
+          // itself: the first player named, until somebody says otherwise.
+          captainUid: captainUid ??
+              (rosterIsExact
+                  ? (roster.isEmpty ? null : roster.first)
+                  : createdByUid),
           managerUid: managerUid,
           memberUids: roster,
           competitionId: competitionId,

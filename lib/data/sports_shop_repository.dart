@@ -42,21 +42,6 @@ class SportsShopRepository {
 
   // --- Finding one --------------------------------------------------------
 
-  /// Shops in one city, most useful first.
-  ///
-  /// Queried on `cityKey` rather than filtered in Dart, because "which shops
-  /// are in Warangal" is the question this directory exists to answer and it
-  /// must not degrade into reading the whole collection as the list grows.
-  Stream<List<SportsShop>> watchShopsInCity(String city, {int limit = 40}) =>
-      guardStream(
-        () => Refs.sportsShops
-            .where('isActive', isEqualTo: true)
-            .where('cityKey', isEqualTo: city.trim().toLowerCase())
-            .limit(limit)
-            .snapshots()
-            .map((s) => s.docs.map(SportsShop.fromDoc).toList()),
-      );
-
   /// Finds shops by any words somebody might type — a shop name, an area, a
   /// sport — narrowed by what they stock, what they do, and where.
   ///

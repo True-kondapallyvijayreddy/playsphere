@@ -11,6 +11,8 @@ import '../../core/router/app_router.dart';
 import '../../data/discovery_repository.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/club_switcher.dart';
+import '../home/home_providers.dart';
 import '../../shared/identity.dart';
 import '../../shared/location_fields.dart';
 import '../../shared/ui_kit.dart';
@@ -38,9 +40,9 @@ import 'club_network_providers.dart';
 ///
 /// Committing a club to another club's season is the same class of decision
 /// as accepting a challenge, so this is an owner's surface — see
-/// `myOwnedOrgIdsProvider` and the matching rule. An owner who runs several
-/// clubs has ONE inbox and picks which club they are speaking as, rather than
-/// three inboxes to check; see `actingClubIdProvider`.
+/// `myOwnedOrgIdsProvider` and the matching rule. It speaks as the club
+/// selected in the app bar, and only that club's conversations are shown —
+/// see `actingClubIdProvider`.
 class ClubNetworkScreen extends ConsumerStatefulWidget {
   const ClubNetworkScreen({super.key, this.initialTab = 0});
 
@@ -86,6 +88,32 @@ class _ClubNetworkScreenState extends ConsumerState<ClubNetworkScreen>
       );
     }
 
+    // The network speaks as the club in the app bar and no other. Selected a
+    // club this person does not own: say so, rather than quietly speaking as
+    // a different one — see `actingClubIdProvider`.
+    if (ref.watch(actingClubIdProvider) == null) {
+      final currentId = ref.watch(currentClubIdProvider);
+      final current = currentId == null
+          ? null
+          : ref.watch(organizationProvider(currentId)).valueOrNull;
+      return AppScaffold(
+        title: 'Club network',
+        body: EmptyState(
+          icon: Icons.handshake_outlined,
+          title: current == null
+              ? 'Pick a club you own'
+              : 'You do not own ${current.name}',
+          message: 'The network speaks for the club selected at the top, and '
+              'only its owner can use it. Switch to a club you own to see '
+              'its conversations.',
+          action: FilledButton(
+            onPressed: () => showClubSwitcher(context, ref),
+            child: const Text('Switch club'),
+          ),
+        ),
+      );
+    }
+
     return AppScaffold(
       title: 'Club network',
       subtitle: acting == null
@@ -93,12 +121,6 @@ class _ClubNetworkScreenState extends ConsumerState<ClubNetworkScreen>
           : 'Speaking as ${acting.name}',
       body: Column(
         children: [
-          if (owned.length > 1)
-            ContentBounds(
-              maxWidth: 820,
-              padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
-              child: _ActingClubPicker(ownedOrgIds: owned),
-            ),
           TabBar(
             controller: _tabs,
             tabs: [
@@ -126,40 +148,6 @@ class _ClubNetworkScreenState extends ConsumerState<ClubNetworkScreen>
               ],
             ),
           ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Which of the owner's clubs is speaking. Renders only for the handful of
-/// people who own more than one.
-class _ActingClubPicker extends ConsumerWidget {
-  const _ActingClubPicker({required this.ownedOrgIds});
-
-  final List<String> ownedOrgIds;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final acting = ref.watch(actingClubIdProvider);
-    return SizedBox(
-      height: 38,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        children: [
-          for (final id in ownedOrgIds) ...[
-            ChoiceChip(
-              avatar: const Icon(Icons.shield_outlined, size: 16),
-              label: Text(
-                ref.watch(organizationProvider(id)).valueOrNull?.name ??
-                    'Club',
-              ),
-              selected: acting == id,
-              onSelected: (_) =>
-                  ref.read(actingClubOverrideProvider.notifier).state = id,
-            ),
-            const SizedBox(width: 8),
-          ],
         ],
       ),
     );

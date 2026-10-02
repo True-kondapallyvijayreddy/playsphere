@@ -461,8 +461,21 @@ class _ScoringScreenState extends ConsumerState<ScoringScreen> {
   /// Writes the result the engine has already decided onto a fixture that is
   /// somehow still live. See [ScoringService.finalizeMatch] for how a pad ends
   /// up in that state; from here it is one press.
-  void _finish(Fixture fixture) {
+  Future<void> _finish(Fixture fixture) async {
     if (_busy) return;
+    // A match already live when a protest was raised on the match feeding it
+    // can still be played to its end, and this is where that result would
+    // land. Refused for the same reason the Match Center refuses to START one
+    // — see `feederProtestBlock`. Asked here rather than inside
+    // `finalizeMatch` because the guard has to read the competition's other
+    // fixtures, and every other write on this path is deliberately synchronous.
+    try {
+      await ref.read(scoringServiceProvider).assertFeedersSettled(fixture);
+    } catch (e) {
+      if (mounted) showError(context, e);
+      return;
+    }
+    if (!mounted) return;
     try {
       final updated = ref.read(scoringServiceProvider).finalizeMatch(
             fixture: fixture,

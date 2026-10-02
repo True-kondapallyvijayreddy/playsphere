@@ -420,11 +420,6 @@ class DiscoveryRepository {
             ),
       );
 
-  Future<PlayerListing?> fetchListing(String uid) => guard(() async {
-        final doc = await Refs.playerListing(uid).get();
-        return doc.exists ? PlayerListing.fromDoc(doc) : null;
-      });
-
   /// Publishes or replaces a listing. Whole-document, see [PlayerListing.toMap].
   Future<void> saveListing(PlayerListing listing) => guard(
         () => Refs.playerListing(listing.uid).set(listing.toMap()),

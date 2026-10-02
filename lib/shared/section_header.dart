@@ -115,17 +115,29 @@ class QuietCard extends StatelessWidget {
 }
 
 /// "Today, 4:30 pm" rather than a date nobody reads.
+///
+/// A start stored as a DAY — which is what a season, and any event whose
+/// timetable has not been drawn yet, actually has — carries midnight as its
+/// time. Printing that gave every such row "Tomorrow, 12:00 AM", which reads
+/// as a match at midnight rather than as a date with no time on it yet. So an
+/// exact midnight prints the day alone.
 String friendlyDate(DateTime when) {
   final now = DateTime.now();
   final day = DateTime(when.year, when.month, when.day);
   final today = DateTime(now.year, now.month, now.day);
   final delta = day.difference(today).inDays;
 
+  final dayOnly = when.hour == 0 &&
+      when.minute == 0 &&
+      when.second == 0 &&
+      when.millisecond == 0 &&
+      when.microsecond == 0;
   final time = DateFormat.jm().format(when);
+  final suffix = dayOnly ? '' : ', $time';
   return switch (delta) {
-    0 => 'Today, $time',
-    1 => 'Tomorrow, $time',
-    -1 => 'Yesterday, $time',
+    0 => 'Today$suffix',
+    1 => 'Tomorrow$suffix',
+    -1 => 'Yesterday$suffix',
     _ => DateFormat('d MMM').format(when),
   };
 }

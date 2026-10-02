@@ -200,7 +200,9 @@ class _ChallengeCardState extends ConsumerState<_ChallengeCard> {
   bool _busy = false;
 
   Future<void> _accept(DateTime slot) async {
-    final uid = ref.read(currentUidProvider);
+    // The signed-in account, not a managed child's profile: the rules record
+    // and check the creator against whoever is actually signed in.
+    final uid = ref.read(authUidProvider);
     if (uid == null || _busy) return;
     setState(() => _busy = true);
     try {
@@ -208,6 +210,7 @@ class _ChallengeCardState extends ConsumerState<_ChallengeCard> {
             challenge: widget.challenge,
             selectedSlot: slot,
             acceptedByUid: uid,
+            acceptingOrgId: widget.orgId,
           );
 
       // The other club asked its own members the moment it issued the

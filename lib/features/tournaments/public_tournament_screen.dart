@@ -123,10 +123,19 @@ class PublicTournamentScreen extends ConsumerWidget {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
+                            if (tournament.organizerName != null) ...[
+                              Text(
+                                'Organised by ${tournament.organizerName}',
+                                style: Theme.of(context).textTheme.bodyMedium,
+                              ),
+                              const SizedBox(height: 8),
+                            ],
                             Wrap(
                               spacing: 8,
                               runSpacing: 8,
                               children: [
+                                if (tournament.shortName != null)
+                                  Chip(label: Text(tournament.shortName!)),
                                 Chip(label: Text(tournament.grade.label)),
                                 Chip(label: Text(tournament.status.label)),
                                 if (overview != null &&
@@ -289,7 +298,7 @@ class _PublicMatch extends StatelessWidget {
             ? Icon(Icons.circle, size: 10, color: theme.colorScheme.error)
             : (f.summary.isNotEmpty
                 ? Text(
-                    localizedSummary(context, f.summary),
+                    localizedScoreLine(context, f),
                     style: theme.textTheme.labelSmall,
                   )
                 : null),

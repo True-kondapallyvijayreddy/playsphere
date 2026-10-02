@@ -61,6 +61,7 @@ class OfficiatingSlot {
     required this.window,
     required this.courtKey,
     required this.contestingClubIds,
+    this.playerUids = const {},
     this.sportId,
     this.eventId,
     this.eventName = '',
@@ -74,6 +75,10 @@ class OfficiatingSlot {
 
   /// The clubs playing. An official from either may not take this match.
   final Set<String> contestingClubIds;
+
+  /// The people playing. Club neutrality says nothing inside one club's own
+  /// season, where every official and every player share a club.
+  final Set<String> playerUids;
 
   /// Which sport this match is, so only officials who cover it are offered.
   /// Null for a match whose event never recorded one, and treated as "any
@@ -279,6 +284,7 @@ class OfficialsAssigner {
 
         final club = official.clubId;
         if (club != null && slot.contestingClubIds.contains(club)) continue;
+        if (slot.playerUids.contains(official.uid)) continue;
         sawNeutral = true;
 
         if (dayLoad(official) >= official.maxMatches) continue;
@@ -362,9 +368,9 @@ class OfficialsAssigner {
           'on this date. Move the match, or add someone who can come.';
     }
     if (!sawNeutral) {
-      return 'Every official free on this date belongs to one of the two '
-          'clubs playing. Add a neutral official, or assign one by hand and '
-          'record that both sides agreed.';
+      return 'Every official free on this date is playing in this match or '
+          'belongs to one of the two clubs playing. Add a neutral official, '
+          'or assign one by hand and record that both sides agreed.';
     }
     if (!sawUnderCap) {
       return 'Every neutral official has already reached their match limit '

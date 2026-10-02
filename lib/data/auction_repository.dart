@@ -301,7 +301,12 @@ class AuctionRepository {
     String? ratingLabel,
   }) =>
       guard(() async {
-        await Refs.auctionParticipant(auction.id, participant.uid).update({
+        // One batch: the decision, the side and the lot land together, so an
+        // approved bidder is never left without a purse or a player outside
+        // the pool. `teamCount`/`playerCount` are the server's
+        // (`onAuctionTeamWritten`); the rules refuse a client writing them.
+        final batch = Refs.db.batch();
+        batch.update(Refs.auctionParticipant(auction.id, participant.uid), {
           'status': approve
               ? AuctionJoinStatus.approved.wire
               : AuctionJoinStatus.declined.wire,
@@ -310,12 +315,13 @@ class AuctionRepository {
         });
 
         if (!approve) {
+          await batch.commit();
           await _notifyDecision(auction.id, participant.uid);
           return;
         }
 
         if (participant.isBidder) {
-          await Refs.auctionTeam(auction.id, participant.uid).set({
+          batch.set(Refs.auctionTeam(auction.id, participant.uid), {
             'auctionId': auction.id,
             'ownerUid': participant.uid,
             'ownerName': participant.displayName,
@@ -331,13 +337,10 @@ class AuctionRepository {
             'createdAt': FieldValue.serverTimestamp(),
             'updatedAt': FieldValue.serverTimestamp(),
           });
-          await Refs.auction(auction.id).update({
-            'teamCount': FieldValue.increment(1),
-          });
         }
 
         if (participant.isPlayer) {
-          await Refs.auctionLot(auction.id, participant.uid).set({
+          batch.set(Refs.auctionLot(auction.id, participant.uid), {
             'auctionId': auction.id,
             'playerUid': participant.uid,
             'displayName': participant.displayName,
@@ -353,11 +356,9 @@ class AuctionRepository {
             'ratingLabel': ratingLabel,
             'createdAt': FieldValue.serverTimestamp(),
           });
-          await Refs.auction(auction.id).update({
-            'playerCount': FieldValue.increment(1),
-          });
         }
 
+        await batch.commit();
         await _notifyDecision(auction.id, participant.uid);
       });
 

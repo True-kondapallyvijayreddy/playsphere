@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/material.dart' show DateUtils;
 
 import '../core/errors/app_exception.dart';
 import '../core/firebase/firestore_refs.dart';
@@ -121,12 +122,55 @@ class UmpireRepository {
     required String fixtureId,
     required MatchOfficial official,
     bool grantScoringAccess = true,
+    int? maxMatchesPerDay,
   }) async {
     final fixRef = Refs.fixture(orgId, compId, fixtureId);
     final doc = await fixRef.get();
     if (!doc.exists) return;
 
     final fixture = Fixture.fromDoc(doc);
+
+    // Nobody officiates a match they are playing in.
+    final players = <String>{
+      ...fixture.playerUids,
+      if (fixture.entrantAUid != null) fixture.entrantAUid!,
+      if (fixture.entrantBUid != null) fixture.entrantBUid!,
+    };
+    for (final entrantId in [fixture.entrantAId, fixture.entrantBId]) {
+      if (entrantId.isEmpty) continue;
+      final e = await Refs.entrants(orgId, compId).doc(entrantId).get();
+      final d = e.data();
+      if (d == null) continue;
+      if (d['uid'] is String) players.add(d['uid'] as String);
+      players.addAll(List<String>.from(d['memberUids'] as List? ?? const []));
+    }
+    if (players.contains(official.uid)) {
+      throw ValidationException(
+        '${official.name} is playing in this match and cannot officiate it.',
+      );
+    }
+
+    final at = fixture.scheduledAt;
+    if (maxMatchesPerDay != null && at != null) {
+      final sameEvent = fixture.tournamentId == null
+          ? await Refs.fixtures(orgId, compId).get()
+          : await Refs.allFixturesQuery
+              .where('orgId', isEqualTo: orgId)
+              .where('tournamentId', isEqualTo: fixture.tournamentId)
+              .get();
+      final thatDay = sameEvent.docs.map(Fixture.fromDoc).where((f) =>
+          f.id != fixtureId &&
+          f.scheduledAt != null &&
+          DateUtils.isSameDay(f.scheduledAt, at) &&
+          f.officials.any((o) => o.uid == official.uid));
+      if (thatDay.length >= maxMatchesPerDay) {
+        throw ValidationException(
+          '${official.name} already has $maxMatchesPerDay '
+          '${maxMatchesPerDay == 1 ? 'match' : 'matches'} that day, their '
+          'limit. Raise it on the panel first.',
+        );
+      }
+    }
 
     // Validate that official is not already officiating a live or overlapping match
     await checkOfficialAvailability(
@@ -317,23 +361,6 @@ class UmpireRepository {
         },
         'scorerUids': FieldValue.arrayUnion([scorerUid]),
       });
-    });
-  }
-
-  /// Releases the pen so anyone eligible can pick it up.
-  ///
-  /// Leaves `scorerUids` alone: the person is still allowed to score this
-  /// match, they are just not the one doing it at this moment.
-  Future<void> releasePen({
-    required String orgId,
-    required String compId,
-    required String fixtureId,
-  }) async {
-    await Refs.fixture(orgId, compId, fixtureId).update({
-      'activeScorerUid': null,
-      'activeScorerDeviceId': null,
-      'penGrantedByUid': null,
-      'penGrantedAt': null,
     });
   }
 

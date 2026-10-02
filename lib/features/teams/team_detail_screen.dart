@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/layout/responsive.dart';
 import '../../core/models/app_user.dart';
+import '../../core/models/enums.dart';
 import '../../core/models/organization.dart';
 import '../../core/models/team.dart';
 import '../../core/models/team_join_request.dart';
@@ -80,7 +81,9 @@ class _TeamBody extends ConsumerWidget {
   /// `Team.photoUrl` was read by this screen, the team list and the career
   /// profile, and written by nothing at all. This is the write.
   Future<void> _changeCrest(BuildContext context, WidgetRef ref) {
-    final uid = ref.read(currentUidProvider);
+    // The storage path is checked against the SIGNED-IN account, whichever
+    // profile is open.
+    final uid = ref.read(authUidProvider);
     if (uid == null) return Future.value();
     final repo = ref.read(teamRepositoryProvider);
     return pickAndUploadImage(
@@ -133,6 +136,8 @@ class _TeamBody extends ConsumerWidget {
                     ),
                   ),
                   const SizedBox(width: 14),
+                  if (canEdit)
+                    _TeamMenu(team: team),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -589,3 +594,193 @@ class _AskToJoin extends ConsumerWidget {
     }
   }
 }
+
+
+/// Renaming a team, handing over the captaincy, archiving and promoting — the
+/// edits `teamRuns()` in `firestore.rules` already allows the people running a
+/// team, which no screen offered.
+class _TeamMenu extends ConsumerWidget {
+  const _TeamMenu({required this.team});
+
+  final Team team;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final repo = ref.read(teamRepositoryProvider);
+
+    Future<void> run(Future<void> Function() action, String done) async {
+      try {
+        await action();
+        if (context.mounted) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text(done)));
+        }
+      } catch (e) {
+        if (context.mounted) showError(context, e);
+      }
+    }
+
+    return PopupMenuButton<String>(
+      tooltip: 'Manage team',
+      icon: const Icon(Icons.more_vert),
+      itemBuilder: (_) => [
+        const PopupMenuItem(value: 'edit', child: Text('Rename or change captain')),
+        if (team.type == TeamType.event)
+          const PopupMenuItem(value: 'promote', child: Text('Keep this squad after the event')),
+        if (team.isSelectable)
+          const PopupMenuItem(value: 'archive', child: Text('Archive team'))
+        else
+          const PopupMenuItem(value: 'restore', child: Text('Restore team')),
+      ],
+      onSelected: (choice) async {
+        switch (choice) {
+          case 'edit':
+            await showModalBottomSheet<void>(
+              context: context,
+              isScrollControlled: true,
+              showDragHandle: true,
+              builder: (_) => _EditTeamSheet(team: team),
+            );
+          case 'promote':
+            await run(() => repo.promoteEventTeam(team.id),
+                '${team.name} is now a lasting team.');
+          case 'archive':
+            final ok = await showDialog<bool>(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                title: Text('Archive ${team.name}?'),
+                content: const Text(
+                  'It stops appearing where teams are picked. Its matches and '
+                  'records stay, and you can restore it any time.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(ctx).pop(false),
+                    child: const Text('Cancel'),
+                  ),
+                  FilledButton(
+                    onPressed: () => Navigator.of(ctx).pop(true),
+                    child: const Text('Archive'),
+                  ),
+                ],
+              ),
+            );
+            if (ok == true) {
+              await run(() => repo.archiveTeam(team.id), 'Team archived.');
+            }
+          case 'restore':
+            await run(() => repo.restoreTeam(team.id), 'Team restored.');
+        }
+      },
+    );
+  }
+}
+
+class _EditTeamSheet extends ConsumerStatefulWidget {
+  const _EditTeamSheet({required this.team});
+
+  final Team team;
+
+  @override
+  ConsumerState<_EditTeamSheet> createState() => _EditTeamSheetState();
+}
+
+class _EditTeamSheetState extends ConsumerState<_EditTeamSheet> {
+  late final _name = TextEditingController(text: widget.team.name);
+  late final _area = TextEditingController(text: widget.team.homeArea ?? '');
+  late String? _captain = widget.team.captainUid;
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _area.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await ref.read(teamRepositoryProvider).updateTeamDetails(
+            teamId: widget.team.id,
+            name: _name.text,
+            captainUid: _captain,
+            homeArea: _area.text.trim().isEmpty ? null : _area.text.trim(),
+          );
+      if (mounted) Navigator.of(context).pop();
+    } catch (e) {
+      if (mounted) showError(context, e);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final roster = widget.team.memberUids;
+    final names = ref.watch(_rosterNamesProvider(roster.join(','))).valueOrNull ??
+        const <String, AppUser>{};
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+          20, 0, 20, 24 + MediaQuery.of(context).viewInsets.bottom),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Edit team', style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _name,
+            maxLength: 80,
+            textCapitalization: TextCapitalization.words,
+            decoration: const InputDecoration(
+              labelText: 'Team name',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _area,
+            textCapitalization: TextCapitalization.words,
+            decoration: const InputDecoration(
+              labelText: 'Home area',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<String>(
+            value: roster.contains(_captain) ? _captain : null,
+            decoration: const InputDecoration(
+              labelText: 'Captain',
+              border: OutlineInputBorder(),
+            ),
+            items: [
+              for (final uid in roster)
+                DropdownMenuItem(
+                  value: uid,
+                  child: Text(names[uid]?.displayName ?? 'Player'),
+                ),
+            ],
+            onChanged: (v) => setState(() => _captain = v),
+          ),
+          const SizedBox(height: 16),
+          FilledButton(
+            onPressed: _busy ? null : _save,
+            child: Text(_busy ? 'Saving…' : 'Save'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Names for a roster, in one batched read.
+/// Keyed by the joined uids: a list has no value equality, and a family keyed
+/// on one would start a fresh read on every rebuild.
+final _rosterNamesProvider =
+    FutureProvider.autoDispose.family<Map<String, AppUser>, String>(
+  (ref, joined) => ref
+      .watch(userRepositoryProvider)
+      .fetchMany(joined.isEmpty ? const [] : joined.split(',')),
+);

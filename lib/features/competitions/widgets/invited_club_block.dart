@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../../core/models/season_interest.dart';
+import '../../../core/router/app_router.dart';
 import '../../../core/providers.dart';
+import '../../home/home_providers.dart';
 import '../../../shared/identity.dart';
 import '../../../shared/ui_kit.dart';
 
@@ -122,6 +125,22 @@ class InvitedClubBlock extends ConsumerWidget {
               ),
             ],
             const SizedBox(height: 14),
+            // The organizer's way from "thirty people said yes" to sides that
+            // are actually entered. Without it the only route was: leave,
+            // create each team by hand, come back, enter them one at a time,
+            // remembering who went where. See [BuildEntryScreen].
+            if (ctx.canEnterForClub && ctx.invite.isAccepted)
+              FilledButton.icon(
+                onPressed: () => context.push(
+                  Routes.buildEntry(ctx.orgId, hostOrgId, tournamentId),
+                ),
+                icon: const Icon(Icons.groups_2_outlined, size: 18),
+                label: Text(
+                  interest.isEmpty
+                      ? 'Pick our side'
+                      : 'Build our entry from ${interest.length} available',
+                ),
+              ),
             if (!ctx.canEnterForClub)
               _InterestButton(
                 orgId: ctx.orgId,

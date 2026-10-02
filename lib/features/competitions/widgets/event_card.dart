@@ -48,7 +48,7 @@ class EventCard extends ConsumerWidget {
             if (org != null) org.name,
             c.sportName,
             c.category.label,
-            '${c.entrantCount} entered',
+            '${c.enteredCount} entered',
             if (c.startDate != null) friendlyDate(c.startDate!),
           ].join(' · '),
           maxLines: 2,

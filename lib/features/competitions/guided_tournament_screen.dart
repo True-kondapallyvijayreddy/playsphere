@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -7,9 +9,11 @@ import '../../core/models/competition.dart';
 import '../../core/models/draw_config.dart';
 import '../../core/models/enums.dart';
 import '../../core/providers.dart';
+import '../../domain/tournament/season_name.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart' show showError;
+import '../../shared/app_messenger.dart';
 import '../../shared/club_context_banner.dart';
 import '../../shared/season_branding_field.dart';
 import '../../shared/offline_fee_notice.dart';
@@ -158,15 +162,29 @@ class _GuidedTournamentScreenState
     );
   }
 
+  /// Too long or already used — shown under the name as it is typed.
+  String? get _nameProblem => _name.text.trim().isEmpty
+      ? null
+      : SeasonName.problem(
+          _name.text,
+          noun: 'tournament',
+          taken: ref.read(
+              seasonNamesTakenProvider((orgId: widget.orgId, exceptId: null))),
+        );
+
   Future<void> _submit() async {
-    final uid = ref.read(currentUidProvider);
+    final uid = ref.read(authUidProvider);
     if (uid == null) return;
 
     setState(() => _busy = true);
     try {
-      final compId =
-          await ref.read(competitionRepositoryProvider).createCompetition(
-                Competition(
+      // Stored as a one-sport season, so it opens on the season page with
+      // everything a season has — see `SeasonKind`.
+      final tournaments = ref.read(tournamentRepositoryProvider);
+      final created = await tournaments.createSingleSportTournament(
+                shortName: _shortName.text,
+                createdBy: uid,
+                event: Competition(
                   id: '',
                   orgId: widget.orgId,
                   name: _name.text.trim(),
@@ -211,20 +229,31 @@ class _GuidedTournamentScreenState
                   createdBy: uid,
                 ),
               );
-      // After the document, because the storage path is keyed on its id, and
-      // allowed to fail on its own — see [SeasonBranding.uploadTo].
-      final brandingProblem = await _branding.uploadToEvent(
-        repo: ref.read(competitionRepositoryProvider),
-        orgId: widget.orgId,
-        compId: compId,
-        uid: uid,
-      );
+      // After the server has the document, because the storage path is
+      // checked against it, and allowed to fail on its own — see
+      // [SeasonBranding.uploadTo].
+      if (!_branding.isEmpty) {
+        final branding = _branding;
+        final orgId = widget.orgId;
+        unawaited(created.committed.then((_) async {
+          final problem = await branding.uploadTo(
+            repo: tournaments,
+            orgId: orgId,
+            tournamentId: created.tournamentId,
+            uid: uid,
+          );
+          if (problem != null) showAppMessage(problem);
+        }).catchError((_) {}));
+      }
 
       if (!mounted) return;
       // Replace, not push: the tournament exists now, and a back press must
       // not land on a filled-in form that would create a second one.
-      context.pushReplacement(Routes.competition(widget.orgId, compId));
-      if (brandingProblem != null) showError(context, brandingProblem);
+      context.pushReplacement(
+        Routes.tournament(widget.orgId, created.tournamentId),
+      );
+    } catch (e) {
+      if (mounted) showError(context, e);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -232,6 +261,8 @@ class _GuidedTournamentScreenState
 
   @override
   Widget build(BuildContext context) {
+    // Keeps the club's seasons loaded, so the name check below has them.
+    ref.watch(seasonNamesTakenProvider((orgId: widget.orgId, exceptId: null)));
     return WizardScaffold(
       title: 'Create Tournament',
       submitLabel: 'Create Tournament',
@@ -243,7 +274,8 @@ class _GuidedTournamentScreenState
           // Only the name is genuinely required. Everything else on this step
           // has a defensible default, and a flow that blocks on six fields at
           // step one is a flow people abandon at step one.
-          canAdvance: () => _name.text.trim().isNotEmpty,
+          canAdvance: () =>
+              _name.text.trim().isNotEmpty && _nameProblem == null,
           builder: _detailsStep,
         ),
         WizardStep(title: 'Teams', builder: _teamsStep),
@@ -278,7 +310,11 @@ class _GuidedTournamentScreenState
             required: true,
             child: TextField(
               controller: _name,
-              decoration: _input('Hyderabad Champions Cup 2026'),
+              maxLength: SeasonName.maxLength,
+              decoration: _input('Hyderabad Champions Cup 2026').copyWith(
+                errorText: _nameProblem,
+                errorMaxLines: 3,
+              ),
               // Rebuilds so the Next button enables as soon as there is a
               // name, rather than on the next unrelated interaction.
               onChanged: (_) => setState(() {}),
@@ -391,15 +427,9 @@ class _GuidedTournamentScreenState
                       onChanged: (h) => setState(() => _presetHouses = h),
                     ),
                   ),
-                const SizedBox(height: 8),
-                _ParticipationChoice(
-                  label: 'Player Pool & Organizer Draft',
-                  help: 'Players register solo into a pool, and organizer uses 1-click Auto-Draft',
-                  selected: _teamEntryMode == TeamEntryMode.playerPool,
-                  onTap: () => setState(
-                    () => _teamEntryMode = TeamEntryMode.playerPool,
-                  ),
-                ),
+                // No "player pool" here any more: a team sport enters as
+                // teams (or houses inside a school), never as solo players
+                // an organizer then has to split into sides by hand.
               ],
             ),
           ),

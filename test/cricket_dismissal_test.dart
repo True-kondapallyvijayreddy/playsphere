@@ -226,7 +226,19 @@ void main() {
       ]);
 
       expect(tallyOf(s, 'B1')['wickets'], isNull);
-      expect(inningsOf(s)['wickets'], 1);
+      // Not a wicket and not a ball: the batter walks off not out.
+      expect(inningsOf(s)['wickets'], 0);
+      expect(inningsOf(s)['legalBalls'] ?? 0, 0);
+      expect((inningsOf(s)['fow'] as List? ?? const []), isEmpty);
+      expect(inningsOf(s)['striker'], isNull);
+      final a1 = (inningsOf(s)['batting'] as Map)['A1'] as Map;
+      expect(a1['out'], isNot(true));
+
+      // And may come back in.
+      final back = play(s, [
+        const ScoreAction(type: 'new_batter', payload: {'playerId': 'A1'}),
+      ]);
+      expect(inningsOf(back)['striker'], 'A1');
     });
   });
 

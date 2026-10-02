@@ -678,9 +678,28 @@ extension GroundTrustRepository on GroundRepository {
 
         // The advertising photo, so a listing made this way is not blank in
         // search. The playing-area shot is the one people are choosing on.
-        final hero = uploads.isNotEmpty ? uploads.first : null;
-        if (hero != null) {
+        //
+        // Uploaded again to the ground's PUBLIC photo path rather than linked
+        // from the proof. A proof lives under `groundProofs/`, which
+        // storage.rules keeps to the owner and staff — but a download URL
+        // carries its own token, so putting the proof's URL on the
+        // world-readable ground document published the private evidence.
+        final heroProof = proofs.firstWhere(
+          (p) => p.kind == GroundProofKind.playingArea,
+          orElse: () => proofs.first,
+        );
+        try {
+          final hero = await _media.putImage(
+            folder: 'grounds/${groundRef.id}/photo',
+            uid: uid,
+            bytes: heroProof.bytes,
+            contentType: heroProof.contentType,
+            maxMegabytes: 6,
+          );
           batch.update(groundRef, {'photoUrl': hero});
+        } catch (_) {
+          // A listing without a picture is still a listing; the owner can add
+          // one from its page. The evidence is what must not be lost.
         }
 
         await batch.commit();

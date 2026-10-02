@@ -120,7 +120,7 @@ export const closeIdleArenaGames = onSchedule(
  * same reason.
  */
 export const onArenaMatchFinished = onDocumentUpdated(
-  'arenaMatches/{matchId}',
+  { region: 'asia-south1', document: 'arenaMatches/{matchId}' },
   async (event) => {
     const before = event.data?.before.data();
     const after = event.data?.after.data();
@@ -172,16 +172,19 @@ export const onArenaMatchFinished = onDocumentUpdated(
               // Per game as well as overall, because being the club's best at
               // connect four and its worst at go is the interesting fact, and
               // one combined number hides it.
-              [`byGame.${gameId}.played`]: FieldValue.increment(1),
-              [`byGame.${gameId}.won`]: FieldValue.increment(
-                outcome === 'won' ? 1 : 0,
-              ),
-              [`byGame.${gameId}.drawn`]: FieldValue.increment(
-                outcome === 'drawn' ? 1 : 0,
-              ),
-              [`byGame.${gameId}.lost`]: FieldValue.increment(
-                outcome === 'lost' ? 1 : 0,
-              ),
+              //
+              // A nested map, not dotted keys: `set(..., {merge: true})` takes
+              // a key like `byGame.chess.won` as one literal field name, so the
+              // ladder read `byGame` and found nothing. Merge deep-merges maps,
+              // and an increment inside one still increments.
+              byGame: {
+                [gameId]: {
+                  played: FieldValue.increment(1),
+                  won: FieldValue.increment(outcome === 'won' ? 1 : 0),
+                  drawn: FieldValue.increment(outcome === 'drawn' ? 1 : 0),
+                  lost: FieldValue.increment(outcome === 'lost' ? 1 : 0),
+                },
+              },
               // Capped: this exists to make the write idempotent, not to be a
               // history — the matches themselves are that.
               settledMatches: settled.concat(matchId).slice(-400),

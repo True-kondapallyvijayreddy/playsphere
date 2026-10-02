@@ -46,6 +46,8 @@ import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import { onDocumentCreated, onDocumentWritten } from 'firebase-functions/v2/firestore';
 import { logger } from 'firebase-functions';
 
+import { persistNotifications, pushToUids } from './push.js';
+
 function db() {
   return getFirestore();
 }
@@ -152,7 +154,9 @@ function distanceMetres(lat1, lng1, lat2, lng2) {
  *
  * Every flag is advisory. See the file header for why none of them blocks.
  */
-export const scoreNewGround = onDocumentCreated('grounds/{groundId}', async (event) => {
+export const scoreNewGround = onDocumentCreated(
+  { region: 'asia-south1', document: 'grounds/{groundId}' },
+  async (event) => {
   const snap = event.data;
   if (!snap) return;
 
@@ -172,41 +176,6 @@ export const scoreNewGround = onDocumentCreated('grounds/{groundId}', async (eve
   }
 
   try {
-    // --- The proofs behind it --------------------------------------------
-    const proofs = await db()
-      .collection('grounds').doc(groundId)
-      .collection('verification')
-      .get();
-
-    let worstOffset = 0;
-    const fixes = [];
-    for (const doc of proofs.docs) {
-      if (doc.id === 'claim') continue;
-      const p = doc.data() ?? {};
-      if (p.isMocked === true) {
-        // The client refuses a mocked fix outright, so a stored one means the
-        // write did not come from the shipped app. That is a more interesting
-        // fact about the account than anything about the ground.
-        if (!flags.includes('mockedLocation')) flags.push('mockedLocation');
-      }
-      if (typeof p.latitude === 'number' && typeof p.longitude === 'number') {
-        fixes.push([p.latitude, p.longitude]);
-        if (lat !== null && lng !== null) {
-          worstOffset = Math.max(worstOffset, distanceMetres(lat, lng, p.latitude, p.longitude));
-        }
-      }
-    }
-
-    if (worstOffset > 300) flags.push('pinFarFromCapture');
-
-    let spread = 0;
-    for (let i = 0; i < fixes.length; i++) {
-      for (let j = i + 1; j < fixes.length; j++) {
-        spread = Math.max(spread, distanceMetres(fixes[i][0], fixes[i][1], fixes[j][0], fixes[j][1]));
-      }
-    }
-    if (spread > 300) flags.push('capturesScattered');
-
     // --- Somebody else's ground at the same spot --------------------------
     //
     // The single most valuable check here, and the one that directly catches
@@ -271,11 +240,86 @@ export const scoreNewGround = onDocumentCreated('grounds/{groundId}', async (eve
   if (flags.length === 0) return;
 
   await snap.ref.update({
-    riskFlags: flags,
+    riskFlags: FieldValue.arrayUnion(...flags),
     riskScoredAt: FieldValue.serverTimestamp(),
   });
   logger.info('ground flagged for review', { groundId, flags });
 });
+
+// ---------------------------------------------------------------------------
+// The on-site proofs, once they exist
+// ---------------------------------------------------------------------------
+
+/**
+ * What is odd about a listing's on-site proof photos. Pure.
+ *
+ * `ground` carries the pin; `proofs` are the verification documents other than
+ * the ownership claim.
+ */
+export function proofFlags(ground, proofs) {
+  const flags = [];
+  const lat = typeof ground?.latitude === 'number' ? ground.latitude : null;
+  const lng = typeof ground?.longitude === 'number' ? ground.longitude : null;
+
+  let worstOffset = 0;
+  const fixes = [];
+  for (const p of proofs) {
+    if (p?.isMocked === true && !flags.includes('mockedLocation')) {
+      // The client refuses a mocked fix outright, so a stored one means the
+      // write did not come from the shipped app.
+      flags.push('mockedLocation');
+    }
+    if (typeof p?.latitude === 'number' && typeof p?.longitude === 'number') {
+      fixes.push([p.latitude, p.longitude]);
+      if (lat !== null && lng !== null) {
+        worstOffset = Math.max(worstOffset, distanceMetres(lat, lng, p.latitude, p.longitude));
+      }
+    }
+  }
+  if (worstOffset > 300) flags.push('pinFarFromCapture');
+
+  let spread = 0;
+  for (let i = 0; i < fixes.length; i++) {
+    for (let j = i + 1; j < fixes.length; j++) {
+      spread = Math.max(spread, distanceMetres(fixes[i][0], fixes[i][1], fixes[j][0], fixes[j][1]));
+    }
+  }
+  if (spread > 300) flags.push('capturesScattered');
+  return flags;
+}
+
+/**
+ * Scores the proof photos when the ownership claim is filed.
+ *
+ * Not on the ground's own create, which is where this used to run: the app
+ * writes the ground first (every storage path is keyed on its id), uploads the
+ * photos, and only then writes the proofs and the claim in one batch. On the
+ * ground's create the proofs did not exist yet, so a mocked location or a pin a
+ * kilometre from the photos was never flagged. The claim is written in the same
+ * commit as the proofs, so when it appears they are all there.
+ */
+export const scoreGroundProofs = onDocumentCreated(
+  { region: 'asia-south1', document: 'grounds/{groundId}/verification/{proofId}' },
+  async (event) => {
+    if (event.params.proofId !== 'claim') return;
+    const groundRef = db().collection('grounds').doc(event.params.groundId);
+    const [ground, proofs] = await Promise.all([
+      groundRef.get(),
+      groundRef.collection('verification').get(),
+    ]);
+    if (!ground.exists) return;
+    const flags = proofFlags(
+      ground.data(),
+      proofs.docs.filter((d) => d.id !== 'claim').map((d) => d.data()),
+    );
+    if (flags.length === 0) return;
+    await groundRef.update({
+      riskFlags: FieldValue.arrayUnion(...flags),
+      riskScoredAt: FieldValue.serverTimestamp(),
+    });
+    logger.info('ground proofs flagged for review', { groundId: groundRef.id, flags });
+  },
+);
 
 // ---------------------------------------------------------------------------
 // Reports and auto-suspension
@@ -302,7 +346,9 @@ export const scoreNewGround = onDocumentCreated('grounds/{groundId}', async (eve
  * has never heard of `verificationStatus`. `firestore.rules` stops the owner
  * turning it back on while suspended.
  */
-export const onGroundReported = onDocumentWritten('groundReports/{reportId}', async (event) => {
+export const onGroundReported = onDocumentWritten(
+  { region: 'asia-south1', document: 'groundReports/{reportId}' },
+  async (event) => {
   const after = event.data?.after;
   if (!after?.exists) return;
 
@@ -380,15 +426,19 @@ async function notifyOwnerOfSuspension(groundId, ground) {
   const uid = ground.ownerUid;
   if (!uid) return;
   try {
-    await db().collection('users').doc(uid).collection('notifications').add({
-      type: 'ground_suspended',
+    // The same payload every other notice uses, so the inbox row opens the
+    // listing (`deepLinkRoute`) and a tray push reaches a phone that is asleep.
+    const payload = {
+      id: `ground_suspended_${groundId}`,
+      type: 'event_reminder',
       title: 'Your ground listing has been paused',
       body: `${ground.name ?? 'Your ground'} is no longer taking bookings while `
         + 'PlaySphere checks reports about it. Existing bookings are unaffected.',
-      route: `/grounds/${groundId}`,
-      createdAt: FieldValue.serverTimestamp(),
-      read: false,
-    });
+      deepLinkRoute: '/grounds/:groundId',
+      deepLinkParam_groundId: groundId,
+    };
+    const unique = await persistNotifications([uid], payload);
+    await pushToUids(unique, payload);
   } catch (error) {
     logger.warn('suspension notice failed', { groundId, error: String(error) });
   }
@@ -419,7 +469,7 @@ async function notifyOwnerOfSuspension(groundId, ground) {
  * the badge claims it means.
  */
 export const onGroundCheckIn = onDocumentCreated(
-  'grounds/{groundId}/checkIns/{bookingId}',
+  { region: 'asia-south1', document: 'grounds/{groundId}/checkIns/{bookingId}' },
   async (event) => {
     const snap = event.data;
     if (!snap) return;
@@ -492,7 +542,9 @@ export const onGroundCheckIn = onDocumentCreated(
  * there because a new ground with two bookings and no check-ins is just a new
  * ground — check-in is a habit that takes a while to spread.
  */
-export const flagUnvisitedGround = onDocumentWritten('grounds/{groundId}', async (event) => {
+export const flagUnvisitedGround = onDocumentWritten(
+  { region: 'asia-south1', document: 'grounds/{groundId}' },
+  async (event) => {
   const before = event.data?.before?.data();
   const after = event.data?.after?.data();
   if (!after || !before) return;
@@ -541,7 +593,7 @@ export const flagUnvisitedGround = onDocumentWritten('grounds/{groundId}', async
  * cancelled booking takes its contribution back with it.
  */
 export const onGroundBooked = onDocumentWritten(
-  'grounds/{groundId}/bookings/{bookingId}',
+  { region: 'asia-south1', document: 'grounds/{groundId}/bookings/{bookingId}' },
   async (event) => {
     const groundId = event.params.groundId;
     const groundRef = db().collection('grounds').doc(groundId);

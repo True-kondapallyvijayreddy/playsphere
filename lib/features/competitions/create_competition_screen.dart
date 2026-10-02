@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -9,9 +11,11 @@ import '../../core/models/competition.dart';
 import '../../core/models/enums.dart';
 import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
+import '../../domain/tournament/season_name.dart';
 import '../../core/router/app_router.dart';
 import '../../data/ground_repository.dart';
 import '../../domain/scoring/scoring_registry.dart';
+import '../../shared/app_messenger.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/season_branding_field.dart';
 import '../../shared/club_context_banner.dart';
@@ -62,6 +66,14 @@ class _CreateCompetitionScreenState
 
   SportSpec _sport = SportCatalog.byId('badminton');
   late CompetitionCategory _category = CompetitionCategory.presets().first;
+
+  /// Overrides the picked category's age bounds with an organizer-typed pair,
+  /// for the exact case none of the presets cover — e.g. "Minimum Age 21" for
+  /// an adults-only veterans event. Off by default; the presets already carry
+  /// the common bounds (U-11/14/17/19, Senior 19+).
+  bool _customAgeBounds = false;
+  final _minAge = TextEditingController();
+  final _maxAge = TextEditingController();
   CompetitionFormat _format = CompetitionFormat.roundRobin;
   DateTime? _startDate;
   TimeOfDay? _startTime;
@@ -89,7 +101,32 @@ class _CreateCompetitionScreenState
     _fee.dispose();
     _teamSize.dispose();
     _rules.dispose();
+    _minAge.dispose();
+    _maxAge.dispose();
     super.dispose();
+  }
+
+  /// The category actually submitted: the picked preset, with the
+  /// organizer's custom age bounds layered on when they've turned that on.
+  CompetitionCategory get _effectiveCategory {
+    if (!_customAgeBounds) return _category;
+    final min = int.tryParse(_minAge.text.trim());
+    final max = int.tryParse(_maxAge.text.trim());
+    if (min == null && max == null) return _category;
+    return CompetitionCategory(
+      label: _category.label,
+      dimensions: {..._category.dimensions, CategoryDimension.age},
+      minAge: min,
+      maxAge: max,
+      // Falls back to the competition start once it's picked — see
+      // [CompetitionCategory.ageCutOffDate]: the eligibility clock is the
+      // event's reference date, never "today".
+      ageCutOffDate: _startDate,
+      allowedGenders: _category.allowedGenders,
+      minWeightKg: _category.minWeightKg,
+      maxWeightKg: _category.maxWeightKg,
+      grade: _category.grade,
+    );
   }
 
   /// The date and the time of day as one moment.
@@ -166,7 +203,7 @@ class _CreateCompetitionScreenState
 
   Future<void> _create() async {
     if (!_formKey.currentState!.validate()) return;
-    final uid = ref.read(currentUidProvider);
+    final uid = ref.read(authUidProvider);
     if (uid == null) return;
 
     // Unreachable by the dropdown since single match became its own event
@@ -190,10 +227,12 @@ class _CreateCompetitionScreenState
 
     setState(() => _busy = true);
     try {
-      final compId = await ref
-          .read(competitionRepositoryProvider)
-          .createCompetition(
-            Competition(
+      // A tournament is a one-sport season — see `SeasonKind` — so it opens on
+      // the season page with everything a season has.
+      final tournaments = ref.read(tournamentRepositoryProvider);
+      final created = await tournaments.createSingleSportTournament(
+            createdBy: uid,
+            event: Competition(
               id: '',
               orgId: _orgId,
               name: _name.text.trim(),
@@ -212,7 +251,7 @@ class _CreateCompetitionScreenState
                   : TeamEntryMode.individual,
               format: _format,
               status: CompetitionStatus.registrationOpen,
-              category: _category,
+              category: _effectiveCategory,
               scoringPluginKey: _sport.pluginKey,
               venue: _venue.text.trim().isEmpty ? null : _venue.text.trim(),
               startDate: _startsAt,
@@ -227,22 +266,29 @@ class _CreateCompetitionScreenState
               createdBy: uid,
             ),
           );
-      // After the document, because the storage path is keyed on its id.
-      // Reports rather than throws, so a picture that fails to upload never
-      // costs the event — see [SeasonBranding.uploadTo].
-      final brandingProblem = await _branding.uploadToEvent(
-        repo: ref.read(competitionRepositoryProvider),
-        orgId: _orgId,
-        compId: compId,
-        uid: uid,
-      );
+      // After the server has the document, because the storage path is
+      // checked against it. Reports rather than throws, so a picture that
+      // fails to upload never costs the tournament — see
+      // [SeasonBranding.uploadTo].
+      if (!_branding.isEmpty) {
+        final branding = _branding;
+        final orgId = _orgId;
+        unawaited(created.committed.then((_) async {
+          final problem = await branding.uploadTo(
+            repo: tournaments,
+            orgId: orgId,
+            tournamentId: created.tournamentId,
+            uid: uid,
+          );
+          if (problem != null) showAppMessage(problem);
+        }).catchError((_) {}));
+      }
 
       if (mounted) {
-        // Replace rather than push: the event now exists, and a back press
-        // from it should return to the club, not to a creation form that
-        // would make a second copy if it were submitted again.
-        context.pushReplacement(Routes.competition(_orgId, compId));
-        if (brandingProblem != null) showError(context, brandingProblem);
+        // Replace rather than push: the tournament now exists, and a back
+        // press from it should return to the club, not to a creation form
+        // that would make a second copy if it were submitted again.
+        context.pushReplacement(Routes.tournament(_orgId, created.tournamentId));
       }
     } catch (e) {
       if (mounted) showError(context, e);
@@ -276,6 +322,8 @@ class _CreateCompetitionScreenState
   @override
   Widget build(BuildContext context) {
     final presets = CompetitionCategory.presets(cutOff: _startDate);
+    // Keeps the club's seasons loaded, so the name check below has them.
+    ref.watch(seasonNamesTakenProvider((orgId: _orgId, exceptId: null)));
 
     return AppScaffold(
       orgId: _orgId,
@@ -307,14 +355,22 @@ class _CreateCompetitionScreenState
                   TextFormField(
                     controller: _name,
                     textCapitalization: TextCapitalization.words,
+                    maxLength: SeasonName.maxLength,
+                    autovalidateMode: AutovalidateMode.onUserInteraction,
                     decoration: const InputDecoration(
                       labelText: 'Event name',
                       hintText: 'e.g. Inter-house Badminton 2026',
                       border: OutlineInputBorder(),
+                      errorMaxLines: 3,
                     ),
-                    validator: (v) => (v == null || v.trim().length < 3)
-                        ? 'At least 3 characters'
-                        : null,
+                    // Stored as a one-sport tournament, so it is held to a
+                    // season's naming rules — see [SeasonName].
+                    validator: (v) => SeasonName.problem(
+                      v ?? '',
+                      noun: 'tournament',
+                      taken: ref.read(seasonNamesTakenProvider(
+                          (orgId: _orgId, exceptId: null))),
+                    ),
                   ),
                   const SizedBox(height: 24),
 
@@ -391,6 +447,54 @@ class _CreateCompetitionScreenState
                       setState(() => _category = match);
                     },
                   ),
+                  const SizedBox(height: 12),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    value: _customAgeBounds,
+                    title: const Text('Enforce age bounds'),
+                    subtitle: const Text(
+                      'Set a minimum and/or maximum age this category\'s '
+                      'presets don\'t already cover, e.g. "21 and above".',
+                    ),
+                    onChanged: (v) =>
+                        setState(() => _customAgeBounds = v ?? false),
+                  ),
+                  if (_customAgeBounds) ...[
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextFormField(
+                            controller: _minAge,
+                            keyboardType: TextInputType.number,
+                            decoration: const InputDecoration(
+                              labelText: 'Minimum age',
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: TextFormField(
+                            controller: _maxAge,
+                            keyboardType: TextInputType.number,
+                            decoration: const InputDecoration(
+                              labelText: 'Maximum age',
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Checked against the start date below — a player must '
+                      'meet the bound on that day, not on the day they '
+                      'register.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
                   const SizedBox(height: 20),
 
                   DropdownButtonFormField<CompetitionFormat>(

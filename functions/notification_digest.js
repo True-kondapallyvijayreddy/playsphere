@@ -53,16 +53,46 @@ const TYPE_LABELS = {
   tournament_invite: 'tournament invite',
   sponsor_pledge_received: 'sponsor offer',
   sponsor_pledge_resolved: 'sponsor response',
+  club_message: 'club message',
+  give_donation_submitted: 'donation',
+  give_need_raised: 'need to verify',
+  give_donation_advanced: 'donation update',
+  ad_campaign_submitted: 'campaign to review',
+  ad_campaign_reviewed: 'campaign decision',
 };
+
+/** A wire type nobody has labelled yet, as words rather than a token. */
+function labelFor(type) {
+  return TYPE_LABELS[type] ?? String(type).replace(/_/g, ' ');
+}
 
 function pluralize(word, count) {
   return count === 1 ? word : `${word}s`;
 }
 
-function summarize(types) {
+/**
+ * The per-type counts on a pending-digest document. Reads the `types` map, and
+ * also the literal `types.<wire>` fields an earlier version wrote by mistake
+ * (a dotted key under merge is a field name, not a path), so a backlog queued
+ * before the fix still reads right.
+ */
+export function pendingTypes(data) {
+  const out = {};
+  const add = (type, n) => {
+    const count = Number(n) || 0;
+    if (count > 0) out[type] = (out[type] ?? 0) + count;
+  };
+  for (const [type, n] of Object.entries(data?.types ?? {})) add(type, n);
+  for (const [key, n] of Object.entries(data ?? {})) {
+    if (key.startsWith('types.')) add(key.slice('types.'.length), n);
+  }
+  return out;
+}
+
+export function summarize(types) {
   const parts = Object.entries(types || {})
     .filter(([, count]) => Number(count) > 0)
-    .map(([type, count]) => `${count} ${pluralize(TYPE_LABELS[type] ?? type, count)}`);
+    .map(([type, count]) => `${count} ${pluralize(labelFor(type), count)}`);
   if (parts.length === 0) return null;
   if (parts.length === 1) return parts[0];
   if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
@@ -107,8 +137,24 @@ export const flushNotificationDigests = onSchedule(
         const uid = doc.ref.parent.parent?.id;
         if (!uid) return;
 
-        const count = doc.get('pendingCount') ?? 0;
-        const summary = summarize(doc.get('types'));
+        // Claimed before the push, in a transaction: whatever arrives while the
+        // push is on its way lands on the zeroed counter and goes out with the
+        // next flush, instead of being wiped by an overwrite afterwards.
+        const claimed = await db().runTransaction(async (tx) => {
+          const fresh = await tx.get(doc.ref);
+          const data = fresh.exists ? fresh.data() : {};
+          const pending = Number(data.pendingCount) || 0;
+          if (pending <= 0) return null;
+          tx.set(doc.ref, {
+            pendingCount: 0,
+            types: {},
+            updatedAt: FieldValue.serverTimestamp(),
+          });
+          return { count: pending, types: pendingTypes(data) };
+        });
+        if (!claimed) return;
+        const { count } = claimed;
+        const summary = summarize(claimed.types);
 
         await pushToUids([uid], {
           id: `digest_${uid}_${Date.now()}`,
@@ -123,13 +169,6 @@ export const flushNotificationDigests = onSchedule(
           deepLinkRoute: '/notifications',
         });
 
-        // Full overwrite — see doc comment above for why merge would not
-        // actually clear the per-type counts.
-        await doc.ref.set({
-          pendingCount: 0,
-          types: {},
-          updatedAt: FieldValue.serverTimestamp(),
-        });
         sent += 1;
       }));
     };

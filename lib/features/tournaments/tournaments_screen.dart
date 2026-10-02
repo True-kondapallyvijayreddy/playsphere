@@ -8,6 +8,7 @@ import '../../core/models/venue.dart';
 import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
+import '../../domain/tournament/season_name.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/offline_fee_notice.dart';
 import '../../shared/identity.dart';
@@ -236,6 +237,10 @@ class _TournamentEditorState extends ConsumerState<TournamentEditor> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isNew = widget.existing == null;
+    // Keeps the club's seasons loaded, so the name check has them.
+    ref.watch(seasonNamesTakenProvider(
+      (orgId: widget.orgId, exceptId: widget.existing?.id),
+    ));
     final venues = ref.watch(venuesProvider(widget.orgId)).valueOrNull ??
         const <Venue>[];
 
@@ -260,9 +265,13 @@ class _TournamentEditorState extends ConsumerState<TournamentEditor> {
               controller: _name,
               autofocus: isNew,
               textCapitalization: TextCapitalization.words,
-              decoration: const InputDecoration(
+              maxLength: SeasonName.maxLength,
+              onChanged: (_) => setState(() {}),
+              decoration: InputDecoration(
                 labelText: 'Name',
                 hintText: 'Hyderabad District Championship 2026',
+                errorText: _nameProblem,
+                errorMaxLines: 3,
               ),
             ),
             const SizedBox(height: 12),
@@ -467,19 +476,41 @@ class _TournamentEditorState extends ConsumerState<TournamentEditor> {
     return (n == null || n < 0) ? 0 : n;
   }
 
-  bool get _canSave =>
-      !_busy && _name.text.trim().isNotEmpty && _start != null;
+  /// Shown under the field once something is typed — too long, or a name
+  /// another live season of the club already has.
+  String? get _nameProblem {
+    if (_name.text.trim().isEmpty) return null;
+    // An unchanged name is not re-judged: a season named before the rules
+    // existed must still be editable. See `SeasonName.isRename`.
+    final existing = widget.existing;
+    if (existing != null && !SeasonName.isRename(existing.name, _name.text)) {
+      return null;
+    }
+    return SeasonName.problem(
+      _name.text,
+      noun: (widget.existing?.kind ?? SeasonKind.season).noun,
+      taken: ref.read(seasonNamesTakenProvider(
+        (orgId: widget.orgId, exceptId: widget.existing?.id),
+      )),
+    );
+  }
+
+  bool get _canSave => !_busy && _nameProblem == null &&
+      _name.text.trim().isNotEmpty && _start != null;
 
   Future<void> _save() async {
     setState(() => _busy = true);
     final repo = ref.read(tournamentRepositoryProvider);
-    final uid = ref.read(currentUidProvider);
+    final uid = ref.read(authUidProvider);
 
     final t = Tournament(
       id: widget.existing?.id ?? '',
       orgId: widget.orgId,
-      name: _name.text.trim(),
-      status: widget.existing?.status ?? TournamentStatus.draft,
+      name: SeasonName.normalize(_name.text),
+      kind: widget.existing?.kind ?? SeasonKind.season,
+      // A new season is published as it is created, like every other
+      // creation path — see `SeasonBlueprint.tournament`.
+      status: widget.existing?.status ?? TournamentStatus.entriesOpen,
       grade: _grade,
       description:
           _description.text.trim().isEmpty ? null : _description.text.trim(),
@@ -496,15 +527,35 @@ class _TournamentEditorState extends ConsumerState<TournamentEditor> {
       // charges.
       entryFeeRupees:
           _feeMode == SeasonFeeMode.wholeSeason ? _entryFeeRupees : 0,
+      // Not on this sheet, so carried as they are. Left to the constructor's
+      // default, the travel time between grounds set in the venue planner
+      // was reset to zero every time somebody fixed a typo in the name.
+      venueTransitionMinutes: widget.existing?.venueTransitionMinutes ?? 0,
+      shortName: widget.existing?.shortName,
+      organizerName: widget.existing?.organizerName,
       createdBy: widget.existing?.createdBy ?? uid,
       createdAt: widget.existing?.createdAt,
     );
 
     try {
-      final id = widget.existing == null
+      final existing = widget.existing;
+      final id = existing == null
           ? await repo.createTournament(t)
           : await () async {
-              await repo.updateTournament(t);
+              // Moves the events' own dates with the season's — see
+              // `TournamentRepository.updateSeasonDetails`.
+              final moved =
+                  await repo.updateSeasonDetails(before: existing, after: t);
+              if (moved > 0 && mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  duration: const Duration(seconds: 8),
+                  content: Text(
+                    '$moved ${moved == 1 ? 'event' : 'events'} moved with the '
+                    'new dates, each keeping its start time. To set a '
+                    'different day or time, use Edit on that event.',
+                  ),
+                ));
+              }
               return t.id;
             }();
 

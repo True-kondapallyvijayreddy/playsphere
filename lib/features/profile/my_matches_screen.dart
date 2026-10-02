@@ -139,7 +139,7 @@ class _MyMatchesScreenState extends ConsumerState<MyMatchesScreen> {
 /// Shared with the per-sport page so a match reads identically wherever it
 /// appears. Tapping opens the scorecard — the whole point of the list is that
 /// a result is a doorway to the full card, per Bug #15.
-class PlayerMatchTile extends StatelessWidget {
+class PlayerMatchTile extends ConsumerWidget {
   const PlayerMatchTile({
     super.key,
     required this.fixture,
@@ -150,10 +150,13 @@ class PlayerMatchTile extends StatelessWidget {
   final String uid;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final now = DateTime.now();
     final isLive = fixture.isLiveAt(now);
+    // A season draw before its sport is published: the time can still move,
+    // so it is not shown as one (test run TC-28).
+    final confirmed = fixtureTimeConfirmedIn(ref, fixture);
     final sport = SportCatalog.byId(fixture.sport.split(':').first);
 
     final when = fixture.completedAt ?? fixture.startedAt ?? fixture.scheduledAt;
@@ -189,9 +192,12 @@ class PlayerMatchTile extends StatelessWidget {
             ),
             Text(
               [
-                if (when != null) friendlyDate(when),
+                if (!confirmed)
+                  'Time not published yet'
+                else if (when != null)
+                  friendlyDate(when),
                 if (fixture.summary.isNotEmpty)
-                  localizedSummary(context, fixture.summary),
+                  localizedScoreLine(context, fixture),
               ].join(' · '),
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
@@ -215,7 +221,9 @@ class PlayerMatchTile extends StatelessWidget {
                 // status == FixtureStatus.live, so its label would read
                 // "Live". Say "Paused" instead — the scorer stopped.
                 : Text(
-                    fixture.isStaleLiveAt(now) ? 'Paused' : fixture.status.label,
+                    fixture.isStaleLiveAt(now)
+                        ? 'Paused'
+                        : (confirmed ? fixture.status.label : 'Draft'),
                     style: theme.textTheme.labelSmall,
                   )),
         onTap: () => context.push(

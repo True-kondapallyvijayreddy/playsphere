@@ -234,7 +234,36 @@ class Fixture {
 
   /// Short human-readable score, e.g. "21-18, 19-21, 15-11". Kept so list
   /// views and notifications never need to load a plugin to show a score.
+  ///
+  /// Holds either a score or, for a ruling on a match that never had one, a
+  /// stable token ([outcomeTokens]) the UI translates.
   final String summary;
+
+  /// The summary values that are words about an outcome, not scores.
+  static const Set<String> outcomeTokens = {
+    'walkover',
+    'abandoned',
+    'disputed',
+    'conceded',
+    'no_show',
+  };
+
+  /// Whether [summary] is a scoreline — something was actually played.
+  bool get summaryIsScore =>
+      summary.trim().isNotEmpty && !outcomeTokens.contains(summary.trim());
+
+  /// The score as it should be read in a list: the stored score, marked with
+  /// how the match ended when that was not the ordinary way —
+  /// "21-15, 8-3 (R)". A token is returned as-is for the caller to translate;
+  /// "Walkover (W/O)" would say the same thing twice.
+  ///
+  /// The context-free half of `localizedScoreLine`, for plain-text surfaces:
+  /// a share message, a printed schedule.
+  String get scoreLine {
+    final marker = resultType.marker;
+    if (marker == null || !summaryIsScore) return summary;
+    return '${summary.trim()} ($marker)';
+  }
 
   /// Sequence number of the most recent applied event. Security rules require
   /// this to strictly increase, so a stale client cannot overwrite a newer
@@ -788,6 +817,37 @@ class Fixture {
   /// A fixture can be scored if the user is in [scorerUids] OR holds manager access.
   bool canBeScoredBy(String uid, {bool isOrgManager = false}) =>
       status.acceptsScoring && (scorerUids.contains(uid) || isOrgManager);
+
+  /// Whether [uid] may open the pad at all — to score, or to withdraw a
+  /// ruling on a match an official decided. The ruling's undo and a protest's
+  /// decision live only on the pad, so gating the route on [canBeScoredBy]
+  /// stranded every abandoned or disputed match with no way back.
+  bool canOpenPadBy(String uid, {bool isOrgManager = false}) =>
+      (status.acceptsScoring || status.isDecision) &&
+      (scorerUids.contains(uid) || isOrgManager);
+
+  /// Whether [uid] may point this match at a broadcast, or take the link off.
+  ///
+  /// The people running the match, and nobody watching it: the club's
+  /// organizers ([isOrganizer] — owner, admin, event manager), the scorers
+  /// and umpires assigned to this match, and the season's umpire panel
+  /// ([onSeasonPanel]). Deliberately NOT the club-wide scorer rank and NOT an
+  /// entrant, although both may score: a stream link is what every spectator
+  /// of the match is sent to, so it belongs to the officials, not to whoever
+  /// happens to hold a pen or a racquet.
+  ///
+  /// Only the first four officials count, because that is as far as
+  /// `firestore.rules` can index the list — the rule and this must agree, or
+  /// the fifth official sees an edit button whose save is refused.
+  bool canSetStreamBy(
+    String uid, {
+    required bool isOrganizer,
+    bool onSeasonPanel = false,
+  }) =>
+      isOrganizer ||
+      onSeasonPanel ||
+      scorerUids.contains(uid) ||
+      officials.take(4).any((o) => o.uid == uid);
 
   /// True when somebody has been handed the pen for this match.
   bool get penIsHeld => activeScorerUid != null && activeScorerUid!.isNotEmpty;

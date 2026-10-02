@@ -21,8 +21,13 @@ import '../../core/router/app_router.dart';
 /// - A match that has **not started** opens the Match Center, the hub where
 ///   the toss is taken and the pen is picked up. Not the pad: an empty
 ///   scoreboard with nobody assigned is not a useful place to land.
-/// - A **live or finished** match goes straight to the score — the pad for
-///   whoever may write, the read-only board for everybody else.
+/// - A **finished** match opens its result: the score and the scorecard, and
+///   nothing else — for everybody, organizers included. The pad is not a
+///   place to read a result, and a finished match's Match Center is a page
+///   of pre-match controls. Correcting one is a link on that page, for the
+///   people who may (see `SpectatorScreen`).
+/// - A **live** match goes straight to the score — the pad for whoever may
+///   write, the read-only board for everybody else.
 void openMatch(
   BuildContext context, {
   required Fixture fixture,
@@ -36,7 +41,25 @@ void openMatch(
     return;
   }
 
-  final started = f.isLiveAt(DateTime.now()) || f.status.isResulted;
+  if (f.status.isResulted) {
+    context.push(Routes.watch(f.orgId, f.compId, f.id));
+    return;
+  }
+
+  // Abandoned or disputed: over, but not settled. The people who may undo
+  // the ruling or decide the protest go to the pad, where those controls are.
+  if (f.status.isDecision) {
+    final canOpen =
+        myUid != null && f.canOpenPadBy(myUid, isOrgManager: canManage);
+    context.push(
+      canOpen
+          ? Routes.scoring(f.orgId, f.compId, f.id)
+          : Routes.watch(f.orgId, f.compId, f.id),
+    );
+    return;
+  }
+
+  final started = f.isLiveAt(DateTime.now());
   if (!started) {
     context.push(Routes.matchCenter(f.orgId, f.compId, f.id));
     return;

@@ -80,6 +80,67 @@ class CareerRepository {
         .map((snap) => snap.docs.map(Fixture.fromDoc).toList());
   }
 
+  /// A player's own match list: [watchPlayerFixtures] plus every match a team
+  /// they are in is playing, whether or not they are on its team sheet.
+  ///
+  /// The second half is `squadUids`, kept by `syncFixtureSquads` on the
+  /// server. Without it a house or club-XI entrant saw none of their team's
+  /// matches (test run TC-31). Deliberately NOT what head-to-head reads: a
+  /// squad member who sat a match out did not face that opponent.
+  ///
+  /// The squad half failing — an index still building, an old rules deploy —
+  /// degrades to the old list rather than taking the whole screen down.
+  Stream<List<Fixture>> watchPlayerMatchList(String uid, {int limit = 300}) {
+    final squad = Refs.allFixturesQuery
+        .where('squadUids', arrayContains: uid)
+        .limit(limit)
+        .snapshots()
+        .map((snap) => snap.docs.map(Fixture.fromDoc).toList());
+
+    late final StreamController<List<Fixture>> controller;
+    StreamSubscription<List<Fixture>>? a;
+    StreamSubscription<List<Fixture>>? b;
+    List<Fixture>? played;
+    var squadList = const <Fixture>[];
+
+    void emit() {
+      final own = played;
+      if (own == null) return;
+      final byKey = <String, Fixture>{
+        for (final f in squadList) '${f.orgId}/${f.compId}/${f.id}': f,
+        for (final f in own) '${f.orgId}/${f.compId}/${f.id}': f,
+      };
+      controller.add(byKey.values.toList());
+    }
+
+    controller = StreamController<List<Fixture>>(
+      onListen: () {
+        a = watchPlayerFixtures(uid, limit: limit).listen(
+          (list) {
+            played = list;
+            emit();
+          },
+          onError: controller.addError,
+        );
+        b = squad.listen(
+          (list) {
+            squadList = list;
+            emit();
+          },
+          onError: (Object _) {
+            squadList = const <Fixture>[];
+            emit();
+          },
+        );
+      },
+      onCancel: () async {
+        await a?.cancel();
+        await b?.cancel();
+      },
+    );
+    return controller.stream;
+  }
+
   /// Every match played under one club, across every sport and every team —
   /// the source `ClubRecord.forFixtures` aggregates into a club record.
   ///
@@ -202,17 +263,6 @@ class CareerRepository {
         });
       return lines;
     });
-  }
-
-  Future<CareerStats?> statsFor(String uid, String sportId) async {
-    final snap = await Refs.userCareerStat(uid, sportId).get();
-    if (!snap.exists) return null;
-    return CareerStats.fromMap(
-      snap.data(),
-      sportId,
-      uid: uid,
-      lastPlayedAt: Fs.dateOrNull(snap.data()?['lastPlayedAt']),
-    );
   }
 }
 

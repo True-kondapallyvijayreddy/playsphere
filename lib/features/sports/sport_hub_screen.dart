@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/l10n/result_labels.dart';
 import '../../core/layout/responsive.dart';
 import '../../core/models/coach.dart';
 import '../../core/models/competition.dart';
@@ -164,7 +165,7 @@ class SportHubScreen extends ConsumerWidget {
                   itemBuilder: (f) => _Row(
                     leading: Icons.scoreboard_outlined,
                     title: '${f.entrantAName}  v  ${f.entrantBName}',
-                    subtitle: f.summary,
+                    subtitle: localizedScoreLine(context, f),
                     onTap: () => context.push(
                       Routes.watch(f.orgId, f.compId, f.id),
                     ),

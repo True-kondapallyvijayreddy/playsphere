@@ -158,7 +158,7 @@ class ScheduleFormat {
                 teamA: f.displayNameA(),
                 teamB: f.displayNameB(),
                 court: court(f),
-                result: f.summary,
+                result: f.scoreLine,
                 mine: mineEntrantIds.contains(f.entrantAId) ||
                     mineEntrantIds.contains(f.entrantBId),
               ),

@@ -165,9 +165,14 @@ class CourtCalendar {
     this.openPeriods = const [],
     this.maxPerDay = 0,
     this.sportIds = const {},
+    this.turnaround,
   });
 
   final CourtRef court;
+
+  /// The gap this court needs between two matches, when its venue plan says.
+  /// Null defers to the scheduler's `courtTurnaround`.
+  final Duration? turnaround;
 
   /// The times a match may be *started* on this court, earliest first.
   final List<DateTime> slotStarts;
@@ -410,6 +415,27 @@ class TournamentScheduler {
     /// at a *different* venue. Zero for a one-ground event, and the difference
     /// between a timetable and a fiction for a season across town.
     Duration venueTransition = Duration.zero,
+
+    /// Time a court needs between the end of one match and the start of the
+    /// next — players off, kit cleared, the pitch rolled.
+    ///
+    /// The slot grid is spaced at match + turnaround for the season's
+    /// default length, so a default-length match gets its changeover for
+    /// free. A longer one does not: a cricket match ending at 12:15 used to
+    /// be followed on the same pitch by the next at 12:15. Zero keeps every
+    /// legacy caller unchanged.
+    Duration courtTurnaround = Duration.zero,
+
+    /// Matches that already have a court and a time, and stay there.
+    ///
+    /// This is what lets one sport be scheduled on its own. The season's
+    /// other sports keep their timetable, and the sport being solved must
+    /// still fit around it. It can't take a court another sport already
+    /// holds (turnaround included). It can't break the daily match limit
+    /// those matches count toward. It can't put a player or team who is also
+    /// in another sport inside their rest or travel gap. None of these
+    /// matches are placed or reported; they are only in the way.
+    List<({SchedulableMatch match, Placement placement})> fixed = const [],
   }) {
     final placements = <String, Placement>{};
     final unplaced = <UnplacedMatch>[];
@@ -475,6 +501,25 @@ class TournamentScheduler {
     // compId -> the candidates that event's own grounds and sport resolve to.
     final eligibleFor = <String, List<_Candidate>>{};
 
+    // What is already on the courts, before anything is placed.
+    final turnaroundOf = {for (final r in resources) r.court.key: r.turnaround};
+    for (final f in fixed) {
+      final p = f.placement;
+      final gap = turnaroundOf[p.court.key] ?? courtTurnaround;
+      courtBookings.putIfAbsent(p.court.key, () => []).add(
+            ScheduleWindow(start: p.window.start, end: p.window.end.add(gap)),
+          );
+      final loadKey = '${p.court.key}|${_dayKey(p.window.start)}';
+      dayLoad[loadKey] = (dayLoad[loadKey] ?? 0) + 1;
+      final booking = _Booking(window: p.window, venueId: p.court.venueId);
+      for (final uid in f.match.playerUids) {
+        playerBookings.putIfAbsent(uid, () => []).add(booking);
+      }
+      for (final key in f.match.teamKeys) {
+        teamBookings.putIfAbsent(key, () => []).add(booking);
+      }
+    }
+
     for (final match in _ordered(matches)) {
       // Nobody named yet — a knockout placeholder waiting on a feeder. It
       // cannot be safely placed (there is no one to check a clash against)
@@ -518,6 +563,7 @@ class TournamentScheduler {
       var sawOpenCourt = false;
       var sawCourtUnderCap = false;
       Placement? placed;
+      Duration placedGap = Duration.zero;
 
       for (final candidate in eligible) {
         // A match of this length starting here. Slots are uniform within one
@@ -546,9 +592,16 @@ class TournamentScheduler {
         if (cap > 0 && (dayLoad[loadKey] ?? 0) >= cap) continue;
         sawCourtUnderCap = true;
 
+        // Both sides padded by the turnaround, so the gap between any two
+        // matches on this court is at least that long whichever came first.
+        final gap = candidate.court.turnaround ?? courtTurnaround;
+        final padded = ScheduleWindow(
+          start: window.start,
+          end: window.end.add(gap),
+        );
         final taken =
             courtBookings[candidate.court.court.key] ?? const <ScheduleWindow>[];
-        if (taken.any((w) => w.overlaps(window))) continue;
+        if (taken.any((w) => w.overlaps(padded))) continue;
         sawFreeCourt = true;
 
         final venueId = candidate.court.court.venueId;
@@ -574,6 +627,7 @@ class TournamentScheduler {
         sawFreePlayers = true;
 
         placed = Placement(court: candidate.court.court, window: window);
+        placedGap = gap;
         dayLoad[loadKey] = (dayLoad[loadKey] ?? 0) + 1;
         break;
       }
@@ -594,7 +648,12 @@ class TournamentScheduler {
       }
 
       placements[match.key] = placed;
-      courtBookings.putIfAbsent(placed.court.key, () => []).add(placed.window);
+      courtBookings.putIfAbsent(placed.court.key, () => []).add(
+            ScheduleWindow(
+              start: placed.window.start,
+              end: placed.window.end.add(placedGap),
+            ),
+          );
       final booking =
           _Booking(window: placed.window, venueId: placed.court.venueId);
       for (final uid in match.playerUids) {

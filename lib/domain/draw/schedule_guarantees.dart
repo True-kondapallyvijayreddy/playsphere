@@ -327,8 +327,8 @@ class ScheduleGuarantees {
         if (p.at.window.start.isBefore(entry.value)) {
           out.add(ScheduleViolation(
             kind: ScheduleViolationKind.roundOutOfOrder,
-            detail: 'round ${p.match.round} of ${p.match.compId} starts '
-                'before round ${entry.key} has finished',
+            detail: 'round ${p.match.round} of this draw starts before '
+                'round ${entry.key} has finished',
             matchKeys: [p.match.key, anyInRound[phase]![entry.key]!],
           ));
         }

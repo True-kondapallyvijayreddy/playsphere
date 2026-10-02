@@ -64,8 +64,9 @@ Future<String?> showClubSwitcher(
             child: Text(
               orgIds.isEmpty
                   ? 'You have not joined a club yet.'
-                  : 'Everything you start — matches, events, live scores — '
-                      'happens as this club.',
+                  : 'Everything you see and start — invitations, '
+                      'challenges, approvals, matches, events — is this '
+                      'club\'s only.',
               style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
                     color: Theme.of(ctx).colorScheme.onSurfaceVariant,
                   ),
@@ -171,6 +172,11 @@ class ClubChip extends ConsumerWidget {
     final shown = ref.watch(currentClubIdProvider);
     final org =
         shown == null ? null : ref.watch(organizationProvider(shown)).valueOrNull;
+    // "No club" is a claim about this person, and for the first seconds after a
+    // cold start it is a claim we cannot make: memberships have not arrived, so
+    // there is no selected club yet. A member of two clubs was told they had
+    // none — see `myClubsLoadingProvider`.
+    final clubsLoading = shown == null && ref.watch(myClubsLoadingProvider);
     final scheme = Theme.of(context).colorScheme;
 
     Future<void> open() async {
@@ -210,7 +216,9 @@ class ClubChip extends ConsumerWidget {
                 ConstrainedBox(
                   constraints: const BoxConstraints(maxWidth: 96),
                   child: Text(
-                    shown == null ? 'No club' : (org?.name ?? '…'),
+                    shown == null
+                        ? (clubsLoading ? '…' : 'No club')
+                        : (org?.name ?? '…'),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.labelLarge?.copyWith(

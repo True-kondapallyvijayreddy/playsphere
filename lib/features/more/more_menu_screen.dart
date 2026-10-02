@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/layout/responsive.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
+import '../home/home_providers.dart';
 import '../network/club_network_providers.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/identity.dart';
@@ -63,6 +64,7 @@ class MoreMenuScreen extends ConsumerWidget {
     // same reason the Operations tile is: a tile that leads to "for club
     // owners" for almost everybody is worse than no tile.
     final ownsAClub = ref.watch(myOwnedOrgIdsProvider).isNotEmpty;
+    final inAClub = ref.watch(myActiveOrgIdsProvider).isNotEmpty;
 
     return AppScaffold(
       title: 'More',
@@ -114,6 +116,12 @@ class MoreMenuScreen extends ConsumerWidget {
                     if (ownsAClub)
                       const _Dest(Icons.handshake_outlined, 'Club network',
                           Routes.clubNetwork),
+                    // Club-to-club invitations: the ones your clubs received,
+                    // and inviting clubs to your own seasons. For anybody in
+                    // a club — every member can read an invitation to it.
+                    if (inAClub)
+                      const _Dest(Icons.mark_email_unread_outlined,
+                          'Invitations', Routes.invitations),
                   ],
                 ),
 

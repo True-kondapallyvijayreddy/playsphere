@@ -43,25 +43,6 @@ class SportsMedicRepository {
 
   // --- Finding one --------------------------------------------------------
 
-  /// Practitioners in one city, most useful first.
-  ///
-  /// The city is queried on `cityKey` rather than filtered in Dart, because
-  /// "who is in Warangal" is the question this directory exists to answer and
-  /// it must not degrade into reading the whole collection as the directory
-  /// grows.
-  Stream<List<SportsMedicProfile>> watchMedicsInCity(
-    String city, {
-    int limit = 40,
-  }) =>
-      guardStream(
-        () => Refs.sportsMedics
-            .where('isActive', isEqualTo: true)
-            .where('cityKey', isEqualTo: city.trim().toLowerCase())
-            .limit(limit)
-            .snapshots()
-            .map((s) => s.docs.map(SportsMedicProfile.fromDoc).toList()),
-      );
-
   /// Finds practitioners by any words somebody might type — a name, a clinic,
   /// an area, a qualification — narrowed by role, sport and consultation mode.
   ///

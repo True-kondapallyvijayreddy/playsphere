@@ -29,7 +29,8 @@ class NotificationsScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final scoringAsync = ref.watch(myScoringAssignmentsProvider);
+    // Every list here is the selected club's — see `scopedOrgIdsProvider`.
+    final scoringAsync = ref.watch(myScopedScoringAssignmentsProvider);
     final scoring = scoringAsync.valueOrNull ?? const <Fixture>[];
     final challengesAsync = ref.watch(myIncomingChallengesProvider);
     final challenges = challengesAsync.valueOrNull ?? const [];
@@ -39,7 +40,7 @@ class NotificationsScreen extends ConsumerWidget {
     final scoreAsks = scoreAsksAsync.valueOrNull ?? const <ScoringRequest>[];
     final invitesAsync = ref.watch(myTournamentInvitesProvider);
     final invites = invitesAsync.valueOrNull ?? const <TournamentInvite>[];
-    final feedAsync = ref.watch(myNotificationFeedProvider);
+    final feedAsync = ref.watch(myScopedNotificationFeedProvider);
     final feed = feedAsync.valueOrNull ?? const <AppNotification>[];
     final unreadIds = [for (final n in feed) if (!n.read) n.id];
 
@@ -137,7 +138,18 @@ class NotificationsScreen extends ConsumerWidget {
                       actionLabel: 'Answer',
                       onTap: () => context.push(Routes.challenges(c.toOrgId)),
                     ),
-                  for (final i in invites) TournamentInviteCard(invite: i),
+                  // A pointer, not the invitation: invitations have their
+                  // own space, where they read as a letter with a Register
+                  // button — see `InvitationsScreen`.
+                  for (final i in invites)
+                    ActionCard(
+                      icon: Icons.mark_email_unread_outlined,
+                      tone: ActionTone.tertiary,
+                      title: '${i.fromOrgName} invited ${i.toOrgName}',
+                      subtitle: i.tournamentName,
+                      actionLabel: 'Open',
+                      onTap: () => context.push(Routes.invitations),
+                    ),
                   // Above join requests on purpose: a match may be about to
                   // start, and an unanswered request to score it means a match
                   // nobody records. A join request can wait a day.
@@ -327,151 +339,6 @@ class ActionCard extends StatelessWidget {
         onTap: onTap,
       ),
     );
-  }
-}
-
-/// "Nizampet Sports Club has invited you" — answered from here.
-///
-/// Answered in place, not behind a tap through to the host's tournament, for
-/// the same reason a scoring request is: the decision is a yes or a no, the
-/// person deciding is usually not sitting down with the app open, and two
-/// screens between them and "yes" is how an invitation goes unanswered until
-/// the entry deadline has passed. The public page is still one tap away for
-/// anyone who wants to read the draw first.
-class TournamentInviteCard extends ConsumerStatefulWidget {
-  const TournamentInviteCard({super.key, required this.invite});
-
-  final TournamentInvite invite;
-
-  @override
-  ConsumerState<TournamentInviteCard> createState() =>
-      _TournamentInviteCardState();
-}
-
-class _TournamentInviteCardState extends ConsumerState<TournamentInviteCard> {
-  bool _busy = false;
-
-  Future<void> _answer(String status) async {
-    if (_busy) return;
-    setState(() => _busy = true);
-    try {
-      await ref.read(tournamentRepositoryProvider).respondToInvite(
-            inviteId: widget.invite.id,
-            status: status,
-          );
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-          ..hideCurrentSnackBar()
-          ..showSnackBar(
-            SnackBar(
-              content: Text(
-                status == 'accepted'
-                    ? '${widget.invite.fromOrgName} know you are coming.'
-                    : 'Invitation declined.',
-              ),
-            ),
-          );
-      }
-    } catch (e) {
-      if (mounted) showError(context, e);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final i = widget.invite;
-    final when = _dates(i);
-
-    return Card(
-      margin: const EdgeInsets.only(bottom: 10),
-      color: scheme.tertiaryContainer,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 12, 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.emoji_events_outlined,
-                    color: scheme.onTertiaryContainer),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        '${i.fromOrgName} has invited you',
-                        style: TextStyle(
-                          color: scheme.onTertiaryContainer,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      Text(
-                        when == null
-                            ? i.tournamentName
-                            : '${i.tournamentName} · $when',
-                        style: TextStyle(color: scheme.onTertiaryContainer),
-                      ),
-                      if (i.message != null && i.message!.isNotEmpty)
-                        Text(
-                          '“${i.message}”',
-                          style: TextStyle(
-                            color: scheme.onTertiaryContainer,
-                            fontStyle: FontStyle.italic,
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              alignment: WrapAlignment.end,
-              spacing: 8,
-              runSpacing: 4,
-              children: [
-                TextButton(
-                  onPressed: _busy
-                      ? null
-                      : () => context.push(
-                            Routes.publicTournament(i.fromOrgId, i.tournamentId),
-                          ),
-                  child: const Text('Have a look'),
-                ),
-                TextButton(
-                  onPressed: _busy ? null : () => _answer('declined'),
-                  child: const Text('Not this time'),
-                ),
-                FilledButton(
-                  onPressed: _busy ? null : () => _answer('accepted'),
-                  child: Text(_busy ? 'Working…' : 'We are in'),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  static String? _dates(TournamentInvite i) {
-    final start = i.startDate;
-    if (start == null) return null;
-    String fmt(DateTime d) =>
-        '${d.day.toString().padLeft(2, '0')}/'
-        '${d.month.toString().padLeft(2, '0')}';
-    final end = i.endDate;
-    if (end == null ||
-        (end.year == start.year &&
-            end.month == start.month &&
-            end.day == start.day)) {
-      return '${fmt(start)}/${start.year}';
-    }
-    return '${fmt(start)} – ${fmt(end)}/${end.year}';
   }
 }
 

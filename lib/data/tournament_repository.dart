@@ -12,21 +12,29 @@ import '../core/models/competition.dart';
 import '../core/models/draw_slot.dart';
 import '../core/models/enums.dart';
 import '../core/models/fixture.dart';
+import '../core/models/firestore_codec.dart';
 import '../core/models/match_official.dart';
+import '../core/models/club_registration_request.dart';
 import '../core/models/club_standing.dart';
 import '../core/models/ranking_entry.dart';
 import '../core/models/tournament.dart';
 import '../core/models/season_interest.dart';
+import '../core/models/season_nomination.dart';
 import '../core/models/tournament_invite.dart';
 import '../core/models/tournament_official.dart';
 import '../core/models/venue.dart';
 import '../core/models/venue_plan.dart';
+import '../domain/draw/draft_season_plan.dart';
 import '../domain/draw/match_count.dart';
 import '../domain/draw/officials_roster.dart';
 import '../domain/draw/schedule_guarantees.dart';
 import '../domain/draw/schedule_shift.dart';
 import '../domain/draw/season_capacity.dart';
 import '../domain/draw/tournament_scheduler.dart';
+import '../domain/tournament/house_roster.dart';
+import '../domain/tournament/season_blueprint.dart';
+import '../domain/tournament/season_date_shift.dart';
+import '../domain/tournament/season_name.dart';
 import 'competition_repository.dart';
 import 'media_uploader.dart';
 import 'org_repository.dart' show guard, guardStream;
@@ -235,10 +243,60 @@ class TournamentRepository {
           }));
   }
 
+  /// Refuses [name] when it is too short, too long, or already held by
+  /// another live season of [orgId] — see [SeasonName].
+  ///
+  /// Every create and rename goes through this. The forms check the club's
+  /// seasons they already hold as the organizer types; this asks the server,
+  /// so a season made on another phone a minute ago counts too.
+  ///
+  /// Settles for the local cache when the server does not answer in a few
+  /// seconds. Seasons are created offline-first (see [createSeason]), and an
+  /// organizer at a ground with no signal must not be refused because the
+  /// check could not reach anybody.
+  Future<void> ensureSeasonNameFree({
+    required String orgId,
+    required String name,
+    String? exceptId,
+    String noun = 'season',
+  }) async {
+    final shape = SeasonName.problem(name, noun: noun);
+    if (shape != null) throw ValidationException(shape);
+
+    final query = Refs.tournaments(orgId)
+        .where('nameLower', isEqualTo: SeasonName.key(name))
+        .limit(10);
+    Iterable<Tournament> same;
+    try {
+      same = (await query.get().timeout(const Duration(seconds: 4)))
+          .docs
+          .map(Tournament.fromDoc);
+    } catch (_) {
+      try {
+        same = (await query.get(const GetOptions(source: Source.cache)))
+            .docs
+            .map(Tournament.fromDoc);
+      } catch (_) {
+        same = const [];
+      }
+    }
+    final problem = SeasonName.problem(
+      name,
+      noun: noun,
+      taken: SeasonName.takenKeys(same, exceptId: exceptId),
+    );
+    if (problem != null) throw ValidationException(problem);
+  }
+
   Future<String> createTournament(Tournament tournament) => guard(() async {
-        if (tournament.name.trim().isEmpty) {
-          throw const ValidationException('A tournament needs a name.');
-        }
+        await ensureSeasonNameFree(
+          orgId: tournament.orgId,
+          name: tournament.name,
+          noun: tournament.kind.noun,
+        );
+        tournament = tournament.copyWith(
+          name: SeasonName.normalize(tournament.name),
+        );
         final ref = Refs.tournaments(tournament.orgId).doc();
         unawaited(ref.set(tournament.toCreate()).catchError((Object e) {
           _writeFailures.add(_translate(e));
@@ -246,10 +304,375 @@ class TournamentRepository {
         return ref.id;
       });
 
-  Future<void> updateTournament(Tournament tournament) => guard(
-        () => Refs.tournament(tournament.orgId, tournament.id)
-            .update(tournament.toUpdate()),
+  /// Creates a whole season — its new grounds, the season, every event, the
+  /// per-ground terms and the officiating panel — in ONE atomic commit.
+  ///
+  /// ## Why one commit
+  ///
+  /// It used to be a dozen separate writes in sequence, and each one could
+  /// fail on its own. A dropped connection on the ninth event left a season
+  /// with eight, the form still open, and a second press of Create made a
+  /// second season. A rules rejection went to a stream nobody listened to,
+  /// so the organizer was sent to a season page that then vanished. A batch
+  /// is applied entirely or not at all, which makes "half a season" a state
+  /// the database cannot be in.
+  ///
+  /// ## Why the commit is not awaited
+  ///
+  /// Awaiting a Firestore write waits for the SERVER. An organizer setting a
+  /// season up from a school ground on a patchy 4G signal would sit on a
+  /// spinner until the signal came back. The batch is applied to the local
+  /// cache the instant it is queued, so the season page opens immediately and
+  /// shows everything; the commit lands when the phone reconnects. A genuine
+  /// rejection rolls the whole season back and is reported on
+  /// [writeFailures], which the app shell turns into a message.
+  ///
+  /// [committed] completes when the server has the season, for work that
+  /// genuinely needs it there first — artwork, whose storage path is checked
+  /// against the season document.
+  ///
+  /// The returned future only waits for the name check
+  /// ([ensureSeasonNameFree]), which gives up on the server after a few
+  /// seconds. It never waits for the commit.
+  ///
+  /// The season is published as it is written: entries are open on the
+  /// season and on every event from the first moment. See
+  /// [SeasonBlueprint.tournament].
+  Future<({String seasonId, Future<void> committed})> createSeason({
+    required SeasonBlueprint blueprint,
+    required List<SeasonGround> grounds,
+    List<TournamentOfficial> officials = const [],
+    DateTime? now,
+  }) async {
+    final problems = blueprint.problems(now: now);
+    if (problems.isNotEmpty) throw ValidationException(problems.first);
+    await ensureSeasonNameFree(orgId: blueprint.orgId, name: blueprint.name);
+
+    final orgId = blueprint.orgId;
+    final newGrounds = [
+      for (final g in grounds)
+        if (g.isNew) g,
+    ];
+    final plans = [
+      for (final g in grounds)
+        if (!g.plan.isUnrestricted) g,
+    ];
+    final writes = newGrounds.length +
+        1 +
+        blueprint.categories.length +
+        plans.length +
+        officials.length;
+    if (writes > 500) {
+      throw const ValidationException(
+        'This season is too large to create in one go. Create it with fewer '
+        'categories or officials and add the rest from the season page.',
       );
+    }
+
+    final batch = Refs.db.batch();
+    for (final ground in newGrounds) {
+      if (ground.venue.id.isEmpty) {
+        throw const ValidationException(
+          'A new ground has no id yet. Pick the grounds again.',
+        );
+      }
+      batch.set(Refs.venue(orgId, ground.venue.id), ground.venue.toCreate());
+    }
+
+    final seasonRef = Refs.tournaments(orgId).doc();
+    batch.set(seasonRef, blueprint.tournament().toCreate());
+
+    for (final event in blueprint.events(seasonRef.id)) {
+      batch.set(
+        Refs.competitions(orgId).doc(),
+        event.toCreate(openForEntries: true),
+      );
+    }
+    for (final ground in plans) {
+      batch.set(
+        Refs.venuePlan(orgId, seasonRef.id, ground.venue.id),
+        ground.plan
+            .rekeyed(ground.venue.id)
+            .copyWith(venueName: ground.venue.name)
+            .toMap(),
+      );
+    }
+    for (final official in officials) {
+      batch.set(
+        Refs.tournamentOfficial(orgId, seasonRef.id, official.uid),
+        official.toCreate(addedBy: blueprint.createdBy),
+      );
+    }
+
+    final seasonName = blueprint.trimmedName;
+    final committed = batch.commit().catchError((Object e) {
+      final reason = _translate(e);
+      // Named, because this can arrive minutes later on another screen, and
+      // "You do not have permission" alone does not say what was refused.
+      _writeFailures.add(ValidationException(
+        '"$seasonName" was not saved — ${reason.message} Nothing from it was '
+        'created, so you can set it up again.',
+      ));
+      throw e;
+    });
+    // Nobody may be awaiting it; an unobserved rejection must not surface as
+    // an uncaught async error on top of the message already sent.
+    unawaited(committed.catchError((_) {}));
+    return (seasonId: seasonRef.id, committed: committed);
+  }
+
+  /// A one-sport tournament: the season container with [event] as its only
+  /// draw, written together.
+  ///
+  /// A tournament used to be stored as a bare competition, which put it on
+  /// the event page and outside every season feature — sport panels, the
+  /// umpire panel, the venue planner, club invitations. Written this way it
+  /// opens on the season page like any season, and everything built for
+  /// seasons from here on reaches it without anybody remembering to. See
+  /// [SeasonKind].
+  ///
+  /// The container is derived from the event rather than typed twice, so the
+  /// two can never disagree about the dates or the grounds. Fees stay on the
+  /// event ([SeasonFeeMode.perEvent]) because that is where both tournament
+  /// forms already put them, and a later category added to the tournament
+  /// gets a price of its own.
+  ///
+  /// Not awaited on the server, for the reason [createSeason] is not: the
+  /// batch is applied to the local cache at once, and a genuine rejection is
+  /// reported on [writeFailures]. The future waits only for the name check.
+  ///
+  /// Published as it is written, like a season: entries open at once.
+  Future<({String tournamentId, String compId, Future<void> committed})>
+      createSingleSportTournament({
+    required Competition event,
+    required String createdBy,
+    String? shortName,
+  }) async {
+    final name = SeasonName.normalize(event.name);
+    final orgId = event.orgId;
+    await ensureSeasonNameFree(orgId: orgId, name: name, noun: 'tournament');
+    final tournamentRef = Refs.tournaments(orgId).doc();
+    final compRef = Refs.competitions(orgId).doc();
+    final trimmedShort = shortName?.trim();
+
+    final container = Tournament(
+      id: tournamentRef.id,
+      orgId: orgId,
+      name: name,
+      kind: SeasonKind.tournament,
+      shortName:
+          trimmedShort == null || trimmedShort.isEmpty ? null : trimmedShort,
+      // Published at once, like a season, with its one event taking entries
+      // in the same commit.
+      status: TournamentStatus.entriesOpen,
+      startDate: event.startDate,
+      endDate: event.endDate ?? event.startDate,
+      entryDeadline: event.registrationClosesAt,
+      venueIds: List.of(event.scheduleConfig.venueIds),
+      eventCount: 1,
+      feeMode: SeasonFeeMode.perEvent,
+      matchMinutesDefault: event.scheduleConfig.matchMinutes,
+      changeoverMinutes: event.scheduleConfig.changeoverMinutes,
+      restGapMinutes: event.scheduleConfig.restGapMinutes,
+      createdBy: createdBy,
+    );
+
+    final batch = Refs.db.batch();
+    batch.set(tournamentRef, container.toCreate());
+    batch.set(
+      compRef,
+      event
+          .copyWith(
+            tournamentId: tournamentRef.id,
+            name: name,
+            status: CompetitionStatus.registrationOpen,
+          )
+          .toCreate(openForEntries: true),
+    );
+
+    final committed = batch.commit().catchError((Object e) {
+      final reason = _translate(e);
+      _writeFailures.add(ValidationException(
+        '"$name" was not saved — ${reason.message} Nothing from it was '
+        'created, so you can set it up again.',
+      ));
+      throw e;
+    });
+    unawaited(committed.catchError((_) {}));
+    return (
+      tournamentId: tournamentRef.id,
+      compId: compRef.id,
+      committed: committed,
+    );
+  }
+
+  /// Saves [tournament] over [before], the season as the caller last read
+  /// it. The name rules apply only when this renames it — see
+  /// [SeasonName.isRename].
+  Future<void> updateTournament(
+    Tournament tournament, {
+    required Tournament before,
+  }) =>
+      guard(() async {
+        if (SeasonName.isRename(before.name, tournament.name)) {
+          await ensureSeasonNameFree(
+            orgId: tournament.orgId,
+            name: tournament.name,
+            exceptId: tournament.id,
+            noun: tournament.kind.noun,
+          );
+        }
+        await Refs.tournament(tournament.orgId, tournament.id).update(
+          tournament
+              .copyWith(name: SeasonName.toStore(before.name, tournament.name))
+              .toUpdate(),
+        );
+      });
+
+  /// Saves the season edit sheet, and keeps its events inside the dates.
+  ///
+  /// ## Why the events move too
+  ///
+  /// Every event carries its own `startDate`/`endDate`, and the scheduler
+  /// reads a date that differs from the season's as a restriction. So moving
+  /// a season used to strand its events: postpone a sports week by seven days
+  /// for the monsoon and every event still "started" on the old Monday —
+  /// inside the new span, so each was quietly pinned to a single day, or
+  /// outside it, so nothing could be scheduled at all.
+  ///
+  /// - The whole season moved by N days (start and end shifted together):
+  ///   every event's own window moves by N as well. That is a postponement,
+  ///   and "badminton on the Saturday" is still the Saturday.
+  /// - Only the span changed: an event that followed the season's first day
+  ///   follows the new one, and a window that now falls outside the season is
+  ///   put back to following the season rather than left unschedulable.
+  ///
+  /// Completed and cancelled events are part of the record and never move.
+  /// Timetabled fixtures are not touched — the season page's shift and
+  /// regenerate tools own match times.
+  ///
+  /// Each event keeps its own time of day on its new date (see
+  /// [SeasonDateShift]). When that is still not what the organizer wants,
+  /// an event's start date and time can be set by hand from its edit
+  /// dialog on the season page.
+  ///
+  /// Returns how many events had their dates moved, so the sheet can tell
+  /// the organizer to check them.
+  Future<int> updateSeasonDetails({
+    required Tournament before,
+    required Tournament after,
+  }) =>
+      guard(() async {
+        // Only a rename is checked. An old season whose name predates the
+        // rules must still be movable — see [SeasonName.isRename].
+        if (SeasonName.isRename(before.name, after.name)) {
+          await ensureSeasonNameFree(
+            orgId: after.orgId,
+            name: after.name,
+            exceptId: after.id,
+            noun: after.kind.noun,
+          );
+        }
+        final season =
+            after.copyWith(name: SeasonName.toStore(before.name, after.name));
+        final oldStart = _dayOrNull(before.startDate);
+        final newStart = _dayOrNull(season.startDate);
+        final oldEnd = _dayOrNull(before.endDate) ?? oldStart;
+        final newEnd = _dayOrNull(season.endDate) ?? newStart;
+        if (oldStart != null && newStart != null && newEnd != null &&
+            newEnd.isBefore(newStart)) {
+          throw const ValidationException(
+            'The season cannot end before it starts.',
+          );
+        }
+
+        final seasonRef = Refs.tournament(season.orgId, season.id);
+        final datesMoved = oldStart != newStart || oldEnd != newEnd;
+        if (!datesMoved || oldStart == null || newStart == null) {
+          await seasonRef.update(season.toUpdate());
+          return 0;
+        }
+
+        final eventSnap = await Refs.competitions(season.orgId)
+            .where('tournamentId', isEqualTo: season.id)
+            .get();
+        final batch = ChunkedBatch(Refs.db);
+        batch.update(seasonRef, season.toUpdate());
+
+        var movedCount = 0;
+        for (final doc in eventSnap.docs) {
+          final event = Competition.fromDoc(doc);
+          if (event.status == CompetitionStatus.completed ||
+              event.status == CompetitionStatus.cancelled) {
+            continue;
+          }
+          final moved = SeasonDateShift.moveEvent(
+            eventStart: event.startDate,
+            eventEnd: event.endDate,
+            oldStart: oldStart,
+            oldEnd: oldEnd!,
+            newStart: newStart,
+            newEnd: newEnd!,
+          );
+          if (moved.start == event.startDate && moved.end == event.endDate) {
+            continue;
+          }
+          movedCount++;
+          batch.update(Refs.competition(season.orgId, event.id), {
+            'startDate': Fs.ts(moved.start),
+            'endDate': Fs.ts(moved.end),
+            'updatedAt': FieldValue.serverTimestamp(),
+          });
+        }
+        await batch.commitAll();
+        return movedCount;
+      });
+
+  /// Sets one event's start (date and time) and last day by hand — the
+  /// organizer's word over [SeasonDateShift]'s guess after a season moves.
+  ///
+  /// Written as its own update, not through `Competition.toUpdate`, because
+  /// that map drops nulls, and a null [end] is a real answer here: "runs to
+  /// the season's last day".
+  Future<void> setEventDates({
+    required String orgId,
+    required String compId,
+    required DateTime? start,
+    required DateTime? end,
+  }) =>
+      guard(() async {
+        if (start != null && end != null && _dayOrNull(end)!.isBefore(_dayOrNull(start)!)) {
+          throw const ValidationException(
+            'The event cannot end before it starts.',
+          );
+        }
+        await Refs.competition(orgId, compId).update({
+          'startDate': Fs.ts(start),
+          'endDate': Fs.ts(end),
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      });
+
+  static DateTime? _dayOrNull(DateTime? d) =>
+      d == null ? null : DateTime(d.year, d.month, d.day);
+
+  /// Names who is in charge of [sportId] in this season — or nobody, for an
+  /// empty [leads]. See [Tournament.sportLeads].
+  ///
+  /// One field path, not the whole map, so two organizers assigning two
+  /// different sports at the same moment do not overwrite each other.
+  Future<void> setSportLeads({
+    required String orgId,
+    required String tournamentId,
+    required String sportId,
+    required List<SportLead> leads,
+  }) =>
+      guard(() => Refs.tournament(orgId, tournamentId).update({
+            FieldPath(['sportLeads', sportId]): leads.isEmpty
+                ? FieldValue.delete()
+                : [for (final l in leads) l.toMap()],
+            'updatedAt': FieldValue.serverTimestamp(),
+          }));
 
   /// Updates the list of assigned venue IDs for this tournament.
   Future<void> updateTournamentVenues({
@@ -440,32 +863,61 @@ class TournamentRepository {
   /// player. Naming the events and stopping is the only correct answer, and
   /// it is the check that turns "I thought I'd done that one" into a message
   /// instead of a Sunday morning.
+  ///
+  /// ## One sport at a time
+  ///
+  /// A season is several tournaments sharing a fortnight. Its cricket can be
+  /// drawn, laid out and published while its badminton is still taking
+  /// entries, and publishing it must not touch the badminton. So this
+  /// publishes [sportId] alone. It records the moment in
+  /// `sportSchedulesReleasedAt`, which the server announces to that sport's
+  /// entrants. It locks the season as a whole only once every sport that
+  /// plays matches has been published.
   Future<void> lockSchedule({
     required String orgId,
     required String tournamentId,
+    required String sportId,
   }) =>
       guard(() async {
+        final seasonSnap = await Refs.tournament(orgId, tournamentId).get();
+        if (!seasonSnap.exists) {
+          throw const NotFoundException('That season no longer exists.');
+        }
+        final season = Tournament.fromDoc(seasonSnap);
         final eventsSnap = await Refs.competitions(orgId)
             .where('tournamentId', isEqualTo: tournamentId)
             .get();
+        final events = [
+          for (final doc in eventsSnap.docs)
+            if (Competition.fromDoc(doc).status != CompetitionStatus.cancelled)
+              Competition.fromDoc(doc),
+        ];
+        final inSport = [
+          for (final e in events)
+            if (e.sportId == sportId) e,
+        ];
+        final sportName =
+            inSport.isEmpty ? 'this sport' : inSport.first.sportName;
+        if (inSport.isEmpty) {
+          throw ValidationException('This season has no $sportName events.');
+        }
 
-        // Read every event before writing anything, so a season that cannot
+        // Read every event before writing anything, so a sport that cannot
         // legally publish has not already half-published itself.
         final placeholderEvents = <String>[];
         var fixtureCount = 0;
-        for (final doc in eventsSnap.docs) {
-          final fixtureSnap = await Refs.fixtures(orgId, doc.id).get();
+        for (final event in inSport) {
+          final fixtureSnap = await Refs.fixtures(orgId, event.id).get();
           fixtureCount += fixtureSnap.docs.length;
           final hasPlaceholder =
               fixtureSnap.docs.map(Fixture.fromDoc).any((f) => f.isDraft);
-          if (hasPlaceholder) {
-            placeholderEvents.add(Competition.fromDoc(doc).name);
-          }
+          if (hasPlaceholder) placeholderEvents.add(event.name);
         }
 
         if (fixtureCount == 0) {
-          throw const ValidationException(
-            'There are no matches to publish yet. Generate the draws first.',
+          throw ValidationException(
+            'There are no $sportName matches to publish yet. Generate the '
+            'draws first.',
           );
         }
 
@@ -477,35 +929,62 @@ class TournamentRepository {
           );
         }
 
+        // Every sport that plays matches. Track and field, recorded as marks,
+        // has no timetable to publish and must not hold the season open.
+        final timetabled = {
+          for (final e in events)
+            if (!e.format.isPerformanceFormat &&
+                e.archetype != CompetitionArchetype.performance)
+              e.sportId,
+        };
+        final released = {...season.sportSchedulesReleasedAt.keys, sportId};
+        final wholeSeason = released.containsAll(timetabled);
+
         final batch = ChunkedBatch(Refs.db);
+        // A dotted path, because a batch update takes string keys only. Sport
+        // ids are catalogue ids (`table_tennis`), never user text, so they
+        // hold no dot; the check keeps it that way.
+        if (!RegExp(r'^[A-Za-z0-9_]+$').hasMatch(sportId)) {
+          throw ValidationException('"$sportId" is not a sport id.');
+        }
         batch.update(Refs.tournament(orgId, tournamentId), {
-          'status': TournamentStatus.scheduled.wire,
-          'isScheduleLocked': true,
-          'scheduleReleasedAt': FieldValue.serverTimestamp(),
+          'sportSchedulesReleasedAt.$sportId': FieldValue.serverTimestamp(),
+          if (wholeSeason) ...{
+            'isScheduleLocked': true,
+            'scheduleReleasedAt': FieldValue.serverTimestamp(),
+            if (const {
+              TournamentStatus.draft,
+              TournamentStatus.entriesOpen,
+              TournamentStatus.entriesClosed,
+            }.contains(season.status))
+              'status': TournamentStatus.scheduled.wire,
+          },
           'updatedAt': FieldValue.serverTimestamp(),
         });
 
-        for (final doc in eventsSnap.docs) {
-          batch.update(doc.reference, {
+        // Only events that have not got further. Writing `scheduled` over one
+        // already being played would put a live event back before its first
+        // ball, and a completed one is refused by the rules — which used to
+        // fail the whole publish.
+        for (final event in inSport) {
+          if (!const {
+            CompetitionStatus.draft,
+            CompetitionStatus.registrationOpen,
+            CompetitionStatus.registrationClosed,
+          }.contains(event.status)) {
+            continue;
+          }
+          batch.update(Refs.competition(orgId, event.id), {
             'status': CompetitionStatus.scheduled.wire,
             'updatedAt': FieldValue.serverTimestamp(),
           });
         }
 
         // Telling everybody is `onScheduleReleased`'s job, in
-        // functions/index.js, and it fires off the `isScheduleLocked`
-        // transition this batch writes.
-        //
-        // It was done here, as a third write in this batch, and it could not
-        // work: the document went to `users/{orgId}/notifications` — an orgId
-        // is not a uid, so the path named a user who does not exist — and
-        // `firestore.rules` ends that collection with `allow create: if
-        // false`, because a notification is the server's to write and a
-        // client that could create one could notify anybody about anything.
-        // Firestore rejects a batch if ANY write in it is denied, so the
-        // rejected notification took the two status updates down with it and
-        // "Lock & publish" failed outright. The schedule could not be
-        // published at all.
+        // functions/index.js, and it fires off the new entry in
+        // `sportSchedulesReleasedAt` this batch writes. A client cannot write
+        // notifications (`allow create: if false`), and an earlier version
+        // that tried failed the whole publish.
         //
         // Awaited, unlike the draw paths: an organizer pressing "publish" is
         // entitled to know it landed.
@@ -528,32 +1007,56 @@ class TournamentRepository {
   /// per-day shift and the "running late" path all read the same fields, so
   /// the tournament keeps its turnaround rather than reverting to the default
   /// the moment anything else touches the timetable.
+  ///
+  /// Scoped to [sportId]. A match length chosen here is that sport's, so it
+  /// is stored on the sport's own events. It lasts for the next time too,
+  /// and doesn't reach any other sport. The changeover and the rest gap stay
+  /// on the season, because courts and players are shared between sports.
   Future<TournamentScheduleReport> regenerateDraftSchedule({
     required String orgId,
     required String tournamentId,
+    required String sportId,
     int? matchMinutes,
     int? changeoverMinutes,
     int? restGapMinutes,
   }) =>
       guard(() async {
         final overrides = <String, Object?>{
-          if (matchMinutes != null) 'matchMinutesDefault': matchMinutes,
           if (changeoverMinutes != null) 'changeoverMinutes': changeoverMinutes,
           if (restGapMinutes != null) 'restGapMinutes': restGapMinutes,
         };
+        // Awaited, unlike most writes here: `generateSchedule` re-reads the
+        // season and its events on its first line, so a fire-and-forget write
+        // would race the read it is meant to inform.
+        final batch = ChunkedBatch(Refs.db);
         if (overrides.isNotEmpty) {
-          // Awaited, unlike most writes here: `generateSchedule` re-reads the
-          // tournament document on its first line, so a fire-and-forget write
-          // would race the read it is meant to inform.
-          await Refs.tournament(orgId, tournamentId).update({
+          batch.update(Refs.tournament(orgId, tournamentId), {
             ...overrides,
             'updatedAt': FieldValue.serverTimestamp(),
           });
         }
+        if (matchMinutes != null) {
+          final eventSnap = await Refs.competitions(orgId)
+              .where('tournamentId', isEqualTo: tournamentId)
+              .where('sportId', isEqualTo: sportId)
+              .get();
+          for (final doc in eventSnap.docs) {
+            final status = Competition.fromDoc(doc).status;
+            if (status == CompetitionStatus.completed ||
+                status == CompetitionStatus.cancelled) {
+              continue;
+            }
+            batch.update(doc.reference, {
+              'scheduleConfig.matchMinutes': matchMinutes,
+              'updatedAt': FieldValue.serverTimestamp(),
+            });
+          }
+        }
+        await batch.commitAll();
         return generateSchedule(
           orgId: orgId,
           tournamentId: tournamentId,
-          matchMinutesOverride: matchMinutes,
+          sportId: sportId,
         );
       });
 
@@ -606,6 +1109,11 @@ class TournamentRepository {
         }
         batch.update(Refs.tournament(orgId, tournamentId), {
           'status': TournamentStatus.entriesOpen.wire,
+          // The moment the season was published as a whole. The server sends
+          // ONE "entries are open" message for the season off this, and each
+          // event's own "now open" push stands down — a thirty-category
+          // sports week used to send every member thirty-one notifications.
+          'entriesOpenedAt': FieldValue.serverTimestamp(),
           'updatedAt': FieldValue.serverTimestamp(),
         });
 
@@ -637,9 +1145,14 @@ class TournamentRepository {
   /// season half-played is the case where regenerating is destructive, and
   /// the honest response is to skip and say so rather than to refuse the
   /// whole run because one event has started.
-  Future<SeasonSetupReport> setUpWholeSeason({
+  ///
+  /// Scoped to [sportId]: its events are drawn, and its matches placed around
+  /// the timetable the season's other sports already have. Nothing of
+  /// another sport is closed, drawn or moved.
+  Future<SeasonSetupReport> setUpSport({
     required String orgId,
     required String tournamentId,
+    required String sportId,
     int? matchMinutes,
     int? changeoverMinutes,
     int? restGapMinutes,
@@ -657,10 +1170,13 @@ class TournamentRepository {
         }
         final eventSnap = await Refs.competitions(orgId)
             .where('tournamentId', isEqualTo: tournamentId)
+            .where('sportId', isEqualTo: sportId)
             .get();
         final events = eventSnap.docs.map(Competition.fromDoc).toList();
         if (events.isEmpty) {
-          throw const ValidationException('This season has no events yet.');
+          throw const ValidationException(
+            'This season has no events in this sport yet.',
+          );
         }
 
         // Checked against the same pool `generateSchedule` actually builds
@@ -681,6 +1197,24 @@ class TournamentRepository {
         final skipped = <String>[];
 
         for (final event in events) {
+          // Track, field and swimming are recorded as marks, not drawn into
+          // matches — `generateDraw` refuses them. Checked FIRST, because the
+          // close below is not undoable: this used to shut registration on
+          // the 100m and only then discover it could not be drawn, so the
+          // one button quietly locked out every athlete still to enter.
+          if (event.format.isPerformanceFormat ||
+              event.archetype == CompetitionArchetype.performance) {
+            skipped.add('${event.name}: recorded as times and marks — '
+                'entries stay as they are; score it from the event page');
+            continue;
+          }
+          // Cancelled or suspended events are not part of the timetable.
+          if (event.status == CompetitionStatus.cancelled || event.isSuspended) {
+            skipped.add('${event.name}: '
+                '${event.isSuspended ? 'on hold' : 'cancelled'}');
+            continue;
+          }
+
           // Anything already scored is somebody's afternoon. Leave it.
           final fixtureSnap = await Refs.fixtures(orgId, event.id).get();
           final fixtures = fixtureSnap.docs.map(Fixture.fromDoc).toList();
@@ -763,6 +1297,7 @@ class TournamentRepository {
         final schedule = await regenerateDraftSchedule(
           orgId: orgId,
           tournamentId: tournamentId,
+          sportId: sportId,
           matchMinutes: matchMinutes,
           changeoverMinutes: changeoverMinutes,
           restGapMinutes: restGapMinutes,
@@ -775,56 +1310,182 @@ class TournamentRepository {
         );
       });
 
-  /// Attaches an existing competition to a tournament, and keeps the
-  /// denormalized event count in step.
-  Future<void> addEvent({
-    required String orgId,
-    required String tournamentId,
-    required String compId,
+  /// Adds new sports to a season that already exists, and attaches existing
+  /// events to it — in one atomic commit, with the event count kept true.
+  ///
+  /// The new events are built by [SeasonBlueprint], taking every setting an
+  /// event of this season needs from the season and its existing events: the
+  /// grounds, the hours, who may enter, the houses, how fees are charged.
+  /// The sheet this serves used to create a bare `Competition` — no grounds,
+  /// a 30-minute match for cricket, individual entry for a team sport, open
+  /// to approval-only when the rest of the season was open — one sequential
+  /// write at a time.
+  Future<int> addSportsToSeason({
+    required Tournament season,
+    required List<SeasonCategorySpec> sports,
+    List<String> attachCompIds = const [],
+    required String createdBy,
   }) =>
       guard(() async {
+        if (sports.isEmpty && attachCompIds.isEmpty) return 0;
+        final orgId = season.orgId;
+        final existing = (await Refs.competitions(orgId)
+                .where('tournamentId', isEqualTo: season.id)
+                .get())
+            .docs
+            .map(Competition.fromDoc)
+            .where((e) => e.status != CompetitionStatus.cancelled)
+            .toList();
+        final template = existing.isEmpty ? null : existing.first;
+        final names = {for (final e in existing) e.name.toLowerCase()};
+
+        final blueprint = SeasonBlueprint(
+          orgId: orgId,
+          name: season.name,
+          createdBy: createdBy,
+          startDate: season.startDate,
+          endDate: season.endDate,
+          groundIds: season.venueIds,
+          venueLabel: template?.venue,
+          // Whole specs, not (sport, format) pairs. Pairs pinned every added
+          // event to the sport's default arrangement and the Open category,
+          // so a live season could never gain its Doubles or its U-17 — and
+          // the refusal below sent the organizer to a season form that has
+          // no categories section (test run TC-24).
+          categories: sports,
+          changeoverMinutes: season.changeoverMinutes,
+          restGapMinutes: season.restGapMinutes,
+          dayStartHour: template?.scheduleConfig.dayStartHour ?? 9,
+          dayEndHour: template?.scheduleConfig.dayEndHour ?? 19,
+          externalEntries: template?.openToNonMembers ?? false,
+          feeMode: season.feeMode,
+          presetHouses: template == null || template.presetHouses.isEmpty
+              ? HouseTemplates.schoolColours
+              : template.presetHouses,
+        );
+        final events = blueprint.events(season.id);
+        for (final e in events) {
+          if (names.contains(e.name.toLowerCase())) {
+            throw ValidationException(
+              '${e.name} is already in this season. Pick a different '
+              'arrangement or category for it, or edit the existing event.',
+            );
+          }
+        }
+
+        // A published season takes entries on a sport the moment it is
+        // added, like the sports it was created with. Only a season still in
+        // draft (created before seasons were published on creation) keeps
+        // its new sports as drafts for its own "Open entries" press.
+        final open = season.status != TournamentStatus.draft;
+        final attached = [
+          for (final compId in attachCompIds)
+            if (await Refs.competition(orgId, compId).get() case final doc
+                when doc.exists)
+              Competition.fromDoc(doc),
+        ];
+
         final batch = Refs.db.batch();
-        batch.update(Refs.competition(orgId, compId), {
-          'tournamentId': tournamentId,
-          'updatedAt': FieldValue.serverTimestamp(),
-        });
-        batch.update(Refs.tournament(orgId, tournamentId), {
-          'eventCount': FieldValue.increment(1),
+        for (final e in events) {
+          batch.set(
+            Refs.competitions(orgId).doc(),
+            e.toCreate(openForEntries: open),
+          );
+        }
+        for (final compId in attachCompIds) {
+          batch.update(Refs.competition(orgId, compId), {
+            'tournamentId': season.id,
+            'updatedAt': FieldValue.serverTimestamp(),
+          });
+        }
+        batch.update(Refs.tournament(orgId, season.id), {
+          'eventCount':
+              FieldValue.increment(events.length + attachCompIds.length),
+          ..._reopenForNewEvents(
+            season: season,
+            existing: existing,
+            added: [...events, ...attached],
+          ),
+          // The first events of a season created empty. Nothing announced it
+          // when it was created, because there was nothing to enter
+          // (`onTournamentCreated` skips an empty season). Now there is, so
+          // this is the season's one "entries are open" push —
+          // `onTournamentPublished` fires off the stamp, and each new event's
+          // own push stands down for it rather than sending one per sport.
+          if (open && season.eventCount == 0 && existing.isEmpty)
+            'entriesOpenedAt': FieldValue.serverTimestamp(),
           'updatedAt': FieldValue.serverTimestamp(),
         });
         await batch.commit();
+        return events.length + attachCompIds.length;
       });
 
-  /// Records that [count] draws were created directly INTO a tournament.
+  /// The season fields that take a published timetable back to draft for
+  /// the sports [added] events belong to.
   ///
-  /// [addEvent] handles the attach-an-existing-event path and keeps the count
-  /// in step itself. The season form takes the other path — it creates each
-  /// sport already carrying `tournamentId`, so nothing ever ran the increment
-  /// and a five-sport season sat at `eventCount: 0`.
+  /// ## Why adding an event reopens its sport
   ///
-  /// That was not merely a wrong chip on a card. `firestore.rules` permits
-  /// deleting a tournament only when `eventCount == 0`, which is the guard
-  /// that stops somebody removing a season out from under the draws hanging
-  /// off it. A season that under-reports its own events is a season that can
-  /// be deleted while it still has five.
-  /// Fire-and-forget, like the creates it follows. Awaiting a write here means
-  /// awaiting the SERVER's acknowledgement, and a season created on a ground
-  /// with no signal would hang on this line rather than finishing offline and
-  /// syncing later — the one thing §2.1 says must never happen. The increment
-  /// is queued in the same ordered mutation queue as the create, so it lands
-  /// after it whenever the connection returns; a genuine rejection surfaces
-  /// through [writeFailures] rather than blocking the organizer.
-  void noteEventsCreated({
-    required String orgId,
-    required String tournamentId,
-    required int count,
+  /// A published sport's matches are final and its schedule page offers no
+  /// way to draw or place anything. An event added to it afterwards — a new
+  /// sport, or a new category of a sport already out — has no matches yet,
+  /// and until this existed it could never get any: its panel read
+  /// "Published", the Draw & schedule and Lock buttons were hidden, and the
+  /// desk did not list it as unpublished. So the sport's release stamp is
+  /// removed, it reads as a draft, and publishing it again announces the
+  /// timetable again — which is right, because scheduling the sport
+  /// re-places its unplayed matches.
+  ///
+  /// The season stops being wholly locked for the same reason, and a
+  /// `scheduled` season goes back to taking entries, since the new events
+  /// take entries. `lockSchedule` promotes it again when the last sport is
+  /// published.
+  ///
+  /// A season published season-wide (no per-sport stamps) has every OTHER
+  /// sport stamped here, so those stay published. `onScheduleReleased` knows
+  /// that write for a backfill and announces nothing.
+  ///
+  /// Events recorded as times and marks have no timetable and reopen
+  /// nothing.
+  static Map<String, Object> _reopenForNewEvents({
+    required Tournament season,
+    required List<Competition> existing,
+    required List<Competition> added,
   }) {
-    unawaited(
-      Refs.tournament(orgId, tournamentId).update({
-        'eventCount': FieldValue.increment(count),
-        'updatedAt': FieldValue.serverTimestamp(),
-      }).catchError((Object e) => _writeFailures.add(_translate(e))),
-    );
+    bool timetabled(Competition e) =>
+        !e.format.isPerformanceFormat &&
+        e.archetype != CompetitionArchetype.performance;
+    if (season.status == TournamentStatus.completed) return const {};
+    final reopened = {
+      for (final e in added)
+        if (timetabled(e) && season.isSportScheduleLocked(e.sportId))
+          e.sportId,
+    };
+    if (reopened.isEmpty) return const {};
+    final validId = RegExp(r'^[A-Za-z0-9_]+$');
+
+    final fields = <String, Object>{};
+    if (season.sportSchedulesReleasedAt.isEmpty) {
+      final releasedAt = season.scheduleReleasedAt;
+      for (final sportId in {
+        for (final e in existing)
+          if (timetabled(e)) e.sportId,
+      }) {
+        if (reopened.contains(sportId) || !validId.hasMatch(sportId)) continue;
+        fields['sportSchedulesReleasedAt.$sportId'] = releasedAt == null
+            ? FieldValue.serverTimestamp()
+            : Timestamp.fromDate(releasedAt);
+      }
+    } else {
+      for (final sportId in reopened) {
+        if (!validId.hasMatch(sportId)) continue;
+        fields['sportSchedulesReleasedAt.$sportId'] = FieldValue.delete();
+      }
+    }
+    if (season.isScheduleLocked) fields['isScheduleLocked'] = false;
+    if (season.status == TournamentStatus.scheduled) {
+      fields['status'] = TournamentStatus.entriesOpen.wire;
+    }
+    return fields;
   }
 
   // --- Cross-club invitations -------------------------------------------
@@ -846,6 +1507,8 @@ class TournamentRepository {
     required List<({String orgId, String name})> clubs,
     required String invitedByUid,
     String? message,
+    List<String> sportNames = const [],
+    String? place,
   }) =>
       guard(() async {
         final targets = [
@@ -856,9 +1519,56 @@ class TournamentRepository {
           throw const ValidationException('Pick at least one club to invite.');
         }
 
+        if (targets.length > 450) {
+          throw const ValidationException(
+            'That is more clubs than one send can carry. Invite up to 450 '
+            'at a time.',
+          );
+        }
+        // Shaped to what the rules accept BEFORE the batch, so one long line
+        // cannot refuse the invitation to every club at once. The letter is
+        // refused with a reason rather than cut: it is the host's own words,
+        // and silently losing its ending would send something they didn't
+        // write. The composer's field already stops at the limit.
         final trimmed = message?.trim();
+        if (trimmed != null &&
+            trimmed.length > TournamentInvite.maxMessageLength) {
+          throw ValidationException(
+            'The invitation letter is ${trimmed.length} characters. Shorten '
+            'it to ${TournamentInvite.maxMessageLength} or fewer and send '
+            'again.',
+          );
+        }
+        final trimmedPlace =
+            TournamentInvite.fit(place, TournamentInvite.maxPlaceLength);
+        final sports = TournamentInvite.fitSportNames(sportNames);
+
+        // A club already waiting on an invitation, or already coming, is not
+        // asked twice: the rules refuse overwriting a live one, and one refusal
+        // would fail the whole send. A declined or withdrawn invitation is
+        // sent again — the rules admit exactly that re-send.
+        final existing = await Refs.tournamentInvites
+            .where('fromOrgId', isEqualTo: tournament.orgId)
+            .where('tournamentId', isEqualTo: tournament.id)
+            .get();
+        final live = {
+          for (final doc in existing.docs)
+            if (TournamentInvite.fromDoc(doc) case final i
+                when i.isPending || i.isAccepted)
+              i.toOrgId,
+        };
+        final toSend = [
+          for (final club in targets)
+            if (!live.contains(club.orgId)) club,
+        ];
+        if (toSend.isEmpty) {
+          throw const ValidationException(
+            'Every club you picked has already been invited.',
+          );
+        }
+
         final batch = Refs.db.batch();
-        for (final club in targets) {
+        for (final club in toSend) {
           batch.set(
             Refs.tournamentInvite(
               TournamentInvite.idFor(
@@ -877,13 +1587,24 @@ class TournamentRepository {
               toOrgName: club.name,
               status: 'pending',
               message: (trimmed == null || trimmed.isEmpty) ? null : trimmed,
+              kind: tournament.kind,
+              sportNames: List.unmodifiable(sports),
+              place: trimmedPlace,
               startDate: tournament.startDate,
               endDate: tournament.endDate,
               invitedBy: invitedByUid,
             ).toCreate(),
           );
         }
-        await batch.commit();
+        // Bounded: on web the commit can sit unacknowledged long after the
+        // write is in the local cache and on screen as "invited", which left
+        // the Send button spinning forever. A rules refusal arrives well
+        // inside this window; past it the write is queued and will sync.
+        try {
+          await batch.commit().timeout(const Duration(seconds: 8));
+        } on TimeoutException {
+          // Queued locally.
+        }
       });
 
   /// Every club invited to one tournament, in the order they were asked.
@@ -897,6 +1618,19 @@ class TournamentRepository {
         .snapshots()
         .map((snap) => snap.docs.map(TournamentInvite.fromDoc).toList()
           ..sort((a, b) => a.toOrgName.compareTo(b.toOrgName)));
+  }
+
+  /// Every invitation [orgId] has sent, to every club, for every season —
+  /// the host's half of the invitations space, newest first.
+  Stream<List<TournamentInvite>> watchSentInvites(String orgId) {
+    return guardStream(
+      () => Refs.tournamentInvites
+          .where('fromOrgId', isEqualTo: orgId)
+          .snapshots()
+          .map((snap) => snap.docs.map(TournamentInvite.fromDoc).toList()
+            ..sort((a, b) => (b.createdAt ?? DateTime(9999))
+                .compareTo(a.createdAt ?? DateTime(9999)))),
+    );
   }
 
   /// Tournaments other clubs have invited [orgId] into and are still waiting
@@ -963,6 +1697,119 @@ class TournamentRepository {
             'respondedAt': FieldValue.serverTimestamp(),
           }));
 
+  // --- Club registration requests (uninvited club asking to enter) -------
+
+  /// A club with no invite asking to bring a side into [tournament] —
+  /// TC-CLUB-034. [viaCompId] is the specific open event the requester found
+  /// this door through; the write is refused server-side unless that
+  /// competition genuinely has `openToNonMembers == true`.
+  Future<void> requestClubRegistration({
+    required Tournament tournament,
+    required String hostOrgName,
+    required String viaCompId,
+    required String requestingOrgId,
+    required String requestingOrgName,
+    required String requestedByUid,
+    String? note,
+  }) =>
+      guard(() async {
+        if (requestingOrgId == tournament.orgId) {
+          throw const ValidationException(
+            'You already run this season\'s host club.',
+          );
+        }
+        final id = ClubRegistrationRequest.idFor(
+          hostOrgId: tournament.orgId,
+          tournamentId: tournament.id,
+          requestingOrgId: requestingOrgId,
+        );
+        final existing = await Refs.clubRegistrationRequest(id).get();
+        if (existing.exists &&
+            ClubRegistrationRequest.fromDoc(existing).isPending) {
+          throw const ValidationException(
+            'You already have a request waiting on this host.',
+          );
+        }
+
+        await Refs.clubRegistrationRequest(id).set(
+          ClubRegistrationRequest(
+            id: id,
+            tournamentId: tournament.id,
+            tournamentName: tournament.name,
+            hostOrgId: tournament.orgId,
+            hostOrgName: hostOrgName,
+            requestingOrgId: requestingOrgId,
+            requestingOrgName: requestingOrgName,
+            viaCompId: viaCompId,
+            status: 'pending',
+            note: note?.trim().isEmpty == true ? null : note?.trim(),
+            requestedBy: requestedByUid,
+          ).toCreate(),
+        );
+      });
+
+  /// Every uninvited club waiting on this season's host.
+  Stream<List<ClubRegistrationRequest>> watchClubRegistrationRequests({
+    required String hostOrgId,
+    required String tournamentId,
+  }) =>
+      guardStream(
+        () => Refs.clubRegistrationRequests
+            .where('hostOrgId', isEqualTo: hostOrgId)
+            .where('tournamentId', isEqualTo: tournamentId)
+            .snapshots()
+            .map((s) => s.docs.map(ClubRegistrationRequest.fromDoc).toList()),
+      );
+
+  /// Whether [requestingOrgId] already has a live (pending) ask on this
+  /// season, so the requesting club's own screen can show its status instead
+  /// of offering to ask again.
+  Stream<ClubRegistrationRequest?> watchMyClubRegistrationRequest({
+    required String hostOrgId,
+    required String tournamentId,
+    required String requestingOrgId,
+  }) =>
+      guardStream(() => Refs.clubRegistrationRequest(
+            ClubRegistrationRequest.idFor(
+              hostOrgId: hostOrgId,
+              tournamentId: tournamentId,
+              requestingOrgId: requestingOrgId,
+            ),
+          ).snapshots().map(
+            (s) => s.exists ? ClubRegistrationRequest.fromDoc(s) : null,
+          ));
+
+  /// The host's decision. Approving does not unlock entry by itself — it
+  /// sends the requesting club an ordinary [TournamentInvite] via
+  /// [inviteClubs], the one audited path everything else that lets a club
+  /// enter a season already goes through; the requester still accepts it,
+  /// exactly as any invited club does. Declining just records why.
+  Future<void> decideClubRegistrationRequest({
+    required Tournament tournament,
+    required String hostOrgName,
+    required ClubRegistrationRequest request,
+    required bool approve,
+    required String invitedByUid,
+    String? declineReason,
+  }) =>
+      guard(() async {
+        if (approve) {
+          await inviteClubs(
+            tournament: tournament,
+            hostOrgName: hostOrgName,
+            clubs: [
+              (orgId: request.requestingOrgId, name: request.requestingOrgName),
+            ],
+            invitedByUid: invitedByUid,
+          );
+        }
+        await Refs.clubRegistrationRequest(request.id).update({
+          'status': approve ? 'approved' : 'declined',
+          if (!approve) 'declineReason': declineReason?.trim(),
+          'decidedAt': FieldValue.serverTimestamp(),
+        });
+      });
+
   // --- Interest in an invited season ------------------------------------
 
   /// Who at [orgId] has put their hand up for the season [hostOrgId] invited
@@ -1020,6 +1867,73 @@ class TournamentRepository {
           ),
         ).delete(),
       );
+
+  /// Picks members for a draw their club cannot enter them into.
+  ///
+  /// The singles half of "Build our entry". A team draw's selection is its
+  /// entry — the side is registered and the job is done — but a singles draw
+  /// is entered by the player, so what the club can do is choose, record the
+  /// choice, and tell them. See [SeasonNomination] for why that is a document
+  /// rather than a message.
+  ///
+  /// One batch, so a secretary picking eight players sends one thing or
+  /// nothing. The deterministic id makes re-picking the same person a rewrite
+  /// rather than a second notification.
+  Future<void> nominateForSeason({
+    required String orgId,
+    required String hostOrgId,
+    required String tournamentId,
+    required Competition competition,
+    required List<String> uids,
+    required String byUid,
+    required String clubName,
+    String? tournamentName,
+  }) =>
+      guard(() async {
+        if (uids.isEmpty) return;
+        final batch = Refs.db.batch();
+        for (final uid in uids) {
+          final id = SeasonNomination.idFor(
+            hostOrgId: hostOrgId,
+            tournamentId: tournamentId,
+            compId: competition.id,
+            uid: uid,
+          );
+          batch.set(
+            Refs.seasonNominationDoc(orgId, id),
+            SeasonNomination(
+              id: id,
+              orgId: orgId,
+              hostOrgId: hostOrgId,
+              tournamentId: tournamentId,
+              compId: competition.id,
+              uid: uid,
+              nominatedByUid: byUid,
+              compName: competition.name,
+              tournamentName: tournamentName,
+              clubName: clubName,
+            ).toCreate(),
+            SetOptions(merge: true),
+          );
+        }
+        await batch.commit();
+      });
+
+  /// Who this club has picked for a season, so the selection screen can show
+  /// a tick beside somebody already chosen rather than picking them twice.
+  Stream<List<SeasonNomination>> watchSeasonNominations({
+    required String orgId,
+    required String hostOrgId,
+    required String tournamentId,
+  }) {
+    return guardStream(
+      () => Refs.seasonNominations(orgId)
+          .where('hostOrgId', isEqualTo: hostOrgId)
+          .where('tournamentId', isEqualTo: tournamentId)
+          .snapshots()
+          .map((snap) => snap.docs.map(SeasonNomination.fromDoc).toList()),
+    );
+  }
 
   // --- Officials (the season's own panel, pre-assigned ICC-style) -------
 
@@ -1135,10 +2049,16 @@ class TournamentRepository {
         // uid-by-entrant map `generateSchedule` builds above, for clubs
         // instead of players.
         final clubByEntrant = <String, String?>{};
+        final uidsByEntrant = <String, List<String>>{};
         for (final compId in {for (final f in fixtures) f.compId}) {
           final entrantSnap = await Refs.entrants(orgId, compId).get();
           for (final doc in entrantSnap.docs) {
-            clubByEntrant[doc.id] = Entrant.fromDoc(doc).clubId;
+            final entrant = Entrant.fromDoc(doc);
+            clubByEntrant[doc.id] = entrant.clubId;
+            uidsByEntrant[doc.id] = <String>{
+              if (entrant.uid != null) entrant.uid!,
+              ...entrant.memberUids,
+            }.toList();
           }
         }
 
@@ -1166,6 +2086,13 @@ class TournamentRepository {
             ),
             courtKey: f.courtId ?? f.venue ?? f.id,
             contestingClubIds: clubs,
+            playerUids: {
+              ...f.playerUids,
+              if (f.entrantAUid != null) f.entrantAUid!,
+              if (f.entrantBUid != null) f.entrantBUid!,
+              ...?uidsByEntrant[f.entrantAId],
+              ...?uidsByEntrant[f.entrantBId],
+            },
             sportId: event?.sportId ?? f.sportId,
             eventId: f.compId,
             eventName: event?.name ?? '',
@@ -1399,6 +2326,9 @@ class TournamentRepository {
           availabilities: availabilityFor.values,
         );
 
+        final seasonHours = SeasonCapacity.hoursOf(
+          [for (final e in events) e.scheduleConfig],
+        );
         final calendars = SeasonCapacity.buildCalendars(
           seasonStart: start,
           dayCount: gridDays,
@@ -1407,6 +2337,10 @@ class TournamentRepository {
           defaultMatchMinutes:
               matchMinutesOverride ?? tournament.matchMinutesDefault,
           defaultTurnaroundMinutes: tournament.changeoverMinutes,
+          // The season's own playing hours, so an unplanned ground does not
+          // contribute the sixteen-hour day its opening hours imply.
+          dayStartHour: seasonHours?.startHour,
+          dayEndHour: seasonHours?.endHour,
         );
 
         final demands = <EventDemand>[];
@@ -1474,6 +2408,10 @@ class TournamentRepository {
         final venues = await _venuesOf(orgId, tournament, events);
         final plans = await _venuePlansOf(orgId, tournamentId);
 
+        final hours = SeasonCapacity.hoursOf(
+          [for (final e in events) e.scheduleConfig],
+        );
+
         return [
           for (final venue in venues)
             SeasonCapacity.lineFor(
@@ -1483,6 +2421,11 @@ class TournamentRepository {
               dayCount: tournament.dayCount,
               defaultMatchMinutes: tournament.matchMinutesDefault,
               defaultTurnaroundMinutes: tournament.changeoverMinutes,
+              // Capacity over the season's playing hours, not the ground's
+              // opening hours — a season running 08:00–20:00 was being costed
+              // against a ground open 06:00–22:00.
+              dayStartHour: hours?.startHour,
+              dayEndHour: hours?.endHour,
             ),
         ];
       });
@@ -1642,9 +2585,13 @@ class TournamentRepository {
       final teamByEntrant = <String, String>{};
       for (final doc in entrantSnap.docs) {
         final entrant = Entrant.fromDoc(doc);
-        uidByEntrant[doc.id] = entrant.uid != null
-            ? [entrant.uid!]
-            : entrant.memberUids;
+        // Both: a team entrant carries its captain as `uid` AND its squad
+        // as `memberUids`, and taking only the captain hid every other
+        // member's clash with their own matches in other sports.
+        uidByEntrant[doc.id] = <String>{
+          if (entrant.uid != null) entrant.uid!,
+          ...entrant.memberUids,
+        }.toList();
         // The persistent team behind this entry, which is the only side
         // identity that survives leaving one draw — an entrant id is
         // scoped to its own competition and says nothing across a season.
@@ -1710,6 +2657,9 @@ class TournamentRepository {
     // of it. `buildCalendars` folds the venue's own hours, this season's
     // sessions, its blackouts and its daily ceiling into the slots each
     // court actually offers.
+    final seasonHours = SeasonCapacity.hoursOf(
+      [for (final e in events) e.scheduleConfig],
+    );
     final calendars = SeasonCapacity.buildCalendars(
       seasonStart: start,
       dayCount: gridDays,
@@ -1718,6 +2668,8 @@ class TournamentRepository {
       defaultMatchMinutes:
           matchMinutesOverride ?? tournament.matchMinutesDefault,
       defaultTurnaroundMinutes: tournament.changeoverMinutes,
+      dayStartHour: seasonHours?.startHour,
+      dayEndHour: seasonHours?.endHour,
     );
     if (calendars.isEmpty) {
       throw const ValidationException(
@@ -1756,9 +2708,21 @@ class TournamentRepository {
   /// the exercise: the same person is a different `Entrant` in the singles,
   /// the doubles and the mixed, so an entrant-keyed check sees three unrelated
   /// competitors and cheerfully books them onto three courts at once.
+  ///
+  /// ## One sport at a time
+  ///
+  /// [sportId] narrows what is PLACED to that sport's events. Everything the
+  /// season already has on its courts stays where it is and is passed to the
+  /// scheduler as fixed. That covers other sports, including ones already
+  /// published. A cricket timetable built this way can't take a court the
+  /// badminton holds at 11:00, or call a player from their doubles to the
+  /// nets, whatever order the sports were scheduled in. The guarantees are
+  /// checked over the whole season, and a violation that involves this sport
+  /// refuses the write.
   Future<TournamentScheduleReport> generateSchedule({
     required String orgId,
     required String tournamentId,
+    required String sportId,
 
     /// Replaces every event's own `matchMinutes` for this solve.
     ///
@@ -1775,17 +2739,48 @@ class TournamentRepository {
           tournamentId: tournamentId,
           matchMinutesOverride: matchMinutesOverride,
         );
-        final matches = plan.matches;
         final calendars = plan.calendars;
         final fixturesByKey = plan.fixturesByKey;
-        final events = plan.events;
         final minRest = plan.minRest;
         final transition = plan.transition;
+
+        final sportEventIds = {
+          for (final e in plan.events)
+            if (e.sportId == sportId) e.id,
+        };
+        final events = [
+          for (final e in plan.events)
+            if (sportEventIds.contains(e.id)) e,
+        ];
+        final matches = [
+          for (final m in plan.matches)
+            if (sportEventIds.contains(m.compId)) m,
+        ];
+        if (matches.isEmpty) {
+          throw const ValidationException(
+            'This sport has no unplayed matches to schedule. Generate its '
+            'draws first.',
+          );
+        }
+        final others = [
+          for (final m in plan.matches)
+            if (!sportEventIds.contains(m.compId)) m,
+        ];
+        final stored = _storedPlacements(plan, others);
+        final fixed = [
+          for (final m in others)
+            if (stored.placements[m.key] != null)
+              (match: m, placement: stored.placements[m.key]!),
+        ];
+
         final schedule = const TournamentScheduler().schedule(
           matches: matches,
           calendars: calendars,
           minRestBetweenMatches: minRest,
           venueTransition: transition,
+          courtTurnaround:
+              Duration(minutes: plan.tournament.changeoverMinutes),
+          fixed: fixed,
         );
 
         // The promises, checked rather than asserted in a comment. A clash
@@ -1797,13 +2792,28 @@ class TournamentRepository {
         // the previous timetable is still intact and still correct, whereas a
         // published one with a double-booking in it has already been read,
         // shared and acted on by the time anybody notices.
-        final violations = ScheduleGuarantees.verify(
-          matches: matches,
-          schedule: schedule,
-          minRestBetweenMatches: minRest,
-          calendars: calendars,
-          venueTransition: transition,
-        );
+        //
+        // Checked against the season as it will stand: this sport's new
+        // placements beside every other sport's stored ones. Only violations
+        // this sport is part of count. A clash between two other sports was
+        // there before this press and is Schedule health's to report.
+        final ownKeys = {for (final m in matches) m.key};
+        final violations = [
+          for (final v in ScheduleGuarantees.verify(
+            matches: [...matches, for (final f in fixed) f.match],
+            schedule: TournamentSchedule(
+              placements: {
+                for (final f in fixed) f.match.key: f.placement,
+                ...schedule.placements,
+              },
+              unplaced: const [],
+            ),
+            minRestBetweenMatches: minRest,
+            calendars: [...calendars, ...stored.extraCalendars],
+            venueTransition: transition,
+          ))
+            if (v.matchKeys.any(ownKeys.contains)) v,
+        ];
         if (violations.isNotEmpty) {
           throw ValidationException(
             'The schedule was rejected because it broke a guarantee, so '
@@ -1833,10 +2843,9 @@ class TournamentRepository {
           );
         }
 
-        batch.update(Refs.tournament(orgId, tournamentId), {
-          'status': TournamentStatus.scheduled.wire,
-          'updatedAt': FieldValue.serverTimestamp(),
-        });
+        // No season status here. A draft timetable is not a published one,
+        // and writing `scheduled` made the season read as published the
+        // moment a draft was generated. Publishing is `lockSchedule`'s.
 
         unawaited(batch.commitAll().catchError((Object e) {
           _writeFailures.add(_translate(e));
@@ -1983,48 +2992,45 @@ class TournamentRepository {
         return health;
       });
 
-  /// Runs the guarantees over the timetable as stored, optionally with one
-  /// match moved — which is how a move is tested before it is written.
-  ScheduleHealthReport _healthOf(
-    _SeasonPlan plan, {
-    required Map<String, ({DateTime start, CourtRef? court})> overrides,
+  /// Where [matches] stand in the stored timetable, with [overrides] applied.
+  ///
+  /// A match with no time is left out. One placed by hand, or before court
+  /// ids were stored, still has a court as far as a player is concerned. It
+  /// is kept, on an unbounded calendar in [extraCalendars]: nothing can say
+  /// whether that court was open, and a false violation is worse than none.
+  ({Map<String, Placement> placements, List<CourtCalendar> extraCalendars})
+      _storedPlacements(
+    _SeasonPlan plan,
+    Iterable<SchedulableMatch> matches, {
+    Map<String, ({DateTime start, CourtRef? court})> overrides = const {},
   }) {
     final calendarByKey = {for (final c in plan.calendars) c.court.key: c};
     final placements = <String, Placement>{};
-    final extraCalendars = <String, CourtCalendar>{};
-    var unscheduled = 0;
-    var unverifiable = 0;
+    final extra = <String, CourtCalendar>{};
 
-    for (final match in plan.matches) {
+    for (final match in matches) {
       final fixture = plan.fixturesByKey[match.key];
       final override = overrides[match.key];
       final start = override?.start ?? fixture?.scheduledAt;
-      if (fixture == null || start == null) {
-        unscheduled++;
-        continue;
-      }
+      if (fixture == null || start == null) continue;
 
       var court = override?.court;
       if (court == null) {
         final key = '${fixture.venueId}/${fixture.courtRefId}';
         court = calendarByKey[key]?.court;
         if (court == null) {
-          // Placed by hand, or before the ids were stored. It still has a
-          // court in the sense that matters to a player, so it is checked for
-          // clashes — but nothing can say whether that court was open, so it
-          // gets an unbounded calendar rather than a false violation.
-          court = CourtRef(
+          final fallback = CourtRef(
             venueId: fixture.venueId ?? 'unknown',
             venueName: fixture.venue ?? 'Venue',
             courtId: fixture.courtRefId ?? (fixture.courtId ?? 'court'),
             courtName: fixture.courtId ?? 'Court',
           );
-          if (!calendarByKey.containsKey(court.key)) {
-            extraCalendars.putIfAbsent(
-              court.key,
-              () => CourtCalendar(court: court!, slotStarts: const []),
+          court = fallback;
+          if (!calendarByKey.containsKey(fallback.key)) {
+            extra.putIfAbsent(
+              fallback.key,
+              () => CourtCalendar(court: fallback, slotStarts: const []),
             );
-            unverifiable++;
           }
         }
       }
@@ -2037,6 +3043,24 @@ class TournamentRepository {
         ),
       );
     }
+    return (placements: placements, extraCalendars: extra.values.toList());
+  }
+
+  /// Runs the guarantees over the timetable as stored, optionally with one
+  /// match moved — which is how a move is tested before it is written.
+  ScheduleHealthReport _healthOf(
+    _SeasonPlan plan, {
+    required Map<String, ({DateTime start, CourtRef? court})> overrides,
+  }) {
+    final stored = _storedPlacements(plan, plan.matches, overrides: overrides);
+    final placements = stored.placements;
+    final extraCalendars = {
+      for (final c in stored.extraCalendars) c.court.key: c,
+    };
+    final unscheduled = plan.matches.length - placements.length;
+    final unverifiable = placements.values
+        .where((p) => extraCalendars.containsKey(p.court.key))
+        .length;
 
     final violations = ScheduleGuarantees.verify(
       matches: plan.matches,
@@ -2086,7 +3110,18 @@ class TournamentRepository {
           );
         }
 
+        // `orgId` is what AUTHORIZES this query, not merely what narrows it —
+        // the same reason [watchTournamentFixtures] and `checkOfficial-
+        // Availability` pin it. A collection-group `list` is authorised
+        // against the QUERY rather than the documents it would return, so the
+        // rules' `orgIsReadable(resource.data.orgId)` clause can only be
+        // satisfied when the query itself names the org; filtering on
+        // `tournamentId` alone left `orgId` unbound and the whole list was
+        // refused. That reached the organizer as "You do not have permission
+        // to do that in this organization" on their own season's rain-delay
+        // tool, owner included (test run TC-ADM-023).
         final snap = await Refs.allFixturesQuery
+            .where('orgId', isEqualTo: orgId)
             .where('tournamentId', isEqualTo: tournamentId)
             .get();
         final fixtures = snap.docs.map(Fixture.fromDoc).toList();

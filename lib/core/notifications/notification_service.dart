@@ -54,6 +54,16 @@ class NotificationService {
   /// listen — the router, to deep-link; a badge, to count.
   Stream<AppNotification> get incoming => _incoming.stream;
 
+  final _opened = StreamController<AppNotification>.broadcast();
+
+  /// Notifications the person TAPPED: the one that brought the app to the
+  /// front, or launched it. The app shell routes these to their deep link.
+  ///
+  /// Separate from [incoming] because that one also carries messages that
+  /// merely arrived while the app was open, and navigating on those would
+  /// pull the person off whatever they were doing.
+  Stream<AppNotification> get opened => _opened.stream;
+
   /// Asks for permission and registers this device against every uid in
   /// [uids].
   ///
@@ -112,13 +122,37 @@ class NotificationService {
     _onMessage = FirebaseMessaging.onMessage.listen(_emit);
 
     await _onOpened?.cancel();
-    _onOpened = FirebaseMessaging.onMessageOpenedApp.listen(_emit);
+    _onOpened = FirebaseMessaging.onMessageOpenedApp.listen((message) {
+      _emit(message);
+      _emitOpened(message);
+    });
 
     // The app was launched from a notification while terminated. Without this
     // the tap is swallowed and the person lands on the home screen wondering
     // what they just opened.
     final initial = await _messaging.getInitialMessage();
-    if (initial != null) _emit(initial);
+    if (initial != null) {
+      _emit(initial);
+      _emitOpened(initial);
+    }
+  }
+
+  /// Taps already routed. `_listen` runs again on every sign-in and profile
+  /// change and asks for the launch message each time, and a person must not
+  /// be sent back to the same screen whenever they switch profile.
+  final _routedTaps = <String>{};
+
+  void _emitOpened(RemoteMessage message) {
+    if (_opened.isClosed) return;
+    final id = message.messageId;
+    if (id != null && !_routedTaps.add(id)) return;
+    _opened.add(
+      AppNotification.fromDataPayload(
+        message.data,
+        id: message.messageId ?? DateTime.now().toIso8601String(),
+        createdAt: message.sentTime ?? DateTime.now(),
+      ),
+    );
   }
 
   void _emit(RemoteMessage message) {
@@ -174,5 +208,6 @@ class NotificationService {
     _onMessage?.cancel();
     _onOpened?.cancel();
     _incoming.close();
+    _opened.close();
   }
 }

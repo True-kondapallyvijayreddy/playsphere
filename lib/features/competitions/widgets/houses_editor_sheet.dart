@@ -1,12 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'dart:convert';
+import 'dart:typed_data';
+
 import '../../../core/models/competition.dart';
 import '../../../core/models/enums.dart';
 import '../../../core/providers.dart';
 import '../../../data/competition_repository.dart';
+import '../../../data/rating_service.dart';
+import '../../../domain/team/team_balancer.dart';
 import '../../../domain/tournament/house_roster.dart';
+import '../../../domain/tournament/house_roster_csv.dart';
+import '../../../domain/tournament/team_partitioner.dart';
 import '../../../shared/app_scaffold.dart';
+import '../../../shared/file_download.dart';
 import '../../../shared/ui_kit.dart';
 import 'house_list_editor.dart';
 
@@ -219,6 +227,141 @@ class _HousesEditorSheetState extends ConsumerState<HousesEditorSheet> {
     }
   }
 
+  /// Splits every confirmed entrant across the saved house list in one pass —
+  /// TC-ADM-027/028. Unlike [_autoPlace], which only fills in students the
+  /// club roster already says a house for and leaves the rest in the pool,
+  /// this assigns EVERYONE, overwriting whatever house they currently sit in
+  /// — the "0 unassigned" behaviour the spec asks for. The two are offered as
+  /// separate buttons rather than merged, because "use what the roster
+  /// already knows" and "just split the field evenly" are different organizer
+  /// intents and silently overwriting a hand-placed student under the first
+  /// one would be the wrong kind of surprise.
+  Future<void> _bulkAutoAllocate() async {
+    final c = widget.competition;
+    final regs = ref
+        .read(registrationsProvider(CompRef(c.orgId, c.id)))
+        .valueOrNull;
+    if (regs == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Still loading the roster — try again.')),
+      );
+      return;
+    }
+    final confirmed =
+        regs.where((r) => r.status == RegistrationStatus.confirmed).toList();
+    if (confirmed.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Nobody is confirmed yet.')),
+      );
+      return;
+    }
+
+    final options = await showDialog<bool>(
+      context: context,
+      builder: (_) => _BulkAllocateDialog(entrantCount: confirmed.length),
+    );
+    if (options == null || !mounted) return;
+    final balance = options;
+
+    setState(() => _busy = true);
+    try {
+      final houses = widget.competition.presetHouses;
+      final placements = <String, String>{};
+
+      if (balance) {
+        const ratings = RatingService();
+        final players = <BalancerPlayer>[];
+        for (final r in confirmed) {
+          final user = await ref.read(userProfileProvider(r.uid).future);
+          final rating = await ratings.getRating(r.uid, c.sportId);
+          players.add(BalancerPlayer(
+            id: r.uid,
+            rating: rating,
+            roles: user == null ? const {} : {user.gender.wire},
+          ));
+        }
+
+        // A floor, not an exact split — see [TeamConstraints.requiredRoles].
+        // Every house gets at least this many of each gender present; the
+        // handful left over after the floor go wherever the rating-balance
+        // pass lands them, which is the "tight band" the spec asks for
+        // rather than an exact-count guarantee.
+        final genderCounts = <String, int>{};
+        for (final p in players) {
+          for (final role in p.roles) {
+            genderCounts[role] = (genderCounts[role] ?? 0) + 1;
+          }
+        }
+        final requiredRoles = {
+          for (final e in genderCounts.entries) e.key: e.value ~/ houses.length,
+        };
+
+        final result = const TeamBalancer().shuffle(
+          players: players,
+          teamCount: houses.length,
+          constraints: TeamConstraints(requiredRoles: requiredRoles),
+          seed: DateTime.now().millisecondsSinceEpoch,
+        );
+        for (var i = 0; i < result.teams.length; i++) {
+          for (final p in result.teams[i].players) {
+            placements[p.id] = houses[i];
+          }
+        }
+      } else {
+        final partition = const TeamPartitioner().partition(
+          players: confirmed,
+          teamCount: houses.length,
+        );
+        for (var i = 0; i < partition.squads.length; i++) {
+          for (final r in partition.squads[i].members) {
+            placements[r.uid] = houses[i];
+          }
+        }
+      }
+
+      final n = await ref.read(competitionRepositoryProvider).applyHousePlacement(
+            orgId: c.orgId,
+            compId: c.id,
+            preview: HousePlacementPreview(
+              placements: placements,
+              unplaced: const [],
+              outsiders: const [],
+              alreadyPlaced: const [],
+            ),
+          );
+      if (!mounted) return;
+      setState(() => _busy = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$n students split across the houses.')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _busy = false);
+      showError(context, e);
+    }
+  }
+
+  Future<void> _exportCsv() async {
+    final c = widget.competition;
+    final regs =
+        ref.read(registrationsProvider(CompRef(c.orgId, c.id))).valueOrNull ??
+            const <Registration>[];
+    final csv = HouseRosterCsv.build(
+      registrations: regs,
+      sportName: c.sportName,
+    );
+    final safeName = c.name.replaceAll(RegExp(r'[^A-Za-z0-9]+'), '-');
+    try {
+      await saveFileBytes(
+        bytes: Uint8List.fromList(utf8.encode(csv)),
+        filename: '$safeName-houses.csv',
+        mimeType: 'text/csv',
+      );
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+  }
+
   Future<void> _save() async {
     final plan = _plan;
     if (!plan.isValid) return;
@@ -235,14 +378,18 @@ class _HousesEditorSheetState extends ConsumerState<HousesEditorSheet> {
         final ok = await showDialog<bool>(
           context: context,
           builder: (ctx) => AlertDialog(
-            title: const Text('Remove these houses?'),
+            title: Text(
+              'Return $stranded ${stranded == 1 ? 'member' : 'members'} to '
+              'the unassigned pool?',
+            ),
             content: Text(
               '${plan.removed.join(', ')} '
               '${plan.removed.length == 1 ? 'is' : 'are'} being removed, and '
               '$stranded ${stranded == 1 ? 'student is' : 'students are'} '
               'registered under ${plan.removed.length == 1 ? 'it' : 'them'}.\n\n'
-              'They stay in the event and keep their entry, but they will have '
-              'no house until you place them in the Team Builder.',
+              'They stay in the event and keep their entry. Their house is '
+              'cleared, not reassigned, so they show up in the Team Builder\'s '
+              'unassigned pool for you to place.',
             ),
             actions: [
               TextButton(
@@ -446,7 +593,57 @@ class _HousesEditorSheetState extends ConsumerState<HousesEditorSheet> {
                     : 'Save the houses first, then place students',
               ),
             ),
-          const SizedBox(height: 4),
+          if (widget.competition.presetHouses.length >= 2) ...[
+            const SizedBox(height: 4),
+            OutlinedButton.icon(
+              onPressed: _busy || !_savedListIsOnScreen
+                  ? null
+                  : _bulkAutoAllocate,
+              icon: const Icon(Icons.shuffle_outlined, size: 18),
+              label: Text(
+                _savedListIsOnScreen
+                    ? 'Split the field evenly across houses'
+                    : 'Save the houses first, then split the field',
+              ),
+            ),
+          ],
+          if (regs != null && regs.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            OutlinedButton.icon(
+              onPressed: _busy ? null : _exportCsv,
+              icon: const Icon(Icons.download_outlined, size: 18),
+              label: const Text('Export roster (CSV)'),
+            ),
+          ],
+          const Divider(height: 24),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            value: c.allowHouseTransferRequests,
+            title: const Text('Let players request a house transfer'),
+            subtitle: const Text(
+              'A player can ask to move houses; it lands on your queue below '
+              'rather than applying instantly — you still decide.',
+            ),
+            onChanged: _busy
+                ? null
+                : (v) async {
+                    try {
+                      await ref
+                          .read(competitionRepositoryProvider)
+                          .updateCompetition(
+                            c.copyWith(allowHouseTransferRequests: v),
+                          );
+                    } catch (e) {
+                      if (context.mounted) showError(context, e);
+                    }
+                  },
+          ),
+          if (c.allowHouseTransferRequests) ...[
+            const SizedBox(height: 4),
+            _HouseTransferRequestsQueue(competition: c),
+            const SizedBox(height: 8),
+          ],
+          const Divider(height: 24),
           FilledButton.icon(
             onPressed: _busy || !plan.isValid ? null : _save,
             icon: _busy
@@ -509,5 +706,151 @@ class _PreviewLine extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// Asks whether a bulk allocation should just split the field evenly
+/// (TC-ADM-027) or run the rating/gender-aware snake draft (TC-ADM-028)
+/// before doing either — both write the same way, so the only real decision
+/// is which arithmetic produces the placements.
+class _BulkAllocateDialog extends StatefulWidget {
+  const _BulkAllocateDialog({required this.entrantCount});
+
+  final int entrantCount;
+
+  @override
+  State<_BulkAllocateDialog> createState() => _BulkAllocateDialogState();
+}
+
+class _BulkAllocateDialogState extends State<_BulkAllocateDialog> {
+  bool _balance = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Split the field across houses'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Splits all ${widget.entrantCount} confirmed entrants across '
+            'your houses, replacing any house they currently sit in.',
+            style: const TextStyle(fontSize: 13, color: Ps.muted, height: 1.4),
+          ),
+          const SizedBox(height: 12),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            value: _balance,
+            title: const Text('Balance skill & gender'),
+            subtitle: const Text(
+              'Snake-drafts by rating so no house stacks the top players, '
+              'and spreads each gender evenly. Off splits evenly with no '
+              'regard to either.',
+            ),
+            onChanged: (v) => setState(() => _balance = v),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(_balance),
+          child: const Text('Split them'),
+        ),
+      ],
+    );
+  }
+}
+
+/// The organizer's queue of self-service house-move asks — TC-CLUB-003.
+/// Granting one moves the registration (the same field [saveHouses]'s rename
+/// path and [_bulkAutoAllocate] both write) and clears the request in one
+/// batch; declining just clears it, with no record kept — a request is a
+/// question, not a case file.
+class _HouseTransferRequestsQueue extends ConsumerWidget {
+  const _HouseTransferRequestsQueue({required this.competition});
+
+  final Competition competition;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final requestsAsync = ref.watch(
+      houseTransferRequestsProvider(
+        CompRef(competition.orgId, competition.id),
+      ),
+    );
+    final requests = requestsAsync.valueOrNull ?? const [];
+
+    if (requests.isEmpty) {
+      return const Text(
+        'Nobody has asked to move houses.',
+        style: TextStyle(fontSize: 12.5, color: Ps.muted),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '${requests.length} waiting on you',
+          style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700),
+        ),
+        for (final r in requests)
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            title: Text(r.displayName),
+            subtitle: Text(
+              '${r.fromHouse} → ${r.toHouse}'
+              '${r.note != null && r.note!.isNotEmpty ? ' · ${r.note}' : ''}',
+            ),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  tooltip: 'Decline',
+                  icon: const Icon(Icons.close, size: 20),
+                  onPressed: () => _decide(context, ref, r.uid, approve: false),
+                ),
+                IconButton(
+                  tooltip: 'Approve',
+                  icon: const Icon(Icons.check, size: 20),
+                  onPressed: () => _decide(context, ref, r.uid, approve: true),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  Future<void> _decide(
+    BuildContext context,
+    WidgetRef ref,
+    String uid, {
+    required bool approve,
+  }) async {
+    try {
+      final repo = ref.read(competitionRepositoryProvider);
+      if (approve) {
+        await repo.approveHouseTransferRequest(
+          orgId: competition.orgId,
+          compId: competition.id,
+          uid: uid,
+        );
+      } else {
+        await repo.cancelHouseTransferRequest(
+          orgId: competition.orgId,
+          compId: competition.id,
+          uid: uid,
+        );
+      }
+    } catch (e) {
+      if (context.mounted) showError(context, e);
+    }
   }
 }

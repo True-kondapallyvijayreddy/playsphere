@@ -12,6 +12,7 @@ import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/club_context_banner.dart';
 import '../../shared/identity.dart';
+import '../../shared/same_name.dart';
 import '../home/home_providers.dart';
 
 /// Raising a squad out of a club's members list.
@@ -148,6 +149,8 @@ class _CreateTeamScreenState extends ConsumerState<CreateTeamScreen> {
               : shortlist
                   .where((m) => m.displayName.toLowerCase().contains(query))
                   .toList();
+          final repeatedCandidateNames =
+              repeatedNames(candidates.map((m) => m.displayName));
 
           return ListView(
             padding: const EdgeInsets.all(16),
@@ -240,7 +243,15 @@ class _CreateTeamScreenState extends ConsumerState<CreateTeamScreen> {
                             photoUrl: m.photoUrl,
                             seed: m.uid,
                           ),
-                          title: Text(m.displayName),
+                          // Tagged where the name repeats. Picking eleven
+                          // people out of a roster with two identical rows is
+                          // a guess, and the wrong guess puts somebody else's
+                          // name on the team sheet — see `nameWithTag`.
+                          title: Text(nameWithTag(
+                            m.displayName,
+                            m.uid,
+                            repeatedCandidateNames,
+                          )),
                           subtitle: Text(m.role.label),
                           onChanged: (checked) => setState(() {
                             if (checked ?? false) {

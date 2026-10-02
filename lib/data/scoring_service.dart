@@ -13,6 +13,7 @@ import '../core/sync/sync_batch_planner.dart';
 import '../core/sync/sync_queue_entry.dart';
 import '../core/sync/uuid_v7.dart';
 import '../domain/cheer.dart';
+import '../domain/schedule/feeder_gate.dart';
 import '../domain/scoring/match_award.dart';
 import '../domain/scoring/scoring_plugin.dart';
 import '../domain/scoring/scoring_registry.dart';
@@ -392,16 +393,6 @@ class ScoringService {
       },
     );
 
-    // A knockout winner advances into the next round in the SAME batch as the
-    // result that produced them. Doing it afterwards would leave a window
-    // where the semi-final is decided but the final still reads "To be
-    // decided", and any failure in between would strand the bracket there
-    // permanently — which is exactly what happened before: the generator
-    // recorded where a winner should go and nothing ever read it. Shared
-    // with the offline queue's replay path (see [_replayFixtureGroup]) so a
-    // completing event that only lands during a reconnect advances the
-    // bracket exactly the same way one scored live does.
-    _maybeAdvanceWinner(batch, fixture, outcome, updated.winnerEntrantId);
 
     // This device has now spoken for sequence [nextSeq] on this fixture, and
     // the replay path must not write a projection that predates it. See
@@ -454,6 +445,8 @@ class ScoringService {
         if (outcome.isComplete) _maybeResolveQualifiers(fixture);
       }).catchError((Object error) => _report(_translateWriteFailure(error))),
     );
+    // The bracket moves on too — separately, see [_advanceBestEffort].
+    _advanceBestEffort(fixture, outcome, updated.winnerEntrantId);
 
     return updated;
   }
@@ -559,10 +552,6 @@ class ScoringService {
         'mvp': _awardFor(updated)?.toMap(),
       },
     );
-    // Same batch as the result, for the reason given at the [submit] call
-    // site: a bracket must never be left with a decided semi-final and a final
-    // that still reads "To be decided".
-    _maybeAdvanceWinner(batch, fixture, outcome, winnerEntrantId);
     _noteLocalHead(fixture, nextSeq);
 
     // Fire-and-forget, like every other write on the scoring path — awaiting
@@ -574,6 +563,7 @@ class ScoringService {
           .then<void>((_) => _maybeResolveQualifiers(fixture))
           .catchError((Object error) => _report(_translateWriteFailure(error))),
     );
+    _advanceBestEffort(fixture, outcome, winnerEntrantId);
 
     return updated;
   }
@@ -1125,6 +1115,14 @@ class ScoringService {
         'Use the scoring pad to record a normal result.',
       );
     }
+    // A walkover or an abandonment on a match whose feeder is under protest
+    // would publish a champion out of a result still being argued about. The
+    // one decision that must go through is marking THIS match disputed — a
+    // protest is how the argument gets settled, so it cannot be blocked by
+    // another one.
+    if (status != FixtureStatus.disputed) {
+      await assertFeedersSettled(fixture);
+    }
     final type = resultType ??
         switch (status) {
           FixtureStatus.walkover => MatchResultType.walkover,
@@ -1208,20 +1206,7 @@ class ScoringService {
         'resultType': type.wire,
         'winnerEntrantId': winnerEntrantId,
         'isDraw': false,
-        // Stored as a stable token, never as a translated phrase.
-        //
-        // This field is persisted and read back by every client, so writing
-        // "Walkover" here would freeze one scorer's language onto the document
-        // and show it to a Telugu spectator in English forever. The UI
-        // translates the token at render time — see `FixtureStatus` and the
-        // `result*` keys in lib/l10n.
-        'summary': switch (status) {
-          FixtureStatus.walkover ||
-          FixtureStatus.abandoned ||
-          FixtureStatus.disputed =>
-            status.wire,
-          _ => fixture.summary,
-        },
+        'summary': outcomeSummary(fixture, status),
         'resultNote': note,
         // Only where the match actually ENDED. A dispute freezes a result
         // pending a decision — it does not finish anything, and stamping a
@@ -1236,6 +1221,31 @@ class ScoringService {
       }),
     );
     if (status.isResulted) _maybeResolveQualifiers(fixture);
+  }
+
+  /// What `summary` holds once an official has ruled on [fixture].
+  ///
+  /// The score that was on the board, whenever there was one. A walkover
+  /// awarded at 21-15, 8-3 is still a match that reached 21-15, 8-3, and
+  /// replacing that with the word "walkover" threw away the one fact everyone
+  /// at the table will argue about afterwards. How it ended is `resultType`,
+  /// and lists join the two at render time — "21-15, 8-3 (W/O)", see
+  /// [Fixture.scoreLine]. Retirements and disqualifications always kept
+  /// theirs; this makes a walkover and an abandonment agree with them.
+  ///
+  /// Where nothing was played, and for a dispute — a freeze on a result, not
+  /// a result — it is a stable token, never a translated phrase: the field is
+  /// persisted and read by every client, so writing "Walkover" would show a
+  /// Telugu spectator one scorer's English forever. The UI translates it —
+  /// see `localizedSummary`.
+  static String outcomeSummary(Fixture fixture, FixtureStatus status) {
+    if (status == FixtureStatus.disputed) return status.wire;
+    final played = fixture.lastSeq > 0 && fixture.summaryIsScore;
+    if (played) return fixture.summary;
+    return switch (status) {
+      FixtureStatus.walkover || FixtureStatus.abandoned => status.wire,
+      _ => fixture.summary,
+    };
   }
 
   /// Withdraws an official's ruling and gives the match back to the pad.
@@ -1363,6 +1373,48 @@ class ScoringService {
       'This match was recorded as $what. Withdraw that decision first and '
       'the score continues from exactly where it stopped.',
     );
+  }
+
+  /// Refuses a result on a match whose feeder is still under protest.
+  ///
+  /// The reasoning is in [feederProtestBlock]; this is where it is enforced.
+  /// Unlike every other guard on this path it has to ask the server, because a
+  /// fixture does not know its own feeders — the draw writes the arrow forwards
+  /// (see [Fixture.feedsWinnerToFixtureId]) — so the question is two equality
+  /// queries against the competition's own fixtures.
+  ///
+  /// Only on the decision path, never per point. A protest is raised on a
+  /// match that has already finished, and the downstream match cannot be
+  /// finished until the ruling lands, so gating the result is enough; gating
+  /// every tap would put two queries behind every ball of a cricket innings.
+  ///
+  /// Reads from the cache first and falls back to it on any failure. An
+  /// organizer at a ground with no signal must still be able to award a
+  /// walkover, so an unanswerable question is deliberately not an obstacle —
+  /// the guard is here to stop a mistake nobody noticed, not to hold up a
+  /// match day.
+  Future<void> assertFeedersSettled(Fixture fixture) async {
+    if (fixture.bracket == Bracket.group) return;
+    final feeders = <String, Fixture>{};
+    for (final field in const [
+      'feedsWinnerToFixtureId',
+      'feedsLoserToFixtureId',
+    ]) {
+      try {
+        final snap = await Refs.fixtures(fixture.orgId, fixture.compId)
+            .where(field, isEqualTo: fixture.id)
+            .get();
+        for (final doc in snap.docs) {
+          final f = Fixture.fromDoc(doc);
+          feeders[f.id] = f;
+        }
+      } catch (error) {
+        debugPrint('[PlaySphere] feeder check skipped: $error');
+        return;
+      }
+    }
+    final block = feederProtestBlock(fixture, feeders.values);
+    if (block != null) throw ValidationException(block);
   }
 
   /// Refuses a write from anybody but the current pen holder.
@@ -1796,8 +1848,6 @@ class ScoringService {
             )?.toMap(),
         },
       );
-      _maybeAdvanceWinner(batch, fixture, outcome, winnerEntrantId);
-
       // Bounded, because an awaited Firestore commit does not settle until
       // the server acknowledges it and the connection can drop between the
       // reads above and this line. An unbounded await here is what used to
@@ -1812,6 +1862,7 @@ class ScoringService {
       // document id is its sequence number, so a second delivery of the same
       // action is a no-op rather than a duplicate.
       await batch.commit().timeout(_commitTimeout);
+      _advanceBestEffort(fixture, outcome, winnerEntrantId);
 
       // No rating call here either — see the note at the [submit] call site.
       // Settlement is `onMatchSettled`'s, and it fires off the same status
@@ -1927,20 +1978,25 @@ class ScoringService {
       };
 
   /// Advances a knockout winner into the next round's fixture — and, in a
-  /// double-elimination draw, drops the loser into the losers bracket — in the
-  /// SAME batch as the result that produced them.
+  /// double-elimination draw, drops the loser into the losers bracket.
   ///
-  /// Factored out of [submit] so [_replayFixtureGroup] applies the identical
-  /// rule to a match completed by a queued event that only lands during a
-  /// reconnect — see the comment at the [submit] call site for why this must
-  /// never happen in a second, separate write.
+  /// ## Why its own write, and why nobody is told when it fails
   ///
-  /// The loser leg exists because losing a winners-bracket match is not an
-  /// elimination: it is a transfer. The draw generator has always wired that
-  /// transfer and nothing ever read it, so a double-elimination tournament
-  /// wrote a full losers bracket that no player could ever reach.
-  void _maybeAdvanceWinner(
-    WriteBatch batch,
+  /// It used to ride in the SAME batch as the winning point. That write lands
+  /// on a different fixture, and `firestore.rules` admits it (branch (d)) only
+  /// for somebody holding the club's scorer rank — not for a season-panel
+  /// umpire from another club, nor for players scoring their own individual
+  /// match, both of whom are allowed to score the match itself. For them the
+  /// rule refused the whole batch, and the winning point was lost with it.
+  ///
+  /// So the point commits on its own and this follows as a separate write,
+  /// applied to the local cache at once so the organizer's own bracket moves
+  /// immediately, offline included. When the rules refuse it, the
+  /// `onFixtureDecidedAdvance` Cloud Function puts the winner in the next
+  /// round from the result itself — which is also what corrects a slot after
+  /// a reopened match is finished the other way — so the refusal is not an
+  /// error anybody can act on, and is not reported.
+  void _advanceBestEffort(
     Fixture fixture,
     MatchOutcome outcome,
     String? winnerEntrantId,
@@ -1948,6 +2004,8 @@ class ScoringService {
     if (!outcome.isComplete || outcome.isDraw || winnerEntrantId == null) {
       return;
     }
+    final batch = Refs.db.batch();
+    var writes = 0;
 
     void feed(String? targetFixtureId, String? targetSlot, String entrantId) {
       if (targetFixtureId == null || targetSlot == null) return;
@@ -1956,9 +2014,7 @@ class ScoringService {
           ? fixture.entrantAName
           : fixture.entrantBName;
       // The account travels with the id. In an individual draw this is the
-      // only record that the promoted player is in the next round — there is
-      // no line-up on a knockout fixture and never will be — so without it a
-      // semi-finalist's own match list stops at the quarter-final.
+      // only record that the promoted player is in the next round.
       final entrantUid = entrantId == fixture.entrantAId
           ? fixture.entrantAUid
           : fixture.entrantBUid;
@@ -1968,12 +2024,11 @@ class ScoringService {
           'entrant${slot}Id': entrantId,
           'entrant${slot}Name': name,
           'entrant${slot}Uid': entrantUid,
-          // Extends the target's stored summary rather than rewriting it: the
-          // other half of that fixture may already be decided.
           if (entrantUid != null)
             'playerUids': FieldValue.arrayUnion([entrantUid]),
         },
       );
+      writes++;
     }
 
     feed(
@@ -1981,10 +2036,6 @@ class ScoringService {
       fixture.feedsWinnerToSlot,
       winnerEntrantId,
     );
-
-    // Whoever was not the winner. Derived rather than passed in, because the
-    // outcome only ever names a winner and a two-sided fixture makes the
-    // other side unambiguous.
     final loserEntrantId = winnerEntrantId == fixture.entrantAId
         ? fixture.entrantBId
         : fixture.entrantAId;
@@ -1995,6 +2046,10 @@ class ScoringService {
         loserEntrantId,
       );
     }
+    if (writes == 0) return;
+    unawaited(batch.commit().catchError((Object error) {
+      debugPrint('[PlaySphere] advancement left to the server: $error');
+    }));
   }
 
   /// Generates the durable idempotency key for one event: a fresh UUIDv7,

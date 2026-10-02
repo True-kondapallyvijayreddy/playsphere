@@ -76,17 +76,71 @@ class Fs {
   }
 }
 
+/// The instant a deadline picked as a DAY actually expires: the end of that
+/// day, not its beginning.
+///
+/// ## Why this exists
+///
+/// Every deadline in the product is chosen from a date picker, which returns
+/// midnight. Midnight is the *start* of the chosen day, so a season whose
+/// entries closed "19 Sep" stopped taking entries at 00:00 on the 19th — and
+/// on the first morning of the season the home screen said "Active seasons 0"
+/// while both seasons were still openly advertising Register buttons. The day
+/// before, it had correctly said 2.
+///
+/// Read-side rather than write-side, deliberately, and for the same reason
+/// `Competition.displayStatus` is: it repairs every season already in the
+/// database, including the ones running right now, with no migration and no
+/// scheduled job. The creation path already stores 23:59:59 (see
+/// `SeasonBlueprint.entriesCloseAt`), and a value with a real time on it is
+/// passed through untouched — an organizer who says "entries close at 6pm"
+/// means 6pm.
+DateTime? endOfDeadlineDay(DateTime? deadline) {
+  if (deadline == null) return null;
+  final atMidnight = deadline.hour == 0 &&
+      deadline.minute == 0 &&
+      deadline.second == 0 &&
+      deadline.millisecond == 0 &&
+      deadline.microsecond == 0;
+  if (!atMidnight) return deadline;
+  return DateTime(
+    deadline.year,
+    deadline.month,
+    deadline.day,
+    23,
+    59,
+    59,
+    999,
+  );
+}
+
 /// Age is computed from date of birth against a fixed reference date, never
 /// against "now". Age-category eligibility must be stable for the whole
 /// season: a player who is U-17 on the cut-off date stays U-17 even if they
 /// have a birthday mid-tournament. Every sports body in the world works this
 /// way, and computing against `DateTime.now()` silently disqualifies people
 /// halfway through a competition.
+///
+/// Both dates are read as India Standard Time calendar days before the
+/// year/month/day comparison, regardless of the device's own timezone. A
+/// birth or cut-off instant stored near midnight would otherwise land on the
+/// wrong calendar day for a device (or a UTC-clocked server) not set to IST —
+/// this product's whole userbase reads age bounds against the Indian date.
 int ageOnDate(DateTime dateOfBirth, DateTime referenceDate) {
-  var age = referenceDate.year - dateOfBirth.year;
-  final hadBirthday = referenceDate.month > dateOfBirth.month ||
-      (referenceDate.month == dateOfBirth.month &&
-          referenceDate.day >= dateOfBirth.day);
+  final dob = _istCalendarDay(dateOfBirth);
+  final ref = _istCalendarDay(referenceDate);
+  var age = ref.year - dob.year;
+  final hadBirthday =
+      ref.month > dob.month || (ref.month == dob.month && ref.day >= dob.day);
   if (!hadBirthday) age -= 1;
   return age;
+}
+
+/// India observes no daylight-saving time, so a constant UTC+5:30 offset is
+/// correct year-round without needing a full timezone database.
+const _istOffset = Duration(hours: 5, minutes: 30);
+
+DateTime _istCalendarDay(DateTime dt) {
+  final ist = dt.toUtc().add(_istOffset);
+  return DateTime(ist.year, ist.month, ist.day);
 }

@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'firestore_codec.dart';
+import 'tournament.dart';
 
 /// One club asking another to bring a side to its tournament
 /// (`tournamentInvites/{inviteId}`).
@@ -38,6 +39,9 @@ class TournamentInvite {
     required this.toOrgName,
     required this.status,
     this.message,
+    this.kind = SeasonKind.season,
+    this.sportNames = const [],
+    this.place,
     this.startDate,
     this.endDate,
     this.invitedBy,
@@ -73,7 +77,24 @@ class TournamentInvite {
 
   /// The line the host writes to this club. Optional, and usually the part
   /// that gets a reply: "bring your U-14s, we are short two teams".
+  ///
+  /// Since the invitations space, this is the whole letter — "Dear sports
+  /// enthusiasts, we from … are conducting …" — composed by
+  /// `InvitationLetter` and edited by the host. Older invitations carry only
+  /// the one line, or nothing; [letter] covers both.
   final String? message;
+
+  /// Whether the host is running a season or a one-sport tournament. Copied
+  /// at invitation time for the reason [tournamentName] is.
+  final SeasonKind kind;
+
+  /// The sports on offer, copied at invitation time so the invited club can
+  /// see "Cricket, Table Tennis" without reading across the tenant boundary.
+  final List<String> sportNames;
+
+  /// Where it is played — "Adibatla, Hyderabad". Free text, as the host wrote
+  /// it on the invitation.
+  final String? place;
 
   /// Copied off the tournament at the moment of invitation, so the invited
   /// club sees the dates in the notification and in the list without reading
@@ -84,6 +105,49 @@ class TournamentInvite {
   final String? invitedBy;
   final DateTime? createdAt;
   final DateTime? respondedAt;
+
+  // --- What one invitation may carry --------------------------------------
+  //
+  // The same numbers as `match /tournamentInvites/{inviteId}` in
+  // firestore.rules. A send is one batch across every picked club, so a field
+  // one character over used to refuse the WHOLE send with a bare permission
+  // error. The composer's fields stop at these, the prefills are fitted to
+  // them, and [fitted] shapes every value before it is written.
+
+  /// The letter.
+  static const int maxMessageLength = 2000;
+
+  /// "Where".
+  static const int maxPlaceLength = 200;
+
+  /// The sports listed on the invitation.
+  static const int maxSportNames = 30;
+
+  /// [text] trimmed and shortened to [max] characters, cut at a word where
+  /// one is near and marked with an ellipsis. Null for blank text.
+  static String? fit(String? text, int max) {
+    final t = text?.trim().replaceAll(RegExp(r'[ \t]+'), ' ');
+    if (t == null || t.isEmpty) return null;
+    if (t.length <= max) return t;
+    final cut = t.substring(0, max - 1);
+    final space = cut.lastIndexOf(' ');
+    final head = space > max * 0.6 ? cut.substring(0, space) : cut;
+    return '${head.trimRight()}…';
+  }
+
+  /// The sports list as it may be stored: blanks and repeats dropped, and at
+  /// most [maxSportNames]. Past that, the last entry says how many more there
+  /// are, so the invitation still says "and 6 more" rather than going quiet.
+  static List<String> fitSportNames(Iterable<String> names) {
+    final seen = <String>{};
+    final clean = [
+      for (final n in names)
+        if (n.trim().isNotEmpty && seen.add(n.trim().toLowerCase())) n.trim(),
+    ];
+    if (clean.length <= maxSportNames) return clean;
+    final shown = clean.take(maxSportNames - 1).toList();
+    return [...shown, 'and ${clean.length - shown.length} more'];
+  }
 
   /// The document id for one host/tournament/guest triple.
   ///
@@ -132,6 +196,9 @@ class TournamentInvite {
       toOrgName: Fs.str(d['toOrgName'], 'A club'),
       status: Fs.str(d['status'], 'pending'),
       message: Fs.strOrNull(d['message']),
+      kind: SeasonKind.fromWire(Fs.strOrNull(d['kind'])),
+      sportNames: Fs.strList(d['sportNames']),
+      place: Fs.strOrNull(d['place']),
       startDate: Fs.dateOrNull(d['startDate']),
       endDate: Fs.dateOrNull(d['endDate']),
       invitedBy: Fs.strOrNull(d['invitedBy']),
@@ -149,6 +216,9 @@ class TournamentInvite {
         'toOrgName': toOrgName,
         'status': status,
         'message': message,
+        'kind': kind.wire,
+        'sportNames': sportNames,
+        'place': place,
         'startDate': Fs.ts(startDate),
         'endDate': Fs.ts(endDate),
         'invitedBy': invitedBy,

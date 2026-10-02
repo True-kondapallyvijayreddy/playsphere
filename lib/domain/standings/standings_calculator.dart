@@ -80,15 +80,26 @@ class StandingsCalculator {
     // `isDraft` is the right signal rather than a proxy for one: it is already
     // "what the rest of the app reads to leave placeholders out of anything it
     // counts" (see `CompetitionRepository.generateDraftSchedule`).
+    //
+    // A PUBLISHED schedule of open slots is the exception that proves it:
+    // publishing clears `isDraft` but its matches still name `draft_` slots,
+    // and dropping those left every group card of such an event blank. The
+    // slot id is itself the placeholder signal, so it counts on any fixture.
     for (final f in fixtures) {
-      if (!f.isDraft) continue;
-      if (f.entrantAId.isNotEmpty && !rows.containsKey(f.entrantAId)) {
+      final aSlot = Entrant.isPlaceholderId(f.entrantAId);
+      final bSlot = Entrant.isPlaceholderId(f.entrantBId);
+      if (!f.isDraft && !aSlot && !bSlot) continue;
+      if ((f.isDraft || aSlot) &&
+          f.entrantAId.isNotEmpty &&
+          !rows.containsKey(f.entrantAId)) {
         rows[f.entrantAId] = _Row(
           entrantId: f.entrantAId,
           displayName: f.entrantAName.isNotEmpty ? f.entrantAName : f.entrantAId,
         );
       }
-      if (f.entrantBId.isNotEmpty && !rows.containsKey(f.entrantBId)) {
+      if ((f.isDraft || bSlot) &&
+          f.entrantBId.isNotEmpty &&
+          !rows.containsKey(f.entrantBId)) {
         rows[f.entrantBId] = _Row(
           entrantId: f.entrantBId,
           displayName: f.entrantBName.isNotEmpty ? f.entrantBName : f.entrantBId,
@@ -493,12 +504,16 @@ class StandingsCalculator {
         if (f.entrantAId.isNotEmpty) {
           ids.add(f.entrantAId);
           names[f.entrantAId] = f.entrantAName;
-          if (f.isDraft) placeholders.add(f.entrantAId);
+          if (f.isDraft || Entrant.isPlaceholderId(f.entrantAId)) {
+            placeholders.add(f.entrantAId);
+          }
         }
         if (f.entrantBId.isNotEmpty) {
           ids.add(f.entrantBId);
           names[f.entrantBId] = f.entrantBName;
-          if (f.isDraft) placeholders.add(f.entrantBId);
+          if (f.isDraft || Entrant.isPlaceholderId(f.entrantBId)) {
+            placeholders.add(f.entrantBId);
+          }
         }
       }
       tables[entry.key] = compute(

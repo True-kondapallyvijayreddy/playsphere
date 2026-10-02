@@ -10,6 +10,7 @@ import '../../core/providers.dart';
 import '../../domain/draw/season_capacity.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/ui_kit.dart';
+import 'widgets/season_organizer_gate.dart';
 
 /// The step where an organizer describes the *real world*, and the app does
 /// the timetabling.
@@ -42,14 +43,21 @@ class VenuePlannerScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final key = (orgId: orgId, tournamentId: tournamentId);
     final tournamentAsync = ref.watch(tournamentProvider(key));
-    final canManage = ref
-        .watch(myCapabilitiesProvider(orgId))
-        .contains(Capability.manageCompetitions);
+    // The organizers, and whoever holds the club's grounds brief — the same
+    // two `firestore.rules` admits to `venuePlans`.
+    final caps = ref.watch(myCapabilitiesProvider(orgId));
+    final canManage = caps.contains(Capability.manageCompetitions) ||
+        caps.contains(Capability.manageVenues);
 
     return AppScaffold(
       orgId: orgId,
       title: 'Venue Planner',
-      body: AsyncView(
+      body: SeasonOrganizerGate(
+        orgId: orgId,
+        tournamentId: tournamentId,
+        what: "the season's grounds and playing days",
+        alsoAllow: Capability.manageVenues,
+        child: AsyncView(
         value: tournamentAsync,
         builder: (tournament) {
           if (tournament == null) {
@@ -98,7 +106,9 @@ class VenuePlannerScreen extends ConsumerWidget {
                 children: [
                   _SeasonRulesCard(
                     tournament: tournament,
-                    canManage: canManage,
+                    // Rest and travel are written onto the season itself,
+                    // which is the organizers' alone — not the grounds brief.
+                    canManage: caps.contains(Capability.manageCompetitions),
                     lines: lines.values.toList(),
                   ),
                   const SizedBox(height: 16),
@@ -119,6 +129,7 @@ class VenuePlannerScreen extends ConsumerWidget {
             },
           );
         },
+        ),
       ),
     );
   }
@@ -174,6 +185,7 @@ class _SeasonRulesCard extends ConsumerWidget {
                           .read(tournamentRepositoryProvider)
                           .updateTournament(
                             tournament.copyWith(restGapMinutes: v),
+                            before: tournament,
                           ),
                     )
                 : null,
@@ -196,6 +208,7 @@ class _SeasonRulesCard extends ConsumerWidget {
                           .read(tournamentRepositoryProvider)
                           .updateTournament(
                             tournament.copyWith(venueTransitionMinutes: v),
+                            before: tournament,
                           ),
                     )
                 : null,
@@ -514,7 +527,9 @@ class _VenueCard extends ConsumerWidget {
                           'schedule uses whichever is stricter — this, or what '
                           'the sessions physically hold.',
                       initial: plan.maxMatchesPerCourtPerDay,
-                      options: const [0, 1, 2, 3, 4, 5, 6, 8, 10, 12],
+                      options: const [
+                        0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 30, 40, 50,
+                      ],
                       zeroLabel: 'No limit',
                       unit: '',
                     );

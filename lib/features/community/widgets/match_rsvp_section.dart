@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/models/announcement.dart';
-import '../../../core/models/organization.dart';
 import '../../../core/permissions/capability.dart';
 import '../../../core/providers.dart';
 import '../../../domain/scoring/scoring_registry.dart';
@@ -47,12 +46,12 @@ class _MatchRsvpSectionState extends ConsumerState<MatchRsvpSection> {
     // action uses: offering the button to somebody who cannot create one is
     // offering them a permission error.
     final organizingOrgIds = <String>[
-      for (final m in ref.watch(myActiveMembershipsProvider).valueOrNull ??
-          const <Membership>[])
-        if (ref.watch(myCapabilitiesProvider(m.orgId)).any((c) =>
+      // The selected club only — see `scopedOrgIdsProvider`.
+      for (final id in ref.watch(scopedOrgIdsProvider))
+        if (ref.watch(myCapabilitiesProvider(id)).any((c) =>
             c == Capability.manageCompetitions ||
             c == Capability.manageOrganization))
-          m.orgId,
+          id,
     ];
 
     // Nothing to show and nothing to create: the section does not exist. An

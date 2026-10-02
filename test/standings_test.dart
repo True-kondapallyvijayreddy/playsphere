@@ -298,5 +298,17 @@ void main() {
         reason: '"Withdrawn" is on a played fixture and is not an entrant',
       );
     });
+
+    test('a PUBLISHED schedule of open slots still has rows', () {
+      // Publishing clears `isDraft` but the matches keep naming `draft_`
+      // slots. Dropping them blanked every group card of such an event.
+      final table = calc.compute(
+        competition: competition(),
+        entrants: const [],
+        fixtures: [played('draft_0', 'draft_1', 2, 1)],
+      );
+      expect(table.map((r) => r.entrantId), ['draft_0', 'draft_1']);
+      expect(table.first.points, 3);
+    });
   });
 }

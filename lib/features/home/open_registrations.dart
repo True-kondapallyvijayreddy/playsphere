@@ -258,7 +258,8 @@ final openRegistrationsPartialProvider =
 /// `GlobalEventsScreen`.
 final invitedSeasonEventsProvider = Provider<List<Competition>>((ref) {
   final events = <String, Competition>{};
-  for (final orgId in ref.watch(myActiveOrgIdsProvider)) {
+  // The selected club's invitations only — see `scopedOrgIdsProvider`.
+  for (final orgId in ref.watch(scopedOrgIdsProvider)) {
     final invites =
         ref.watch(liveIncomingTournamentInvitesProvider(orgId)).valueOrNull ??
             const <TournamentInvite>[];
@@ -295,6 +296,19 @@ final homeCompetitionPoolProvider = Provider<List<Competition>>((ref) {
     pool['${c.orgId}/${c.id}'] = c;
   }
   return pool.values.toList();
+});
+
+/// Whether the pool behind every count and every row is still arriving.
+///
+/// An empty list means two completely different things — "nothing is open" and
+/// "we have not finished asking" — and every screen here was rendering the
+/// first for both. On a slow connection that put "Nothing open to enter" and
+/// "You have entered nothing" in front of people who had entered something,
+/// for as long as the clubs took to load. A screen that can say "still
+/// loading" needs this to say it with.
+final homePoolLoadingProvider = Provider<bool>((ref) {
+  final pool = ref.watch(openRegistrationsPartialProvider);
+  return pool.isLoading && ref.watch(homeCompetitionPoolProvider).isEmpty;
 });
 
 // ---------------------------------------------------------------------------
@@ -338,6 +352,9 @@ List<OpenRegistration> _rowsFrom(
     String title;
     DateTime? createdAt;
     String route;
+    // A one-sport tournament is stored under a season document too — see
+    // `SeasonKind` — and is still a tournament to the person looking for one.
+    var isTournament = tournamentId == null;
 
     if (tournamentId == null) {
       title = first.name;
@@ -352,6 +369,7 @@ List<OpenRegistration> _rowsFrom(
           )
           .valueOrNull;
       if (season != null && !seasonQualifies(season)) continue;
+      isTournament = season?.isSingleSportTournament ?? false;
 
       title = season?.name ??
           // "Sports Week 2026 — Cricket" back to "Sports Week 2026", for the
@@ -367,7 +385,7 @@ List<OpenRegistration> _rowsFrom(
 
     rows.add(OpenRegistration(
       key: entry.key,
-      kind: tournamentId == null
+      kind: isTournament
           ? OpenRegistrationKind.tournament
           : OpenRegistrationKind.season,
       orgId: first.orgId,
@@ -475,6 +493,10 @@ final profileEntryRefsProvider = Provider<Set<String>>((ref) {
   for (final entries in [
     ref.watch(userEntriesProvider(me.uid)).valueOrNull,
     ref.watch(userTeamEntriesProvider(me.uid)).valueOrNull,
+    // The entries this profile FILED — a club's side entered by its owner,
+    // who is the manager rather than a player. See
+    // [userSubmittedEntriesProvider].
+    ref.watch(userSubmittedEntriesProvider(me.uid)).valueOrNull,
   ]) {
     for (final entry in entries ?? const <MyEntry>[]) {
       switch (entry.registration.status) {
@@ -538,7 +560,13 @@ final registeredRegistrationsProvider = Provider<List<OpenRegistration>>((ref) {
 
   return _rowsFrom(
     ref,
-    ref.watch(_enteredCompetitionsProvider),
+    // The selected club's entries, and entries at clubs this person is not a
+    // member of — never another of their own clubs. See [inClubScopeProvider].
+    [
+      for (final c in ref.watch(_enteredCompetitionsProvider))
+        if (ref.watch(inClubScopeProvider(c.orgId)) && _hostExists(ref, c.orgId))
+          c,
+    ],
     qualifies: (events) => events.any(
       (c) =>
           entered.contains('${c.orgId}/${c.id}') &&
@@ -550,6 +578,18 @@ final registeredRegistrationsProvider = Provider<List<OpenRegistration>>((ref) {
         season.status != TournamentStatus.completed,
   );
 });
+
+/// False only once [orgId] has loaded and is gone.
+///
+/// Entries outlive the club that ran them: a deleted test club leaves its
+/// registrations behind, and because the person is no longer a member of it
+/// [inClubScopeProvider] let them through on every chip — 25 nameless "?"
+/// rows on one account in test run TC-04. Still loading counts as present, so
+/// a real row does not blink out and back in.
+bool _hostExists(Ref ref, String orgId) {
+  final org = ref.watch(organizationProvider(orgId));
+  return !(org.hasValue && org.value == null);
+}
 
 /// One button's worth: a lens, narrowed to a kind.
 ///
@@ -579,8 +619,11 @@ final entryListProvider =
 bool _stillTakingEntries(Tournament season) {
   if (season.isSuspended) return false;
   if (season.status == TournamentStatus.cancelled) return false;
-  final deadline = season.entryDeadline;
-  return deadline == null || !DateTime.now().isAfter(deadline);
+  // Through the model, so a deadline picked as a day closes at the END of that
+  // day. Comparing against the raw field is what made the home screen say
+  // "Active seasons 0" on the first morning of two seasons whose entries were
+  // still open — see `endOfDeadlineDay`.
+  return !season.entryDeadlinePassed();
 }
 
 /// Whether the profile in use could enter any one of these draws.

@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 
 import '../../../core/l10n/result_labels.dart';
 import '../../../core/models/fixture.dart';
+import '../../../domain/schedule/match_phase.dart';
 import '../../../domain/schedule/schedule_view_model.dart';
 import '../../../shared/ui_kit.dart';
 import 'schedule_export.dart';
@@ -157,16 +158,21 @@ class _ScheduleBoardState extends State<ScheduleBoard> {
     return !_startsCollapsed || hasMine;
   }
 
-  bool _matches(Fixture f, ScheduleLens lens, DateTime now) => switch (lens) {
-        ScheduleLens.all => true,
-        ScheduleLens.mine => _isMine(f),
-        // Activity-aware rather than the raw status field, exactly as
-        // `MyMatchesScreen` and `LiveScoreCard` are: a match abandoned by its
-        // scorer on Tuesday is not live on Friday.
-        ScheduleLens.live => f.isLiveAt(now),
-        ScheduleLens.upcoming => !f.status.isResulted && !f.isLiveAt(now),
-        ScheduleLens.results => f.status.isResulted,
-      };
+  bool _matches(Fixture f, ScheduleLens lens, DateTime now) {
+    // Activity-aware rather than the raw status field, exactly as
+    // `MyMatchesScreen` and `LiveScoreCard` are: a match abandoned by its
+    // scorer on Tuesday is not live on Friday. [MatchPhase] owns that call.
+    final phase = MatchPhase.of(f, now);
+    return switch (lens) {
+      ScheduleLens.all => true,
+      ScheduleLens.mine => _isMine(f),
+      // A paused scoreboard is still a match somebody has to finish, so it
+      // sits with the live ones rather than vanishing from both lists.
+      ScheduleLens.live => phase.inProgress,
+      ScheduleLens.upcoming => phase.isAhead,
+      ScheduleLens.results => phase.isDone,
+    };
+  }
 
   String _sectionKey(Fixture f) {
     if (widget.byDay) {
@@ -241,9 +247,8 @@ class _ScheduleBoardState extends State<ScheduleBoard> {
         ],
         const SizedBox(height: 8),
         _SummaryLine(
-          total: all.length,
+          tally: MatchTally.of(all, now),
           mine: all.where(_isMine).length,
-          played: all.where((f) => f.status.isResulted).length,
         ),
         const SizedBox(height: 10),
         _LensChips(
@@ -311,49 +316,51 @@ class _ScheduleBoardState extends State<ScheduleBoard> {
 
 }
 
-/// "96 matches · 12 yours · 40 played".
+/// "96 matches · 12 yours · 40 played · 2 live · 54 to play · 3 late".
+///
+/// Every figure an organizer counts on match day, from the same [MatchTally]
+/// the season page uses, so the two cannot report different totals.
 class _SummaryLine extends StatelessWidget {
-  const _SummaryLine({
-    required this.total,
-    required this.mine,
-    required this.played,
-  });
+  const _SummaryLine({required this.tally, required this.mine});
 
-  final int total;
+  final MatchTally tally;
   final int mine;
-  final int played;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final base = theme.textTheme.bodySmall;
-    // One wrapping [Text] rather than a [Row] of three. The row could not
-    // wrap, so "96 matches · 12 yours · 40 played" overflowed the right edge
-    // of a 360pt phone the moment any of the numbers reached three digits.
+    final t = tally;
+    TextSpan dot() =>
+        TextSpan(text: '  ·  ', style: base?.copyWith(color: Ps.faint));
+    TextSpan part(String text, {Color color = Ps.muted, bool bold = false}) =>
+        TextSpan(
+          text: text,
+          style: base?.copyWith(
+            color: color,
+            fontWeight: bold ? FontWeight.w700 : null,
+          ),
+        );
+
+    // One wrapping [Text] rather than a [Row]. The row could not wrap, so the
+    // line overflowed the right edge of a 360pt phone the moment any of the
+    // numbers reached three digits.
     return Text.rich(
       TextSpan(
         children: [
-          TextSpan(
-            text: '$total ${total == 1 ? 'match' : 'matches'}',
-            style: base?.copyWith(color: Ps.muted),
-          ),
-          if (mine > 0) ...[
-            TextSpan(text: '  ·  ', style: base?.copyWith(color: Ps.faint)),
-            TextSpan(
-              text: '$mine yours',
-              style: base?.copyWith(
-                color: Ps.primary,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
+          part('${t.total} ${t.total == 1 ? 'match' : 'matches'}'),
+          if (mine > 0) ...[dot(), part('$mine yours', color: Ps.primary, bold: true)],
+          if (t.played > 0) ...[dot(), part('${t.played} played')],
+          if (t.inProgress > 0) ...[
+            dot(),
+            part('${t.inProgress} on now', color: Ps.live, bold: true),
           ],
-          if (played > 0) ...[
-            TextSpan(text: '  ·  ', style: base?.copyWith(color: Ps.faint)),
-            TextSpan(
-              text: '$played played',
-              style: base?.copyWith(color: Ps.muted),
-            ),
+          if (t.ahead > 0) ...[dot(), part('${t.ahead} to play')],
+          if (t.overdue > 0) ...[
+            dot(),
+            part('${t.overdue} late', color: MatchRow.lateColor, bold: true),
           ],
+          if (t.halted > 0) ...[dot(), part('${t.halted} stopped')],
         ],
       ),
     );
@@ -558,6 +565,20 @@ class _Section extends StatelessWidget {
 /// Public because the same row is what a season's schedule page and the
 /// public spectator page want; there is no second way to draw a fixture in a
 /// list worth maintaining.
+///
+/// ## Reading a sheet at a glance
+///
+/// An organizer scanning forty rows is asking one question of each — is it
+/// done, is it on, or is it still to come — and the row answers it before a
+/// word is read, from [MatchPhase]:
+///
+/// - **Live** — a red edge and wash, LIVE and the running score.
+/// - **Paused** — an amber edge, PAUSED and the score where it stopped.
+/// - **Late** — the start time in amber and a LATE tag: the row to chase.
+/// - **Played** — greyed back, a tick, the final score (marked "(R)" and so
+///   on where a ruling ended it), and the winner in bold.
+/// - **Stopped** — abandoned or disputed, said in words.
+/// - **Upcoming** — plain: the time is the information.
 class MatchRow extends StatelessWidget {
   const MatchRow({
     super.key,
@@ -572,27 +593,58 @@ class MatchRow extends StatelessWidget {
   final VoidCallback? onTap;
   final List<ScheduleAction> actions;
 
+  /// Amber for "needs somebody": a late start or a scoreboard gone quiet.
+  static const Color lateColor = Color(0xFFD97706);
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final f = fixture;
-    final now = DateTime.now();
-    final isLive = f.isLiveAt(now);
+    final phase = MatchPhase.of(f, DateTime.now());
     final hasTime = ScheduleFormat.hasTime(f);
     final court = ScheduleFormat.court(f);
+
+    // The edge says the phase where there is one worth shouting about, and
+    // "ours" otherwise — a live match of your own team is live first.
+    final Color? edge = switch (phase) {
+      MatchPhase.live => Ps.live,
+      MatchPhase.paused => lateColor,
+      _ => mine ? Ps.primary : null,
+    };
+    final Color background = switch (phase) {
+      MatchPhase.live => Ps.live.withValues(alpha: 0.06),
+      _ when mine => Ps.primary.withValues(alpha: 0.07),
+      MatchPhase.finished || MatchPhase.halted => Ps.canvas,
+      _ => Ps.surface,
+    };
+    final Color border = switch (phase) {
+      MatchPhase.live => Ps.live.withValues(alpha: 0.45),
+      MatchPhase.paused => lateColor.withValues(alpha: 0.45),
+      _ => mine ? Ps.primary.withValues(alpha: 0.45) : Ps.border,
+    };
+    final done = phase.isDone;
+    final winner = f.winnerEntrantId;
+    final aWon = phase == MatchPhase.finished && winner == f.entrantAId;
+    final bWon = phase == MatchPhase.finished && winner == f.entrantBId;
+    final nameStyle = theme.textTheme.bodyMedium?.copyWith(
+      fontWeight: mine ? FontWeight.w700 : FontWeight.w500,
+      color: done ? Ps.muted : Ps.ink,
+    );
+    final winnerStyle = nameStyle?.copyWith(
+      fontWeight: FontWeight.w800,
+      color: Ps.ink,
+    );
 
     return Container(
       margin: const EdgeInsets.only(bottom: 6),
       decoration: BoxDecoration(
-        color: mine ? Ps.primary.withValues(alpha: 0.07) : Ps.surface,
+        color: background,
         borderRadius: BorderRadius.circular(Ps.radiusSm),
-        border: Border.all(
-          color: mine ? Ps.primary.withValues(alpha: 0.45) : Ps.border,
-        ),
+        border: Border.all(color: border),
       ),
       clipBehavior: Clip.antiAlias,
       // A [Stack] rather than a [Row] with an [IntrinsicHeight] around it.
-      // The green edge has to run the full height of a row whose height is
+      // The coloured edge has to run the full height of a row whose height is
       // set by its own text, and IntrinsicHeight answers that by asking a
       // Row full of Expanded children for its intrinsic width — which it
       // cannot give, and which laid the row out against a nonsense width and
@@ -600,20 +652,20 @@ class MatchRow extends StatelessWidget {
       // pass at all, and costs one less layout of every row in the list.
       child: Stack(
         children: [
-          if (mine)
-            const Positioned(
+          if (edge != null)
+            Positioned(
               left: 0,
               top: 0,
               bottom: 0,
               width: 4,
               // Wide enough to find by eye down a long list, which a tint
               // alone is not on a sunlit phone.
-              child: ColoredBox(color: Ps.primary),
+              child: ColoredBox(color: edge),
             ),
           InkWell(
             onTap: onTap,
             child: Padding(
-              padding: EdgeInsets.fromLTRB(mine ? 14 : 10, 8, 4, 8),
+              padding: EdgeInsets.fromLTRB(edge != null ? 14 : 10, 8, 4, 8),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
@@ -631,7 +683,13 @@ class MatchRow extends StatelessWidget {
                           overflow: TextOverflow.clip,
                           style: theme.textTheme.labelMedium?.copyWith(
                             fontWeight: FontWeight.w700,
-                            color: hasTime ? Ps.ink : Ps.faint,
+                            color: !hasTime
+                                ? Ps.faint
+                                : phase == MatchPhase.overdue
+                                    ? lateColor
+                                    : done
+                                        ? Ps.muted
+                                        : Ps.ink,
                           ),
                         ),
                         if (hasTime)
@@ -651,14 +709,22 @@ class MatchRow extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(
-                          '${f.displayNameA()}  v  ${f.displayNameB()}',
+                        Text.rich(
+                          TextSpan(
+                            children: [
+                              TextSpan(
+                                text: f.displayNameA(),
+                                style: aWon ? winnerStyle : nameStyle,
+                              ),
+                              TextSpan(text: '  v  ', style: nameStyle),
+                              TextSpan(
+                                text: f.displayNameB(),
+                                style: bWon ? winnerStyle : nameStyle,
+                              ),
+                            ],
+                          ),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: theme.textTheme.bodyMedium?.copyWith(
-                            fontWeight:
-                                mine ? FontWeight.w700 : FontWeight.w500,
-                          ),
                         ),
                         if (court.isNotEmpty)
                           Text(
@@ -672,7 +738,7 @@ class MatchRow extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: 6),
-                  _Status(fixture: f, isLive: isLive),
+                  _Status(fixture: f, phase: phase),
                   if (actions.isNotEmpty)
                     PopupMenuButton<ScheduleAction>(
                       // One overflow button rather than three icon buttons:
@@ -724,51 +790,91 @@ class MatchRow extends StatelessWidget {
   }
 }
 
-/// The right-hand column: a live dot, a score, or nothing.
+/// The right-hand column: a tag saying where the match is, over its score.
 class _Status extends StatelessWidget {
-  const _Status({required this.fixture, required this.isLive});
+  const _Status({required this.fixture, required this.phase});
 
   final Fixture fixture;
-  final bool isLive;
+  final MatchPhase phase;
 
   @override
   Widget build(BuildContext context) {
-    if (isLive) {
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-        decoration: BoxDecoration(
-          color: Ps.live,
-          borderRadius: BorderRadius.circular(4),
-        ),
-        child: const Text(
-          'LIVE',
-          style: TextStyle(
-            color: Colors.white,
-            fontSize: 9,
-            fontWeight: FontWeight.w800,
-            letterSpacing: 0.5,
-          ),
-        ),
-      );
-    }
+    final score = localizedScoreLine(context, fixture);
+    final (String? tag, Color tagColor, bool filled) = switch (phase) {
+      MatchPhase.live => ('LIVE', Ps.live, true),
+      MatchPhase.paused => ('PAUSED', MatchRow.lateColor, true),
+      MatchPhase.overdue => ('LATE', MatchRow.lateColor, false),
+      // A played match whose summary is a token ("Walkover") says so in the
+      // score line itself; a tick over a scoreline is the "done" tag.
+      MatchPhase.finished => (null, Ps.primary, false),
+      MatchPhase.halted => (null, MatchRow.lateColor, false),
+      MatchPhase.upcoming => (null, Ps.muted, false),
+    };
 
-    final summary = fixture.summary;
-    if (summary.isEmpty) return const SizedBox.shrink();
     return ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 84),
-      child: Text(
-        localizedSummary(context, summary),
-        textAlign: TextAlign.right,
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-        style: const TextStyle(
-          fontSize: 11,
-          fontWeight: FontWeight.w600,
-          color: Ps.ink,
-        ),
+      constraints: const BoxConstraints(maxWidth: 96),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (tag != null)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: filled ? tagColor : null,
+                borderRadius: BorderRadius.circular(4),
+                border: filled ? null : Border.all(color: tagColor),
+              ),
+              child: Text(
+                tag,
+                style: TextStyle(
+                  color: filled ? Colors.white : tagColor,
+                  fontSize: 9,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ),
+          if (phase == MatchPhase.finished && score.isNotEmpty)
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.check_circle, size: 12, color: Ps.primary),
+                const SizedBox(width: 3),
+                Flexible(child: _scoreText(score, Ps.ink)),
+              ],
+            )
+          else if (phase == MatchPhase.finished)
+            const Icon(Icons.check_circle, size: 14, color: Ps.primary)
+          else if (phase == MatchPhase.halted)
+            _scoreText(
+              [
+                localizedSummary(context, fixture.status.wire),
+                // The bare score: "Abandoned · 21-15 (A)" says it twice.
+                if (fixture.summaryIsScore) fixture.summary,
+              ].join(' · '),
+              MatchRow.lateColor,
+            )
+          else if (phase.inProgress && score.isNotEmpty) ...[
+            const SizedBox(height: 2),
+            _scoreText(score, phase == MatchPhase.live ? Ps.live : Ps.ink),
+          ],
+        ],
       ),
     );
   }
+
+  static Widget _scoreText(String text, Color color) => Text(
+        text,
+        textAlign: TextAlign.right,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          color: color,
+        ),
+      );
 }
 
 /// "Your next match", pinned above the groups.

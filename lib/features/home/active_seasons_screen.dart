@@ -38,21 +38,32 @@ class ActiveSeasonsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final rows = ref.watch(entryListProvider((kind: kind, lens: lens)));
+    // Empty because nothing is open, or empty because the clubs have not
+    // arrived yet? The two read identically and only one of them is true at a
+    // time — see `homePoolLoadingProvider`.
+    final loading = rows.isEmpty && ref.watch(homePoolLoadingProvider);
 
     return AppScaffold(
       // The words on the tile that was pressed, so the screen confirms what
       // was asked for rather than renaming it.
       title: lens.labelFor(kind),
-      subtitle: rows.isEmpty
-          ? 'Nothing here right now'
-          : '${rows.length} ${kind.noun}${rows.length == 1 ? '' : 's'} '
-              '${lens.blurb}',
+      subtitle: loading
+          ? 'Looking…'
+          : rows.isEmpty
+              ? 'Nothing here right now'
+              : '${rows.length} ${kind.noun}${rows.length == 1 ? '' : 's'} '
+                  '${lens.blurb}',
       body: ListView(
         padding: const EdgeInsets.only(top: 12, bottom: 96),
         children: [
           ContentBounds(
             maxWidth: 980,
-            child: rows.isEmpty
+            child: loading
+                ? const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 48),
+                    child: Center(child: CircularProgressIndicator()),
+                  )
+                : rows.isEmpty
                 // Reachable by someone who had the list open when the last
                 // entry closed, and by anyone who kept the link. It says the
                 // one true thing rather than looking broken.

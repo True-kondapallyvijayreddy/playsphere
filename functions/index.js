@@ -32,21 +32,16 @@ import { persistNotifications, pushToUids } from './push.js';
 
 import { awardsFor, ROUND_LABEL, WINDOW_DAYS } from './ranking.js';
 import { contributionWeights, ratingKeyFor } from './contribution.js';
-import {
-  DEFAULT_DEVIATION,
-  DEFAULT_RATING,
-  DEFAULT_VOLATILITY,
-  rate,
-} from './glicko2.js';
 import { refreshOverallForUids } from './overall_glicko.js';
 // Career and officiating credit, settled against the fixture as it IS rather
 // than as this trigger's snapshot remembers it — see settlement.js for the
 // reopen race that made the difference matter.
 import {
-  claimRatingSettlement,
   settleCareer,
   settleOfficials,
+  settlementMayBeDue,
 } from './settlement.js';
+import { reverseRatings, settleRatings } from './rating_settlement.js';
 import {
   competitionRatingWithheldReason,
   ratingWithheldReason,
@@ -57,6 +52,7 @@ import {
 import {
   relevantOrgIds,
   splitParticipantsByTrust,
+  teamEntryVouchesFor,
 } from './participant_trust.js';
 
 export { createPaymentLink, razorpayWebhook } from './razorpay.js';
@@ -66,6 +62,7 @@ export { deleteMyAccount, exportMyData } from './account.js';
 export { computeGovAggregates } from './gov.js';
 export {
   scoreNewGround,
+  scoreGroundProofs,
   onGroundReported,
   onGroundCheckIn,
   onGroundBooked,
@@ -77,6 +74,7 @@ export { computeSportStats, rebuildSportStats } from './sports.js';
 export { computeClubStandings, rebuildClubStandings } from './clubs.js';
 export { flushNotificationDigests } from './notification_digest.js';
 export { backfillMatchSource } from './matchsource.js';
+export { onFixtureDecidedAdvance } from './advancement.js';
 export { backfillFixtureParticipants } from './participants.js';
 export { rebuildPlayerCareerStats } from './careerrebuild.js';
 export { computeLeaderboards, rebuildLeaderboards } from './leaderboard.js';
@@ -86,6 +84,15 @@ export {
   redeemClaimCode,
   onChildProfileClaimed,
 } from './family.js';
+// Age/gender limits on a whole squad, which a captain cannot read for
+// themselves — see team_eligibility.js.
+export {
+  checkTeamEligibility,
+  onTeamRegistrationCreated,
+} from './team_eligibility.js';
+// A club telling a member it has picked them for a draw the club cannot enter
+// them into — see nominations.js.
+export { onSeasonNominated } from './nominations.js';
 export {
   placeAuctionBid,
   openAuctionBidding,
@@ -95,6 +102,8 @@ export {
   executeAuctionTrade,
   notifyAuctionDecision,
   notifyAuctionTrade,
+  onAuctionTeamWritten,
+  onAuctionLotWritten,
 } from './auctions.js';
 
 initializeApp();
@@ -206,7 +215,9 @@ async function queueDigest(uids, payload) {
       db.collection('users').doc(uid).collection('notificationDigest').doc('pending').set(
         {
           pendingCount: FieldValue.increment(1),
-          [`types.${payload.type}`]: FieldValue.increment(1),
+          // A nested map: under merge a dotted key is one literal field name,
+          // and the digest reads `types` as a map.
+          types: { [payload.type]: FieldValue.increment(1) },
           updatedAt: FieldValue.serverTimestamp(),
         },
         { merge: true },
@@ -248,10 +259,15 @@ function previewOf(text) {
   return trimmed.length <= 120 ? trimmed : `${trimmed.slice(0, 119)}…`;
 }
 
-function notification({ id, type, title, body, route, params = {} }) {
+function notification({ id, type, title, body, route, legacyRoute, params = {} }) {
   const payload = { id, type, title, body };
   if (route) {
-    payload.deepLinkRoute = route;
+    // `legacyRoute` is for a screen that builds already on phones do not
+    // have. Those builds read `deepLinkRoute` only, so it keeps a route they
+    // know, and builds that have the new screen read `deepLinkRouteV2` first
+    // (`DeepLink.fromDataPayload`).
+    payload.deepLinkRoute = legacyRoute ?? route;
+    if (legacyRoute) payload.deepLinkRouteV2 = route;
     for (const [key, value] of Object.entries(params)) {
       payload[`deepLinkParam_${key}`] = String(value);
     }
@@ -268,6 +284,22 @@ function notification({ id, type, title, body, route, params = {} }) {
  * a draft and telling a club about a draft its organizer is still writing
  * would be worse than saying nothing.
  */
+/** How long after a season-wide open an event's own "open" push stands down. */
+const SEASON_OPEN_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * Whether two server timestamps were written by one commit. Every
+ * `serverTimestamp()` in a batch resolves to the commit time, so documents
+ * created together carry the same value; the tolerance only absorbs
+ * serialisation, never a second write.
+ */
+function sameCommit(a, b) {
+  if (!a || !b || typeof a.toMillis !== 'function' || typeof b.toMillis !== 'function') {
+    return false;
+  }
+  return Math.abs(a.toMillis() - b.toMillis()) < 1000;
+}
+
 export const onEventOpened = onDocumentWritten(
   'orgs/{orgId}/competitions/{compId}',
   async (event) => {
@@ -278,6 +310,25 @@ export const onEventOpened = onDocumentWritten(
     if (before && before.status === after.status) return;
 
     const { orgId, compId } = event.params;
+
+    // Opened as part of a whole season: the season is announced once
+    // (`onTournamentCreated` / `onTournamentPublished`), instead of one push
+    // per category to every member.
+    if (after.tournamentId) {
+      const season = await db.collection('orgs').doc(orgId)
+        .collection('tournaments').doc(after.tournamentId).get();
+      // Created open, in the same commit as its season. Both documents carry
+      // the commit's server time, so equal `createdAt`s mean the season's own
+      // announcement already covers this event. A sport added to the season
+      // later is a separate commit and still announces itself.
+      if (!before && sameCommit(season.get('createdAt'), after.createdAt)) return;
+      const openedAt = season.get('entriesOpenedAt');
+      if (openedAt && typeof openedAt.toDate === 'function'
+          && Math.abs(Date.now() - openedAt.toDate().getTime()) < SEASON_OPEN_WINDOW_MS) {
+        return;
+      }
+    }
+
     const uids = await activeMemberUids(orgId);
 
     const openLine = after.participationModel === 'approval'
@@ -314,52 +365,89 @@ function tournamentDates(data) {
   return `${day(start)} – ${day(end)}`;
 }
 
+/** The push that tells a club its season is taking entries. */
+async function announceSeasonOpen({ orgId, tournamentId, data }) {
+  const uids = await activeMemberUids(orgId);
+  if (uids.length === 0) return;
+
+  const org = await db.collection('orgs').doc(orgId).get();
+  const dates = tournamentDates(data);
+  const clubName = org.get('name') ?? 'Your club';
+  const events = Number(data.eventCount ?? 0);
+  const what = events > 1 ? `${events} events` : 'entries';
+
+  await sendToUsers(uids, notification({
+    id: `tournament_created_${tournamentId}`,
+    type: 'tournament_announced',
+    title: data.name ?? 'New season',
+    body: dates
+      ? `${clubName} has opened ${what} — ${dates}. Tap to enter.`
+      : `${clubName} has opened ${what}. Tap to enter.`,
+    route: '/org/:orgId/tournaments/:tournamentId',
+    params: { orgId, tournamentId },
+  }));
+}
+
 /**
- * A tournament or a season being created.
+ * A season or tournament being created — which, since 2026-09-13, is the
+ * moment it is published.
  *
- * ## Why on CREATE, and not on a later "publish"
+ * `SeasonBlueprint` writes the season `entries_open` with every event
+ * `registration_open` in the same commit, so this is the one announcement.
+ * The events' own `onEventOpened` pushes stand down because they share the
+ * season's commit time.
  *
- * `onEventOpened` deliberately waits for a status transition, because a single
- * event really is created as a blank draft and filled in afterwards. A
- * tournament is not: both routes into this collection — the tournament sheet
- * and the season form — ask for the name, the dates and (for a season) every
- * sport before the create button will enable, so the document's first write is
- * already the finished announcement. Waiting for a transition that no screen
- * currently performs would mean this notification never fired at all.
+ * A DRAFT (from an app build still on somebody's phone) is not announced:
+ * members could neither see it nor enter it. It is announced when its entries
+ * are opened, by `onTournamentPublished`.
  *
- * Goes to EVERY active member rather than to organizers. That is the whole
- * request: a club's members should hear about their club's tournament at the
- * same moment, from the club, rather than from whoever happened to be in the
- * right WhatsApp group.
- *
- * The draws hanging off a season are created immediately after this document
- * and each would otherwise fire its own `onEventOpened` later; those are about
- * entries opening for one sport, and this is about the season existing. They
- * carry different ids so neither replaces the other in the tray.
+ * Named `onTournamentCreated` on purpose. The deployed function of that name
+ * announced drafts on create; deploying this replaces it in place.
  */
 export const onTournamentCreated = onDocumentCreated(
   'orgs/{orgId}/tournaments/{tournamentId}',
   async (event) => {
     const data = event.data?.data();
-    if (!data) return;
+    if (!data || data.status !== 'entries_open') return;
+    // A season created empty — the season sheet, before any sport is added —
+    // has nothing to enter, and telling every member to "tap to enter" it
+    // sends them to an empty page. It is announced when its first sports are
+    // added: `addSportsToSeason` stamps `entriesOpenedAt` in that commit and
+    // `onTournamentPublished` sends this same push then, once.
+    if (Number(data.eventCount ?? 0) === 0) return;
+    const { orgId, tournamentId } = event.params;
+    await announceSeasonOpen({ orgId, tournamentId, data });
+  },
+);
+
+/**
+ * A draft season's entries being opened, all at once, by
+ * `TournamentRepository.openEntriesForSeason` — the path for seasons created
+ * as drafts before seasons were published on creation.
+ *
+ * Fires on every new `entriesOpenedAt`, not only on the `draft` →
+ * `entries_open` edge. A season lifted out of draft by opening ONE event from
+ * its own page is already `entries_open` when "Open entries" is pressed for
+ * the rest. The edge test missed that case, and the push from each event
+ * stood down because of the `entriesOpenedAt` window, so nobody heard.
+ *
+ * Goes to EVERY active member: a club's members should hear about their club's
+ * season at the same moment, from the club.
+ */
+export const onTournamentPublished = onDocumentUpdated(
+  'orgs/{orgId}/tournaments/{tournamentId}',
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (!before || !after) return;
+    if (after.status !== 'entries_open' || !after.entriesOpenedAt) return;
+    const was = before.entriesOpenedAt;
+    if (was && typeof was.isEqual === 'function' && was.isEqual(after.entriesOpenedAt)) {
+      return;
+    }
 
     const { orgId, tournamentId } = event.params;
-    const uids = await activeMemberUids(orgId);
-    if (uids.length === 0) return;
-
-    const org = await db.collection('orgs').doc(orgId).get();
-    const dates = tournamentDates(data);
-
-    await sendToUsers(uids, notification({
-      id: `tournament_created_${tournamentId}`,
-      type: 'tournament_announced',
-      title: data.name ?? 'New tournament',
-      body: dates
-        ? `${org.get('name') ?? 'Your club'} is running this — ${dates}. Tap for the details.`
-        : `${org.get('name') ?? 'Your club'} is running this. Tap for the details.`,
-      route: '/org/:orgId/tournaments/:tournamentId',
-      params: { orgId, tournamentId },
-    }));
+    await announceSeasonOpen({ orgId, tournamentId, data: after });
   },
 );
 
@@ -402,22 +490,49 @@ export const onScheduleReleased = onDocumentUpdated(
     const before = event.data?.before.data();
     const after = event.data?.after.data();
     if (!before || !after) return;
-    // Only the false -> true edge. A later edit to any other field must not
-    // re-announce a timetable everybody already has.
-    if (before.isScheduleLocked === true || after.isScheduleLocked !== true) return;
+
+    // Timetables are published one sport at a time
+    // (`TournamentRepository.lockSchedule`), each stamped into
+    // `sportSchedulesReleasedAt`. A sport is announced once, when its stamp
+    // first appears. When the last sport locks the whole season in the same
+    // write, that is the same publish, not a second one.
+    const wasReleased = before.sportSchedulesReleasedAt ?? {};
+    const nowReleased = after.sportSchedulesReleasedAt ?? {};
+    // A season published the old, season-wide way has no per-sport stamps.
+    // When a sport is added to it, `addSportsToSeason` stamps every sport
+    // already out, so they stay published while the new one is a draft.
+    // Those stamps record a publish everybody has already heard about.
+    const publishedSeasonWide = Object.keys(wasReleased).length === 0
+      && (before.isScheduleLocked === true
+        || before.status === 'in_progress'
+        || before.status === 'completed');
+    const newSports = publishedSeasonWide
+      ? []
+      : Object.keys(nowReleased).filter((id) => !wasReleased[id]);
+
+    // Only the false -> true edge, and only for a season published the old,
+    // season-wide way. A later edit to any other field must not re-announce
+    // a timetable everybody already has.
+    const legacyLock = before.isScheduleLocked !== true
+      && after.isScheduleLocked === true
+      && Object.keys(nowReleased).length === 0;
+    if (newSports.length === 0 && !legacyLock) return;
 
     const { orgId, tournamentId } = event.params;
 
-    const comps = await db.collection('orgs').doc(orgId).collection('competitions')
+    const allComps = await db.collection('orgs').doc(orgId).collection('competitions')
       .where('tournamentId', '==', tournamentId)
       .get();
-    if (comps.empty) return;
+    const comps = newSports.length === 0
+      ? allComps.docs
+      : allComps.docs.filter((doc) => newSports.includes(doc.get('sportId')));
+    if (comps.length === 0) return;
 
     const uids = new Set(await activeMemberUids(orgId));
     const entrantOrgIds = new Set();
 
     const entrantSnaps = await Promise.all(
-      comps.docs.map((doc) => doc.ref.collection('entrants').get()),
+      comps.map((doc) => doc.ref.collection('entrants').get()),
     );
     for (const snap of entrantSnaps) {
       snap.forEach((doc) => {
@@ -440,11 +555,22 @@ export const onScheduleReleased = onDocumentUpdated(
 
     if (uids.size === 0) return;
 
+    const sportNames = [...new Set(comps
+      .map((doc) => doc.get('sportName'))
+      .filter((n) => typeof n === 'string' && n))];
+    const what = newSports.length === 0 || sportNames.length === 0
+      ? 'timetable'
+      : `${sportNames.join(', ')} timetable`;
     const dates = tournamentDates(after);
+    const oneSport = newSports.length === 1 ? newSports[0] : null;
     await sendToUsers([...uids], notification({
-      id: `schedule_released_${tournamentId}`,
+      // Per sport, so publishing the badminton does not replace the cricket
+      // notice already in somebody's tray.
+      id: oneSport
+        ? `schedule_released_${tournamentId}_${oneSport}`
+        : `schedule_released_${tournamentId}`,
       type: 'event_reminder',
-      title: `${after.name ?? 'The schedule'} — timetable published`,
+      title: `${after.name ?? 'The schedule'} — ${what} published`,
       body: dates
         ? `Match times and courts are now final for ${dates}. Tap to see when you play.`
         : 'Match times and courts are now final. Tap to see when you play.',
@@ -463,29 +589,52 @@ export const onScheduleReleased = onDocumentUpdated(
  * an ordinary event in their own club and their members hear about it through
  * the paths that already exist.
  */
-export const onTournamentInvite = onDocumentCreated(
+export const onTournamentInvite = onDocumentWritten(
   'tournamentInvites/{inviteId}',
   async (event) => {
-    const data = event.data?.data();
+    // Sent when an invitation becomes pending: on creation, and when a host
+    // asks again after a decline or a withdrawal. Not on the answer.
+    const data = event.data?.after?.data();
+    const previous = event.data?.before?.data();
     if (!data || data.status !== 'pending') return;
+    if (previous && previous.status === 'pending') return;
     if (!data.toOrgId) return;
 
     const dates = tournamentDates(data);
+    const sports = Array.isArray(data.sportNames)
+      ? data.sportNames.filter((s) => typeof s === 'string' && s).slice(0, 4)
+      : [];
+    const noun = data.kind === 'tournament' ? 'tournament' : 'season';
+    const facts = [
+      sports.join(', '),
+      dates,
+      typeof data.place === 'string' ? data.place : '',
+    ].filter(Boolean).join(' · ');
 
     await sendToUsersDigestAware(
       await activeMemberUids(data.toOrgId, { onlyAdmins: true }),
       notification({
         id: `tournament_invite_${event.params.inviteId}`,
         type: 'tournament_invite',
-        title: `${data.fromOrgName ?? 'A club'} has invited you`,
-        body: dates
-          ? `${data.tournamentName ?? 'Their tournament'} — ${dates}. Take a look and enter.`
-          : `${data.tournamentName ?? 'Their tournament'} — take a look and enter.`,
-        // The PUBLIC page, not the host club's own tournament screen: the
-        // invited club's admins are not members of the host and would be
-        // refused by the rules on the org-scoped route.
-        route: '/org/:orgId/live-tournament/:tournamentId',
+        title: `${data.fromOrgName ?? 'A club'} invited you to their ${noun}`,
+        body: facts
+          ? `${data.tournamentName ?? `Their ${noun}`} — ${facts}. Open the invitation to register.`
+          : `${data.tournamentName ?? `Their ${noun}`} — open the invitation to register.`,
+        // The invitations space, where it reads as a letter with a Register
+        // button — not a bare page the club has to work out how to enter.
+        // `club` makes the screen switch to the club the invitation is FOR:
+        // it lists only the selected club's invitations, so an admin of two
+        // clubs with the other one selected would otherwise land on a list
+        // without it.
+        route: '/invitations?club=:clubId',
+        // Builds on phones before the invitations space have no such route.
+        // They get the season's public page, as they always did.
+        legacyRoute: '/org/:orgId/live-tournament/:tournamentId',
         params: {
+          // The club the invitation is FOR. The feed files a notification
+          // under `clubId` before `orgId`, so this one shows under the
+          // invited club, not the host.
+          clubId: data.toOrgId,
           orgId: data.fromOrgId ?? '',
           tournamentId: data.tournamentId ?? '',
         },
@@ -494,19 +643,32 @@ export const onTournamentInvite = onDocumentCreated(
   },
 );
 
-/** Everyone who entered a competition, whatever their entry's state. */
-async function entrantUids(orgId, compId) {
+/**
+ * Who to tell about a competition.
+ *
+ * `includeWithdrawn` is a real decision and each caller has to make it, because
+ * the two audiences are not the same people:
+ *
+ *  * A CANCELLATION goes to everybody, withdrawn included. Someone who pulled
+ *    out on Tuesday still arranged their Saturday around the event not
+ *    happening; the cost of telling them is one push and the cost of not
+ *    telling them is a person turning up at a ground.
+ *  * Everything else — an organizer's note, a reminder, anything about how the
+ *    event is running — goes only to people who are still IN it. A player who
+ *    withdrew was still being sent every update for an event they had left,
+ *    which is the one thing withdrawing is supposed to stop.
+ *
+ * Cancelled entries are never included: those were never real entries.
+ */
+async function entrantUids(orgId, compId, { includeWithdrawn = false } = {}) {
   const snap = await db.collection('orgs').doc(orgId)
     .collection('competitions').doc(compId)
     .collection('registrations').get();
-  // Withdrawn entrants are deliberately INCLUDED for a cancellation. Someone
-  // who pulled out on Tuesday still arranged their Saturday around the event
-  // not happening; they do not need to hear it was cancelled, but the cost of
-  // telling them is one push and the cost of the alternative is a person
-  // turning up. Cancelled entries are the one exception — those were never
-  // real entries.
+  const skip = includeWithdrawn
+    ? ['cancelled']
+    : ['cancelled', 'withdrawn', 'rejected'];
   return snap.docs
-    .filter((d) => (d.data().status ?? '') !== 'cancelled')
+    .filter((d) => !skip.includes(d.data().status ?? ''))
     .map((d) => d.id);
 }
 
@@ -532,7 +694,9 @@ export const onEventCancelled = onDocumentUpdated(
     if (after.status !== 'cancelled') return;
 
     const { orgId, compId } = event.params;
-    const uids = await entrantUids(orgId, compId);
+    // Withdrawn entrants too — see `entrantUids`. A cancellation is the one
+    // message somebody who pulled out still needs.
+    const uids = await entrantUids(orgId, compId, { includeWithdrawn: true });
     if (uids.length === 0) return;
 
     const reason = (after.cancelReason ?? '').trim();
@@ -809,19 +973,98 @@ export const onFixtureStatusChanged = onDocumentUpdated(
 
     if (after.status === 'completed') {
       const mvp = after.mvp?.name;
+      const score = scoreLine(after) || 'Match finished';
       await sendToUsers(uids, notification({
         id: `match_result_${fixtureId}`,
         type: 'result',
         title,
-        body: mvp
-          ? `${after.summary ?? 'Match finished'} · Best performer: ${mvp}`
-          : (after.summary ?? 'Match finished'),
+        body: mvp ? `${score} · Best performer: ${mvp}` : score,
         route,
         params,
       }));
     }
   },
 );
+
+/**
+ * Keeps `squadUids` on a fixture: every member of the team entrant on either
+ * side, plus a solo entrant's own account.
+ *
+ * A player's own match list is a collection-group query on the fixture, and
+ * for a team match `playerUids` only ever held the people named on a team
+ * sheet — usually nobody until the toss. So a player entered through a house
+ * or a club XI never saw their team's matches in My matches (test run TC-31).
+ * `playerUids` cannot simply take the squad: `onMatchSettled` and the rules
+ * treat it as "who took the field" and rate those people. This is the
+ * separate, read-only list.
+ *
+ * Server-side so every path that puts an entrant on a fixture — a draw, a
+ * bracket promotion, a qualifier fill, an opponent change — is covered by one
+ * place instead of five client writes. Exits before any read unless a side
+ * changed or the field is missing, because every scoring tap writes this
+ * document too.
+ */
+export const syncFixtureSquads = onDocumentWritten(
+  'orgs/{orgId}/competitions/{compId}/fixtures/{fixtureId}',
+  async (event) => {
+    const before = event.data?.before?.data();
+    const after = event.data?.after?.data();
+    if (!after) return;
+    const sidesChanged = !before
+      || before.entrantAId !== after.entrantAId
+      || before.entrantBId !== after.entrantBId;
+    if (!sidesChanged && Array.isArray(after.squadUids)) return;
+
+    const { orgId, compId } = event.params;
+    const squad = await squadUidsFor(orgId, compId, after);
+    const current = Array.isArray(after.squadUids) ? after.squadUids : null;
+    if (current && sameMembers(current, squad)) return;
+    await event.data.after.ref.update({ squadUids: squad });
+  },
+);
+
+async function squadUidsFor(orgId, compId, fixture) {
+  const entrants = db.collection('orgs').doc(orgId)
+    .collection('competitions').doc(compId).collection('entrants');
+  const ids = [fixture.entrantAId, fixture.entrantBId]
+    .filter((id) => typeof id === 'string' && id);
+  const snaps = await Promise.all(ids.map((id) => entrants.doc(id).get()));
+  const uids = new Set();
+  for (const snap of snaps) {
+    if (!snap.exists) continue;
+    const data = snap.data();
+    if (typeof data.uid === 'string' && data.uid) uids.add(data.uid);
+    for (const member of data.memberUids ?? []) {
+      if (typeof member === 'string' && member) uids.add(member);
+    }
+  }
+  for (const uid of [fixture.entrantAUid, fixture.entrantBUid]) {
+    if (typeof uid === 'string' && uid) uids.add(uid);
+  }
+  return [...uids].sort();
+}
+
+function sameMembers(a, b) {
+  if (a.length !== b.length) return false;
+  const set = new Set(a);
+  return b.every((x) => set.has(x));
+}
+
+/**
+ * The score as a list shows it — "21-15, 8-3 (R)" where a ruling ended the
+ * match. Mirrors `Fixture.scoreLine` and `MatchResultType.marker`; keep the
+ * three in step.
+ */
+const RESULT_MARKERS = {
+  retired: 'R', disqualified: 'D', walkover: 'W/O', conceded: 'C', abandoned: 'A',
+};
+const OUTCOME_TOKENS = new Set(['walkover', 'abandoned', 'disputed', 'conceded', 'no_show']);
+function scoreLine(fixture) {
+  const summary = (fixture.summary ?? '').trim();
+  const marker = RESULT_MARKERS[fixture.resultType];
+  if (!summary || !marker || OUTCOME_TOKENS.has(summary)) return summary;
+  return `${summary} (${marker})`;
+}
 
 /** Mirrors `_roleLabel` in `officials_screen.dart` — keep the two in step. */
 function officialRoleLabel(role) {
@@ -901,6 +1144,32 @@ export const onChallengeReceived = onDocumentCreated(
       body: 'Accept, pick a slot, or decline.',
       route: '/org/:orgId/challenges',
       params: { orgId: data.toOrgId },
+    }));
+  },
+);
+
+/**
+ * A protest raised against a result. The organizers are the only people who
+ * can decide it, and without this nobody told them it existed.
+ */
+export const onDisputeRaised = onDocumentCreated(
+  'orgs/{orgId}/competitions/{compId}/fixtures/{fixtureId}/disputes/{disputeId}',
+  async (event) => {
+    const data = event.data?.data();
+    if (!data || data.status !== 'open') return;
+    const { orgId, compId, fixtureId, disputeId } = event.params;
+
+    const uids = (await activeMemberUids(orgId, { onlyAdmins: true }))
+      .filter((uid) => uid !== data.raisedByUid);
+    if (uids.length === 0) return;
+
+    await sendToUsers(uids, notification({
+      id: `dispute_${disputeId}`,
+      type: 'dispute_raised',
+      title: `${data.raisedByName ?? 'A player'} protested a result`,
+      body: 'Open the match to uphold or reject it.',
+      route: '/org/:orgId/event/:compId/score/:fixtureId',
+      params: { orgId, compId, fixtureId },
     }));
   },
 );
@@ -994,6 +1263,67 @@ export const onMembershipApproved = onDocumentUpdated(
       route: '/org/:orgId',
       params: { orgId },
     }));
+  },
+);
+
+/**
+ * Somebody being made an owner — appointed a co-owner, or handed the club by
+ * an owner who is leaving it.
+ *
+ * Told because ownership is the one role that arrives with obligations: a
+ * member handed a club by a leaving owner may now be the only person who can
+ * approve joiners or appoint anyone, and nothing else in the app would say so.
+ * A demotion by vote has its own notice in `onOwnerVote`.
+ */
+export const onOwnershipGranted = onDocumentUpdated(
+  'orgs/{orgId}/members/{memberUid}',
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (!before || !after) return;
+    if (before.role === 'owner' || after.role !== 'owner') return;
+    if (after.status !== 'active') return;
+
+    const { orgId, memberUid } = event.params;
+    const org = await db.collection('orgs').doc(orgId).get();
+    const name = org.get('name') ?? 'your club';
+
+    await sendToUsersDigestAware([memberUid], notification({
+      id: `owner_granted_${orgId}_${memberUid}`,
+      type: 'membership_approved',
+      title: `You now own ${name}`,
+      body: 'You have full control of the club, including its members and '
+        + 'who else is an owner.',
+      route: '/org/:orgId/members',
+      params: { orgId },
+    }));
+  },
+);
+
+/**
+ * `memberCount`, kept true by the server.
+ *
+ * Clients bump it on a self-join and an approval, but nothing moved it when a
+ * member left or was removed, and a count that only ever climbs is not a
+ * roster size. Recounted from the active rows whenever a row starts or stops
+ * being active, so every path — joining, approval, leaving, removal — agrees.
+ */
+export const onMemberRosterChanged = onDocumentWritten(
+  'orgs/{orgId}/members/{memberUid}',
+  async (event) => {
+    const wasActive = event.data?.before?.data()?.status === 'active';
+    const isActive = event.data?.after?.data()?.status === 'active';
+    if (wasActive === isActive) return;
+
+    const { orgId } = event.params;
+    const orgRef = db.collection('orgs').doc(orgId);
+    const org = await orgRef.get();
+    if (!org.exists) return;
+    const active = await orgRef.collection('members')
+      .where('status', '==', 'active')
+      .count()
+      .get();
+    await orgRef.update({ memberCount: active.data().count });
   },
 );
 
@@ -1120,8 +1450,11 @@ export const onTournamentCompleted = onDocumentUpdated(
 
       // Only a finished event awards anything. An abandoned draw, or one the
       // organizer never completed, has no finishing positions to score.
+      // An abandoned match was never going to produce a result, and waiting on
+      // one would hold back every finishing position in the event forever.
+      // A disputed one still might, so it still blocks.
       const unfinished = fixtures.some(
-        (f) => f.status !== 'completed' && f.status !== 'walkover',
+        (f) => !['completed', 'walkover', 'abandoned'].includes(f.status),
       );
       if (unfinished || fixtures.length === 0) continue;
 
@@ -1288,7 +1621,11 @@ export const onMatchSettled = onDocumentUpdated(
     // exactly what it added. `previous` is consulted only for fixtures credited
     // before that record existed.
     // -----------------------------------------------------------------
-    const careerOutcome = await settleCareer(event.data.after.ref, {
+    // Every scoring write lands here, ball by ball, and both settlements are
+    // transactions on this very document. Only a write that can change what
+    // settlement would decide reaches them.
+    const settle = settlementMayBeDue(before, after);
+    const careerOutcome = settle && await settleCareer(event.data.after.ref, {
       orgId: event.params.orgId,
       previous: before,
     });
@@ -1330,7 +1667,7 @@ export const onMatchSettled = onDocumentUpdated(
     // settleOfficials records which umpires it actually credited, so a
     // withdrawal takes back exactly those rather than recomputing from a list
     // that may have changed in between.
-    const officialsOutcome = await settleOfficials(event.data.after.ref, {
+    const officialsOutcome = settle && await settleOfficials(event.data.after.ref, {
       orgId: event.params.orgId,
       compId: event.params.compId,
       fixtureId: event.params.fixtureId,
@@ -1345,6 +1682,24 @@ export const onMatchSettled = onDocumentUpdated(
 
     const wasDone = before.status === 'completed';
     const isDone = after.status === 'completed';
+
+    // A finished match taken back out of `completed` — reopened, restarted,
+    // disputed, ruled a walkover — gives its rating movement back, so the
+    // result that finally stands is the one that is rated.
+    if (wasDone && !isDone) {
+      const reversed = await reverseRatings(event.data.after.ref, {
+        fixtureId: event.params.fixtureId,
+      });
+      if (reversed && reversed.length > 0) {
+        logger.info(`Fixture ${event.params.fixtureId}: reversed ${reversed.length} ratings.`);
+        try {
+          await refreshOverallForUids(reversed, new Date());
+        } catch (err) {
+          logger.warn('overall refresh after reversal failed', err);
+        }
+      }
+      return;
+    }
     if (wasDone || !isDone) return;
 
     // WHERE the match was played decides whether it moves a rating.
@@ -1366,25 +1721,6 @@ export const onMatchSettled = onDocumentUpdated(
     if (withheldReason) {
       logger.info(
         `Fixture ${event.params.fixtureId}: not rated (${withheldReason}).`,
-      );
-      return;
-    }
-
-    // The right to settle this match's ratings, claimed atomically before any
-    // arithmetic: the claim re-reads the fixture and stamps `ratingSettledAt`
-    // only if it is still completed and still unclaimed.
-    //
-    // Reading the marker off `after` instead was a snapshot of a moment that
-    // may already have passed — two invocations racing over one finished match
-    // could both find it unset and both pay it, and a match reopened while this
-    // ran was rated on a result that no longer stood. The per-player
-    // `settledFixtures` list stays as a second line of defence only: it is
-    // bounded, so it forgets, which is exactly how a re-finished match used to
-    // be paid for twice.
-    if (!(await claimRatingSettlement(event.data.after.ref))) {
-      logger.info(
-        `Fixture ${event.params.fixtureId}: rating already settled, or the ` +
-          'match was reopened before it could be.',
       );
       return;
     }
@@ -1468,36 +1804,54 @@ export const onMatchSettled = onDocumentUpdated(
             return;
           }
         }
-        const reg = await db
-          .doc(
-            `orgs/${event.params.orgId}/competitions/${event.params.compId}` +
-              `/registrations/${uid}`,
-          )
-          .get();
-        if (reg.exists) {
+        const regs = db.collection(
+          `orgs/${event.params.orgId}/competitions/${event.params.compId}/registrations`,
+        );
+        const reg = await regs.doc(uid).get();
+        const r = reg.exists ? reg.data() : null;
+        if (r && !(typeof r.teamId === 'string' && r.teamId.length > 0)) {
           facts.set(uid, {
             memberStatus: null,
             // An organizer-written entry proves an organizer wrote it. Only a
-            // registration the person made themselves stands on its own.
-            selfRegistered: reg.data().preselected !== true,
+            // registration the person made (or accepted, as a group member)
+            // stands on its own.
+            selfRegistered: r.preselected !== true
+              && (r.uid ?? uid) === uid
+              && (r.registeredByUid == null || r.registeredByUid === uid),
           });
           return;
         }
         // A squad player has no registration of their own — the document id is
-        // the team's. Being named on a team entry by whoever runs that team is
-        // a relationship of the same kind, so it counts.
-        const teamEntries = await db
-          .collection(
-            `orgs/${event.params.orgId}/competitions/${event.params.compId}` +
-              '/registrations',
-          )
+        // the team's. The entry's word is not enough (whoever writes it names
+        // the squad), so the TEAM is read, and the player must be on its roster
+        // with a relationship of their own: they founded the team, or they are
+        // an active member of the club it belongs to.
+        const teamEntries = await regs
           .where('memberUids', 'array-contains', uid)
-          .limit(1)
+          .limit(10)
           .get();
-        facts.set(uid, {
-          memberStatus: null,
-          namedInTeamEntry: !teamEntries.empty,
-        });
+        let vouched = false;
+        for (const entry of teamEntries.docs) {
+          const teamId = entry.get('teamId');
+          if (typeof teamId !== 'string' || teamId !== entry.id) continue;
+          const team = await db.doc(`teams/${teamId}`).get();
+          if (!team.exists) continue;
+          const clubId = team.get('clubId');
+          const clubMember = typeof clubId === 'string' && clubId.length > 0
+            ? await db.doc(`orgs/${clubId}/members/${uid}`).get()
+            : null;
+          if (teamEntryVouchesFor({
+            entryId: entry.id,
+            entry: entry.data(),
+            team: team.data(),
+            uid,
+            clubMemberStatus: clubMember?.exists ? clubMember.get('status') : null,
+          })) {
+            vouched = true;
+            break;
+          }
+        }
+        facts.set(uid, { memberStatus: null, namedInTeamEntry: vouched });
       }),
     );
 
@@ -1580,149 +1934,39 @@ export const onMatchSettled = onDocumentUpdated(
       logger.info(`Fixture ${fixtureId}: no winner recorded, not rated.`);
       return;
     }
-    const aWon = winner === after.entrantAId;
 
     // How much each player contributed, from the same tally the MVP award and
     // the client's projection read. §8.1 is explicit that a team result must
     // not be distributed as pure win/loss — the eleventh man and the centurion
-    // moving identically is exactly what it forbids — and this trigger did
-    // precisely that until now.
+    // moving identically is exactly what it forbids.
     const weights = new Map([
       ...contributionWeights(after.scoreState, after.lineupA ?? []),
       ...contributionWeights(after.scoreState, after.lineupB ?? []),
     ]);
 
-    // Current ratings for everybody this match may rate.
-    //
     // The verified set, not the full line-up, and that matters for the
-    // AVERAGES below as much as for the writes: an unverifiable name carries
-    // the default 1500, so including one in a side's average is itself the
-    // manipulation — inject a fabricated teammate and the opponent's expected
-    // score moves. Rating only the verified players against the verified
-    // opposition removes the lever rather than narrowing it.
-    const current = new Map();
-    for (const uid of [...trustA.rated, ...trustB.rated]) {
-      const snap = await db.doc(`users/${uid}/ratings/${ratingKey}`).get();
-      const d = snap.exists ? snap.data() : null;
-      current.set(uid, {
-        rating: d?.rating ?? DEFAULT_RATING,
-        deviation: d?.deviation ?? DEFAULT_DEVIATION,
-        volatility: d?.volatility ?? DEFAULT_VOLATILITY,
-        gamesPlayed: d?.gamesPlayed ?? 0,
-        settled: d?.settledFixtures ?? [],
-        trail: Array.isArray(d?.trail) ? d.trail : [],
-      });
+    // AVERAGES as much as for the writes: an unverifiable name carries the
+    // default 1500, so including one in a side's average is itself the
+    // manipulation. See rating_settlement.js for why the fixture, the ratings
+    // and the record of what moved are one transaction.
+    const moved = await settleRatings(event.data.after.ref, {
+      fixtureId,
+      ratingKey,
+      sideA: trustA.rated,
+      sideB: trustB.rated,
+      weights,
+      expected: { winnerEntrantId: winner ?? null, isDraw },
+      trailLength: TRAIL_LENGTH,
+    });
+    if (!moved) {
+      logger.info(
+        `Fixture ${fixtureId}: rating already settled, or the result changed ` +
+          'before it could be.',
+      );
+      return;
     }
-
-    const average = (uids) => {
-      const rs = uids.map((u) => current.get(u)?.rating ?? DEFAULT_RATING);
-      return rs.reduce((s, r) => s + r, 0) / rs.length;
-    };
-    const avgA = average(trustA.rated);
-    const avgB = average(trustB.rated);
-
-    // The opponent's real uncertainty, not a hardcoded 350. A side whose
-    // players are all established should move a rating further than one nobody
-    // has a reading on, and pinning the opponent at the maximum deviation
-    // flattened that distinction away.
-    const avgDeviation = (uids) => {
-      const ds = uids.map((u) => current.get(u)?.deviation ?? DEFAULT_DEVIATION);
-      return ds.reduce((s, d) => s + d, 0) / ds.length;
-    };
-    const rdA = avgDeviation(trustA.rated);
-    const rdB = avgDeviation(trustB.rated);
-
-    const batch = db.batch();
-    let settled = 0;
-
-    // One instant for every trail entry this match writes. Calling
-    // `new Date()` per player would stamp the same match with times a few
-    // milliseconds apart, which is harmless for ordering but makes two
-    // teammates' trails disagree about when their shared match happened.
     const settledAt = new Date();
-
-    for (const [uids, opponentAvg, opponentRd, won] of [
-      [trustA.rated, avgB, rdB, aWon],
-      [trustB.rated, avgA, rdA, !aWon],
-    ]) {
-      const score = isDraw ? 0.5 : won ? 1 : 0;
-      for (const uid of uids) {
-        const player = current.get(uid);
-        // Already paid for this match.
-        if (player.settled.includes(fixtureId)) continue;
-
-        const rawWeight = weights.get(uid) ?? 1;
-        // In a win, high individual performance (rawWeight > 1) increases reward.
-        // In a loss, high individual performance protects the player by dampening
-        // rating loss (rawWeight 1.8 -> effectiveWeight 0.2), while a poor performer
-        // (rawWeight 0.2 -> effectiveWeight 1.8) absorbs the loss impact.
-        const effectiveWeight = isDraw
-          ? 1.0
-          : won
-            ? rawWeight
-            : Math.max(0.2, 2.0 - rawWeight);
-
-        const next = rate(player, [
-          {
-            opponent: { rating: opponentAvg, deviation: opponentRd },
-            score,
-            weight: effectiveWeight,
-          },
-        ]);
-
-        // Cap single-match rating swing to prevent fabricated/outlier spikes
-        // from moving a rating implausibly far in a single fixture.
-        const MAX_SWING = 50;
-        const delta = Math.max(-MAX_SWING, Math.min(MAX_SWING, next.rating - player.rating));
-        const finalRating = player.rating + delta;
-
-        batch.set(
-          db.doc(`users/${uid}/ratings/${ratingKey}`),
-          {
-            rating: finalRating,
-            deviation: next.deviation,
-            volatility: next.volatility,
-            gamesPlayed: next.gamesPlayed,
-            // Second line of defence only. The durable guard is
-            // `ratingSettledAt` on the fixture — this list is bounded and
-            // therefore forgets, which is precisely how a re-finished match
-            // used to be paid for twice. Kept because it catches a retry of
-            // THIS invocation, and because rating documents already carry it.
-            settledFixtures: [...player.settled, fixtureId].slice(-50),
-            // The rating's own history, and the only record of it anywhere.
-            //
-            // A rating document holds a single mutable number, so before this
-            // trail existed the product could say how good a player IS and had
-            // no way at all to say whether they were getting better — which is
-            // the signal talent discovery actually runs on (see
-            // `lib/domain/scout/talent_trend.dart`). Nothing can reconstruct
-            // it after the fact: the previous value is overwritten right here.
-            //
-            // Bounded for the same reason `settledFixtures` is: an array that
-            // grows for a whole career eventually becomes the largest thing in
-            // the document and is re-read on every single match. TRAIL_LENGTH
-            // snapshots is roughly five months for a weekly player, comfortably
-            // longer than the 90-day window the boards measure over.
-            trail: [
-              ...player.trail,
-              { r: finalRating, t: settledAt.toISOString() },
-            ].slice(-TRAIL_LENGTH),
-            updatedAt: new Date(),
-          },
-          { merge: true },
-        );
-
-        settled += 1;
-      }
-    }
-
-    // No marker write here any more: `claimRatingSettlement` stamped it in a
-    // transaction before any of this arithmetic ran, which is what stops two
-    // invocations paying the same match. Writing it again would be harmless but
-    // would record the wrong moment — the instant the ratings landed rather
-    // than the instant this fixture stopped being available to settle.
-    await batch.commit();
-    logger.info(`Fixture ${fixtureId}: settled ${settled} player ratings.`);
+    logger.info(`Fixture ${fixtureId}: settled ${moved.length} player ratings.`);
 
     // The headline composite on each player's profile, refreshed the moment
     // the ratings under it move — a player should walk off the pitch with
@@ -1739,10 +1983,7 @@ export const onMatchSettled = onDocumentUpdated(
       // The rated set, not the line-up: a player whose rating was withheld has
       // nothing new to recompose, and naming them here would write a composite
       // onto an account this match was not allowed to touch.
-      const refreshed = await refreshOverallForUids(
-        [...trustA.rated, ...trustB.rated],
-        settledAt,
-      );
+      const refreshed = await refreshOverallForUids(moved, settledAt);
       logger.info(
         `Fixture ${fixtureId}: refreshed ${refreshed.updated} overall ratings.`,
       );
@@ -2146,34 +2387,60 @@ export const onMatchRsvp = onDocumentWritten(
     const newYesUids = newlyConfirmed(before, after);
     if (newYesUids.length === 0) return;
 
-    const others = await db.collection('orgs').doc(orgId)
-      .collection('announcements').get();
+    // Every club the person is active in, not only this one: the clash that
+    // matters is Saturday's club match against the college fixture, and those
+    // live on two different notice boards.
+    const windowStart = new Date(kickOff.getTime() - CLASH_WINDOW_MS);
+    const windowEnd = new Date(kickOff.getTime() + CLASH_WINDOW_MS);
 
     for (const uid of newYesUids) {
+      // One equality, the same query `watchMyMemberships` already has an index
+      // for; the status is filtered here. Capped rather than paged: it is one
+      // person's memberships, and only the first 30 clubs are checked below.
+      const memberships = await db.collectionGroup('members')
+        .where('uid', '==', uid)
+        .limit(100)
+        .get();
+      const active = memberships.docs.filter((d) => d.get('status') === 'active');
+      const clubIds = [...new Set([orgId, ...active.map((d) => d.get('orgId'))])]
+        .filter((id) => typeof id === 'string' && id.length > 0)
+        .slice(0, 30);
+
       const clashes = [];
-      others.forEach((doc) => {
-        if (doc.id === announcementId) return;
-        const other = doc.data();
-        const otherMatch = other.match;
-        if (!otherMatch?.matchDate) return;
-        if (other.poll?.votes?.[uid] !== RSVP_YES) return;
-        const when = otherMatch.matchDate.toDate
-          ? otherMatch.matchDate.toDate()
-          : new Date(otherMatch.matchDate);
-        if (Math.abs(when.getTime() - kickOff.getTime()) < CLASH_WINDOW_MS) {
-          clashes.push(other.title || 'another match');
-        }
-      });
+      const boards = await Promise.all(clubIds.map((clubId) =>
+        db.collection('orgs').doc(clubId).collection('announcements')
+          .where('match.matchDate', '>=', windowStart)
+          .where('match.matchDate', '<=', windowEnd)
+          .get()
+          .then((snap) => ({ clubId, snap }))
+          .catch((error) => {
+            logger.warn('clash scan failed', { clubId, error: String(error) });
+            return { clubId, snap: null };
+          })));
+      for (const { clubId, snap } of boards) {
+        snap?.forEach((doc) => {
+          if (clubId === orgId && doc.id === announcementId) return;
+          const other = doc.data();
+          if (other.poll?.votes?.[uid] !== RSVP_YES) return;
+          const when = other.match?.matchDate?.toDate
+            ? other.match.matchDate.toDate()
+            : new Date(other.match?.matchDate);
+          if (Math.abs(when.getTime() - kickOff.getTime()) < CLASH_WINDOW_MS) {
+            clashes.push({ title: other.title || 'another match', clubId });
+          }
+        });
+      }
 
       if (clashes.length === 0) continue;
+      const otherClub = clashes.some((c) => c.clubId !== orgId);
 
       await sendToUsers([uid], notification({
         id: `match_clash_${announcementId}_${uid}`,
         type: 'match_clash',
         title: 'You are booked twice',
         body: `"${after.title || 'This match'}" clashes with `
-          + `${clashes.length === 1 ? `"${clashes[0]}"` : `${clashes.length} other matches`}`
-          + '. Both clubs are counting on you.',
+          + `${clashes.length === 1 ? `"${clashes[0].title}"` : `${clashes.length} other matches`}`
+          + (otherClub ? '. Both clubs are counting on you.' : '. Both are counting on you.'),
         route: '/home',
         params: { orgId },
       }));

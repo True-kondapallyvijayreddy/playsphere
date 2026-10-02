@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -13,12 +15,14 @@ import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/draw/draft_season_plan.dart';
 import '../../domain/draw/match_duration.dart';
+import '../../domain/tournament/season_blueprint.dart';
+import '../../domain/tournament/season_name.dart';
 import '../../domain/scoring/scoring_registry.dart';
+import '../../shared/app_messenger.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/club_context_banner.dart';
 import '../../shared/offline_fee_notice.dart';
 import '../../shared/season_branding_field.dart';
-import '../../domain/tournament/house_roster.dart';
 import 'widgets/bulk_category_selector_sheet.dart';
 import 'widgets/season_officials_field.dart';
 import 'widgets/season_plan_field.dart';
@@ -40,6 +44,7 @@ class _CategoryDraft {
     required this.sportId,
     required this.sideFormat,
     required this.category,
+    this.equipment,
   })  : format = SportCatalog.byId(sportId).defaultCompetitionFormat,
         entries = TextEditingController(),
         entryFee = TextEditingController();
@@ -47,6 +52,10 @@ class _CategoryDraft {
   final String sportId;
   final SideFormat sideFormat;
   final CompetitionCategory category;
+
+  /// The ball or shuttle, when the organizer picked one — see
+  /// [SeasonCategorySpec.equipment].
+  final String? equipment;
 
   /// This event's entry fee, in whole rupees, declared while the season is
   /// being built.
@@ -136,13 +145,23 @@ class _CategoryDraft {
         config: draw,
       );
 
-  /// Whether [other] configures the same slot — same sport, same
-  /// arrangement, same category — which would otherwise silently create two
-  /// identical draws under one season with no way to tell them apart.
-  bool clashesWith(_CategoryDraft other) =>
-      sportId == other.sportId &&
-      sideFormat.id == other.sideFormat.id &&
-      category.label == other.category.label;
+  /// This draft as the season builder reads it.
+  SeasonCategorySpec get spec => SeasonCategorySpec(
+        sportId: sportId,
+        sideFormat: sideFormat,
+        category: category,
+        equipment: equipment,
+        format: format,
+        draw: drawToSubmit,
+        maxEntrants: int.tryParse(entries.text.trim()),
+        entryFeeRupees: entryFeeRupees,
+        venueIds: {...venueIds},
+        startDate: startDate,
+        endDate: endDate,
+        dayStartHour: dayStartHour,
+        dayEndHour: dayEndHour,
+        matchMinutes: matchMinutes,
+      );
 
   void dispose() {
     entries.dispose();
@@ -199,8 +218,6 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
   /// had to know existed — see [SeasonOfficialsDraft].
   final _officials = SeasonOfficialsDraft();
 
-  Set<String> get _venueIds => {..._grounds.venueIds};
-
   /// The crest and header art, held here and uploaded once the season has an
   /// id — see [SeasonBranding] for why they cannot go up any earlier.
   final _branding = SeasonBranding();
@@ -212,6 +229,9 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
 
   DateTime? _startDate;
   DateTime? _endDate;
+
+  /// Last day entries are taken — see [SeasonBlueprint.entriesCloseOn].
+  DateTime? _entriesCloseOn;
 
   /// The timetable's shape, captured here rather than left to defaults.
   ///
@@ -278,18 +298,8 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
   /// date in the past is not a smaller season, it is a mistake. Bounding the
   /// date picker here means the wrong date is never offered in the first
   /// place, rather than being accepted and rejected on submit.
-  static DateTime get _earliestStart {
-    final today = DateTime.now();
-    return DateTime(today.year, today.month, today.day + 1);
-  }
-
-  /// Entries from outside the club must be approved, not auto-confirmed.
-  ///
-  /// The whole point of opening a season to other clubs is that the host
-  /// decides who is in — an open model would let anyone who found the link
-  /// confirm themselves a place in a school's meet.
-  ParticipationModel get _participation =>
-      _externalEntries ? ParticipationModel.approval : ParticipationModel.open;
+  static DateTime get _earliestStart =>
+      SeasonBlueprint.earliestStart(DateTime.now());
 
   void _onStartDateChanged(DateTime picked) {
     setState(() {
@@ -300,7 +310,50 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
       if (_endDate != null && _endDate!.isBefore(picked)) {
         _endDate = null;
       }
+      _clampCategoryDates();
+      if (_entriesCloseOn != null && _entriesCloseOn!.isAfter(picked)) {
+        _entriesCloseOn = null;
+      }
     });
+  }
+
+  void _onEndDateChanged(DateTime? picked) {
+    setState(() {
+      _endDate = picked;
+      _clampCategoryDates();
+    });
+  }
+
+  /// Keeps every category's own days inside the season's.
+  ///
+  /// A category's window is chosen against the season's dates as they were
+  /// at that moment. Moving the season afterwards used to leave those windows
+  /// behind — a badminton "13–14 June" inside a season now running in July,
+  /// which the scheduler reads as "never" and the date picker crashed on.
+  /// Dropped back to "follows the season" when it falls outside, because the
+  /// organizer's intent for a window that no longer overlaps is unknowable
+  /// and the card then plainly says "Follows the season".
+  void _clampCategoryDates() {
+    final start = _startDate;
+    if (start == null) return;
+    final end = _endDate ?? start;
+    for (final draft in _categories) {
+      final from = draft.startDate;
+      final to = draft.endDate;
+      if (from != null && (from.isBefore(start) || from.isAfter(end))) {
+        draft.startDate = null;
+      }
+      if (to != null && (to.isBefore(start) || to.isAfter(end))) {
+        draft.endDate = null;
+      }
+    }
+  }
+
+  /// Drops any category's pin to a ground the season no longer has.
+  void _pruneGroundPins() {
+    for (final draft in _categories) {
+      _grounds.prunePins(draft.venueIds);
+    }
   }
 
   Future<void> _addCategory({String? sportId}) async {
@@ -316,19 +369,18 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
 
     int addedCount = 0;
     for (final draft in drafts) {
-      if (_categories.any((c) =>
-          c.sportId == draft.sportId &&
-          c.sideFormat.id == draft.sideFormat.id &&
-          c.category.label == draft.category.label)) {
+      draft.dispose();
+      final candidate = _CategoryDraft(
+        sportId: draft.sportId,
+        sideFormat: draft.sideFormat,
+        category: draft.category,
+        equipment: draft.equipmentType,
+      );
+      if (_categories.any((c) => c.spec.identity == candidate.spec.identity)) {
+        candidate.dispose();
         continue;
       }
-      _categories.add(
-        _CategoryDraft(
-          sportId: draft.sportId,
-          sideFormat: draft.sideFormat,
-          category: draft.category,
-        ),
-      );
+      _categories.add(candidate);
       addedCount++;
     }
 
@@ -348,218 +400,92 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
     draft.dispose();
   }
 
-  int? _entriesFor(_CategoryDraft draft) {
-    final text = draft.entries.text.trim();
-    if (text.isEmpty) return null;
-    return int.tryParse(text);
-  }
+  /// The season exactly as it would be saved — see [SeasonBlueprint].
+  SeasonBlueprint _blueprint({String? createdBy}) => SeasonBlueprint(
+        orgId: widget.orgId,
+        name: _name.text,
+        createdBy: createdBy ?? '',
+        startDate: _startDate,
+        endDate: _endDate,
+        entriesCloseOn: _entriesCloseOn,
+        venueLabel: _venue.text,
+        groundIds: _grounds.venueIds,
+        categories: [for (final c in _categories) c.spec],
+        seasonMatchMinutes: _matchMinutesSet ? _matchMinutes : null,
+        changeoverMinutes: _changeoverMinutes,
+        restGapMinutes: _restGapMinutes,
+        dayStartHour: _dayStartHour,
+        dayEndHour: _dayEndHour,
+        externalEntries: _externalEntries,
+        feeMode: _feeMode,
+        seasonFeeRupees: _seasonFeeRupees,
+        takenNames: ref.read(
+            seasonNamesTakenProvider((orgId: widget.orgId, exceptId: null))),
+      );
 
   Future<void> _create() async {
+    if (_busy) return;
     if (!_formKey.currentState!.validate()) return;
-    if (_categories.isEmpty) {
-      showError(context, 'Add at least one category for this season.');
-      return;
-    }
-    final start = _startDate;
-    if (start == null) {
-      showError(context, 'Pick a start date.');
-      return;
-    }
-    if (start.isBefore(_earliestStart)) {
-      showError(context, 'Start date must be at least tomorrow.');
-      return;
-    }
-    final end = _endDate;
-    if (end != null && end.isBefore(start)) {
-      showError(context, 'End date cannot be before the start date.');
-      return;
-    }
-    // A season with no ground cannot be scheduled at all — `generateSchedule`
-    // resolves its courts from these venue documents and refuses when there
-    // are none. Caught here, at creation, rather than weeks later when
-    // somebody presses the only button that would have told them.
-    if (_venueIds.isEmpty) {
+    final uid = ref.read(authUidProvider);
+    if (uid == null) return;
+
+    // Every reason this season cannot be saved, checked by the same builder
+    // that writes it — so nothing reaches Firestore that the rules or the
+    // scheduler would later refuse.
+    final problems = _blueprint(createdBy: uid).problems();
+    if (problems.isNotEmpty) {
       showError(
         context,
-        'Pick at least one ground. Matches are scheduled onto their courts.',
+        problems.length == 1
+            ? problems.first
+            : '${problems.first} (and ${problems.length - 1} more to fix)',
       );
       return;
     }
-    final uid = ref.read(currentUidProvider);
-    if (uid == null) return;
 
     setState(() => _busy = true);
     try {
-      final tournaments = ref.read(tournamentRepositoryProvider);
-      final competitions = ref.read(competitionRepositoryProvider);
-
-      // Grounds first, because the season document carries their ids and a
-      // ground typed on this form has none until it is written. Any category
-      // pinned to one of those grounds is re-pointed at the real id — a
-      // restriction naming a ground that no longer exists under that key is
-      // a restriction that silently confines a draw to nothing.
-      final remap = await _grounds.ensureVenues(
-        repo: tournaments,
-        orgId: widget.orgId,
-      );
+      // Real ids for grounds typed on this form, allocated on the phone, and
+      // every category pinned to one re-pointed at its real id.
+      final remap = _grounds.allocateIds(orgId: widget.orgId);
       if (remap.isNotEmpty) {
         for (final draft in _categories) {
-          final moved = {
-            for (final id in draft.venueIds) remap[id] ?? id,
-          };
+          final moved = {for (final id in draft.venueIds) remap[id] ?? id};
           draft.venueIds
             ..clear()
             ..addAll(moved);
         }
       }
-      final venueIds = _grounds.venueIds;
 
-      // The status asked for here is not the status stored.
-      // `Competition.toCreate` forces every event to `draft` and
-      // `firestore.rules` requires it, so that an organizer can check an
-      // event before anybody enters it. The season page's "Open entries on
-      // all N events" is what lifts them — see
-      // `TournamentRepository.openEntriesForSeason`.
-      final seasonId = await tournaments.createTournament(
-        Tournament(
-          id: '',
-          orgId: widget.orgId,
-          name: _name.text.trim(),
-          status: TournamentStatus.entriesOpen,
-          startDate: start,
-          endDate: end ?? start,
-          venueIds: venueIds,
-          eventCount: _categories.length,
-          feeMode: _feeMode,
-          // Zero under per-sport pricing, always. An organizer who typed a
-          // season fee and then switched to per-sport must not leave that
-          // number behind on the season — an entrant would be quoted it on
-          // the season page and a different one on the event they enter.
-          entryFeeRupees: _feeMode == SeasonFeeMode.wholeSeason
-              ? _seasonFeeRupees
-              : 0,
-          createdBy: uid,
-        ),
+      final tournaments = ref.read(tournamentRepositoryProvider);
+      // One atomic commit: grounds, season, every event, ground terms and
+      // the officiating panel. See `TournamentRepository.createSeason`.
+      final created = await tournaments.createSeason(
+        blueprint: _blueprint(createdBy: uid),
+        grounds: _grounds.grounds,
+        officials: _officials.officials,
       );
 
-      for (final draft in _categories) {
-        final sport = draft.sport;
-        final showsArrangement = sport.sideFormats.length > 1;
-        await competitions.createCompetition(
-          Competition(
-            id: '',
+      // Artwork needs the season on the server (its storage path is checked
+      // against it), so it follows the commit and reports on the root
+      // messenger — this screen is gone by then.
+      if (!_branding.isEmpty) {
+        final branding = _branding;
+        unawaited(created.committed.then((_) async {
+          final problem = await branding.uploadTo(
+            repo: tournaments,
             orgId: widget.orgId,
-            tournamentId: seasonId,
-            name: showsArrangement
-                ? '${_name.text.trim()} — ${sport.name} '
-                    '(${draft.sideFormat.name})'
-                : '${_name.text.trim()} — ${sport.name}',
-            sportId: sport.id,
-            sportName: sport.name,
-            archetype: sport.archetype,
-            entrantType: sport.defaultEntrantType,
-            // How the field is ASSEMBLED, which is a different question from
-            // what an entrant is. Left unset, every event took
-            // `TeamEntryMode.individual` — so a cricket event created on this
-            // form promoted its twenty-two confirmed registrations into
-            // twenty-two individual entrants and drew singles matches between
-            // cricketers. The guided form has always set this; this one
-            // silently did not, and the two produced different seasons from
-            // the same answers.
-            teamEntryMode: sport.defaultEntrantType == EntrantType.individual
-                ? TeamEntryMode.individual
-                : (_externalEntries
-                    ? TeamEntryMode.preformedTeam
-                    : TeamEntryMode.houseBatch),
-            // Named here rather than left to the registration screen's
-            // fallback, so the stored event says what people will actually be
-            // offered. Empty for an open season: house names belong to one
-            // school and mean nothing to a visiting club entering as a team.
-            presetHouses: _externalEntries ||
-                    sport.defaultEntrantType == EntrantType.individual
-                ? const []
-                : HouseTemplates.schoolColours,
-            format: draft.format,
-            status: CompetitionStatus.registrationOpen,
-            category: draft.category,
-            scoringPluginKey: sport.pluginKey,
-            scoringConfig: draft.sideFormat.configOverrides,
-            drawConfig: draft.drawToSubmit,
-            // The season's answers, overridden by this category's own where
-            // it gave any. `generateSchedule` reads these back and confines
-            // the sport's matches to exactly them.
-            scheduleConfig: ScheduleConfig(
-              venueIds: draft.venueIds.isEmpty
-                  ? venueIds
-                  : draft.venueIds.toList(),
-              // The sport's own match length unless it was overridden — the
-              // same number the plan on the form was computed from, so the
-              // timetable the season generates is the one it promised.
-              matchMinutes: _minutesFor(draft),
-              changeoverMinutes: _changeoverMinutes,
-              restGapMinutes: _restGapMinutes,
-              dayStartHour: draft.dayStartHour ?? _dayStartHour,
-              dayEndHour: draft.dayEndHour ?? _dayEndHour,
-            ),
-            venue: _venue.text.trim().isEmpty ? null : _venue.text.trim(),
-            startDate: draft.startDate ?? start,
-            // Null while the category runs the whole season — see the same
-            // field in `guided_season_screen.dart`.
-            endDate: draft.endDate,
-            // Declared here and never collected here — see
-            // `FeeSettlement` for why the number travels with the event
-            // but the money does not travel through PlaySphere.
-            //
-            // Zero under whole-season pricing: the event is not free, it is
-            // already covered, and `Tournament.seasonFeeCoversEverything` is
-            // what lets the event page say so.
-            entryFeeRupees: _feeMode == SeasonFeeMode.perEvent
-                ? draft.entryFeeRupees
-                : 0,
-            maxEntrants: _entriesFor(draft),
-            participationModel: _participation,
-            waitlistEnabled: true,
-            openToNonMembers: _externalEntries,
-            createdBy: uid,
-          ),
-        );
+            tournamentId: created.seasonId,
+            uid: uid,
+          );
+          if (problem != null) showAppMessage(problem);
+        }).catchError((_) {}));
       }
 
-      tournaments.noteEventsCreated(
-        orgId: widget.orgId,
-        tournamentId: seasonId,
-        count: _categories.length,
-      );
-
-      // Everything that needs the season's id and is allowed to fail without
-      // losing the season: the per-ground hours, the officiating panel, the
-      // artwork. Each reports rather than throws — a season that exists with
-      // no crest, or with a panel one name short, is a season; losing it to
-      // a failed side-write would not be.
-      await _grounds.savePlans(
-        repo: tournaments,
-        orgId: widget.orgId,
-        tournamentId: seasonId,
-      );
-
-      final panelProblem = await _officials.commit(
-        repo: tournaments,
-        orgId: widget.orgId,
-        tournamentId: seasonId,
-        addedByUid: uid,
-      );
-
-      final brandingProblem = await _branding.uploadTo(
-        repo: tournaments,
-        orgId: widget.orgId,
-        tournamentId: seasonId,
-        uid: uid,
-      );
-
       if (mounted) {
-        context.pushReplacement(Routes.tournament(widget.orgId, seasonId));
-        final problem = panelProblem ?? brandingProblem;
-        if (problem != null) showError(context, problem);
+        context.pushReplacement(
+          Routes.tournament(widget.orgId, created.seasonId),
+        );
       }
     } catch (e) {
       if (mounted) showError(context, e);
@@ -571,6 +497,25 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    // Keeps the club's seasons loaded, so the name check below has them.
+    ref.watch(seasonNamesTakenProvider((orgId: widget.orgId, exceptId: null)));
+
+    // Straight off the grounds panel rather than re-read from Firestore: a
+    // ground added on this form is not a saved venue yet, and filtering the
+    // saved list by the season's ids would hide exactly the ground the
+    // organizer had just typed in.
+    //
+    // Built HERE and not inline in the category card below, which is what
+    // test run TC-12 crashed on: a list literal nested inside the widget
+    // list's own `for (final draft in _categories)` element compiles, under
+    // dart2js -O4, to a `$flags` write hoisted ABOVE the assignment it
+    // belongs to — "Cannot set properties of undefined (setting '$flags')",
+    // and the whole screen fails to build. Only on the web release build, so
+    // no test and no debug run could see it. One variable, read by every
+    // card, avoids the shape entirely.
+    final seasonVenues = [
+      for (final g in _grounds.grounds) g.venue,
+    ];
 
     return AppScaffold(
       orgId: widget.orgId,
@@ -591,14 +536,19 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
                   TextFormField(
                     controller: _name,
                     textCapitalization: TextCapitalization.words,
+                    maxLength: SeasonName.maxLength,
+                    autovalidateMode: AutovalidateMode.onUserInteraction,
                     decoration: const InputDecoration(
                       labelText: 'Season name',
                       hintText: 'e.g. Nizampet Sports Week 2026',
                       border: OutlineInputBorder(),
+                      errorMaxLines: 3,
                     ),
-                    validator: (v) => (v == null || v.trim().length < 3)
-                        ? 'At least 3 characters'
-                        : null,
+                    validator: (v) => SeasonName.problem(
+                      v ?? '',
+                      taken: ref.read(seasonNamesTakenProvider(
+                          (orgId: widget.orgId, exceptId: null))),
+                    ),
                   ),
                   const SizedBox(height: 24),
 
@@ -634,7 +584,19 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
                     helper: 'Leave blank for a one-day season',
                     value: _endDate,
                     firstSelectableDate: _startDate ?? _earliestStart,
-                    onPick: (d) => setState(() => _endDate = d),
+                    onPick: _onEndDateChanged,
+                  ),
+                  const SizedBox(height: 20),
+                  _DateField(
+                    label: 'Entries close (optional)',
+                    helper: _startDate == null
+                        ? 'Pick the start date first'
+                        : 'Last day to enter. Leave blank to close entries '
+                            'yourself from the season page.',
+                    value: _entriesCloseOn,
+                    firstSelectableDate: DateUtils.dateOnly(DateTime.now()),
+                    lastSelectableDate: _startDate,
+                    onPick: (d) => setState(() => _entriesCloseOn = d),
                   ),
                   const SizedBox(height: 20),
 
@@ -657,7 +619,7 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
                     start: _startDate,
                     end: _endDate,
                     defaultTurnaroundMinutes: _changeoverMinutes,
-                    onChanged: () => setState(() {}),
+                    onChanged: () => setState(_pruneGroundPins),
                     onAddDay: _addADay,
                   ),
                   const SizedBox(height: 16),
@@ -775,14 +737,7 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
                         key: ObjectKey(draft),
                         draft: draft,
                         showFee: _feeMode == SeasonFeeMode.perEvent,
-                        // Straight off the grounds panel rather than
-                        // re-read from Firestore: a ground added on this form
-                        // is not a saved venue yet, and filtering the saved
-                        // list by the season's ids would hide exactly the
-                        // ground the organizer had just typed in.
-                        seasonVenues: [
-                          for (final g in _grounds.grounds) g.venue,
-                        ],
+                        seasonVenues: seasonVenues,
                         seasonStart: _startDate,
                         seasonEnd: _endDate,
                         seasonDayStartHour: _dayStartHour,
@@ -851,7 +806,7 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
         Text('Entry fee', style: theme.textTheme.titleMedium),
         const SizedBox(height: 4),
         Text(
-          'Both options are free if you leave the amount blank.',
+          'Both options are free if you leave the amount at 0.',
           style: theme.textTheme.bodySmall
               ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
         ),
@@ -935,10 +890,15 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
               children: [
                 Expanded(
                   child: _MinutesField(
-                    label: _matchMinutesSet
-                        ? 'Match length'
-                        : 'Match length (auto)',
+                    label: 'Match length',
                     value: _matchMinutes,
+                    // Unset, every sport keeps its own length from its rules —
+                    // a T20 and a badminton game are not both 30 minutes — so
+                    // the box says that rather than showing a 30 it ignores.
+                    display: _matchMinutesSet ? null : 'Each sport’s own',
+                    onReset: _matchMinutesSet
+                        ? () => setState(() => _matchMinutesSet = false)
+                        : null,
                     min: 5,
                     max: 240,
                     step: 5,
@@ -1017,12 +977,11 @@ class _CreateSeasonScreenState extends ConsumerState<CreateSeasonScreen> {
       ];
 
   /// Minutes one match of [draft] takes: its own override, then the season's
-  /// if the organizer set one, then the sport's ruleset.
+  /// if the organizer set one, then the sport's ruleset for its arrangement.
+  /// The builder's arithmetic, so the plan on the form and the events saved
+  /// agree to the minute.
   int _minutesFor(_CategoryDraft draft) =>
-      draft.matchMinutes ??
-      (_matchMinutesSet
-          ? _matchMinutes
-          : MatchDuration.estimate(sportId: draft.sportId));
+      _blueprint().minutesFor(draft.spec);
 
   /// The season as currently typed, measured against the grounds it has.
   ///
@@ -1197,7 +1156,7 @@ class _CategoryCard extends StatelessWidget {
                       final t = v?.trim() ?? '';
                       if (t.isEmpty) return null;
                       final n = int.tryParse(t);
-                      return (n == null || n < 1) ? 'No' : null;
+                      return (n == null || n < 2) ? 'At least 2' : null;
                     },
                   ),
                 ),
@@ -1335,7 +1294,7 @@ class _CategoryCard extends StatelessWidget {
                     hint: 'Season start',
                     value: draft.startDate,
                     firstDate: seasonStart!,
-                    lastDate: seasonEnd,
+                    lastDate: seasonEnd ?? seasonStart,
                     onPick: (d) {
                       draft.startDate = d;
                       final end = draft.endDate;
@@ -1351,7 +1310,7 @@ class _CategoryCard extends StatelessWidget {
                     hint: 'Season end',
                     value: draft.endDate,
                     firstDate: draft.startDate ?? seasonStart!,
-                    lastDate: seasonEnd,
+                    lastDate: seasonEnd ?? seasonStart,
                     onPick: (d) {
                       draft.endDate = d;
                       onScheduleChanged();
@@ -1460,14 +1419,20 @@ class _CategoryDateField extends StatelessWidget {
       ),
       child: InkWell(
         onTap: () async {
-          final last = lastDate ?? firstDate.add(const Duration(days: 365));
+          // No end date means a one-day season, so a category's window cannot
+          // run past its first day. It used to offer a whole year.
+          final raw = lastDate ?? firstDate;
+          final last = raw.isBefore(firstDate) ? firstDate : raw;
+          // A value left over from before the season's dates moved must not
+          // be handed to the picker outside its own range — that asserts.
+          var initial = value ?? firstDate;
+          if (initial.isBefore(firstDate)) initial = firstDate;
+          if (initial.isAfter(last)) initial = last;
           final picked = await showDatePicker(
             context: context,
-            initialDate: value ?? firstDate,
+            initialDate: initial,
             firstDate: firstDate,
-            // A season narrower than a day would otherwise trip the picker's
-            // own assertion.
-            lastDate: last.isBefore(firstDate) ? firstDate : last,
+            lastDate: last,
           );
           if (picked != null) onPick(picked);
         },
@@ -1503,133 +1468,6 @@ class _Chip extends StatelessWidget {
   }
 }
 
-/// Asks the questions that fully describe one season category, in the order
-/// an organizer actually thinks in: which sport, then which arrangement it
-/// is played in (skipped entirely when the sport only has one), then which
-/// age/gender band it is for.
-class _AddCategorySheet extends StatefulWidget {
-  const _AddCategorySheet({required this.cutOff});
-
-  /// The season's start date, so age presets are measured against it rather
-  /// than today — a U-14 category should not silently mean something
-  /// different depending on when the organizer happened to build the season.
-  final DateTime? cutOff;
-
-  @override
-  State<_AddCategorySheet> createState() => _AddCategorySheetState();
-}
-
-class _AddCategorySheetState extends State<_AddCategorySheet> {
-  late SportSpec _sport = SportCatalog.all.first;
-  late SideFormat _sideFormat = _sport.defaultSideFormat;
-  late final List<CompetitionCategory> _presets =
-      CompetitionCategory.presets(cutOff: widget.cutOff);
-  late CompetitionCategory _category = _presets.first;
-
-  void _pickSport(String id) {
-    setState(() {
-      _sport = SportCatalog.byId(id);
-      _sideFormat = _sport.defaultSideFormat;
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final showsArrangement = _sport.sideFormats.length > 1;
-
-    return Padding(
-      padding: EdgeInsets.only(
-        left: 20,
-        right: 20,
-        top: 20,
-        bottom: MediaQuery.of(context).viewInsets.bottom + 20,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text('Add a category', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 16),
-
-          DropdownButtonFormField<String>(
-            value: _sport.id,
-            isExpanded: true,
-            decoration: const InputDecoration(
-              labelText: 'Sport',
-              border: OutlineInputBorder(),
-            ),
-            items: [
-              for (final s in SportCatalog.all)
-                DropdownMenuItem(
-                  value: s.id,
-                  child: Text('${s.icon}  ${s.name}'),
-                ),
-            ],
-            onChanged: (id) {
-              if (id != null) _pickSport(id);
-            },
-          ),
-          const SizedBox(height: 16),
-
-          if (showsArrangement) ...[
-            DropdownButtonFormField<String>(
-              value: _sideFormat.id,
-              isExpanded: true,
-              decoration: const InputDecoration(
-                labelText: 'Sport type',
-                helperText: 'How this category is played',
-                border: OutlineInputBorder(),
-              ),
-              items: [
-                for (final f in _sport.sideFormats)
-                  DropdownMenuItem(value: f.id, child: Text(f.name)),
-              ],
-              onChanged: (id) {
-                if (id == null) return;
-                setState(
-                  () => _sideFormat =
-                      _sport.sideFormats.firstWhere((f) => f.id == id),
-                );
-              },
-            ),
-            const SizedBox(height: 16),
-          ],
-
-          DropdownButtonFormField<String>(
-            value: _category.label,
-            isExpanded: true,
-            decoration: const InputDecoration(
-              labelText: 'Category',
-              border: OutlineInputBorder(),
-            ),
-            items: [
-              for (final c in _presets)
-                DropdownMenuItem(value: c.label, child: Text(c.label)),
-            ],
-            onChanged: (label) => setState(
-              () => _category = _presets.firstWhere((c) => c.label == label),
-            ),
-          ),
-          const SizedBox(height: 20),
-
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(
-              _CategoryDraft(
-                sportId: _sport.id,
-                sideFormat: _sideFormat,
-                category: _category,
-              ),
-            ),
-            style:
-                FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
-            child: const Text('Add category'),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _DateField extends StatelessWidget {
   const _DateField({
     required this.label,
@@ -1637,12 +1475,16 @@ class _DateField extends StatelessWidget {
     required this.value,
     required this.onPick,
     this.firstSelectableDate,
+    this.lastSelectableDate,
   });
 
   final String label;
   final String helper;
   final DateTime? value;
   final ValueChanged<DateTime> onPick;
+
+  /// Latest date offered. Null means three years on.
+  final DateTime? lastSelectableDate;
 
   /// Earliest date the picker will offer. This is what actually enforces
   /// "start date is at least tomorrow" and "end date is not before the
@@ -1655,13 +1497,15 @@ class _DateField extends StatelessWidget {
     final first = firstSelectableDate ?? DateTime.now();
     return InkWell(
       onTap: () async {
-        final initial =
-            value != null && !value!.isBefore(first) ? value! : first;
+        final bound = lastSelectableDate ?? DateTime(first.year + 3);
+        final last = bound.isBefore(first) ? first : bound;
+        var initial = value != null && !value!.isBefore(first) ? value! : first;
+        if (initial.isAfter(last)) initial = last;
         final picked = await showDatePicker(
           context: context,
           initialDate: initial,
           firstDate: first,
-          lastDate: DateTime(first.year + 3),
+          lastDate: last,
         );
         if (picked != null) onPick(picked);
       },
@@ -1693,10 +1537,18 @@ class _MinutesField extends StatelessWidget {
     required this.max,
     required this.step,
     required this.onChanged,
+    this.display,
+    this.onReset,
   });
 
   final String label;
   final int value;
+
+  /// Shown instead of the number when the value is not in force.
+  final String? display;
+
+  /// Puts the value back to "not set", when it is set.
+  final VoidCallback? onReset;
   final int min;
   final int max;
   final int step;
@@ -1708,7 +1560,20 @@ class _MinutesField extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label, style: theme.textTheme.bodySmall),
+        Row(
+          children: [
+            Expanded(child: Text(label, style: theme.textTheme.bodySmall)),
+            if (onReset != null)
+              InkWell(
+                onTap: onReset,
+                child: Text(
+                  'Per sport',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.primary),
+                ),
+              ),
+          ],
+        ),
         const SizedBox(height: 4),
         InputDecorator(
           decoration: const InputDecoration(
@@ -1725,10 +1590,13 @@ class _MinutesField extends StatelessWidget {
                 visualDensity: VisualDensity.compact,
                 onPressed: value > min ? () => onChanged(value - step) : null,
               ),
-              Text(
-                '$value min',
-                style: theme.textTheme.bodyMedium
-                    ?.copyWith(fontWeight: FontWeight.w700),
+              Flexible(
+                child: Text(
+                  display ?? '$value min',
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodyMedium
+                      ?.copyWith(fontWeight: FontWeight.w700),
+                ),
               ),
               IconButton(
                 tooltip: 'Add',

@@ -276,8 +276,8 @@ Future<Venue?> showQuickAddVenueDialog(
                   labelText: 'Courts / Pitches (comma-separated)',
                   hintText: 'e.g. Court 1, Court 2, Court 3',
                   helperText:
-                      'One line per playing area. This is what the schedule '
-                      'spreads matches across.',
+                      'Separate each playing area with a comma. This is what '
+                      'the schedule spreads matches across.',
                   helperMaxLines: 2,
                   border: OutlineInputBorder(),
                 ),

@@ -1,13 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../core/models/competition.dart';
 import '../../core/models/fixture.dart';
-import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
+import '../../core/router/app_router.dart';
 import '../../data/tournament_repository.dart';
 import '../../domain/schedule/schedule_view_model.dart';
 import '../../shared/app_scaffold.dart';
+import '../../shared/ui_kit.dart';
 import '../competitions/widgets/schedule_board.dart';
 import '../competitions/widgets/schedule_export.dart';
 import '../scoring/open_match.dart';
@@ -25,29 +27,47 @@ class TournamentScheduleScreen extends ConsumerWidget {
     super.key,
     required this.orgId,
     required this.tournamentId,
+    this.sportId,
   });
 
   final String orgId;
   final String tournamentId;
 
+  /// One sport's timetable instead of the season's — what "Full schedule" on
+  /// a sport's panel of the season page opens. The capacity and health cards
+  /// stay season-wide, because the grounds are shared whatever the filter.
+  ///
+  /// It is also the only place a timetable is built: draw, schedule and
+  /// publish act on this sport alone. Without a sport the page is the
+  /// season's read-only programme, with a way into each sport.
+  final String? sportId;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final key = (orgId: orgId, tournamentId: tournamentId);
     final tournamentAsync = ref.watch(tournamentProvider(key));
-    final canManage = ref
-        .watch(myCapabilitiesProvider(orgId))
-        .contains(Capability.manageCompetitions);
+    final canManage = ref.watch(seasonAccessProvider(key)).canManage;
 
     final tournament = tournamentAsync.valueOrNull;
-    final allFixtures =
-        ref.watch(tournamentFixturesProvider(key)).valueOrNull ?? const [];
-    final events =
+    final seasonEvents =
         ref.watch(tournamentEventsProvider(key)).valueOrNull ?? const [];
+    final events = _inSport(seasonEvents);
+    final eventIds = {for (final e in events) e.id};
+    final allFixtures = <Fixture>[
+      for (final f
+          in ref.watch(tournamentFixturesProvider(key)).valueOrNull ?? const [])
+        if ((sportId == null || eventIds.contains(f.compId)) &&
+            // Placeholder "Team A v Team B" previews are the organizer's.
+            (canManage || !f.isDraft))
+          f,
+    ];
     final eventNames = {for (final e in events) e.id: e.name};
+    final sportName =
+        sportId == null || events.isEmpty ? null : events.first.sportName;
 
     return AppScaffold(
       orgId: orgId,
-      title: 'Schedule',
+      title: sportName == null ? 'Schedule' : '$sportName schedule',
       // At the top of the page, not only beside the Programme heading below
       // the court grid. An organiser printing a timetable for a noticeboard
       // should not have to scroll past the grid to find the printer.
@@ -55,7 +75,9 @@ class TournamentScheduleScreen extends ConsumerWidget {
         if (tournament != null && allFixtures.isNotEmpty)
           ScheduleDownloadButton(
             fixtures: allFixtures,
-            title: tournament.name,
+            title: sportName == null
+                ? tournament.name
+                : '${tournament.name} — $sportName',
             subtitle: '${events.length} events · ${allFixtures.length} matches',
             note: allFixtures.any((f) => f.isDraft)
                 ? 'DRAFT — team names are placeholders until each draw is '
@@ -76,91 +98,145 @@ class TournamentScheduleScreen extends ConsumerWidget {
               title: 'This tournament no longer exists',
             );
           }
-          final eventsAsync = ref.watch(tournamentEventsProvider(key));
           final fixturesAsync = ref.watch(tournamentFixturesProvider(key));
+
+          final sport = sportId;
+          final grid = GraphicalScheduleView(
+            tournament: tournament,
+            events: events,
+            fixtures: allFixtures,
+            canManage: canManage,
+            embedded: false,
+            sportId: sport,
+            sportName: sportName,
+            onDrawAndSchedule: sport == null
+                ? null
+                : (timings) => drawAndScheduleSport(
+                      context: context,
+                      ref: ref,
+                      orgId: orgId,
+                      tournamentId: tournamentId,
+                      sportId: sport,
+                      sportName: sportName ?? 'this sport',
+                      timings: timings,
+                    ),
+            onRegenerateDraft: sport == null
+                ? null
+                : (timings) => regenerateTournamentSchedule(
+                      context: context,
+                      ref: ref,
+                      orgId: orgId,
+                      tournamentId: tournamentId,
+                      sportId: sport,
+                      timings: timings,
+                    ),
+            onLockSchedule: sport == null
+                ? null
+                : () => lockTournamentSchedule(
+                      context: context,
+                      ref: ref,
+                      orgId: orgId,
+                      tournamentId: tournamentId,
+                      sportId: sport,
+                      sportName: sportName ?? 'this sport',
+                    ),
+            onOpenSport: (id) => context.pushReplacement(
+              Routes.tournamentSchedule(orgId, tournamentId, sportId: id),
+            ),
+            onMoveMatch: (fixture) => moveMatchByHand(
+              context: context,
+              ref: ref,
+              orgId: orgId,
+              tournamentId: tournamentId,
+              fixture: fixture,
+            ),
+            // A live or finished cell cannot be moved; before this it did
+            // nothing at all, so the grid was a dead end on match day.
+            onOpenMatch: (fixture) => openMatch(
+              context,
+              fixture: fixture,
+              myUid: ref.read(currentUidProvider),
+              canManage: canManage,
+            ),
+          );
+          // The grid answers "is Court 2 free at 11" and is the right shape
+          // for building a schedule; a coach wants their club's matches in
+          // order and a school office wants a sheet for the wall. Both come
+          // from the same fixtures, so neither can drift from the other.
+          final programme = _SeasonProgramme(
+            orgId: orgId,
+            tournamentId: tournamentId,
+            tournamentName: sportName == null
+                ? tournament.name
+                : '${tournament.name} — $sportName',
+            events: events,
+            fixtures: allFixtures,
+            canManage: canManage,
+          );
 
           return ListView(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
             children: [
               AsyncErrorStrip(value: fixturesAsync, what: 'the matches'),
-
-              // Feasibility first, timetable second. An organizer opening this
-              // page before anything is drawn should be told whether the
-              // season fits at all — the answer is available from the entrant
-              // counts, and it is worth far more before Generate than after.
-              SeasonCapacityCard(
-                orgId: orgId,
-                tournamentId: tournamentId,
-                canManage: canManage,
-              ),
-              const SizedBox(height: 12),
-              ScheduleHealthCard(orgId: orgId, tournamentId: tournamentId),
-              const SizedBox(height: 12),
-              GraphicalScheduleView(
-                tournament: tournament,
-                events: eventsAsync.valueOrNull ?? const [],
-                fixtures: fixturesAsync.valueOrNull ?? const [],
-                canManage: canManage,
-                embedded: false,
-                onSetUpWholeSeason: (timings) => setUpWholeSeason(
-                  context: context,
-                  ref: ref,
+              if (sportName != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Wrap(
+                    spacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      InputChip(
+                        avatar: Icon(SportVisual.of(sportId!).icon, size: 16),
+                        label: Text('$sportName only'),
+                        onDeleted: () => context.pushReplacement(
+                          Routes.tournamentSchedule(orgId, tournamentId),
+                        ),
+                        deleteButtonTooltipMessage: 'Show every sport',
+                      ),
+                    ],
+                  ),
+                ),
+              if (canManage) ...[
+                // Feasibility first, timetable second. An organizer opening this
+                // page before anything is drawn should be told whether the
+                // season fits at all — the answer is available from the entrant
+                // counts, and it is worth far more before Generate than after.
+                SeasonCapacityCard(
                   orgId: orgId,
                   tournamentId: tournamentId,
-                  timings: timings,
-                ),
-                onRegenerateDraft: (timings) => regenerateTournamentSchedule(
-                  context: context,
-                  ref: ref,
-                  orgId: orgId,
-                  tournamentId: tournamentId,
-                  timings: timings,
-                ),
-                onLockSchedule: () => lockTournamentSchedule(
-                  context: context,
-                  ref: ref,
-                  orgId: orgId,
-                  tournamentId: tournamentId,
-                ),
-                onMoveMatch: (fixture) => moveMatchByHand(
-                  context: context,
-                  ref: ref,
-                  orgId: orgId,
-                  tournamentId: tournamentId,
-                  fixture: fixture,
-                ),
-                // A live or finished cell cannot be moved; before this it did
-                // nothing at all, so the grid was a dead end on match day.
-                onOpenMatch: (fixture) => openMatch(
-                  context,
-                  fixture: fixture,
-                  myUid: ref.read(currentUidProvider),
                   canManage: canManage,
                 ),
-              ),
-              const SizedBox(height: 24),
-              // The same timetable as a list, and the button that prints it.
-              //
-              // The grid answers "is Court 2 free at 11" and is the right
-              // shape for building a schedule. It is the wrong shape for
-              // handing to somebody: a coach wants their own club's matches
-              // in order, and a school office wants a sheet to put on the
-              // wall. Both come from the same fixtures, so neither can drift
-              // from the grid above.
-              _SeasonProgramme(
-                orgId: orgId,
-                tournamentId: tournamentId,
-                tournamentName: tournament.name,
-                events: eventsAsync.valueOrNull ?? const [],
-                fixtures: fixturesAsync.valueOrNull ?? const [],
-                canManage: canManage,
-              ),
+                const SizedBox(height: 12),
+                ScheduleHealthCard(orgId: orgId, tournamentId: tournamentId),
+                const SizedBox(height: 12),
+              ],
+              // The organizer builds the timetable on the grid, so it comes
+              // first for them; everyone else came to read the programme —
+              // the same fixtures as a list, and the button that prints it.
+              if (canManage) ...[
+                grid,
+                const SizedBox(height: 24),
+                programme,
+              ] else ...[
+                programme,
+                const SizedBox(height: 24),
+                grid,
+              ],
             ],
           );
         },
       ),
     );
   }
+}
+
+extension on TournamentScheduleScreen {
+  List<Competition> _inSport(List<Competition> events) => sportId == null
+      ? events
+      : [
+          for (final e in events)
+            if (e.sportId == sportId) e,
+        ];
 }
 
 /// The reader's own entrants across every event in one season.
@@ -176,7 +252,8 @@ Set<String> _seasonEntrantIds(
       entrants: ref.watch(tournamentEntrantsProvider(key)),
       uid: ref.watch(currentUidProvider),
       myOrgIds: {
-        for (final m in ref.watch(myMembershipsProvider).valueOrNull ?? const [])
+        for (final m
+            in ref.watch(myMembershipsProvider).valueOrNull ?? const [])
           m.orgId,
       },
       myTeamIds: {
@@ -253,17 +330,19 @@ class _SeasonProgramme extends ConsumerWidget {
   }
 }
 
-/// Draws every event and lays the whole season out, from one press.
+/// Draws every event of one sport and lays its matches out, from one press.
 ///
 /// The stress this product exists to remove: an organizer with fifteen events
 /// otherwise opens each one, generates its draw, returns, and only then asks
-/// for a timetable — and a schedule solved per event still double-books the
-/// player who entered three of them.
-Future<void> setUpWholeSeason({
+/// for a timetable. The sport is fitted around the season's other sports, so
+/// it still can't double-book a player who entered three of them.
+Future<void> drawAndScheduleSport({
   required BuildContext context,
   required WidgetRef ref,
   required String orgId,
   required String tournamentId,
+  required String sportId,
+  required String sportName,
   required ScheduleTimings timings,
 }) async {
   final messenger = ScaffoldMessenger.of(context);
@@ -282,7 +361,7 @@ Future<void> setUpWholeSeason({
             child: CircularProgressIndicator(strokeWidth: 2.5),
           ),
           SizedBox(width: 16),
-          Expanded(child: Text('Drawing every event and scheduling…')),
+          Expanded(child: Text('Drawing and scheduling…')),
         ],
       ),
     ),
@@ -291,9 +370,10 @@ Future<void> setUpWholeSeason({
   SeasonSetupReport? report;
   Object? failure;
   try {
-    report = await ref.read(tournamentRepositoryProvider).setUpWholeSeason(
+    report = await ref.read(tournamentRepositoryProvider).setUpSport(
           orgId: orgId,
           tournamentId: tournamentId,
+          sportId: sportId,
           matchMinutes: timings.matchMinutes,
           changeoverMinutes: timings.changeoverMinutes,
           restGapMinutes: timings.restGapMinutes,
@@ -307,7 +387,7 @@ Future<void> setUpWholeSeason({
 
   if (failure != null) {
     messenger.showSnackBar(
-      SnackBar(content: Text('Could not set up the season: $failure')),
+      SnackBar(content: Text('Could not set up $sportName: $failure')),
     );
     return;
   }
@@ -330,7 +410,7 @@ Future<void> setUpWholeSeason({
   await showDialog<void>(
     context: context,
     builder: (ctx) => AlertDialog(
-      title: const Text('Season laid out, with gaps'),
+      title: Text('$sportName laid out, with gaps'),
       content: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -381,6 +461,7 @@ Future<void> regenerateTournamentSchedule({
   required WidgetRef ref,
   required String orgId,
   required String tournamentId,
+  required String sportId,
   required ScheduleTimings timings,
 }) async {
   final messenger = ScaffoldMessenger.of(context);
@@ -389,6 +470,7 @@ Future<void> regenerateTournamentSchedule({
         await ref.read(tournamentRepositoryProvider).regenerateDraftSchedule(
               orgId: orgId,
               tournamentId: tournamentId,
+              sportId: sportId,
               matchMinutes: timings.matchMinutes,
               changeoverMinutes: timings.changeoverMinutes,
               restGapMinutes: timings.restGapMinutes,
@@ -429,8 +511,7 @@ Future<void> moveMatchByHand({
   required Fixture fixture,
 }) async {
   final messenger = ScaffoldMessenger.of(context);
-  final calendarsAsync =
-      ref.read(venueCapacityLinesProvider((
+  final calendarsAsync = ref.read(venueCapacityLinesProvider((
     orgId: orgId,
     tournamentId: tournamentId,
   )));
@@ -524,15 +605,16 @@ class _MoveMatchSheet extends ConsumerStatefulWidget {
 }
 
 class _MoveMatchSheetState extends ConsumerState<_MoveMatchSheet> {
-  late DateTime _when =
-      widget.fixture.scheduledAt ?? DateTime.now().add(const Duration(hours: 1));
+  late DateTime _when = widget.fixture.scheduledAt ??
+      DateTime.now().add(const Duration(hours: 1));
   String? _venueId;
   String? _courtRefId;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final venues = ref.watch(venuesProvider(widget.orgId)).valueOrNull ?? const [];
+    final venues =
+        ref.watch(venuesProvider(widget.orgId)).valueOrNull ?? const [];
     final allowed = {for (final v in widget.venueNames) v.id};
     final options = [
       for (final v in venues)
@@ -655,22 +737,25 @@ class _MoveMatchSheetState extends ConsumerState<_MoveMatchSheet> {
   }
 }
 
-/// Publishes the draft: the timetable becomes official and everyone entered
-/// is told.
+/// Publishes one sport's draft: its timetable becomes official and everyone
+/// entered in it is told. The season's other sports are untouched.
 Future<void> lockTournamentSchedule({
   required BuildContext context,
   required WidgetRef ref,
   required String orgId,
   required String tournamentId,
+  required String sportId,
+  required String sportName,
 }) async {
   final messenger = ScaffoldMessenger.of(context);
   final confirm = await showDialog<bool>(
     context: context,
     builder: (ctx) => AlertDialog(
-      title: const Text('Lock & publish schedule?'),
-      content: const Text(
-        'This publishes the timetable, closes new entries, and notifies every '
-        'registered team and player.',
+      title: Text('Publish the $sportName schedule?'),
+      content: Text(
+        'This publishes the $sportName timetable, closes new entries to its '
+        'events, and notifies every team and player entered in them. Other '
+        'sports in the season are not affected.',
       ),
       actions: [
         TextButton(
@@ -690,10 +775,11 @@ Future<void> lockTournamentSchedule({
     await ref.read(tournamentRepositoryProvider).lockSchedule(
           orgId: orgId,
           tournamentId: tournamentId,
+          sportId: sportId,
         );
     if (!context.mounted) return;
     messenger.showSnackBar(
-      const SnackBar(content: Text('Schedule published.')),
+      SnackBar(content: Text('$sportName schedule published.')),
     );
   } catch (e) {
     if (!context.mounted) return;

@@ -16,11 +16,19 @@ class MemoryGrid extends StatelessWidget {
     this.loading = false,
     this.emptyMessage = 'No memories yet.',
     this.onDelete,
+    this.onEditCaption,
+    this.editorUid,
   });
 
   final List<Memory> memories;
   final bool loading;
   final String emptyMessage;
+
+  /// When provided, the viewer lets [editorUid] change the caption on the
+  /// memories they uploaded — the one edit `firestore.rules` allows on a
+  /// memory, and only to its uploader.
+  final Future<void> Function(Memory memory, String? caption)? onEditCaption;
+  final String? editorUid;
 
   /// When provided, the viewer offers a delete action. Omitted for profiles
   /// the caller does not own.
@@ -79,6 +87,8 @@ class MemoryGrid extends StatelessWidget {
           memories: memories,
           initialIndex: initialIndex,
           onDelete: onDelete,
+          onEditCaption: onEditCaption,
+          editorUid: editorUid,
         ),
       ),
     );
@@ -144,11 +154,15 @@ class _MemoryViewer extends StatefulWidget {
     required this.memories,
     required this.initialIndex,
     this.onDelete,
+    this.onEditCaption,
+    this.editorUid,
   });
 
   final List<Memory> memories;
   final int initialIndex;
   final Future<void> Function(Memory memory)? onDelete;
+  final Future<void> Function(Memory memory, String? caption)? onEditCaption;
+  final String? editorUid;
 
   @override
   State<_MemoryViewer> createState() => _MemoryViewerState();
@@ -198,9 +212,44 @@ class _MemoryViewerState extends State<_MemoryViewer> {
     if (mounted) Navigator.pop(context);
   }
 
+  Future<void> _editCaption() async {
+    final memory = widget.memories[_index];
+    final onEdit = widget.onEditCaption;
+    if (onEdit == null) return;
+    final field = TextEditingController(text: memory.caption ?? '');
+    final caption = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Caption'),
+        content: TextField(
+          controller: field,
+          maxLength: 280,
+          maxLines: 3,
+          decoration: const InputDecoration(border: OutlineInputBorder()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, field.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    field.dispose();
+    if (caption == null || !mounted) return;
+    await onEdit(memory, caption.isEmpty ? null : caption);
+  }
+
   @override
   Widget build(BuildContext context) {
     final memory = widget.memories[_index];
+    final canEditCaption = widget.onEditCaption != null &&
+        widget.editorUid != null &&
+        memory.uploaderUid == widget.editorUid;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -209,6 +258,12 @@ class _MemoryViewerState extends State<_MemoryViewer> {
         foregroundColor: Colors.white,
         title: Text('${_index + 1} of ${widget.memories.length}'),
         actions: [
+          if (canEditCaption)
+            IconButton(
+              tooltip: 'Edit caption',
+              icon: const Icon(Icons.edit_outlined),
+              onPressed: _editCaption,
+            ),
           if (widget.onDelete != null)
             IconButton(
               tooltip: 'Remove',

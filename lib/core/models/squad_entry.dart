@@ -28,6 +28,8 @@ class SquadEntry {
     this.photoUrl,
     this.waitlistPosition,
     this.addedByAdmin = false,
+    this.isCaptain = false,
+    this.isWicketKeeper = false,
     this.createdAt,
   });
 
@@ -53,6 +55,13 @@ class SquadEntry {
   /// were ever really open to them.
   final bool addedByAdmin;
 
+  /// Role chips the club has assigned this player on its own side —
+  /// TC-CLUB-025. Both are club-set and editable at any point before the
+  /// squad locks; captain and wicket-keeper are not mutually exclusive
+  /// because in cricket they routinely are the same person.
+  final bool isCaptain;
+  final bool isWicketKeeper;
+
   final DateTime? createdAt;
 
   bool get isPlaying => status == RegistrationStatus.confirmed;
@@ -70,6 +79,8 @@ class SquadEntry {
           ? null
           : Fs.integer(d['waitlistPosition']),
       addedByAdmin: Fs.boolean(d['addedByAdmin']),
+      isCaptain: Fs.boolean(d['isCaptain']),
+      isWicketKeeper: Fs.boolean(d['isWicketKeeper']),
       createdAt: Fs.dateOrNull(d['createdAt']),
     );
   }
@@ -83,6 +94,8 @@ class SquadEntry {
         'status': status.wire,
         'waitlistPosition': waitlistPosition,
         'addedByAdmin': addedByAdmin,
+        'isCaptain': isCaptain,
+        'isWicketKeeper': isWicketKeeper,
         'createdAt': FieldValue.serverTimestamp(),
       };
 }

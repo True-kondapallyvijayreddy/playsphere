@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart' as fb;
-import 'package:flutter/foundation.dart' show immutable;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/billing_repository.dart';
@@ -45,6 +44,8 @@ import '../domain/career/leaderboard.dart';
 import '../domain/rating/overall_glicko.dart';
 import '../domain/standings/standings_calculator.dart';
 import '../domain/draw/season_capacity.dart';
+import '../domain/tournament/season_access.dart';
+import '../domain/tournament/season_name.dart';
 import '../domain/tournament/player_boards.dart';
 import '../domain/tournament/tournament_leaderboard.dart';
 import '../domain/tournament/tournament_overview.dart';
@@ -59,6 +60,7 @@ import 'models/glicko_badge.dart';
 import 'models/venue.dart';
 import 'models/venue_plan.dart';
 import 'models/tournament.dart';
+import 'models/club_registration_request.dart';
 import 'models/tournament_invite.dart';
 import 'models/tournament_official.dart';
 import 'models/challenge.dart';
@@ -74,6 +76,7 @@ import 'models/ground.dart';
 import 'models/ground_verification.dart';
 import '../domain/cheer.dart';
 import 'models/group_entry.dart';
+import 'models/house_transfer_request.dart';
 import 'models/organization.dart';
 import 'models/owner_proposal.dart';
 import 'models/club_standing.dart';
@@ -1605,6 +1608,31 @@ final groupEntriesProvider =
       );
 });
 
+/// Players asking to move houses on one event. See [HouseTransferRequest].
+final houseTransferRequestsProvider =
+    StreamProvider.family<List<HouseTransferRequest>, CompRef>((ref, key) {
+  return ref.watch(competitionRepositoryProvider).watchHouseTransferRequests(
+        orgId: key.orgId,
+        compId: key.compId,
+      );
+});
+
+/// Whether the signed-in player already has an outstanding house-transfer
+/// request on this event, so the "Request transfer" action can hide instead
+/// of letting a second tap silently overwrite the first.
+final myHouseTransferRequestedProvider =
+    StreamProvider.family<bool, CompRef>((ref, key) {
+  final uid = ref.watch(authUidProvider);
+  if (uid == null) return Stream.value(false);
+  return ref
+      .watch(competitionRepositoryProvider)
+      .watchHasRequestedHouseTransfer(
+        orgId: key.orgId,
+        compId: key.compId,
+        uid: uid,
+      );
+});
+
 /// Live cheer tally for one match. See [Cheer].
 final cheersProvider =
     StreamProvider.family<CheerTally, FixtureRef>((ref, key) {
@@ -1620,6 +1648,15 @@ final cheersProvider =
 /// `GlobalEventsScreen`.
 final globalEventsProvider = StreamProvider<List<Competition>>((ref) {
   return ref.watch(competitionRepositoryProvider).watchGlobalEvents();
+});
+
+/// Somebody else's membership in one club — one document, for a profile that
+/// says how long they have been in the club you are looking from. Readable by
+/// any active member of that club (`firestore.rules`), which is exactly who
+/// has a club selected.
+final clubMembershipProvider = StreamProvider.family<Membership?,
+    ({String orgId, String uid})>((ref, key) {
+  return ref.watch(orgRepositoryProvider).watchMembership(key.orgId, key.uid);
 });
 
 final orgOwnersProvider =
@@ -1669,6 +1706,17 @@ final venueProvider =
 final tournamentsProvider =
     StreamProvider.family<List<Tournament>, String>((ref, orgId) {
   return ref.watch(tournamentRepositoryProvider).watchTournaments(orgId);
+});
+
+/// [SeasonName.key]s already taken by the club's live seasons and
+/// tournaments, leaving out [exceptId] — what the name fields check against
+/// as the organizer types. The repository asks the server again on save.
+final seasonNamesTakenProvider =
+    Provider.family<Set<String>, ({String orgId, String? exceptId})>(
+        (ref, key) {
+  final seasons =
+      ref.watch(tournamentsProvider(key.orgId)).valueOrNull ?? const [];
+  return SeasonName.takenKeys(seasons, exceptId: key.exceptId);
 });
 
 final tournamentProvider = StreamProvider.family<Tournament?,
@@ -1775,6 +1823,43 @@ final tournamentInvitesProvider = StreamProvider.family<List<TournamentInvite>,
       );
 });
 
+/// Uninvited clubs asking to enter this season — TC-CLUB-034's host-side
+/// queue. `orgId` here is the HOST, matching every other tournament-scoped
+/// provider's key shape.
+final clubRegistrationRequestsProvider = StreamProvider.family<
+    List<ClubRegistrationRequest>,
+    ({String orgId, String tournamentId})>((ref, key) {
+  return ref
+      .watch(tournamentRepositoryProvider)
+      .watchClubRegistrationRequests(
+        hostOrgId: key.orgId,
+        tournamentId: key.tournamentId,
+      );
+});
+
+/// Whether MY club already has a live ask on somebody else's season, keyed by
+/// (host, tournament, my org).
+final myClubRegistrationRequestProvider = StreamProvider.family<
+    ClubRegistrationRequest?,
+    ({String hostOrgId, String tournamentId, String requestingOrgId})>(
+  (ref, key) {
+    return ref
+        .watch(tournamentRepositoryProvider)
+        .watchMyClubRegistrationRequest(
+          hostOrgId: key.hostOrgId,
+          tournamentId: key.tournamentId,
+          requestingOrgId: key.requestingOrgId,
+        );
+  },
+);
+
+/// Every invitation this club has sent — the "Sent" half of the invitations
+/// space.
+final sentTournamentInvitesProvider =
+    StreamProvider.family<List<TournamentInvite>, String>((ref, orgId) {
+  return ref.watch(tournamentRepositoryProvider).watchSentInvites(orgId);
+});
+
 /// Tournaments other clubs have invited this one into, still unanswered.
 final incomingTournamentInvitesProvider =
     StreamProvider.family<List<TournamentInvite>, String>((ref, orgId) {
@@ -1790,64 +1875,6 @@ final incomingTournamentInvitesProvider =
 final liveIncomingTournamentInvitesProvider =
     StreamProvider.family<List<TournamentInvite>, String>((ref, orgId) {
   return ref.watch(tournamentRepositoryProvider).watchLiveIncomingInvites(orgId);
-});
-
-/// What this profile may do at a season some OTHER club is running, on the
-/// strength of an invitation to a club of theirs.
-///
-/// Null when there is no such invitation, which is the ordinary case and the
-/// one every existing screen already handles: the season is either your own
-/// club's or none of your business.
-///
-/// When it is not null, it carries the two facts the screens need and neither
-/// of them can work out alone — WHICH of this profile's clubs was asked, and
-/// whether this profile is the one who answers for it.
-@immutable
-class InvitedSeasonContext {
-  const InvitedSeasonContext({
-    required this.invite,
-    required this.canEnterForClub,
-  });
-
-  final TournamentInvite invite;
-
-  /// Whether this profile may enter the club into the host's draws.
-  ///
-  /// `manageCompetitions` at the INVITED club — its owner and admins. An
-  /// invitation is addressed to a club, and the club's entry is a commitment
-  /// made on behalf of everybody in it; the people who already carry that
-  /// authority are the people who already run its competitions. Every other
-  /// member gets [SeasonInterest] instead.
-  final bool canEnterForClub;
-
-  String get orgId => invite.toOrgId;
-}
-
-final invitedSeasonContextProvider = Provider.family<InvitedSeasonContext?,
-    ({String hostOrgId, String tournamentId})>((ref, key) {
-  // Derived here rather than read from `myActiveOrgIdsProvider`, which lives
-  // in the home feature and imports this file — the club list is a core fact
-  // and the dashboard's copy of it is the convenience, not the source.
-  final memberships =
-      ref.watch(myMembershipsProvider).valueOrNull ?? const <Membership>[];
-  for (final membership in memberships) {
-    if (!membership.isActive) continue;
-    final orgId = membership.orgId;
-    final invites =
-        ref.watch(liveIncomingTournamentInvitesProvider(orgId)).valueOrNull ??
-            const <TournamentInvite>[];
-    for (final invite in invites) {
-      if (invite.fromOrgId != key.hostOrgId) continue;
-      if (invite.tournamentId != key.tournamentId) continue;
-      return InvitedSeasonContext(
-        invite: invite,
-        canEnterForClub: ref
-            .watch(myCapabilitiesProvider(orgId))
-            .contains(Capability.manageCompetitions),
-      );
-    }
-  }
-  return null;
 });
 
 /// Who at one invited club has put their hand up for the host's season.
@@ -1875,6 +1902,22 @@ final tournamentOfficialsProvider = StreamProvider.family<
   return ref
       .watch(tournamentRepositoryProvider)
       .watchOfficials(key.orgId, key.tournamentId);
+});
+
+/// Who the signed-in person is to one season — organizer, official or
+/// spectator — and so which season page they get. See [SeasonAccess].
+///
+/// While the caller's memberships are still loading this answers spectator,
+/// so the page fails closed: nobody is flashed an organizer's controls for a
+/// frame before the membership arrives.
+final seasonAccessProvider = Provider.family<SeasonAccess,
+    ({String orgId, String tournamentId})>((ref, key) {
+  return SeasonAccess.resolve(
+    capabilities: ref.watch(myCapabilitiesProvider(key.orgId)),
+    uid: ref.watch(currentUidProvider),
+    roster: ref.watch(tournamentOfficialsProvider(key)).valueOrNull ??
+        const <TournamentOfficial>[],
+  );
 });
 
 /// The derived high-level state of a tournament — progress, what is on court,
@@ -2082,7 +2125,7 @@ final overallGlickoProvider =
 /// free.
 final playerFixturesProvider =
     StreamProvider.family<List<Fixture>, String>((ref, uid) {
-  return ref.watch(careerRepositoryProvider).watchPlayerFixtures(uid).map(
+  return ref.watch(careerRepositoryProvider).watchPlayerMatchList(uid).map(
     (fixtures) {
       final sorted = [...fixtures];
       sorted.sort((a, b) {
@@ -2310,6 +2353,50 @@ final competitionProvider =
       .watchCompetition(key.orgId, key.compId);
 });
 
+/// Whether a player may treat [fixture]'s time as final.
+///
+/// A season's draw is laid out days before the organizer publishes that
+/// sport (`TournamentRepository.lockSchedule`), and until then every time on
+/// it can still move. The player's own lists read fixtures straight off
+/// `playerUids`, so they showed the unpublished Badminton final as "Today
+/// 10:00 AM · Scheduled" before anyone had announced it (test run TC-28).
+///
+/// Publishing moves the event to `scheduled`, so an event still at or before
+/// `registrationClosed` has not been published. Only season fixtures go
+/// through that step; a standalone event or a quick match is final as soon
+/// as it exists. Unknown — still loading, or unreadable — counts as not
+/// confirmed: a time shown a second late is harmless, a draft shown as final
+/// is the bug.
+final _seasonEventPublishedProvider =
+    Provider.family<bool, CompRef>((ref, key) {
+  final comp = ref.watch(competitionProvider(key)).valueOrNull;
+  if (comp == null) return false;
+  return !const {
+    CompetitionStatus.draft,
+    CompetitionStatus.registrationOpen,
+    CompetitionStatus.registrationClosed,
+  }.contains(comp.status);
+});
+
+/// See the note above. Not a provider keyed on [Fixture] itself: a fixture
+/// has no value equality, so every rebuild would mint a new family member.
+bool fixtureTimeConfirmed(Ref ref, Fixture fixture) {
+  if (fixture.tournamentId == null) return true;
+  if (fixture.status != FixtureStatus.scheduled) return true;
+  return ref.watch(
+    _seasonEventPublishedProvider(CompRef(fixture.orgId, fixture.compId)),
+  );
+}
+
+/// [fixtureTimeConfirmed], from a widget.
+bool fixtureTimeConfirmedIn(WidgetRef ref, Fixture fixture) {
+  if (fixture.tournamentId == null) return true;
+  if (fixture.status != FixtureStatus.scheduled) return true;
+  return ref.watch(
+    _seasonEventPublishedProvider(CompRef(fixture.orgId, fixture.compId)),
+  );
+}
+
 /// Every event one named person has entered themselves into, across every
 /// club.
 ///
@@ -2341,6 +2428,21 @@ final userTeamEntriesProvider =
   return ref
       .watch(competitionRepositoryProvider)
       .watchMyEntries(uid, asTeamMember: true);
+});
+
+/// The third half: entries this person FILED, for a side they may not play in.
+///
+/// A club owner enters the club's team and is very often not in the squad —
+/// they are the manager. Neither [userEntriesProvider] (keyed on the entrant's
+/// own uid, which on a team row is the team's id) nor [userTeamEntriesProvider]
+/// (keyed on the squad) returns that entry, so the person who did the
+/// registering was the one person the app could not tell they had registered.
+/// That is the "still showing Register after we registered" bug.
+final userSubmittedEntriesProvider =
+    StreamProvider.family<List<MyEntry>, String>((ref, uid) {
+  return ref
+      .watch(competitionRepositoryProvider)
+      .watchMyEntries(uid, asSubmitter: true);
 });
 
 final registrationsProvider =

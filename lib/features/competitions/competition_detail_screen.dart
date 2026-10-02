@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/layout/responsive.dart';
+import '../../core/models/app_user.dart';
 import '../../core/models/competition.dart';
 import '../../core/models/enums.dart';
 import '../../core/models/fixture.dart';
@@ -10,6 +11,7 @@ import '../../core/models/organization.dart';
 import '../../core/models/team.dart';
 import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
+import '../home/home_providers.dart';
 import '../../core/router/app_router.dart';
 import '../../core/models/draw_slot.dart';
 import '../../domain/draw/group_bounds.dart';
@@ -30,6 +32,7 @@ import '../../shared/ui_kit.dart';
 import '../scoring/open_match.dart';
 import 'widgets/cancel_event_sheet.dart';
 import 'widgets/competition_rule_editor.dart';
+import 'widgets/eligibility_editor.dart';
 import 'widgets/houses_editor_sheet.dart';
 import 'widgets/draw_setup_sheet.dart';
 import 'widgets/group_entry_sheet.dart';
@@ -587,6 +590,12 @@ class _OrganizerActions extends ConsumerWidget {
             onSelected: () =>
                 CompetitionRuleEditor.show(context, competition: c),
           ),
+          PsAction(
+            label: 'Age & eligibility',
+            icon: Icons.cake_outlined,
+            onSelected: () =>
+                EligibilityEditor.show(context, competition: c),
+          ),
           // Only for events people enter as part of a group. An individual
           // event has nothing to split into houses, and offering the editor
           // there would be a menu item that changes nothing.
@@ -640,6 +649,21 @@ class _OrganizerActions extends ConsumerWidget {
               icon: Icons.event_busy_outlined,
               destructive: true,
               onSelected: () => CancelEventSheet.show(context, competition: c),
+            ),
+          // TC-ADM-013's delete-vs-cancel guard: deletion is only ever
+          // offered while nobody has registered. The instant there's one
+          // entrant, this disappears and Cancel — soft, reasoned, auditable —
+          // is the only way to end the event, so a live field can never be
+          // silently erased from the overflow menu.
+          if (c.status == CompetitionStatus.draft ||
+              (c.entrantCount == 0 &&
+                  c.confirmedCount == 0 &&
+                  c.waitlistCount == 0))
+            PsAction(
+              label: 'Delete event',
+              icon: Icons.delete_outline,
+              destructive: true,
+              onSelected: () => _deleteEvent(context, ref, c),
             ),
         ],
       ),
@@ -1137,9 +1161,14 @@ class _Entries extends ConsumerWidget {
     // If the read failed, `myReg` is null for the wrong reason and the screen
     // would offer "Enter" to someone already entered — a duplicate the rules
     // then reject, which reads to the user as the button being broken.
+    // A withdrawn entry is no entry: the repository and the rules both let
+    // that person register again, so the screen offers it.
     final myReg = me == null
         ? null
-        : regs.where((r) => r.uid == me.uid).firstOrNull;
+        : regs
+            .where((r) =>
+                r.uid == me.uid && r.status != RegistrationStatus.withdrawn)
+            .firstOrNull;
 
     // Whether the person about to tap the button is entering as a guest —
     // signed in, but not a member of this club at all. Only meaningful when
@@ -1397,9 +1426,7 @@ class _Entries extends ConsumerWidget {
     // value a cricket event created from the ordinary "New event" form used
     // to carry, and reading it as "one player, one entry" is precisely how a
     // 32-team tournament ended up with a bracket of individuals.
-    final teamIsTheEntrant = c.entrantType == EntrantType.team &&
-        (c.teamEntryMode == TeamEntryMode.preformedTeam ||
-            c.teamEntryMode == TeamEntryMode.individual);
+    final teamIsTheEntrant = c.entersAsTeams;
 
     // What used to be implicit in whether the Enter/Apply button happened to
     // be showing — an organizer or a spectator had to infer "closed" from a
@@ -1434,7 +1461,8 @@ class _Entries extends ConsumerWidget {
           children: [
             Row(
               children: [
-                Text('Entries (${regs.length})',
+                Text(
+                    'Entries (${regs.where((r) => r.status != RegistrationStatus.withdrawn).length})',
                     style: Theme.of(context).textTheme.titleMedium),
                 const Spacer(),
                 if (canManage && regs.isNotEmpty)
@@ -1450,14 +1478,59 @@ class _Entries extends ConsumerWidget {
                       label: const Text('Team Builder & Draft'),
                     ),
                   ),
-                if (myReg != null)
-                  Chip(
-                    label: Text(
-                      myReg.status == RegistrationStatus.waitlisted &&
-                              myReg.waitlistPosition != null
-                          ? 'Waitlist #${myReg.waitlistPosition}'
-                          : myReg.status.label,
+                if (canManage &&
+                    c.participationModel == ParticipationModel.hybrid &&
+                    c.preselectedSlots > 0 &&
+                    c.status.acceptsRegistrations)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: OutlinedButton.icon(
+                      onPressed: () => _PreselectSheet.show(
+                        context,
+                        competition: c,
+                        alreadyIn: {for (final r in regs) r.uid},
+                      ),
+                      icon: const Icon(Icons.how_to_reg_outlined, size: 16),
+                      label: const Text('Pick players'),
                     ),
+                  ),
+                if (myReg != null)
+                  Wrap(
+                    spacing: 6,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      Chip(
+                        label: Text(
+                          myReg.status == RegistrationStatus.waitlisted &&
+                                  myReg.waitlistPosition != null
+                              ? 'Waitlist #${myReg.waitlistPosition}'
+                              : myReg.status.label,
+                        ),
+                      ),
+                      if (const {
+                        RegistrationStatus.pending,
+                        RegistrationStatus.confirmed,
+                        RegistrationStatus.waitlisted,
+                      }.contains(myReg.status))
+                        TextButton(
+                          onPressed: () => _withdrawMine(context, ref, c, myReg),
+                          child: const Text('Withdraw'),
+                        ),
+                      // TC-CLUB-003: a self-service ask, not a self-service
+                      // move — see [HouseTransferRequest]. Offered only when
+                      // the organizer turned it on, the player actually has a
+                      // house to move from, and there is somewhere else to
+                      // move to.
+                      if (c.allowHouseTransferRequests &&
+                          myReg.houseName != null &&
+                          c.presetHouses.length > 1 &&
+                          me != null)
+                        _HouseTransferRequestButton(
+                          competition: c,
+                          myReg: myReg,
+                          me: me,
+                        ),
+                    ],
                   )
                 else if (entryIsTheClubs)
                   // Said here, on the row where the button used to be, so a
@@ -1477,6 +1550,7 @@ class _Entries extends ConsumerWidget {
                           onPressed: () => RegisterTeamSheet.show(
                             context,
                             competition: c,
+                            invitedClubId: invited.invite.toOrgId,
                           ),
                           icon: const Icon(Icons.groups_2_outlined, size: 16),
                           label: Text('Enter ${invited.invite.toOrgName}'),
@@ -1508,6 +1582,17 @@ class _Entries extends ConsumerWidget {
                           // named, and it disappears when the event does.
                           label: const Text('One-off squad'),
                         ),
+                        // TC-CLUB-034: "Enter a team" above only ever offers
+                        // teams `_couldEnterHere` allows — this club's own
+                        // teams, or (for an outside club with no invite) a
+                        // player's club-less side. A persistent team that
+                        // belongs to a DIFFERENT club never appears there —
+                        // that club enters through an invite, which this
+                        // button is how an uninvited one asks for.
+                        if (c.openToNonMembers &&
+                            !enteringForClub &&
+                            membership?.isActive != true)
+                          _RequestClubRegistrationButton(competition: c),
                       ] else ...[
                         FilledButton.tonal(
                           onPressed:
@@ -1583,7 +1668,13 @@ class _Entries extends ConsumerWidget {
             ],
             const SizedBox(height: 8),
             AsyncErrorStrip(value: regsAsync, what: 'the entry list'),
-            if (regs.isEmpty && !regsAsync.hasError)
+            if (regs.isEmpty && regsAsync.isLoading)
+              // Not "nobody has entered" — we have not been told yet. The two
+              // look identical on screen and only one of them is a fact, and
+              // this list takes tens of seconds on a slow connection.
+              Text('Loading the entries…',
+                  style: Theme.of(context).textTheme.bodySmall)
+            else if (regs.isEmpty && !regsAsync.hasError)
               Text('Nobody has entered yet.',
                   style: Theme.of(context).textTheme.bodySmall)
             else
@@ -1646,9 +1737,38 @@ class _Entries extends ConsumerWidget {
                       if (r.preselected) 'picked by organizer',
                     ].join(' · '),
                   ),
-                  trailing: !canManage ||
-                          r.status != RegistrationStatus.pending
+                  trailing: !canManage
                       ? null
+                      : r.status != RegistrationStatus.pending
+                      ? (r.status.occupiesSlot
+                          ? PopupMenuButton<String>(
+                              tooltip: 'Manage entry',
+                              icon: const Icon(Icons.more_vert),
+                              itemBuilder: (_) => [
+                                const PopupMenuItem(
+                                  value: 'withdraw',
+                                  child: Text('Withdraw this entry'),
+                                ),
+                                if (c.fixtureCount > 0)
+                                  const PopupMenuItem(
+                                    value: 'concede',
+                                    child: Text(
+                                      'Withdraw from the draw (concede '
+                                      'remaining matches)',
+                                    ),
+                                  ),
+                              ],
+                              onSelected: (choice) => choice == 'concede'
+                                  ? _concede(context, ref, c, r)
+                                  : _decide(
+                                      context,
+                                      ref,
+                                      c,
+                                      r.uid,
+                                      RegistrationStatus.withdrawn,
+                                    ),
+                            )
+                          : null)
                       : Wrap(
                           children: [
                             IconButton(
@@ -1684,6 +1804,115 @@ class _Entries extends ConsumerWidget {
     );
   }
 
+  Future<void> _withdrawMine(
+    BuildContext context,
+    WidgetRef ref,
+    Competition c,
+    Registration reg,
+  ) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Withdraw your entry?'),
+        content: Text(
+          reg.status == RegistrationStatus.confirmed
+              ? 'Your place goes to the next person on the waitlist.'
+              : 'You can enter again while entries are open.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Keep my place'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Withdraw'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await ref.read(competitionRepositoryProvider).withdraw(
+            orgId: c.orgId,
+            compId: c.id,
+            uid: reg.uid,
+          );
+    } catch (e) {
+      if (context.mounted) showError(context, e);
+    }
+  }
+
+  /// Takes an entrant out of a draw that is already being played: every match
+  /// they have not started goes to their opponent, and the bracket moves on.
+  Future<void> _concede(
+    BuildContext context,
+    WidgetRef ref,
+    Competition c,
+    Registration reg,
+  ) async {
+    final note = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Withdraw ${reg.displayName} from the draw?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              'Every match they have not started is awarded to the opponent, '
+              'and winners move on in the bracket. Matches already played '
+              'stay as they are.',
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: note,
+              decoration: const InputDecoration(
+                labelText: 'Reason (shown on the matches)',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Withdraw'),
+          ),
+        ],
+      ),
+    );
+    final reason = note.text.trim();
+    note.dispose();
+    if (ok != true) return;
+    try {
+      final outcome =
+          await ref.read(competitionRepositoryProvider).withdrawEntrant(
+                orgId: c.orgId,
+                compId: c.id,
+                entrantId: reg.teamId ?? reg.uid,
+                note: reason.isEmpty ? null : reason,
+              );
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+            '${outcome.matchesConceded} '
+            '${outcome.matchesConceded == 1 ? 'match' : 'matches'} awarded to '
+            'the opponent'
+            '${outcome.matchesWaiting > 0 ? ' · ${outcome.matchesWaiting} waiting on an opponent — run this again once they are known' : ''}.',
+          ),
+        ));
+      }
+    } catch (e) {
+      if (context.mounted) showError(context, e);
+    }
+  }
+
   Future<void> _decide(
     BuildContext context,
     WidgetRef ref,
@@ -1704,6 +1933,126 @@ class _Entries extends ConsumerWidget {
     } catch (e) {
       if (context.mounted) showError(context, e);
     }
+  }
+}
+
+/// The organizer's picks in a hybrid event — the reserved places that were
+/// never offered to first-come registration.
+class _PreselectSheet extends ConsumerStatefulWidget {
+  const _PreselectSheet({required this.competition, required this.alreadyIn});
+
+  final Competition competition;
+  final Set<String> alreadyIn;
+
+  static Future<void> show(
+    BuildContext context, {
+    required Competition competition,
+    required Set<String> alreadyIn,
+  }) =>
+      showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        showDragHandle: true,
+        useSafeArea: true,
+        builder: (_) =>
+            _PreselectSheet(competition: competition, alreadyIn: alreadyIn),
+      );
+
+  @override
+  ConsumerState<_PreselectSheet> createState() => _PreselectSheetState();
+}
+
+class _PreselectSheetState extends ConsumerState<_PreselectSheet> {
+  final _picked = <String>{};
+  bool _busy = false;
+
+  Future<void> _save() async {
+    final me = ref.read(authUidProvider);
+    if (me == null || _picked.isEmpty || _busy) return;
+    setState(() => _busy = true);
+    try {
+      final users =
+          await ref.read(userRepositoryProvider).fetchMany(_picked.toList());
+      await ref.read(competitionRepositoryProvider).preselect(
+            competition: widget.competition,
+            players: users.values.toList(),
+            byUid: me,
+          );
+      if (mounted) Navigator.of(context).pop();
+    } catch (e) {
+      if (mounted) showError(context, e);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.competition;
+    final members = ref.watch(orgMembersProvider(c.orgId)).valueOrNull ??
+        const <Membership>[];
+    final candidates = [
+      for (final m in members)
+        if (m.isActive && !widget.alreadyIn.contains(m.uid)) m,
+    ]..sort((a, b) => a.displayName.compareTo(b.displayName));
+    final picksLeft = c.preselectedSlots -
+        widget.alreadyIn.length.clamp(0, c.preselectedSlots);
+
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.8,
+      builder: (_, controller) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Pick players',
+                    style: Theme.of(context).textTheme.titleLarge),
+                const SizedBox(height: 4),
+                Text(
+                  '${c.preselectedSlots} places are reserved for your picks. '
+                  'Picks are confirmed at once and do not use the open places.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: ListView(
+              controller: controller,
+              children: [
+                for (final m in candidates)
+                  CheckboxListTile(
+                    value: _picked.contains(m.uid),
+                    onChanged: (on) => setState(() {
+                      if (on == true) {
+                        if (_picked.length < picksLeft || picksLeft <= 0) {
+                          _picked.add(m.uid);
+                        }
+                      } else {
+                        _picked.remove(m.uid);
+                      }
+                    }),
+                    title: Text(m.displayName),
+                  ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: FilledButton(
+              onPressed: _picked.isEmpty || _busy ? null : _save,
+              child: Text(_busy
+                  ? 'Saving…'
+                  : 'Put ${_picked.length} in the field'),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -1736,7 +2085,9 @@ class _SlotsLine extends ConsumerWidget {
     final coveredBySeason = season?.seasonFeeCoversEverything ?? false;
 
     final left = c.slotsRemaining;
-    if (left == null) {
+    if (c.teamEntryMode == TeamEntryMode.houseBatch && c.maxEntrants != null) {
+      parts.add('Everyone plays for a house · up to ${c.maxEntrants} teams');
+    } else if (left == null) {
       parts.add('No limit on entries');
     } else if (left > 0) {
       parts.add('$left of ${c.openSlots} slots left');
@@ -2085,54 +2436,106 @@ class _GroupTable extends StatelessWidget {
   final List<Standing> rows;
   final int qualifiers;
 
+  /// What the collapsed card says, so a closed group still answers "who is
+  /// top?" — a header with nothing under it read as an empty group.
+  String get _summary {
+    if (rows.isEmpty) return 'No teams in this group yet';
+    final teams = '${rows.length} ${rows.length == 1 ? 'team' : 'teams'}';
+    if (rows.every((r) => r.played == 0)) return '$teams \u00b7 no results yet';
+    final top = rows.first;
+    return '$teams \u00b7 leader ${top.displayName} '
+        '(${top.points} ${top.points == 1 ? 'pt' : 'pts'})';
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final muted = theme.textTheme.labelSmall
+        ?.copyWith(color: theme.colorScheme.onSurfaceVariant);
+
+    Widget stat(String text, {TextStyle? style, double width = 28}) => SizedBox(
+          width: width,
+          child: Text(text, textAlign: TextAlign.end, style: style),
+        );
+
     return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Group $groupId', style: theme.textTheme.titleMedium),
-            const SizedBox(height: 8),
+      clipBehavior: Clip.antiAlias,
+      child: ExpansionTile(
+        shape: const Border(),
+        collapsedShape: const Border(),
+        tilePadding: const EdgeInsets.symmetric(horizontal: 12),
+        childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+        title: Text('Group $groupId', style: theme.textTheme.titleMedium),
+        subtitle: Text(_summary, style: theme.textTheme.bodySmall),
+        children: [
+          if (rows.isEmpty)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'The table fills in once this group has entrants.',
+                style: theme.textTheme.bodySmall,
+              ),
+            )
+          else ...[
+            Row(
+              children: [
+                SizedBox(width: 24, child: Text('#', style: muted)),
+                Expanded(child: Text('Team', style: muted)),
+                stat('P', style: muted),
+                stat('W', style: muted),
+                stat('D', style: muted),
+                stat('L', style: muted),
+                stat('Pts', style: muted, width: 36),
+              ],
+            ),
+            const Divider(height: 12),
             for (var i = 0; i < rows.length; i++) ...[
-              Row(
-                children: [
-                  SizedBox(
-                    width: 24,
-                    child: Text(
-                      '${i + 1}',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: i < qualifiers
-                            ? theme.colorScheme.primary
-                            : theme.colorScheme.onSurfaceVariant,
-                        fontWeight:
-                            i < qualifiers ? FontWeight.bold : FontWeight.normal,
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 24,
+                      child: Text(
+                        '${i + 1}',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: i < qualifiers
+                              ? theme.colorScheme.primary
+                              : theme.colorScheme.onSurfaceVariant,
+                          fontWeight: i < qualifiers
+                              ? FontWeight.bold
+                              : FontWeight.normal,
+                        ),
                       ),
                     ),
-                  ),
-                  Expanded(
-                    child: InkWell(
-                      onTap: () => context.push(
-                        Routes.entrant(orgId, compId, rows[i].entrantId),
+                    Expanded(
+                      child: InkWell(
+                        // An open slot has no entrant page to open.
+                        onTap: Entrant.isPlaceholderId(rows[i].entrantId)
+                            ? null
+                            : () => context.push(
+                                  Routes.entrant(
+                                      orgId, compId, rows[i].entrantId),
+                                ),
+                        child: Text(
+                          rows[i].displayName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
-                      child: Text(rows[i].displayName),
                     ),
-                  ),
-                  Text('${rows[i].played}',
-                      style: theme.textTheme.bodySmall),
-                  const SizedBox(width: 16),
-                  SizedBox(
-                    width: 28,
-                    child: Text(
+                    stat('${rows[i].played}', style: theme.textTheme.bodySmall),
+                    stat('${rows[i].won}', style: theme.textTheme.bodySmall),
+                    stat('${rows[i].drawn}', style: theme.textTheme.bodySmall),
+                    stat('${rows[i].lost}', style: theme.textTheme.bodySmall),
+                    stat(
                       '${rows[i].points}',
-                      textAlign: TextAlign.end,
+                      width: 36,
                       style: theme.textTheme.bodyMedium
                           ?.copyWith(fontWeight: FontWeight.bold),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
               if (i == qualifiers - 1 && i < rows.length - 1)
                 Padding(
@@ -2158,7 +2561,7 @@ class _GroupTable extends StatelessWidget {
                 ),
             ],
           ],
-        ),
+        ],
       ),
     );
   }
@@ -2843,6 +3246,334 @@ Future<void> _resumeEvent(
     );
   } catch (e) {
     if (context.mounted) showError(context, e);
+  }
+}
+
+/// Erases an event with no entrants, after a single tap-confirm — nothing to
+/// notify anyone about, so nothing to write a reason for (contrast
+/// [CancelEventSheet]).
+Future<void> _deleteEvent(
+  BuildContext context,
+  WidgetRef ref,
+  Competition competition,
+) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (_) => AlertDialog(
+      title: Text('Delete ${competition.name}?'),
+      content: const Text(
+        'Nobody has registered, so nothing is left to keep. This cannot be '
+        'undone — if you want it back, you\'ll create a fresh event.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Keep it'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, true),
+          child: const Text('Delete'),
+        ),
+      ],
+    ),
+  );
+  if (confirmed != true) return;
+  if (!context.mounted) return;
+
+  final messenger = ScaffoldMessenger.of(context);
+  try {
+    await ref.read(competitionRepositoryProvider).deleteCompetition(
+          orgId: competition.orgId,
+          compId: competition.id,
+        );
+    if (!context.mounted) return;
+    Navigator.of(context).pop();
+    messenger.showSnackBar(const SnackBar(content: Text('Event deleted.')));
+  } catch (e) {
+    if (context.mounted) showError(context, e);
+  }
+}
+
+/// An uninvited club's organizer asking to bring a side into this open
+/// season — TC-CLUB-034. Renders nothing for someone who doesn't run any
+/// other club, since there is nobody for the request to be filed as.
+class _RequestClubRegistrationButton extends ConsumerWidget {
+  const _RequestClubRegistrationButton({required this.competition});
+
+  final Competition competition;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final tournamentId = competition.tournamentId;
+    if (tournamentId == null) return const SizedBox.shrink();
+
+    final myOrgs = [
+      for (final id in ref.watch(myActiveOrgIdsProvider))
+        if (id != competition.orgId &&
+            ref
+                .watch(myCapabilitiesProvider(id))
+                .contains(Capability.manageCompetitions))
+          id,
+    ];
+    if (myOrgs.isEmpty) return const SizedBox.shrink();
+
+    final key = (
+      hostOrgId: competition.orgId,
+      tournamentId: tournamentId,
+      requestingOrgId: myOrgs.first,
+    );
+    // Only checks the first of possibly several clubs the person runs — the
+    // picker dialog re-checks whichever one they actually choose before
+    // sending, so this is purely to decide the button's own label.
+    final existing =
+        ref.watch(myClubRegistrationRequestProvider(key)).valueOrNull;
+
+    if (existing != null && existing.isPending) {
+      return const Chip(label: Text('Registration requested'));
+    }
+    if (existing != null && existing.status == 'declined') {
+      return OutlinedButton.icon(
+        onPressed: () => _RequestClubRegistrationDialog.show(
+          context,
+          competition: competition,
+          myOrgIds: myOrgs,
+        ),
+        icon: const Icon(Icons.replay_outlined, size: 16),
+        label: const Text('Ask again'),
+      );
+    }
+
+    return OutlinedButton.icon(
+      onPressed: () => _RequestClubRegistrationDialog.show(
+        context,
+        competition: competition,
+        myOrgIds: myOrgs,
+      ),
+      icon: const Icon(Icons.groups_outlined, size: 16),
+      label: const Text('Request club registration'),
+    );
+  }
+}
+
+/// Picks which of the asker's clubs is entering (usually just the one) and an
+/// optional note, then files the request.
+class _RequestClubRegistrationDialog extends ConsumerStatefulWidget {
+  const _RequestClubRegistrationDialog({
+    required this.competition,
+    required this.myOrgIds,
+  });
+
+  final Competition competition;
+  final List<String> myOrgIds;
+
+  static Future<void> show(
+    BuildContext context, {
+    required Competition competition,
+    required List<String> myOrgIds,
+  }) {
+    return showDialog<void>(
+      context: context,
+      builder: (_) => _RequestClubRegistrationDialog(
+        competition: competition,
+        myOrgIds: myOrgIds,
+      ),
+    );
+  }
+
+  @override
+  ConsumerState<_RequestClubRegistrationDialog> createState() =>
+      _RequestClubRegistrationDialogState();
+}
+
+class _RequestClubRegistrationDialogState
+    extends ConsumerState<_RequestClubRegistrationDialog> {
+  late String _orgId = widget.myOrgIds.first;
+  final _note = TextEditingController();
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _note.dispose();
+    super.dispose();
+  }
+
+  Future<void> _send() async {
+    final uid = ref.read(currentUidProvider);
+    if (uid == null) return;
+    setState(() => _busy = true);
+    try {
+      final c = widget.competition;
+      final tournament = await ref.read(
+        tournamentProvider((orgId: c.orgId, tournamentId: c.tournamentId!))
+            .future,
+      );
+      if (tournament == null) {
+        throw StateError('This season no longer exists.');
+      }
+      final hostOrg = await ref.read(organizationProvider(c.orgId).future);
+      final myOrg = await ref.read(organizationProvider(_orgId).future);
+      await ref.read(tournamentRepositoryProvider).requestClubRegistration(
+            tournament: tournament,
+            hostOrgName: hostOrg?.name ?? 'The host club',
+            viaCompId: c.id,
+            requestingOrgId: _orgId,
+            requestingOrgName: myOrg?.name ?? 'Our club',
+            requestedByUid: uid,
+            note: _note.text,
+          );
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Sent. The host reviews requests before inviting a '
+              'club in — you\'ll get an invitation to accept if approved.'),
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        setState(() => _busy = false);
+        showError(context, e);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Request club registration'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (widget.myOrgIds.length > 1) ...[
+            DropdownButtonFormField<String>(
+              value: _orgId,
+              decoration: const InputDecoration(labelText: 'Entering as'),
+              items: [
+                for (final id in widget.myOrgIds)
+                  DropdownMenuItem(
+                    value: id,
+                    child: Consumer(
+                      builder: (context, ref, _) => Text(
+                        ref.watch(organizationProvider(id)).valueOrNull?.name ??
+                            id,
+                      ),
+                    ),
+                  ),
+              ],
+              onChanged: (v) => setState(() => _orgId = v ?? _orgId),
+            ),
+            const SizedBox(height: 12),
+          ],
+          TextField(
+            controller: _note,
+            enabled: !_busy,
+            maxLines: 3,
+            maxLength: 500,
+            decoration: const InputDecoration(
+              labelText: 'Note to the host (optional)',
+              hintText: 'We\'d like to bring our U-17 and U-19 sides.',
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _busy ? null : _send,
+          child: Text(_busy ? 'Sending…' : 'Send request'),
+        ),
+      ],
+    );
+  }
+}
+
+/// The player's own "ask to move houses" control — TC-CLUB-003. A chip once
+/// asked (with a way to withdraw it), a text button before that.
+class _HouseTransferRequestButton extends ConsumerWidget {
+  const _HouseTransferRequestButton({
+    required this.competition,
+    required this.myReg,
+    required this.me,
+  });
+
+  final Competition competition;
+  final Registration myReg;
+  final AppUser me;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final key = CompRef(competition.orgId, competition.id);
+    final requested =
+        ref.watch(myHouseTransferRequestedProvider(key)).valueOrNull ?? false;
+
+    if (requested) {
+      return Chip(
+        label: const Text('Transfer requested'),
+        onDeleted: () async {
+          try {
+            await ref
+                .read(competitionRepositoryProvider)
+                .cancelHouseTransferRequest(
+                  orgId: competition.orgId,
+                  compId: competition.id,
+                  uid: me.uid,
+                );
+          } catch (e) {
+            if (context.mounted) showError(context, e);
+          }
+        },
+      );
+    }
+
+    return TextButton(
+      onPressed: () => _ask(context, ref),
+      child: const Text('Request transfer'),
+    );
+  }
+
+  Future<void> _ask(BuildContext context, WidgetRef ref) async {
+    final others = [
+      for (final h in competition.presetHouses)
+        if (h != myReg.houseName) h,
+    ];
+    final toHouse = await showDialog<String>(
+      context: context,
+      builder: (_) => SimpleDialog(
+        title: const Text('Move to which house?'),
+        children: [
+          for (final h in others)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, h),
+              child: Text(h),
+            ),
+        ],
+      ),
+    );
+    if (toHouse == null) return;
+
+    try {
+      await ref.read(competitionRepositoryProvider).requestHouseTransfer(
+            orgId: competition.orgId,
+            compId: competition.id,
+            uid: me.uid,
+            displayName: me.displayName,
+            toHouse: toHouse,
+          );
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Sent. The organizer decides from here.'),
+          ),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) showError(context, e);
+    }
   }
 }
 

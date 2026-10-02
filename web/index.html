@@ -84,6 +84,35 @@
       }
     })();
   </script>
+  <script>
+    // Redraw when the tab comes back.
+    //
+    // Chrome stops painting a background tab, and on return the engine
+    // frequently drew only the top part of the page — the rest stayed blank
+    // until the visitor reloaded, and going back to a previous page triggered
+    // it again. It happened repeatedly through a whole day of testing, and it
+    // looks exactly like a broken app.
+    //
+    // A resize event is the nudge that fixes it: the engine re-measures the
+    // window and repaints everything, which is all that was missing. Cheap —
+    // one relayout per tab switch — and it does nothing on a browser that
+    // painted correctly anyway. `pageshow` covers coming back through the
+    // browser's back/forward cache, which does not fire visibilitychange.
+    (function () {
+      function redraw() {
+        // Two frames: the first lands while the tab may still be reported
+        // hidden, which some engine versions ignore.
+        window.dispatchEvent(new Event('resize'));
+        window.requestAnimationFrame(function () {
+          window.dispatchEvent(new Event('resize'));
+        });
+      }
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') redraw();
+      });
+      window.addEventListener('pageshow', redraw);
+    })();
+  </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

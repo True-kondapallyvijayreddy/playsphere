@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/foundation.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 
@@ -14,6 +15,7 @@ import '../core/models/enums.dart';
 import '../core/models/firestore_codec.dart';
 import '../core/models/fixture.dart';
 import '../core/models/group_entry.dart';
+import '../core/models/house_transfer_request.dart';
 import '../core/models/match_player.dart';
 import '../core/models/scoring_request.dart';
 import '../core/models/squad_entry.dart';
@@ -224,10 +226,37 @@ class CompetitionRepository {
   /// needed to, because every screen that reads one already knows which event
   /// page it is on. A cross-club query has no such context, so the path is
   /// read off the document reference here and travels with it.
-  Stream<List<MyEntry>> watchMyEntries(String uid, {bool asTeamMember = false}) {
-    final q = asTeamMember
-        ? Refs.allRegistrationsQuery.where('memberUids', arrayContains: uid)
-        : Refs.allRegistrationsQuery.where('uid', isEqualTo: uid);
+  ///
+  /// ## Three ways an entry is yours, not one
+  ///
+  /// A person is "registered" for an event if any of these is true, and the
+  /// screens that ask have to accept all three or they tell somebody who has
+  /// entered that they have not:
+  ///
+  ///   * [uid] — they entered as themselves. The individual case.
+  ///   * [asTeamMember] — a side entered and they are in its squad. The
+  ///     document id is the team's, so their own uid appears nowhere but
+  ///     `memberUids`.
+  ///   * [asSubmitter] — they filed the entry for a side, which is the case
+  ///     that was missing. A club owner entering the club's team is very
+  ///     often not in that squad — they are the manager, not a player — so
+  ///     neither query above returns the entry they themselves made, and the
+  ///     season went on offering them a Register button for a draw their club
+  ///     was already in. See `registeredByUid`.
+  ///
+  /// Each is a separate stream on purpose: one failing (a missing index, a
+  /// rules change) must not take the other two down, and a partial answer here
+  /// is "you are registered" from whichever lens still works.
+  Stream<List<MyEntry>> watchMyEntries(
+    String uid, {
+    bool asTeamMember = false,
+    bool asSubmitter = false,
+  }) {
+    final q = asSubmitter
+        ? Refs.allRegistrationsQuery.where('registeredByUid', isEqualTo: uid)
+        : asTeamMember
+            ? Refs.allRegistrationsQuery.where('memberUids', arrayContains: uid)
+            : Refs.allRegistrationsQuery.where('uid', isEqualTo: uid);
     return guardStream(
       () => q.snapshots().map(
             (snap) => [
@@ -249,13 +278,20 @@ class CompetitionRepository {
     String compId, {
     RegistrationStatus? status,
   }) {
-    Query<Map<String, dynamic>> q = Refs.registrations(orgId, compId);
-    if (status != null) q = q.where('status', isEqualTo: status.wire);
-    return guardStream(
-      () => q.snapshots().map(
+    // Built INSIDE the guard, not before it. `Refs.registrations` reaches
+    // `FirebaseFirestore.instance`, which throws rather than returning an
+    // errored stream when there is no app — and a synchronous throw out of a
+    // provider's create takes the whole widget that watched it down, instead
+    // of arriving as the AsyncError every caller here already handles. The
+    // season desk watches one of these per draw, so one unreachable event
+    // would have blanked the organizer's page.
+    return guardStream(() {
+      Query<Map<String, dynamic>> q = Refs.registrations(orgId, compId);
+      if (status != null) q = q.where('status', isEqualTo: status.wire);
+      return q.snapshots().map(
             (snap) => snap.docs.map(Registration.fromDoc).toList(),
-          ),
-    );
+          );
+    });
   }
 
   Stream<List<Entrant>> watchEntrants(String orgId, String compId) =>
@@ -489,6 +525,41 @@ class CompetitionRepository {
           'cancelledAt': FieldValue.serverTimestamp(),
           'updatedAt': FieldValue.serverTimestamp(),
         });
+      });
+
+  /// Removes an event outright, for the case [cancelCompetition] deliberately
+  /// refuses to handle: one nobody has entered yet.
+  ///
+  /// ## Why this is a hard delete and cancel is a soft one
+  ///
+  /// Cancel exists because SOMEBODY was told about this event and needs to be
+  /// told it's off — that's a record worth keeping, with a reason attached.
+  /// An event with zero entrants was never announced to anyone in a way that
+  /// needs walking back; deleting it is closer to undoing a typo than calling
+  /// something off. TC-ADM-013 draws exactly this line: the overflow menu
+  /// offers Delete only while the category is still at zero registrations,
+  /// and switches to Cancel the moment there's one — enforced here too, not
+  /// only in the menu, since a direct call must not be able to erase a
+  /// competition entrants are actually relying on.
+  Future<void> deleteCompetition({
+    required String orgId,
+    required String compId,
+  }) =>
+      guard(() async {
+        final snap = await Refs.competition(orgId, compId).get();
+        if (!snap.exists) return;
+        final existing = Competition.fromDoc(snap);
+        final entered = existing.entrantCount +
+            existing.confirmedCount +
+            existing.waitlistCount;
+        if (entered > 0) {
+          throw const ValidationException(
+            'This event has entrants. Cancel it instead — deletion is only '
+            'for an event nobody has registered for yet.',
+          );
+        }
+
+        await Refs.competition(orgId, compId).delete();
       });
 
   /// Puts one event on hold, reversibly.
@@ -931,6 +1002,9 @@ class CompetitionRepository {
                 // The group's name, so the draw shows "Ravi's XI" rather than
                 // five unrelated individuals who happen to have entered.
                 teamName: group.name,
+                // Names the approval this write belongs to — the only thing the
+                // rules let an organizer write a member's registration on.
+                groupId: groupId,
               ).toCreate(status: RegistrationStatus.confirmed),
             );
           }
@@ -1003,6 +1077,13 @@ class CompetitionRepository {
           );
         }
 
+        if (competition.entersAsTeams) {
+          throw ValidationException(
+            '${competition.sportName} is entered as teams. Ask your captain '
+            'or club organizer to enter your team.',
+          );
+        }
+
         final eligibility = competition.category.check(
           user,
           competitionStart: competition.startDate,
@@ -1048,7 +1129,14 @@ class CompetitionRepository {
               }
             }
 
-            final outcome = fresh.outcomeOfRegisteringNow;
+            var fromHost = false;
+            if (fresh.hostEntriesAutoConfirm) {
+              final member = await tx.get(
+                Refs.member(competition.orgId, user.uid),
+              );
+              fromHost = member.exists && member.data()?['status'] == 'active';
+            }
+            final outcome = fresh.outcomeOfEntering(fromHost: fromHost);
 
             if (outcome == RegistrationStatus.waitlisted &&
                 !fresh.waitlistEnabled) {
@@ -1128,10 +1216,16 @@ class CompetitionRepository {
   /// or silently entering an ineligible player. Both are worse than the
   /// organizer checking a squad list, which is what happens at a real event.
   /// The squad is written onto the entry precisely so they can.
+  ///
+  /// [invitedClubId] is set when the side enters on the strength of an
+  /// accepted invitation to another club's season. The counter write then
+  /// names that club (`lastInvitedEntryOrgId`), which is how `firestore.rules`
+  /// checks the invitation for a caller who is not a member of the host.
   Future<RegistrationStatus> registerTeam({
     required Competition competition,
     required Team team,
     required String byUid,
+    String? invitedClubId,
   }) =>
       guard(() async {
         if (competition.isSuspended) {
@@ -1158,6 +1252,12 @@ class CompetitionRepository {
             'entering them.',
           );
         }
+        if (invitedClubId != null && team.clubId != invitedClubId) {
+          throw ValidationException(
+            '${team.name} is not one of the invited club\'s own teams.',
+          );
+        }
+        await _refuseIneligibleSquad(competition, team);
 
         final compRef = Refs.competition(competition.orgId, competition.id);
         final regRef =
@@ -1186,7 +1286,9 @@ class CompetitionRepository {
             );
           }
 
-          final outcome = fresh.outcomeOfRegisteringNow;
+          final outcome = fresh.outcomeOfEntering(
+            fromHost: team.clubId == competition.orgId,
+          );
           if (outcome == RegistrationStatus.waitlisted &&
               !fresh.waitlistEnabled) {
             throw const ValidationException('This event is full.');
@@ -1212,13 +1314,58 @@ class CompetitionRepository {
           );
 
           if (outcome == RegistrationStatus.confirmed) {
-            tx.update(compRef, {'confirmedCount': FieldValue.increment(1)});
+            tx.update(compRef, {
+              'confirmedCount': FieldValue.increment(1),
+              if (invitedClubId != null) 'lastInvitedEntryOrgId': invitedClubId,
+            });
           } else if (outcome == RegistrationStatus.waitlisted) {
-            tx.update(compRef, {'waitlistCount': FieldValue.increment(1)});
+            tx.update(compRef, {
+              'waitlistCount': FieldValue.increment(1),
+              if (invitedClubId != null) 'lastInvitedEntryOrgId': invitedClubId,
+            });
           }
           return outcome;
         });
       });
+
+  /// Stops a squad with anybody outside the event's age or gender band — an
+  /// Under-19 side carrying a 20-year-old — and says who, before anything is
+  /// written.
+  ///
+  /// Asked of the server because the birth dates are not the captain's to
+  /// read: most of an Under-19 roster is minors, whose profiles are closed to
+  /// teammates (`checkTeamEligibility` in functions/team_eligibility.js). If
+  /// the check cannot be reached the entry goes ahead, and the same function's
+  /// trigger rejects it on arrival with the same reasons.
+  Future<void> _refuseIneligibleSquad(Competition competition, Team team) async {
+    if (!competition.category.restrictsEntry) return;
+    final Map<Object?, Object?> result;
+    try {
+      final response = await FirebaseFunctions.instanceFor(region: 'asia-south1')
+          .httpsCallable('checkTeamEligibility')
+          .call<Map<Object?, Object?>>({
+        'orgId': competition.orgId,
+        'compId': competition.id,
+        'teamId': team.id,
+      });
+      result = response.data;
+    } on FirebaseFunctionsException catch (e) {
+      if (e.code == 'permission-denied' || e.code == 'not-found') {
+        throw ValidationException(e.message ?? 'This team cannot be entered.');
+      }
+      return;
+    }
+    if (result['eligible'] == true) return;
+    final reasons = [
+      for (final p in (result['problems'] as List<Object?>? ?? const []))
+        if (p is Map) '• ${p['reason']}',
+    ];
+    throw ValidationException(
+      '${team.name} cannot enter ${competition.category.label}:\n'
+      '${reasons.join('\n')}\n'
+      'Change the squad, then enter again.',
+    );
+  }
 
   /// Puts members into the field directly — the organizer's picks in a hybrid
   /// event, and the "final changes" an admin makes at the ground.
@@ -1785,11 +1932,12 @@ class CompetitionRepository {
   ///
   /// [plan] carries the rename map the editor derived from what the organizer
   /// actually edited, and this replays it over the registrations in the same
-  /// write as the competition update. A rename therefore moves people; only a
-  /// deletion loses them, which is what a deletion means.
-  ///
-  /// Deleted houses are deliberately NOT reassigned. Picking a house for
-  /// somebody is the organizer's call at the team builder, with the names in
+  /// write as the competition update. A rename therefore moves people; a
+  /// deletion instead sets [Registration.houseName] back to null — TC-ADM-031
+  /// — so they read as genuinely unassigned (the team builder's own
+  /// unassigned-pool query) rather than pointing at a house name that no
+  /// longer exists on the competition. Picking a NEW house for them afterward
+  /// is still the organizer's call at the team builder, with the names in
   /// front of them — not something to guess here.
   ///
   /// Not awaited, for the reason the rest of this file is not: with offline
@@ -1825,6 +1973,21 @@ class CompetitionRepository {
           }
         }
 
+        if (plan.removed.isNotEmpty) {
+          // Same shape as the rename loop above, but clearing rather than
+          // rewriting — TC-ADM-031. Without this, a deleted house's members
+          // keep pointing at a name `presetHouses` no longer has, which is
+          // exactly the stale reference the class comment above warns about.
+          for (final house in plan.removed) {
+            final affected = await Refs.registrations(orgId, compId)
+                .where('houseName', isEqualTo: house)
+                .get();
+            for (final doc in affected.docs) {
+              batch.update(doc.reference, {'houseName': null});
+            }
+          }
+        }
+
         batch.update(Refs.competition(orgId, compId), {
           'presetHouses': plan.names,
           if (entryMode != null) 'teamEntryMode': entryMode.wire,
@@ -1835,6 +1998,112 @@ class CompetitionRepository {
           _writeFailures.add(_translateWriteFailure(error));
         }));
       });
+
+  /// Puts in a self-service ask to move houses — TC-CLUB-003. Refused unless
+  /// the organizer has turned the request queue on for this event; the
+  /// asker's CURRENT house is read server-side rather than trusted from the
+  /// client, so the request can't be forged to claim a move from a house the
+  /// player isn't actually in.
+  Future<void> requestHouseTransfer({
+    required String orgId,
+    required String compId,
+    required String uid,
+    required String displayName,
+    required String toHouse,
+    String? note,
+  }) =>
+      guard(() async {
+        final compSnap = await Refs.competition(orgId, compId).get();
+        if (!compSnap.exists) throw const NotFoundException('That event is gone.');
+        final competition = Competition.fromDoc(compSnap);
+        if (!competition.allowHouseTransferRequests) {
+          throw const ValidationException(
+            'The organizer has not turned on house transfer requests for '
+            'this event.',
+          );
+        }
+        if (!competition.presetHouses.contains(toHouse)) {
+          throw const ValidationException('That house is not on this event.');
+        }
+
+        final regSnap = await Refs.registration(orgId, compId, uid).get();
+        final fromHouse = regSnap.data()?['houseName'] as String?;
+        if (fromHouse == null) {
+          throw const ValidationException(
+            'You do not have a house on this event yet.',
+          );
+        }
+        if (fromHouse == toHouse) {
+          throw const ValidationException('You are already in that house.');
+        }
+
+        await Refs.houseTransferRequest(orgId, compId, uid).set(
+          HouseTransferRequest(
+            uid: uid,
+            displayName: displayName,
+            fromHouse: fromHouse,
+            toHouse: toHouse,
+            note: note,
+          ).toCreate(),
+        );
+      });
+
+  /// Withdraws a request, or declines one — the same call for both, exactly
+  /// as [TeamRepository.cancelJoinRequest] is.
+  Future<void> cancelHouseTransferRequest({
+    required String orgId,
+    required String compId,
+    required String uid,
+  }) =>
+      guard(() => Refs.houseTransferRequest(orgId, compId, uid).delete());
+
+  /// Grants a transfer request: moves the player's registration to the
+  /// requested house and clears the request, in one write — the same
+  /// destination [saveHouses]'s rename path leaves a moved member in, so
+  /// nothing downstream has to know the move came from a request rather than
+  /// the organizer's own hand.
+  Future<void> approveHouseTransferRequest({
+    required String orgId,
+    required String compId,
+    required String uid,
+  }) =>
+      guard(() async {
+        final reqRef = Refs.houseTransferRequest(orgId, compId, uid);
+        final reqSnap = await reqRef.get();
+        if (!reqSnap.exists) return;
+        final request = HouseTransferRequest.fromDoc(reqSnap);
+
+        final batch = Refs.db.batch();
+        batch.update(
+          Refs.registration(orgId, compId, uid),
+          {'houseName': request.toHouse},
+        );
+        batch.delete(reqRef);
+        await batch.commit();
+      });
+
+  /// Every player waiting on this event's organizer for a house move.
+  Stream<List<HouseTransferRequest>> watchHouseTransferRequests({
+    required String orgId,
+    required String compId,
+  }) =>
+      guardStream(
+        () => Refs.houseTransferRequests(orgId, compId)
+            .snapshots()
+            .map((s) => s.docs.map(HouseTransferRequest.fromDoc).toList()),
+      );
+
+  /// Whether [uid] already has an outstanding request on this event.
+  Stream<bool> watchHasRequestedHouseTransfer({
+    required String orgId,
+    required String compId,
+    required String uid,
+  }) =>
+      guardStream(
+        () => Refs.houseTransferRequest(orgId, compId, uid)
+            .snapshots()
+            .map((s) => s.exists),
+      );
 
   /// How many confirmed entries sit in each house right now, including the
   /// ones whose house is no longer on the list.
@@ -2217,7 +2486,7 @@ class CompetitionRepository {
             // An individual event never fills a line-up, so this is the only
             // record of who is actually playing. Null for a team entrant and
             // for a knockout slot still waiting on a qualifier — both fill in
-            // later, from `_maybeAdvanceWinner` and `promoteGroupQualifiers`.
+            // later, from the advancement (`ScoringService._advanceBestEffort` and the `onFixtureDecidedAdvance` function) and `resolveQualifiers`.
             entrantAUid: p.entrantA?.soloUid,
             entrantBUid: p.entrantB?.soloUid,
             // Auto-populate lineups from registered entrants so the scoring
@@ -2875,7 +3144,7 @@ class CompetitionRepository {
             byRating[i].entrant.withSeed(i + 1),
           for (var i = entered.length; i < teamCount; i++)
             Entrant(
-              id: 'draft_$i',
+              id: '${Entrant.placeholderIdPrefix}$i',
               // Two vocabularies, because they answer different questions. A
               // draw with nobody in it yet is a shape, and "Team A vs Team B"
               // reads as one. A draw with ten real names in it has gaps, and
@@ -3054,7 +3323,7 @@ class CompetitionRepository {
             // An individual event never fills a line-up, so this is the only
             // record of who is actually playing. Null for a team entrant and
             // for a knockout slot still waiting on a qualifier — both fill in
-            // later, from `_maybeAdvanceWinner` and `promoteGroupQualifiers`.
+            // later, from the advancement (`ScoringService._advanceBestEffort` and the `onFixtureDecidedAdvance` function) and `resolveQualifiers`.
             entrantAUid: p.entrantA?.soloUid,
             entrantBUid: p.entrantB?.soloUid,
             status: FixtureStatus.scheduled,
@@ -4384,10 +4653,48 @@ class CompetitionRepository {
           forOrgId: forOrgId,
           lineup: [
             for (final e in entries)
-              MatchPlayer(id: e.uid, name: e.displayName, uid: e.uid),
+              MatchPlayer(
+                id: e.uid,
+                name: e.displayName,
+                uid: e.uid,
+                isCaptain: e.isCaptain,
+                isKeeper: e.isWicketKeeper,
+              ),
           ],
           lock: true,
         );
+      });
+
+  /// Toggles the captain or wicket-keeper chip on one squad entry —
+  /// TC-CLUB-025. Each role is exclusive within the side: turning it on for
+  /// [uid] clears it from whoever held it before, in the same batch, so the
+  /// squad card can never show two captains. Turning [uid]'s own chip off
+  /// just clears theirs.
+  Future<void> setSquadRole({
+    required Fixture fixture,
+    required String side,
+    required String uid,
+    required String roleField,
+    required bool value,
+  }) =>
+      guard(() async {
+        assert(roleField == 'isCaptain' || roleField == 'isWicketKeeper');
+        final entries = await Refs.squadEntries(
+          fixture.orgId,
+          fixture.compId,
+          fixture.id,
+        ).where('side', isEqualTo: side).get();
+
+        final batch = ChunkedBatch(Refs.db);
+        for (final doc in entries.docs) {
+          final isTarget = doc.id == uid;
+          final next = isTarget ? value : false;
+          final current = Fs.boolean(doc.data()[roleField]);
+          if (next != current) {
+            batch.update(doc.reference, {roleField: next});
+          }
+        }
+        await batch.commitAll();
       });
 
   /// One club naming its own players in an inter-club match.

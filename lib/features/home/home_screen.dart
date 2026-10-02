@@ -62,12 +62,11 @@ class HomeScreen extends ConsumerWidget {
     final rsvp = ref.watch(rsvpCountProvider);
     final live = ref.watch(liveCountProvider);
 
-    // The club "New event" creates in: the one named in the app bar whenever
-    // it can host an event, and only otherwise the first club where this
-    // person could actually create something. Offering "New event" to a
-    // member who cannot create one is offering a permission error; opening it
-    // on a club other than the one the chip names is worse, because the
-    // person has no reason to look. See [actingOrgIdProvider].
+    // The club "New event" creates in: the one named in the app bar, and only
+    // if it can host an event — never another club of theirs. Offering "New
+    // event" to a member who cannot create one is offering a permission
+    // error; opening it on a club other than the one the chip names mixes
+    // clubs. See [actingOrgIdProvider].
     final organizingOrgId =
         ref.watch(actingOrgIdProvider(Capability.manageCompetitions));
 

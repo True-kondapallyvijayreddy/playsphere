@@ -295,33 +295,36 @@ export const razorpayWebhook = onRequest(
           paymentLink.payments?.[paymentLink.payments.length - 1]
             ?.payment_id ?? paymentLink.id;
 
-        tx.update(paymentRef, {
-          status: 'paid',
-          gatewayRef,
-          paidAt: FieldValue.serverTimestamp(),
-        });
-
         // A renewal EXTENDS the term; it does not restart it.
         //
         // `validUntil` was computed when the link was created — now plus a
         // year — and written straight onto the subject. So somebody who
         // renewed two months early paid for twelve months and received ten,
         // and the two months they had already bought were silently discarded.
-        // That is the shape of billing complaint that costs more to answer
-        // than the plan cost to sell.
         //
-        // Read inside the transaction so two deliveries racing cannot both
-        // extend from the same starting point — though the `status === 'paid'`
-        // guard above already makes the second a no-op.
+        // Read BEFORE any write: a Firestore transaction refuses a read that
+        // follows a write, and this read used to come after the payment row's
+        // update — so every paid webhook threw, returned 500, and the plan the
+        // customer had just paid for was never granted.
         const subjectRef =
           data.kind === 'org_plan'
             ? db().doc(`orgs/${data.subjectId}`)
             : data.kind === 'member_plan'
               ? db().doc(`users/${data.subjectId}`)
               : null;
-        if (!subjectRef) return;
+        const subjectSnap = subjectRef ? await tx.get(subjectRef) : null;
 
-        const subjectSnap = await tx.get(subjectRef);
+        tx.update(paymentRef, {
+          status: 'paid',
+          gatewayRef,
+          paidAt: FieldValue.serverTimestamp(),
+        });
+        if (!subjectRef) return;
+        if (!subjectSnap.exists) {
+          logger.error(`Webhook for ${paymentId}: subject ${data.subjectId} is gone; paid, not granted.`);
+          return;
+        }
+
         const existing = subjectSnap.exists
           ? subjectSnap.data().planValidUntil
           : null;

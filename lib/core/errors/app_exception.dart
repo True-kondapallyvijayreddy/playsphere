@@ -10,8 +10,10 @@ sealed class AppException implements Exception {
   /// Safe to show to a user as-is.
   final String message;
 
+  // Message only: interpolated into snackbars and dialogs, and on web
+  // `runtimeType` is a minified name like `minified:b0`.
   @override
-  String toString() => '$runtimeType: $message';
+  String toString() => message;
 }
 
 class NetworkException extends AppException {

@@ -1530,7 +1530,8 @@ void main() {
       expect(find.text('—'), findsNothing);
     });
 
-    testWidgets('is reported rather than silently dropped', (tester) async {
+    testWidgets('never reaches the page of the club that IS selected',
+        (tester) async {
       await pump(
         tester,
         harness(
@@ -1543,15 +1544,16 @@ void main() {
         ),
       );
 
-      // Showing the matches that loaded is only half of it. Quietly dropping
-      // a club would tell a player nothing is on at the ground they are
-      // standing in, which is the failure the strict combiner existed to
-      // prevent — so the notice has to be there too.
-      //
-      // The notice used to be a full-width banner under a list of live
-      // cards. Both are gone, so it is now the tile's own detail line —
-      // same promise, one line instead of a section.
-      expect(find.text('1 club unavailable'), findsOneWidget);
+      // The dashboard is about the club selected in the app bar and nothing
+      // else (user rule, 2026-09-13 — see `scopedOrgIdsProvider`). Club B is
+      // not selected, so its refused read is not this page's business: no
+      // "club unavailable" notice about a club the person is not looking at.
+      // A failure at the SELECTED club is still reported — next test.
+      expect(find.text('1 club unavailable'), findsNothing);
+      expect(
+        find.descendant(of: tileAround('Live'), matching: find.text('1')),
+        findsOneWidget,
+      );
     });
 
     testWidgets('every club failing still reports an error', (tester) async {

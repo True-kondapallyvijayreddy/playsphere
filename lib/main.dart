@@ -18,6 +18,7 @@ import 'core/theme/app_theme.dart';
 import 'features/splash/splash_screen.dart';
 import 'firebase_options.dart';
 import 'l10n/app_localizations.dart';
+import 'shared/app_messenger.dart';
 
 /// Point the app at a local Firestore emulator instead of the real
 /// `playsphere-os` project:
@@ -186,9 +187,24 @@ class PlaySphereApp extends ConsumerStatefulWidget {
 }
 
 class _PlaySphereAppState extends ConsumerState<PlaySphereApp> {
+  /// Rejected background writes, surfaced — see [rootMessengerKey].
+  late final List<StreamSubscription<Object>> _writeFailureSubs;
+
+  /// Routes a tapped push notification to its deep link.
+  late final StreamSubscription<Object> _pushTapSub;
+
   @override
   void initState() {
     super.initState();
+    // Before the first frame, so no write can be queued and refused unheard.
+    _writeFailureSubs = listenForBackgroundWriteFailures();
+    // A tapped push opens what it is about — the same route the
+    // Notifications screen opens for it. Subscribed before anything
+    // registers the device, so the tap that launched the app is not missed.
+    _pushTapSub = ref.read(notificationServiceProvider).opened.listen((n) {
+      final route = n.deepLink?.resolve();
+      if (route != null && mounted) ref.read(appRouterProvider).push(route);
+    });
     // Starts the offline scoring queue moving (Bug #9). Mounted here rather
     // than on the scoring pad because a scorer who has finished a match never
     // opens that pad again, and until this call existed that was the only
@@ -202,9 +218,19 @@ class _PlaySphereAppState extends ConsumerState<PlaySphereApp> {
   }
 
   @override
+  void dispose() {
+    for (final sub in _writeFailureSubs) {
+      sub.cancel();
+    }
+    _pushTapSub.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return MaterialApp.router(
       title: 'PlaySphere',
+      scaffoldMessengerKey: rootMessengerKey,
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light,
       darkTheme: AppTheme.dark,

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../core/errors/app_exception.dart';
 import '../../../core/models/competition.dart';
 import '../../../core/models/enums.dart';
 import '../../../core/models/team.dart';
@@ -39,19 +40,34 @@ import '../../../shared/identity.dart';
 /// "Create a team" door at the bottom leads to the screen that does that, and
 /// comes back here.
 class RegisterTeamSheet extends ConsumerStatefulWidget {
-  const RegisterTeamSheet({super.key, required this.competition});
+  const RegisterTeamSheet({
+    super.key,
+    required this.competition,
+    this.invitedClubId,
+  });
 
   final Competition competition;
+
+  /// The club an accepted invitation lets its organizers enter a side for, when
+  /// this sheet is entering one. Only that club's own teams are offered — the
+  /// rules admit an invited entry for a team whose `clubId` is the invited
+  /// club, entered by one of its organizers — and the entry names the club so
+  /// the invitation can be checked.
+  final String? invitedClubId;
 
   static Future<void> show(
     BuildContext context, {
     required Competition competition,
+    String? invitedClubId,
   }) =>
       showModalBottomSheet<void>(
         context: context,
         isScrollControlled: true,
         showDragHandle: true,
-        builder: (_) => RegisterTeamSheet(competition: competition),
+        builder: (_) => RegisterTeamSheet(
+          competition: competition,
+          invitedClubId: invitedClubId,
+        ),
       );
 
   @override
@@ -71,6 +87,7 @@ class _RegisterTeamSheetState extends ConsumerState<RegisterTeamSheet> {
                 competition: widget.competition,
                 team: team,
                 byUid: uid,
+                invitedClubId: widget.invitedClubId,
               );
       if (!mounted) return;
       Navigator.of(context).pop();
@@ -91,7 +108,26 @@ class _RegisterTeamSheetState extends ConsumerState<RegisterTeamSheet> {
     } catch (e) {
       if (mounted) {
         setState(() => _busyTeamId = null);
-        showError(context, e);
+        // A squad refused on age or gender names one line per player, which a
+        // snackbar cuts off at exactly the point the captain needs to read —
+        // who to drop. Anything shorter stays a snackbar.
+        if (e is ValidationException && e.message.contains('\n')) {
+          await showDialog<void>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: const Text('This squad cannot enter'),
+              content: SingleChildScrollView(child: Text(e.message)),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(),
+                  child: const Text('OK'),
+                ),
+              ],
+            ),
+          );
+        } else {
+          showError(context, e);
+        }
       }
     }
   }
@@ -118,18 +154,46 @@ class _RegisterTeamSheetState extends ConsumerState<RegisterTeamSheet> {
         .watch(myCapabilitiesProvider(c.orgId))
         .contains(Capability.manageOrganization);
 
-    final byId = <String, Team>{
-      for (final t in mine) t.id: t,
-      // The host club's teams, but only for somebody who can act for the
-      // host club. A member who happens to be looking at the event must not
-      // be able to enter a squad they are not on.
-      if (runsTheClub)
-        for (final t in hostTeams) t.id: t,
-    };
+    final invitedClubId = widget.invitedClubId;
+    final invitedTeams = invitedClubId == null
+        ? const <Team>[]
+        : ref.watch(clubTeamsProvider(invitedClubId)).valueOrNull ??
+            const <Team>[];
+    final runsInvitedClub = invitedClubId != null &&
+        ref
+            .watch(myCapabilitiesProvider(invitedClubId))
+            .contains(Capability.manageCompetitions);
+
+    final byId = invitedClubId != null
+        ? <String, Team>{
+            // An invited club enters its own sides, and only those.
+            if (runsInvitedClub)
+              for (final t in invitedTeams)
+                if (t.clubId == invitedClubId) t.id: t,
+          }
+        : <String, Team>{
+            // My own sides — but not ones that belong to somebody ELSE's club.
+            // `myTeamsProvider` is every team I am on anywhere, and offering
+            // all of them put a team of another club in the picker for this
+            // club's event ("Team Vijay" on a PS Test Academy event). A club's
+            // side enters another club's season through the invitation, which
+            // is the branch above; there is no other honest route, and the
+            // server refuses this one anyway.
+            for (final t in mine)
+              if (_couldEnterHere(t, c)) t.id: t,
+            // The host club's teams, but only for somebody who can act for the
+            // host club. A member who happens to be looking at the event must
+            // not be able to enter a squad they are not on.
+            if (runsTheClub)
+              for (final t in hostTeams) t.id: t,
+          };
 
     final eligible = [
       for (final t in byId.values)
-        if (t.sportId == c.sportId && t.isSelectable && _mayEnter(t, uid)) t,
+        if (t.sportId == c.sportId &&
+            t.isSelectable &&
+            (invitedClubId != null || _mayEnter(t, uid)))
+          t,
     ]..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
 
     // Already in, so the row says so rather than offering a button that
@@ -177,7 +241,7 @@ class _RegisterTeamSheetState extends ConsumerState<RegisterTeamSheet> {
             OutlinedButton.icon(
               onPressed: () {
                 Navigator.of(context).pop();
-                context.push(Routes.createTeam(c.orgId));
+                context.push(Routes.createTeam(invitedClubId ?? c.orgId));
               },
               icon: const Icon(Icons.group_add_outlined, size: 18),
               label: const Text('Create a team'),
@@ -201,6 +265,27 @@ class _RegisterTeamSheetState extends ConsumerState<RegisterTeamSheet> {
     return ref
         .watch(myCapabilitiesProvider(clubId))
         .contains(Capability.manageOrganization);
+  }
+
+  /// Whether [team] is a side that could belong in [c] at all.
+  ///
+  /// Two things disqualify it, both independent of who is holding the phone:
+  ///
+  ///  * it is another club's permanent side. That club enters by being invited
+  ///    — see the `invitedClubId` branch — and a club's squad appearing in the
+  ///    picker for an unrelated club's event is how one season offered
+  ///    "Team Vijay" for a PS Test Academy event.
+  ///  * it is an event team built for a different event. Those are scoped to
+  ///    the competition they were created for and mean nothing outside it.
+  ///
+  /// A side with no club at all is kept: that is the player's own team, and
+  /// entering one is the ordinary path into an open event.
+  static bool _couldEnterHere(Team team, Competition c) {
+    final clubId = team.clubId;
+    if (clubId != null && clubId != c.orgId) return false;
+    final scopedTo = team.competitionId;
+    if (scopedTo != null && scopedTo != c.id) return false;
+    return true;
   }
 }
 

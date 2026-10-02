@@ -49,6 +49,7 @@ import { HttpsError, onCall } from 'firebase-functions/v2/https';
 
 import { CALLABLE_OPTS } from './app_check.js';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
+import { onDocumentWritten } from 'firebase-functions/v2/firestore';
 import { logger } from 'firebase-functions';
 
 import { persistNotifications, pushToUids } from './push.js';
@@ -338,6 +339,23 @@ export const openAuctionBidding = onCall(CALLABLE_OPTS, async (request) => {
   await requireOrganizer(auctionId, uid);
 
   const auctionRef = db().collection('auctions').doc(auctionId);
+
+  // Another round offers again the players nobody bid on. The reveal files
+  // them as `unsold` so the squads screen can say so; they go back into the
+  // pool here, and only here, where the round they re-enter is opened.
+  const current = await auctionRef.get();
+  if (current.get('status') === 'revealed') {
+    const unsold = await auctionRef.collection('lots').where('status', '==', 'unsold').get();
+    for (let i = 0; i < unsold.docs.length; i += 400) {
+      const batch = db().batch();
+      unsold.docs.slice(i, i + 400).forEach((d) => batch.update(d.ref, {
+        status: 'pool',
+        resolvedAt: null,
+      }));
+      await batch.commit();
+    }
+  }
+
   const [teams, lots] = await Promise.all([
     auctionRef.collection('teams').count().get(),
     auctionRef.collection('lots').where('status', '==', 'pool').count().get(),
@@ -434,124 +452,152 @@ export function rankBids(bids) {
 }
 
 /**
+ * What one lot's reveal writes. Pure, so the money is testable without a
+ * database.
+ *
+ * `live` is the lot's bids from the current round. Returns `{ unsold: true }`
+ * when nobody bid, or the sale: the winning bid, and the per-team movements.
+ *
+ * ## The money
+ *
+ * `committedPaise` counts everything a side has promised: live bids AND
+ * players already bought (see `AuctionTeam.availablePaise`, which is
+ * purse − committed). So at the reveal a winning bid does not leave the
+ * commitment — it becomes spend as well — and only the losing bids are
+ * released. The reveal used to release the winner's too, which put a side that
+ * had spent its whole purse back at a full purse for the next round.
+ */
+export function lotOutcome(live) {
+  if (!Array.isArray(live) || live.length === 0) return { unsold: true };
+  const ranked = rankBids([...live]);
+  const winner = ranked[0];
+  const price = Number(winner.amountPaise) || 0;
+  const teams = new Map();
+  for (const bid of ranked) {
+    const won = bid.id === winner.id;
+    teams.set(bid.id, {
+      committed: won ? 0 : -(Number(bid.amountPaise) || 0),
+      spent: won ? price : 0,
+      won: won ? 1 : 0,
+      liveBids: -1,
+    });
+  }
+  return { unsold: false, winner, price, bids: ranked, teams };
+}
+
+/**
  * The reveal: open every sealed bid at once and award the lots.
  *
  * Pure per-lot maximum, made safe by the committed-budget invariant — see the
- * file header. Ties break on `amountSetAt` (earlier commitment wins) and then
- * on team id, which is arbitrary but deterministic, so two runs of this
- * function over the same data can never produce two different squads.
+ * file header and [lotOutcome].
  *
- * Written to be **re-runnable**. It reads only lots still in the pool and
- * only bids from the current round, so a run that dies halfway through leaves
- * the lots it had already awarded alone and finishes the rest on the next
- * tick. That matters more than it looks: this is the one place in the product
- * where a crash could otherwise mean a player sold twice.
+ * ## Exclusive and re-runnable
+ *
+ * The scheduler and "Reveal now" can both reach an auction whose deadline has
+ * passed, and a run can die halfway. So:
+ *
+ *  1. bidding is shut first, in a transaction, by pulling `bidsCloseAt` to now
+ *     — `placeAuctionBid` checks that clock inside its own transaction, so no
+ *     bid can land on a lot while it is being opened;
+ *  2. each lot is ONE transaction: the lot (still in the pool), its bids and
+ *     every team's money move together or not at all, so a lot is never sold
+ *     twice and a team's purse never moves without its lot;
+ *  3. the auction flips to `revealed` in a final transaction, and only the run
+ *     that flips it announces the result — read back from the lots, so it is
+ *     the same announcement whichever run got there.
  */
 async function revealAuction(auctionRef) {
-  const auctionSnap = await auctionRef.get();
-  if (!auctionSnap.exists) return null;
-  const auction = auctionSnap.data();
-  if (auction.status !== 'bidding') return null;
+  const opened = await db().runTransaction(async (tx) => {
+    const snap = await tx.get(auctionRef);
+    if (!snap.exists) return null;
+    const auction = snap.data();
+    if (auction.status !== 'bidding') return null;
+    const now = Date.now();
+    if (!auction.bidsCloseAt || toMillis(auction.bidsCloseAt) > now) {
+      tx.update(auctionRef, { bidsCloseAt: Timestamp.fromMillis(now) });
+    }
+    return auction;
+  });
+  if (!opened) return null;
 
-  const round = Number(auction.round) || 1;
+  const round = Number(opened.round) || 1;
   const pool = await auctionRef.collection('lots').where('status', '==', 'pool').get();
 
-  /** teamId -> { spent, won, released } accumulated across every lot. */
-  const teamDeltas = new Map();
-  const bump = (teamId, key, value) => {
-    const entry = teamDeltas.get(teamId) ?? { spent: 0, won: 0, released: 0, lost: 0 };
-    entry[key] += value;
-    teamDeltas.set(teamId, entry);
-  };
-
-  const sales = [];
-  let soldThisRound = 0;
-
   for (const lotDoc of pool.docs) {
-    const bids = await lotDoc.ref.collection('bids').get();
-    // Only this round's bids can win. A bid left over from an earlier round
-    // cannot exist on a pooled lot — an unsold lot is by definition one
-    // nobody bid on — but filtering makes that an assertion rather than an
-    // assumption somebody has to remember.
-    const live = bids.docs
-      .map((d) => ({ id: d.id, ...d.data() }))
-      .filter((b) => (Number(b.round) || 1) === round);
+    await db().runTransaction(async (tx) => {
+      const lotSnap = await tx.get(lotDoc.ref);
+      if (!lotSnap.exists || lotSnap.data().status !== 'pool') return;
+      const bids = await tx.get(lotDoc.ref.collection('bids'));
+      const live = bids.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .filter((b) => (Number(b.round) || 1) === round);
 
-    if (live.length === 0) {
-      await lotDoc.ref.update({
-        status: 'unsold',
+      const outcome = lotOutcome(live);
+      if (outcome.unsold) {
+        tx.update(lotDoc.ref, {
+          status: 'unsold',
+          resolvedAt: FieldValue.serverTimestamp(),
+        });
+        return;
+      }
+
+      tx.update(lotDoc.ref, {
+        status: 'sold',
+        soldToTeamId: outcome.winner.id,
+        soldToTeamName: outcome.winner.teamName ?? 'Team',
+        soldPricePaise: outcome.price,
+        soldInRound: round,
+        acquiredBy: 'auction',
         resolvedAt: FieldValue.serverTimestamp(),
       });
-      continue;
-    }
-
-    rankBids(live);
-
-    const winner = live[0];
-    const price = Number(winner.amountPaise) || 0;
-    const lot = lotDoc.data();
-
-    const batch = db().batch();
-    batch.update(lotDoc.ref, {
-      status: 'sold',
-      soldToTeamId: winner.id,
-      soldToTeamName: winner.teamName ?? 'Team',
-      soldPricePaise: price,
-      soldInRound: round,
-      acquiredBy: 'auction',
-      resolvedAt: FieldValue.serverTimestamp(),
+      for (const bid of outcome.bids) {
+        tx.update(lotDoc.ref.collection('bids').doc(bid.id), {
+          isWinning: bid.id === outcome.winner.id,
+        });
+      }
+      for (const [teamId, m] of outcome.teams) {
+        tx.update(auctionRef.collection('teams').doc(teamId), {
+          committedPaise: FieldValue.increment(m.committed),
+          spentPaise: FieldValue.increment(m.spent),
+          wonCount: FieldValue.increment(m.won),
+          liveBidCount: FieldValue.increment(m.liveBids),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      }
     });
-    for (const bid of live) {
-      batch.update(lotDoc.ref.collection('bids').doc(bid.id), {
-        isWinning: bid.id === winner.id,
-      });
-    }
-    await batch.commit();
-
-    // The winner's commitment becomes spend; every loser's is released. Both
-    // legs are accumulated and applied per team below, so a team that lost on
-    // forty lots takes one write rather than forty.
-    bump(winner.id, 'spent', price);
-    bump(winner.id, 'won', 1);
-    for (const bid of live) {
-      bump(bid.id, 'released', Number(bid.amountPaise) || 0);
-      if (bid.id !== winner.id) bump(bid.id, 'lost', 1);
-    }
-    sales.push({
-      lotId: lotDoc.id,
-      playerName: lot.displayName ?? 'Player',
-      teamId: winner.id,
-      price,
-    });
-    soldThisRound++;
   }
 
-  // `committedPaise` drops by everything that was locked on these lots —
-  // winners included, since a winner's lock becomes `spentPaise` instead.
-  // After this the two agree for every team, which is what makes
-  // `remainingPaise` meaningful during the trade window.
-  const teamWrites = db().batch();
-  for (const [teamId, delta] of teamDeltas) {
-    teamWrites.update(auctionRef.collection('teams').doc(teamId), {
-      committedPaise: FieldValue.increment(-delta.released),
-      spentPaise: FieldValue.increment(delta.spent),
-      wonCount: FieldValue.increment(delta.won),
-      liveBidCount: FieldValue.increment(-(delta.won + delta.lost)),
+  const flipped = await db().runTransaction(async (tx) => {
+    const snap = await tx.get(auctionRef);
+    if (!snap.exists || snap.data().status !== 'bidding') return false;
+    tx.update(auctionRef, {
+      status: 'revealed',
+      bidsCloseAt: null,
+      revealedAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     });
-  }
-  await teamWrites.commit();
-
-  await auctionRef.update({
-    status: 'revealed',
-    bidsCloseAt: null,
-    revealedAt: FieldValue.serverTimestamp(),
-    soldCount: FieldValue.increment(soldThisRound),
-    updatedAt: FieldValue.serverTimestamp(),
+    return true;
   });
+  if (!flipped) return { soldThisRound: 0, unsold: 0, alreadyRevealed: true };
 
-  await notifyReveal(auctionRef, auction, sales, round);
-  return { soldThisRound, unsold: pool.size - soldThisRound };
+  const [soldAll, soldRound, unsold] = await Promise.all([
+    auctionRef.collection('lots').where('status', '==', 'sold').count().get(),
+    auctionRef.collection('lots').where('soldInRound', '==', round).get(),
+    auctionRef.collection('lots').where('status', '==', 'unsold').count().get(),
+  ]);
+  await auctionRef.update({ soldCount: soldAll.data().count });
+
+  const sales = soldRound.docs
+    .filter((d) => d.get('status') === 'sold' && d.get('acquiredBy') === 'auction')
+    .map((d) => ({
+      lotId: d.id,
+      playerName: d.get('displayName') ?? 'Player',
+      teamId: d.get('soldToTeamId'),
+      teamName: d.get('soldToTeamName'),
+      price: Number(d.get('soldPricePaise')) || 0,
+    }));
+  await notifyReveal(auctionRef, opened, sales, round);
+  return { soldThisRound: sales.length, unsold: unsold.data().count };
 }
 
 /**
@@ -579,7 +625,7 @@ async function notifyReveal(auctionRef, auction, sales, round) {
       id: `auction_sold_${auctionId}_${round}_${sale.lotId}`,
       type: 'auction_result',
       title: `You were picked — ${name}`,
-      body: `${byTeam.get(sale.teamId)?.[0]?.teamName ?? 'A side'} took you for ${rupees(sale.price)}.`,
+      body: `${sale.teamName ?? 'A side'} took you for ${rupees(sale.price)}.`,
       route,
       params: { auctionId },
     })));
@@ -961,3 +1007,46 @@ export const notifyAuctionTrade = onCall(CALLABLE_OPTS, async (request) => {
 
   return { ok: true };
 });
+
+// ===========================================================================
+// Counters
+// ===========================================================================
+
+/**
+ * `teamCount` and `playerCount`, kept true by the server.
+ *
+ * The organizer's client used to bump them when approving somebody, but the
+ * auction rule freezes both (a count a client can write is a count a client can
+ * invent), so every approval was refused after it had already created the side.
+ * They are recounted from the documents themselves instead, which also means a
+ * deleted side or a withdrawn lot takes its count back.
+ */
+async function recountAuction(auctionId) {
+  const auctionRef = db().collection('auctions').doc(auctionId);
+  const auction = await auctionRef.get();
+  if (!auction.exists) return;
+  const [teams, lots] = await Promise.all([
+    auctionRef.collection('teams').count().get(),
+    auctionRef.collection('lots').count().get(),
+  ]);
+  await auctionRef.update({
+    teamCount: teams.data().count,
+    playerCount: lots.data().count,
+  });
+}
+
+export const onAuctionTeamWritten = onDocumentWritten(
+  { region: 'asia-south1', document: 'auctions/{auctionId}/teams/{teamId}' },
+  async (event) => {
+    if (event.data?.before?.exists && event.data?.after?.exists) return;
+    await recountAuction(event.params.auctionId);
+  },
+);
+
+export const onAuctionLotWritten = onDocumentWritten(
+  { region: 'asia-south1', document: 'auctions/{auctionId}/lots/{lotId}' },
+  async (event) => {
+    if (event.data?.before?.exists && event.data?.after?.exists) return;
+    await recountAuction(event.params.auctionId);
+  },
+);

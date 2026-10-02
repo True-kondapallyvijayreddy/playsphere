@@ -29,6 +29,10 @@ import '../../features/family/claim_code_screen.dart';
 import '../../features/family/claim_entry_screen.dart';
 import '../../features/family/managed_children_screen.dart';
 import '../../features/community/looking_for_board_screen.dart';
+import '../../features/invitations/invitations_screen.dart';
+import '../../features/invitations/build_entry_screen.dart';
+import '../../features/invitations/invite_clubs_screen.dart';
+import '../../features/invitations/season_register_screen.dart';
 import '../../features/network/club_network_screen.dart';
 import '../../features/network/club_thread_screen.dart';
 import '../../features/community/match_rsvp_screen.dart';
@@ -278,8 +282,15 @@ class Routes {
   static String certificates(String orgId, String tournamentId) =>
       '/org/$orgId/tournaments/$tournamentId/certificates';
 
-  static String tournamentSchedule(String orgId, String tournamentId) =>
-      '/org/$orgId/tournaments/$tournamentId/schedule';
+  /// [sportId] narrows the page to one sport's events — a season's sport
+  /// read as the tournament it is. Omitted, the whole season.
+  static String tournamentSchedule(
+    String orgId,
+    String tournamentId, {
+    String? sportId,
+  }) =>
+      '/org/$orgId/tournaments/$tournamentId/schedule'
+      '${sportId == null ? '' : '?sport=${Uri.encodeQueryComponent(sportId)}'}';
 
   static String tournamentOfficials(String orgId, String tournamentId) =>
       '/org/$orgId/tournaments/$tournamentId/officials';
@@ -291,6 +302,49 @@ class Routes {
 
   static String seasonMemories(String orgId, String tournamentId) =>
       '/org/$orgId/tournaments/$tournamentId/memories';
+
+  /// Where a season is run from: entries, attention items, running late,
+  /// tools, staffing and the timetable builder. Organizers only — the main
+  /// season page is the same stats-and-leaderboards page for everybody.
+  static String seasonDesk(String orgId, String tournamentId) =>
+      '/org/$orgId/tournaments/$tournamentId/desk';
+
+  /// The page for inviting other clubs to one season or tournament — the
+  /// letter, the directory, the send. Organizers only.
+  static String inviteClubs(String orgId, String tournamentId) =>
+      '/org/$orgId/tournaments/$tournamentId/invite';
+
+  /// Every draw of a season with a Register button beside it — where an
+  /// invitation's link lands. See `SeasonRegisterScreen`.
+  static String seasonRegister(String orgId, String tournamentId) =>
+      '/org/$orgId/tournaments/$tournamentId/register';
+
+  /// An invited club assembling the side it is sending: who is available, how
+  /// many teams, and the entry. See `BuildEntryScreen`.
+  ///
+  /// [orgId] here is the INVITED club, not the host — the members being picked
+  /// and the teams being raised are that club's — so the host is carried as a
+  /// query parameter rather than in the path.
+  static String buildEntry(
+    String orgId,
+    String hostOrgId,
+    String tournamentId,
+  ) =>
+      '/org/$orgId/build-entry/$tournamentId?host=$hostOrgId';
+
+  /// [seasonRegister] as an absolute link, for the invitation that leaves
+  /// the app on WhatsApp. A signed-out visitor is parked on it through
+  /// sign-in by [PendingDestination].
+  static String seasonRegisterUrl(String orgId, String tournamentId) =>
+      '$publicOrigin${seasonRegister(orgId, tournamentId)}';
+
+  /// Club-to-club invitations: what your clubs have received, and the
+  /// seasons you can invite clubs to. Not under a club, for the reason
+  /// [clubNetwork] is not.
+  static const invitations = '/invitations';
+
+  /// The same screen opened on its Send tab.
+  static const invitationsSend = '$invitations?tab=send';
 
   /// One team or player within one season. Deliberately under the season
   /// rather than under an event: a team entered in three draws of a season is
@@ -1383,6 +1437,13 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         ),
       ),
       GoRoute(
+        path: Routes.invitations,
+        builder: (_, state) => InvitationsScreen(
+          initialTab: state.uri.queryParameters['tab'] == 'send' ? 1 : 0,
+          clubId: state.uri.queryParameters['club'],
+        ),
+      ),
+      GoRoute(
         path: Routes.clubNetwork,
         builder: (_, state) => ClubNetworkScreen(
           initialTab: state.uri.queryParameters['tab'] == 'find' ? 1 : 0,
@@ -1679,6 +1740,17 @@ final appRouterProvider = Provider<GoRouter>((ref) {
               tournamentId: state.pathParameters['tournamentId']!,
             ),
           ),
+          // Under the INVITED club, deliberately: the members being picked and
+          // the sides being raised belong to it, and the host is only where
+          // the draw is. See `BuildEntryScreen`.
+          GoRoute(
+            path: 'build-entry/:tournamentId',
+            builder: (_, state) => BuildEntryScreen(
+              orgId: state.pathParameters['orgId']!,
+              hostOrgId: state.uri.queryParameters['host'] ?? '',
+              tournamentId: state.pathParameters['tournamentId']!,
+            ),
+          ),
           GoRoute(
             path: 'tournaments',
             builder: (_, state) =>
@@ -1696,6 +1768,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                     builder: (_, state) => TournamentScheduleScreen(
                       orgId: state.pathParameters['orgId']!,
                       tournamentId: state.pathParameters['tournamentId']!,
+                      sportId: state.uri.queryParameters['sport'],
                     ),
                   ),
                   GoRoute(
@@ -1715,6 +1788,27 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                   GoRoute(
                     path: 'officials',
                     builder: (_, state) => OfficialsScreen(
+                      orgId: state.pathParameters['orgId']!,
+                      tournamentId: state.pathParameters['tournamentId']!,
+                    ),
+                  ),
+                  GoRoute(
+                    path: 'desk',
+                    builder: (_, state) => SeasonDeskScreen(
+                      orgId: state.pathParameters['orgId']!,
+                      tournamentId: state.pathParameters['tournamentId']!,
+                    ),
+                  ),
+                  GoRoute(
+                    path: 'invite',
+                    builder: (_, state) => InviteClubsScreen(
+                      orgId: state.pathParameters['orgId']!,
+                      tournamentId: state.pathParameters['tournamentId']!,
+                    ),
+                  ),
+                  GoRoute(
+                    path: 'register',
+                    builder: (_, state) => SeasonRegisterScreen(
                       orgId: state.pathParameters['orgId']!,
                       tournamentId: state.pathParameters['tournamentId']!,
                     ),

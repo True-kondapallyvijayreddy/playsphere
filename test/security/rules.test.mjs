@@ -2330,6 +2330,9 @@ describe('inter-club challenges', () => {
 describe('cross-club tournament invitations', () => {
   const HOST_ORG = 'org_invite_host';
   const GUEST_ORG = 'org_invite_guest';
+  // The deterministic id `TournamentInvite.idFor` writes and `inviteAccepted`
+  // reads. The rules refuse an invitation filed under any other.
+  const INV = `${HOST_ORG}_tour_1_${GUEST_ORG}`;
 
   const inviteDoc = (overrides = {}) => ({
     tournamentId: 'tour_1',
@@ -2363,13 +2366,74 @@ describe('cross-club tournament invitations', () => {
         doc(db, 'orgs', HOST_ORG, 'members', OUTSIDER),
         membership(OUTSIDER, HOST_ORG, 'member'),
       );
+      await setDoc(doc(db, 'orgs', HOST_ORG, 'tournaments', 'tour_1'), {
+        orgId: HOST_ORG,
+        name: 'District Championship',
+        status: 'entries_open',
+        eventCount: 0,
+      });
     });
+  });
+
+  it('refuses an invitation filed under an id that is not host_season_guest', async () => {
+    // The forgery: a person running two clubs files `HOST_T_GUEST` from their
+    // OTHER club and accepts it as the guest, and `inviteAccepted` — which
+    // reads by that id alone — admits the guest to a season it was never
+    // invited to.
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(setDoc(doc(db, 'tournamentInvites', 'inv1'), inviteDoc()));
+    await assertFails(
+      setDoc(
+        doc(db, 'tournamentInvites', `org_someone_else_tour_1_${GUEST_ORG}`),
+        inviteDoc(),
+      ),
+    );
+  });
+
+  it('refuses an invitation to a season the host club does not have', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'tournamentInvites', `${HOST_ORG}_tour_missing_${GUEST_ORG}`),
+        inviteDoc({ tournamentId: 'tour_missing' }),
+      ),
+    );
+  });
+
+  it('lets the host invite again after a decline, with a fresh letter', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'tournamentInvites', INV), inviteDoc({ status: 'declined' }));
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      setDoc(doc(db, 'tournamentInvites', INV), inviteDoc({ message: 'Try again?' })),
+    );
+  });
+
+  it('refuses re-sending over an invitation that is still waiting or accepted', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'tournamentInvites', INV), inviteDoc({ status: 'accepted' }));
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      setDoc(doc(db, 'tournamentInvites', INV), inviteDoc({ message: 'Changed' })),
+    );
+  });
+
+  it('refuses the guest re-opening a declined invitation itself', async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, 'tournamentInvites', INV), inviteDoc({ status: 'declined' }));
+    });
+    const db = testEnv.authenticatedContext(ADMIN).firestore();
+    await assertFails(
+      setDoc(doc(db, 'tournamentInvites', INV), inviteDoc({ invitedBy: ADMIN })),
+    );
   });
 
   it('lets an organizer of the host club invite another club', async () => {
     const db = testEnv.authenticatedContext(OWNER).firestore();
     await assertSucceeds(
-      setDoc(doc(db, 'tournamentInvites', 'inv1'), inviteDoc()),
+      setDoc(doc(db, 'tournamentInvites', INV), inviteDoc()),
     );
   });
 
@@ -2377,7 +2441,7 @@ describe('cross-club tournament invitations', () => {
     const db = testEnv.authenticatedContext(OUTSIDER).firestore();
     await assertFails(
       setDoc(
-        doc(db, 'tournamentInvites', 'inv1'),
+        doc(db, 'tournamentInvites', INV),
         inviteDoc({ invitedBy: OUTSIDER }),
       ),
     );
@@ -2387,7 +2451,7 @@ describe('cross-club tournament invitations', () => {
     const db = testEnv.authenticatedContext(SCORER).firestore();
     await assertFails(
       setDoc(
-        doc(db, 'tournamentInvites', 'inv1'),
+        doc(db, 'tournamentInvites', INV),
         inviteDoc({ invitedBy: SCORER }),
       ),
     );
@@ -2399,7 +2463,7 @@ describe('cross-club tournament invitations', () => {
     const db = testEnv.authenticatedContext(OWNER).firestore();
     await assertFails(
       setDoc(
-        doc(db, 'tournamentInvites', 'inv1'),
+        doc(db, 'tournamentInvites', INV),
         inviteDoc({ invitedBy: ADMIN }),
       ),
     );
@@ -2409,7 +2473,7 @@ describe('cross-club tournament invitations', () => {
     const db = testEnv.authenticatedContext(OWNER).firestore();
     await assertFails(
       setDoc(
-        doc(db, 'tournamentInvites', 'inv1'),
+        doc(db, 'tournamentInvites', INV),
         inviteDoc({ toOrgId: HOST_ORG, toOrgName: 'Host Club' }),
       ),
     );
@@ -2417,11 +2481,11 @@ describe('cross-club tournament invitations', () => {
 
   it('lets an organizer of the invited club accept', async () => {
     await seed(async (db) => {
-      await setDoc(doc(db, 'tournamentInvites', 'inv1'), inviteDoc());
+      await setDoc(doc(db, 'tournamentInvites', INV), inviteDoc());
     });
     const db = testEnv.authenticatedContext(ADMIN).firestore();
     await assertSucceeds(
-      updateDoc(doc(db, 'tournamentInvites', 'inv1'), { status: 'accepted' }),
+      updateDoc(doc(db, 'tournamentInvites', INV), { status: 'accepted' }),
     );
   });
 
@@ -2429,21 +2493,21 @@ describe('cross-club tournament invitations', () => {
     // The whole value of the feature is that the host can read back a real
     // answer. A host that can write 'accepted' itself is reading its own echo.
     await seed(async (db) => {
-      await setDoc(doc(db, 'tournamentInvites', 'inv1'), inviteDoc());
+      await setDoc(doc(db, 'tournamentInvites', INV), inviteDoc());
     });
     const db = testEnv.authenticatedContext(OWNER).firestore();
     await assertFails(
-      updateDoc(doc(db, 'tournamentInvites', 'inv1'), { status: 'accepted' }),
+      updateDoc(doc(db, 'tournamentInvites', INV), { status: 'accepted' }),
     );
   });
 
   it('lets the host withdraw an unanswered invitation', async () => {
     await seed(async (db) => {
-      await setDoc(doc(db, 'tournamentInvites', 'inv1'), inviteDoc());
+      await setDoc(doc(db, 'tournamentInvites', INV), inviteDoc());
     });
     const db = testEnv.authenticatedContext(OWNER).firestore();
     await assertSucceeds(
-      updateDoc(doc(db, 'tournamentInvites', 'inv1'), { status: 'withdrawn' }),
+      updateDoc(doc(db, 'tournamentInvites', INV), { status: 'withdrawn' }),
     );
   });
 
@@ -2451,23 +2515,67 @@ describe('cross-club tournament invitations', () => {
     // They have put the date in their calendar on the strength of it.
     await seed(async (db) => {
       await setDoc(
-        doc(db, 'tournamentInvites', 'inv1'),
+        doc(db, 'tournamentInvites', INV),
         inviteDoc({ status: 'accepted' }),
       );
     });
     const db = testEnv.authenticatedContext(OWNER).firestore();
     await assertFails(
-      updateDoc(doc(db, 'tournamentInvites', 'inv1'), { status: 'withdrawn' }),
+      updateDoc(doc(db, 'tournamentInvites', INV), { status: 'withdrawn' }),
+    );
+  });
+
+  it('lets the host send the full letter with its sports and place', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      setDoc(
+        doc(db, 'tournamentInvites', INV),
+        inviteDoc({
+          message: 'Dear sports enthusiasts,\n\nWe from Host Club are conducting …',
+          kind: 'tournament',
+          sportNames: ['Cricket', 'Table Tennis'],
+          place: 'Adibatla, Hyderabad',
+        }),
+      ),
+    );
+  });
+
+  it('refuses a letter longer than the bound', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      setDoc(
+        doc(db, 'tournamentInvites', INV),
+        inviteDoc({ message: 'x'.repeat(2001) }),
+      ),
+    );
+  });
+
+  it('refuses the invited club rewriting the host\'s letter while answering', async () => {
+    await seed(async (db) => {
+      await setDoc(
+        doc(db, 'tournamentInvites', INV),
+        inviteDoc({ message: 'Dear sports enthusiasts, …', place: 'Adibatla' }),
+      );
+    });
+    const db = testEnv.authenticatedContext(ADMIN).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'tournamentInvites', INV), {
+        status: 'accepted',
+        message: 'We never asked you.',
+      }),
+    );
+    await assertSucceeds(
+      updateDoc(doc(db, 'tournamentInvites', INV), { status: 'accepted' }),
     );
   });
 
   it('refuses re-pointing an invitation at a different tournament', async () => {
     await seed(async (db) => {
-      await setDoc(doc(db, 'tournamentInvites', 'inv1'), inviteDoc());
+      await setDoc(doc(db, 'tournamentInvites', INV), inviteDoc());
     });
     const db = testEnv.authenticatedContext(ADMIN).firestore();
     await assertFails(
-      updateDoc(doc(db, 'tournamentInvites', 'inv1'), {
+      updateDoc(doc(db, 'tournamentInvites', INV), {
         status: 'accepted',
         tournamentId: 'tour_2',
       }),
@@ -2476,18 +2584,18 @@ describe('cross-club tournament invitations', () => {
 
   it('refuses a stranger reading two clubs\' invitation', async () => {
     await seed(async (db) => {
-      await setDoc(doc(db, 'tournamentInvites', 'inv1'), inviteDoc());
+      await setDoc(doc(db, 'tournamentInvites', INV), inviteDoc());
     });
     const db = testEnv.authenticatedContext(SCORER).firestore();
-    await assertFails(getDoc(doc(db, 'tournamentInvites', 'inv1')));
+    await assertFails(getDoc(doc(db, 'tournamentInvites', INV)));
   });
 
   it('lets the invited club read the invitation addressed to it', async () => {
     await seed(async (db) => {
-      await setDoc(doc(db, 'tournamentInvites', 'inv1'), inviteDoc());
+      await setDoc(doc(db, 'tournamentInvites', INV), inviteDoc());
     });
     const db = testEnv.authenticatedContext(ADMIN).firestore();
-    await assertSucceeds(getDoc(doc(db, 'tournamentInvites', 'inv1')));
+    await assertSucceeds(getDoc(doc(db, 'tournamentInvites', INV)));
   });
 });
 
@@ -3370,11 +3478,15 @@ describe('inter-club challenges', () => {
       );
     });
 
-    it('lets either club accept or decline the challenge doc, but not a bystander', async () => {
+    it('lets only the challenged club answer the challenge doc, not the challenger or a bystander', async () => {
       const away = testEnv.authenticatedContext(AWAY_ADMIN).firestore();
       const third = testEnv.authenticatedContext(THIRD_ADMIN).firestore();
-      await assertSucceeds(updateDoc(doc(away, 'challenges', CHALLENGE), { status: 'declined' }));
+      const home = testEnv.authenticatedContext(HOME_ADMIN).firestore();
+      // The challenger cannot answer its own offer: it withdraws instead.
+      await assertFails(updateDoc(doc(away, 'challenges', CHALLENGE), { status: 'accepted' }));
+      await assertFails(updateDoc(doc(away, 'challenges', CHALLENGE), { status: 'declined' }));
       await assertFails(updateDoc(doc(third, 'challenges', CHALLENGE), { status: 'accepted' }));
+      await assertSucceeds(updateDoc(doc(home, 'challenges', CHALLENGE), { status: 'declined' }));
     });
   });
 });
@@ -4278,6 +4390,36 @@ describe('participation: open registration confirms itself while a slot is free'
     batch.set(regRef(db, PLAYER), registration(PLAYER, 'confirmed'));
     batch.update(compRef(db), { confirmedCount: 1, maxEntrants: 999 });
     await assertFails(batch.commit());
+  });
+});
+
+describe('team events: nobody enters as themselves', () => {
+  const selfEntry = async () => {
+    const db = testEnv.authenticatedContext(PLAYER).firestore();
+    const batch = writeBatch(db);
+    batch.set(regRef(db, PLAYER), registration(PLAYER, 'confirmed'));
+    batch.update(compRef(db), { confirmedCount: 1 });
+    return batch.commit();
+  };
+
+  it('refuses a solo entry into a pre-formed team event', async () => {
+    await seedEvent({ entrantType: 'team', teamEntryMode: 'preformed_team' });
+    await assertFails(selfEntry());
+  });
+
+  it('refuses a solo entry into an older team event with no entry mode', async () => {
+    await seedEvent({ entrantType: 'team' });
+    await assertFails(selfEntry());
+  });
+
+  it('still lets a student enter a house-based team event', async () => {
+    await seedEvent({ entrantType: 'team', teamEntryMode: 'house_batch' });
+    await assertSucceeds(selfEntry());
+  });
+
+  it('still lets a player enter an individual event', async () => {
+    await seedEvent({ entrantType: 'individual', teamEntryMode: 'individual' });
+    await assertSucceeds(selfEntry());
   });
 });
 
@@ -5923,13 +6065,124 @@ describe('tournaments', () => {
     );
   });
 
-  it('a tournament cannot be created already claiming to hold events', async () => {
+  it('a season is created with all its events, grounds and panel in one commit', async () => {
+    // TournamentRepository.createSeason: nothing half-made can exist.
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    const batch = writeBatch(db);
+    batch.set(doc(db, `orgs/${PUBLIC_ORG}/venues/v_season`), {
+      orgId: PUBLIC_ORG, name: 'Main Field', nameLower: 'main field',
+      courts: [{ id: 'c1', name: 'Pitch 1' }], openHour: 6, closeHour: 18,
+      createdBy: OWNER, createdAt: serverTimestamp(),
+    });
+    // Published as it is created: the season open, its events taking entries.
+    batch.set(doc(db, `orgs/${PUBLIC_ORG}/tournaments/t_season`),
+      tournament({ eventCount: 2, venueIds: ['v_season'], status: 'entries_open' }));
+    for (const id of ['e1', 'e2']) {
+      batch.set(doc(db, `orgs/${PUBLIC_ORG}/competitions/season_${id}`),
+        competition(PUBLIC_ORG, { status: 'registration_open', tournamentId: 't_season' }));
+    }
+    batch.set(doc(db, `orgs/${PUBLIC_ORG}/tournaments/t_season/venuePlans/v_season`), {
+      venueId: 'v_season', venueName: 'Main Field', maxMatchesPerCourtPerDay: 3,
+    });
+    batch.set(doc(db, `orgs/${PUBLIC_ORG}/tournaments/t_season/officials/${SCORER}`), {
+      name: 'Umpire', role: 'umpire', sports: ['cricket'], addedBy: OWNER,
+      addedAt: serverTimestamp(),
+    });
+    await assertSucceeds(batch.commit());
+  });
+
+  it('one refused event rolls the whole season back', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    const batch = writeBatch(db);
+    batch.set(doc(db, `orgs/${PUBLIC_ORG}/tournaments/t_half`),
+      tournament({ eventCount: 2 }));
+    batch.set(doc(db, `orgs/${PUBLIC_ORG}/competitions/half_ok`),
+      competition(PUBLIC_ORG, { status: 'draft', tournamentId: 't_half' }));
+    // Events are born drafts or open; this one claims to be finished, so the
+    // commit is refused.
+    batch.set(doc(db, `orgs/${PUBLIC_ORG}/competitions/half_bad`),
+      competition(PUBLIC_ORG, { status: 'completed', tournamentId: 't_half' }));
+    await assertFails(batch.commit());
+
+    const snap = await getDoc(doc(db, `orgs/${PUBLIC_ORG}/tournaments/t_half`));
+    assert.equal(snap.exists(), false);
+  });
+
+  it('a season cannot be created already under way or finished', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    for (const status of ['in_progress', 'completed', 'scheduled']) {
+      await assertFails(
+        setDoc(doc(db, `orgs/${PUBLIC_ORG}/tournaments/t_${status}`),
+          tournament({ status })),
+      );
+    }
+  });
+
+  it('a draft season from an older app build is still accepted', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      setDoc(doc(db, `orgs/${PUBLIC_ORG}/tournaments/t_legacy_draft`),
+        tournament({ status: 'draft' })),
+    );
+  });
+
+  it('a season name over 120 characters is refused on create', async () => {
     const db = testEnv.authenticatedContext(OWNER).firestore();
     await assertFails(
-      setDoc(
-        doc(db, `orgs/${PUBLIC_ORG}/tournaments/t_liar`),
-        tournament({ eventCount: 12 }),
-      ),
+      setDoc(doc(db, `orgs/${PUBLIC_ORG}/tournaments/t_long`),
+        tournament({ name: 'x'.repeat(121) })),
+    );
+  });
+
+  it('a rename over 120 characters is refused', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(
+        doc(ctx.firestore(), `orgs/${PUBLIC_ORG}/tournaments/t_rename`),
+        tournament(),
+      );
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      updateDoc(doc(db, `orgs/${PUBLIC_ORG}/tournaments/t_rename`), {
+        name: 'y'.repeat(121),
+      }),
+    );
+    await assertSucceeds(
+      updateDoc(doc(db, `orgs/${PUBLIC_ORG}/tournaments/t_rename`), {
+        name: 'Hyderabad District Championship 2026',
+      }),
+    );
+  });
+
+  it('a season saved before the bound keeps working when its name is untouched', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(
+        doc(ctx.firestore(), `orgs/${PUBLIC_ORG}/tournaments/t_old_long`),
+        tournament({ name: 'z'.repeat(150) }),
+      );
+    });
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertSucceeds(
+      updateDoc(doc(db, `orgs/${PUBLIC_ORG}/tournaments/t_old_long`), {
+        name: 'z'.repeat(150),
+        sportSchedulesReleasedAt: { cricket: serverTimestamp() },
+      }),
+    );
+  });
+
+  it('a season cannot be created in somebody else\'s name', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      setDoc(doc(db, `orgs/${PUBLIC_ORG}/tournaments/t_name`),
+        tournament({ createdBy: 'uid_someone_else' })),
+    );
+  });
+
+  it('a season cannot claim a nonsense event count', async () => {
+    const db = testEnv.authenticatedContext(OWNER).firestore();
+    await assertFails(
+      setDoc(doc(db, `orgs/${PUBLIC_ORG}/tournaments/t_neg`),
+        tournament({ eventCount: -1 })),
     );
   });
 
@@ -8174,9 +8427,46 @@ describe('ground bookings: price derived server-side, hourHolds are the real '
 
   it('accepts a booking priced at exactly hourlyRate × hours', async () => {
     const db = testEnv.authenticatedContext(BOOKER).firestore();
-    await assertSucceeds(
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'grounds', GROUND, 'bookings', 'bk_1'), booking());
+    for (const hour of [18, 19]) {
+      batch.set(doc(db, 'grounds', GROUND, 'hourHolds', `2026-08-10_${hour}`), {
+        bookingId: 'bk_1', bookedByUid: BOOKER, dayKey: '2026-08-10', hour,
+        createdAt: serverTimestamp(),
+      });
+    }
+    await assertSucceeds(batch.commit());
+  });
+
+  it('refuses a booking written without its hour holds — that is a double booking', async () => {
+    const db = testEnv.authenticatedContext(BOOKER).firestore();
+    await assertFails(
       setDoc(doc(db, 'grounds', GROUND, 'bookings', 'bk_1'), booking()),
     );
+    // One hour held out of two is still a double booking of the other.
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'grounds', GROUND, 'bookings', 'bk_1'), booking());
+    batch.set(doc(db, 'grounds', GROUND, 'hourHolds', '2026-08-10_18'), {
+      bookingId: 'bk_1', bookedByUid: BOOKER, dayKey: '2026-08-10', hour: 18,
+      createdAt: serverTimestamp(),
+    });
+    await assertFails(batch.commit());
+  });
+
+  it('accepts the longest booking allowed, twelve holds in one write', async () => {
+    const db = testEnv.authenticatedContext(BOOKER).firestore();
+    const batch = writeBatch(db);
+    batch.set(
+      doc(db, 'grounds', GROUND, 'bookings', 'bk_long'),
+      booking({ startHour: 8, endHour: 20, amountPaise: 1200000 }),
+    );
+    for (let hour = 8; hour < 20; hour++) {
+      batch.set(doc(db, 'grounds', GROUND, 'hourHolds', `2026-08-10_${hour}`), {
+        bookingId: 'bk_long', bookedByUid: BOOKER, dayKey: '2026-08-10', hour,
+        createdAt: serverTimestamp(),
+      });
+    }
+    await assertSucceeds(batch.commit());
   });
 
   it("refuses a booking that understates the ground's own rate", async () => {
@@ -8466,9 +8756,17 @@ describe('ground bookings: price derived server-side, hourHolds are the real '
       ),
     );
     const asOwner = testEnv.authenticatedContext(GROUND_OWNER).firestore();
-    await assertSucceeds(
+    // Not while the booking behind it still stands.
+    await assertFails(
       deleteDoc(doc(asOwner, 'grounds', GROUND, 'hourHolds', '2026-08-10_18')),
     );
+    const release = writeBatch(asOwner);
+    release.update(doc(asOwner, 'grounds', GROUND, 'bookings', 'bk_1'), {
+      status: 'cancelled',
+      cancelledAt: serverTimestamp(),
+    });
+    release.delete(doc(asOwner, 'grounds', GROUND, 'hourHolds', '2026-08-10_18'));
+    await assertSucceeds(release.commit());
   });
 });
 

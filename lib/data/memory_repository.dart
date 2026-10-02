@@ -4,6 +4,7 @@ import 'package:firebase_storage/firebase_storage.dart';
 
 import '../core/errors/app_exception.dart';
 import '../core/firebase/firestore_refs.dart';
+import 'org_repository.dart' show guard;
 import '../core/models/memory.dart';
 
 /// Uploads and reads match memories — the photos that make a career profile
@@ -237,14 +238,12 @@ class MemoryRepository {
     }
   }
 
-  Future<void> updateCaption(Memory memory, String? caption) async {
-    await Refs.memory(
+  Future<void> updateCaption(Memory memory, String? caption) => guard(() => Refs.memory(
       memory.orgId,
       memory.compId,
       memory.fixtureId,
       memory.id,
-    ).update({'caption': caption});
-  }
+    ).update({'caption': caption}));
 
   String _extensionFor(String contentType) => switch (contentType) {
         'image/png' => '.png',

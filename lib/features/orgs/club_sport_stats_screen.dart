@@ -297,7 +297,7 @@ class _ClubMatchTile extends StatelessWidget {
             fixture.resolvedSource.label,
             if (when != null) friendlyDate(when),
             if (fixture.summary.isNotEmpty)
-              localizedSummary(context, fixture.summary),
+              localizedScoreLine(context, fixture),
           ].join(' · '),
           maxLines: 2,
           overflow: TextOverflow.ellipsis,

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/models/enums.dart';
 import '../../core/models/fixture.dart';
 import '../../core/models/match_player.dart';
 import '../../core/permissions/capability.dart';
@@ -145,20 +146,60 @@ class _LineupEditorState extends ConsumerState<LineupEditor> {
     if (squad.isRegistered) target.addAll(squad.players);
   }
 
-  void _toggleMember(String uid, String name) {
-    setState(() {
-      final list = _current;
-      final existing = list.indexWhere((p) => p.id == uid);
-      if (existing >= 0) {
-        list.removeAt(existing);
-      } else {
-        // Bug #7: A player cannot play for both sides. If present in the
-        // opposite team list, remove them first.
-        final otherList = _tab == 0 ? _b : _a;
-        otherList.removeWhere((p) => p.id == uid);
-        list.add(MatchPlayer(id: uid, name: name, uid: uid));
+  Future<void> _toggleMember(String uid, String name) async {
+    final list = _current;
+    final existing = list.indexWhere((p) => p.id == uid);
+    if (existing >= 0) {
+      setState(() => list.removeAt(existing));
+      return;
+    }
+
+    // A mid-match/matchday addition is a substitution in every way that
+    // matters — see TC-ADM-069/073 — so it is checked against the event's
+    // age bound exactly as the original registration was. Roster edits made
+    // here must not be a way to slot in a reserve the initial squad build
+    // would have rejected.
+    final rejection = await _ageRejectionFor(uid);
+    if (rejection != null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(rejection)));
       }
+      return;
+    }
+
+    setState(() {
+      // Bug #7: A player cannot play for both sides. If present in the
+      // opposite team list, remove them first.
+      final otherList = _tab == 0 ? _b : _a;
+      otherList.removeWhere((p) => p.id == uid);
+      list.add(MatchPlayer(id: uid, name: name, uid: uid));
     });
+  }
+
+  /// Null when [uid] may be added to the lineup; the ineligibility reason
+  /// otherwise. Returns null (lets the add through) whenever there's nothing
+  /// to check against — an event with no age bound, or a uid whose profile
+  /// can't be read — since this is a client-side courtesy check, not the
+  /// authoritative gate.
+  Future<String?> _ageRejectionFor(String uid) async {
+    final f = widget.fixture;
+    final competition = await ref
+        .read(competitionProvider(CompRef(f.orgId, f.compId)).future);
+    final category = competition?.category;
+    if (competition == null ||
+        category == null ||
+        !category.dimensions.contains(CategoryDimension.age) ||
+        (category.minAge == null && category.maxAge == null)) {
+      return null;
+    }
+
+    final user = await ref.read(userProfileProvider(uid).future);
+    if (user == null) return null;
+
+    final eligibility =
+        category.check(user, competitionStart: competition.startDate);
+    return eligibility.isEligible ? null : eligibility.reason;
   }
 
   Future<void> _addGuest() async {

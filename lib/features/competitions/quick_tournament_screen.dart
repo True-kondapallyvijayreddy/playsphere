@@ -125,7 +125,7 @@ class _QuickTournamentScreenState
   }
 
   Future<void> _create() async {
-    final uid = ref.read(currentUidProvider);
+    final uid = ref.read(authUidProvider);
     final playing = _playing;
     if (uid == null) return;
     if (playing.length < 3) {

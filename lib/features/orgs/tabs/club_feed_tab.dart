@@ -6,6 +6,7 @@ import '../../../shared/app_scaffold.dart';
 import '../../../core/models/announcement.dart';
 import '../../../core/models/app_user.dart';
 import '../../../core/models/organization.dart';
+import '../../../core/permissions/capability.dart';
 import '../../../core/providers.dart';
 
 class ClubFeedTab extends ConsumerWidget {
@@ -253,6 +254,12 @@ class _PollBody extends ConsumerWidget {
     final uid = ref.watch(authUidProvider);
     final myVote = uid == null ? null : poll.voteOf(uid);
     final canVote = uid != null && !poll.closed;
+    final caps = ref.watch(myCapabilitiesProvider(orgId));
+    // Mirrors the announcements update rule: organizers or the club's
+    // communications brief, and for a match call only its author.
+    final canClose = (caps.contains(Capability.manageCompetitions) ||
+            caps.contains(Capability.manageCommunications)) &&
+        (announcement.match == null || announcement.authorUid == uid);
 
     Future<void> vote(int index) async {
       if (uid == null) return;
@@ -324,13 +331,37 @@ class _PollBody extends ConsumerWidget {
               ),
             ),
           ),
-        Text(
-          poll.closed
-              ? '${poll.totalVotes} votes · closed'
-              : poll.totalVotes == 0
-                  ? 'No votes yet'
-                  : '${poll.totalVotes} votes · tap to change yours',
-          style: theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                poll.closed
+                    ? '${poll.totalVotes} votes · closed'
+                    : poll.totalVotes == 0
+                        ? 'No votes yet'
+                        : '${poll.totalVotes} votes · tap to change yours',
+                style:
+                    theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
+              ),
+            ),
+            // Closing is the club's call — the people who post notices. The
+            // result stays on the board as the record of what was decided.
+            if (!poll.closed && canClose)
+              TextButton.icon(
+                onPressed: () async {
+                  try {
+                    await ref.read(communityRepositoryProvider).closePoll(
+                          orgId: orgId,
+                          announcementId: announcement.id,
+                        );
+                  } catch (e) {
+                    if (context.mounted) showError(context, e);
+                  }
+                },
+                icon: const Icon(Icons.lock_outline, size: 16),
+                label: const Text('Close poll'),
+              ),
+          ],
         ),
       ],
     );

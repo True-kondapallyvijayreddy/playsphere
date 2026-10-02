@@ -224,9 +224,12 @@ class _RaiseDisputeDialogState extends State<_RaiseDisputeDialog> {
             controller: _detail,
             maxLines: 3,
             autofocus: true,
+            // A hint, not a value — but a concrete score read as if somebody
+            // had already filled the box in, and it named sets a two-game
+            // match never had. Say what to write, not an example of it.
             decoration: const InputDecoration(
               labelText: 'What happened',
-              hintText: 'Third set was 21-19, recorded as 21-18.',
+              hintText: 'Describe what was recorded wrongly',
             ),
           ),
           const SizedBox(height: 8),
@@ -294,9 +297,12 @@ class _DecisionDialogState extends State<_DecisionDialog> {
             controller: _note,
             autofocus: true,
             maxLines: 3,
-            decoration: const InputDecoration(
+            // The old hint said "result stands" on the UPHOLD dialog too.
+            decoration: InputDecoration(
               labelText: 'Why',
-              hintText: 'Scorecard matches the event log; result stands.',
+              hintText: widget.upheld
+                  ? 'Your reason for reopening the match'
+                  : 'Your reason for letting the result stand',
             ),
           ),
         ],

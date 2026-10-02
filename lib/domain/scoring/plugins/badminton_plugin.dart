@@ -491,6 +491,16 @@ class BadmintonPlugin extends ScoringPlugin with RallyTimeline, RacketMatch {
 
   @override
   String headline(Map<String, dynamic> state, ScoringContext ctx) {
+    // A finished match reads in games, as table tennis and volleyball already
+    // do. The rally score is reset to 0-0 when each game ends, so the Result
+    // screen headlined a 22-20, 21-0 win as "0 - 0" (test run TC-52). A
+    // match retired before any game finished has only the rally score to
+    // show, and keeps it.
+    final gamesA = ((state['gamesA'] as num?) ?? 0).toInt();
+    final gamesB = ((state['gamesB'] as num?) ?? 0).toInt();
+    if (state['complete'] == true && gamesA + gamesB > 0) {
+      return '$gamesA - $gamesB';
+    }
     final a = ((state['currentA'] as num?) ?? 0).toInt();
     final b = ((state['currentB'] as num?) ?? 0).toInt();
     return '$a - $b';

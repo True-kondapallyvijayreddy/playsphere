@@ -13,7 +13,9 @@ import '../../../shared/live_dot.dart';
 /// two of them — every value here is minutes, and "45, 10, 20" is a valid
 /// argument list in any order.
 typedef ScheduleTimings = ({
-  int matchMinutes,
+  /// One length for every match in the solve, or null for each event's own —
+  /// the length its sport and category were created with.
+  int? matchMinutes,
   int changeoverMinutes,
   int restGapMinutes,
 });
@@ -40,9 +42,12 @@ class GraphicalScheduleView extends StatefulWidget {
     required this.events,
     required this.fixtures,
     required this.canManage,
-    required this.onRegenerateDraft,
-    this.onSetUpWholeSeason,
-    required this.onLockSchedule,
+    this.sportId,
+    this.sportName,
+    this.onRegenerateDraft,
+    this.onDrawAndSchedule,
+    this.onLockSchedule,
+    this.onOpenSport,
     this.onMoveMatch,
     this.onOpenMatch,
     this.onOpenFullPage,
@@ -58,17 +63,34 @@ class GraphicalScheduleView extends StatefulWidget {
   final List<Fixture> fixtures;
   final bool canManage;
 
+  /// The one sport this timetable is for, or null for the whole season.
+  ///
+  /// Schedules are built and published per sport: the actions below are
+  /// only offered with a sport, and the season-wide view is read-only with a
+  /// way into each sport's own page ([onOpenSport]).
+  final String? sportId;
+  final String? sportName;
+
   /// Receives the organizer's timings so they can be persisted before the
   /// solve. Deliberately not a [VoidCallback]: it was one, and the dialog's
-  /// answers went nowhere.
-  final Future<void> Function(ScheduleTimings timings) onRegenerateDraft;
+  /// answers went nowhere. Null (with the other two) makes this view
+  /// read-only.
+  final Future<void> Function(ScheduleTimings timings)? onRegenerateDraft;
 
-  /// Draws every event and schedules the lot. The organizer's first action on
-  /// a fresh season, and the one that replaces a per-event tour of draw
-  /// sheets.
-  final Future<void> Function(ScheduleTimings timings)? onSetUpWholeSeason;
+  /// Draws this sport's events and places their matches. The organizer's
+  /// first action on a sport, and the one that replaces a per-event tour of
+  /// draw sheets.
+  final Future<void> Function(ScheduleTimings timings)? onDrawAndSchedule;
 
-  final VoidCallback onLockSchedule;
+  /// Publishes this sport's timetable.
+  final VoidCallback? onLockSchedule;
+
+  /// Opens one sport's own schedule page, where it is built and published.
+  /// Offered on the season-wide view instead of season-wide actions.
+  final void Function(String sportId)? onOpenSport;
+
+  bool get _hasActions =>
+      sportId != null && onRegenerateDraft != null && onLockSchedule != null;
 
   /// Opens the "move this match" flow. Null hides the affordance, which is
   /// what a spectator's copy of the timetable gets — moving a match is an
@@ -194,15 +216,23 @@ class _GraphicalScheduleViewState extends State<GraphicalScheduleView> {
   }
 
   Future<void> _promptScheduleParamsAndRegenerate({
-    bool wholeSeason = false,
+    bool drawFirst = false,
   }) async {
-    int matchMins = widget.tournament.matchMinutesDefault > 0
-        ? widget.tournament.matchMinutesDefault
-        : 30;
-    int changeoverMins = widget.tournament.changeoverMinutes > 0
+    final sport = widget.sportName ?? 'this sport';
+    final sportLower = sport.toLowerCase();
+    // Null by default: each event keeps the length it was created with. This
+    // dialog used to send one number for the whole season, pre-filled with
+    // 30, and the scheduler applied it to every event — a season of T20
+    // cricket and badminton was laid out as thirty-minute matches the first
+    // time anybody pressed Generate.
+    int? matchMins;
+    // Zero is a real answer (a table-tennis hall turns a table round at once;
+    // some organisers want no enforced rest between league rounds). It used
+    // to be read as "unset" and replaced with 10 and 20.
+    int changeoverMins = widget.tournament.changeoverMinutes >= 0
         ? widget.tournament.changeoverMinutes
         : 10;
-    int restMins = widget.tournament.restGapMinutes > 0
+    int restMins = widget.tournament.restGapMinutes >= 0
         ? widget.tournament.restGapMinutes
         : 20;
 
@@ -229,26 +259,39 @@ class _GraphicalScheduleViewState extends State<GraphicalScheduleView> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'These decide how the day is paced. Every match is placed '
-                  'around them, so no court is double-booked and nobody is '
-                  'called straight off one court onto another.',
-                  style: TextStyle(fontSize: 13),
+                Text(
+                  'These decide how the $sportLower day is paced. Its matches '
+                  'are placed around them and around every other sport '
+                  'already on the courts, so no court is double-booked and '
+                  'nobody is called straight off one court onto another.',
+                  style: const TextStyle(fontSize: 13),
                 ),
                 const SizedBox(height: 16),
-                DropdownButtonFormField<int>(
+                DropdownButtonFormField<int?>(
                   value: matchMins,
-                  decoration: const InputDecoration(
-                    labelText: 'How long is one match?',
-                    border: OutlineInputBorder(),
+                  isExpanded: true,
+                  decoration: InputDecoration(
+                    labelText: 'How long is one $sportLower match?',
+                    helperText: 'Each event keeps the length set when it was '
+                        'created unless you choose one here. A length you '
+                        'choose is saved on the $sportLower events.',
+                    helperMaxLines: 3,
+                    border: const OutlineInputBorder(),
                   ),
                   items: [
-                    for (final m in options(const [15, 20, 30, 45, 60, 90], matchMins))
-                      DropdownMenuItem(value: m, child: Text('$m minutes')),
+                    const DropdownMenuItem<int?>(
+                      value: null,
+                      child: Text('Each event’s own (recommended)'),
+                    ),
+                    for (final m in const [
+                      15, 20, 30, 45, 60, 90, 120, 150, 180, 210, 240, 300, 360,
+                    ])
+                      DropdownMenuItem<int?>(
+                        value: m,
+                        child: Text('$m minutes'),
+                      ),
                   ],
-                  onChanged: (v) {
-                    if (v != null) setDialogState(() => matchMins = v);
-                  },
+                  onChanged: (v) => setDialogState(() => matchMins = v),
                 ),
                 const SizedBox(height: 12),
                 DropdownButtonFormField<int>(
@@ -290,6 +333,13 @@ class _GraphicalScheduleViewState extends State<GraphicalScheduleView> {
                     if (v != null) setDialogState(() => restMins = v);
                   },
                 ),
+                const SizedBox(height: 8),
+                const Text(
+                  'The time between matches and the rest gap are shared by '
+                  'every sport in the season, because they share the courts '
+                  'and the players.',
+                  style: TextStyle(fontSize: 12),
+                ),
               ],
             ),
           ),
@@ -302,7 +352,7 @@ class _GraphicalScheduleViewState extends State<GraphicalScheduleView> {
               onPressed: () => Navigator.of(ctx).pop(true),
               icon: const Icon(Icons.auto_awesome, size: 18),
               label: Text(
-                wholeSeason ? 'Draw & Schedule Everything' : 'Generate Schedule',
+                drawFirst ? 'Draw & Schedule $sport' : 'Generate Schedule',
               ),
             ),
           ],
@@ -316,11 +366,11 @@ class _GraphicalScheduleViewState extends State<GraphicalScheduleView> {
       changeoverMinutes: changeoverMins,
       restGapMinutes: restMins,
     );
-    final setUp = widget.onSetUpWholeSeason;
-    if (wholeSeason && setUp != null) {
+    final setUp = widget.onDrawAndSchedule;
+    if (drawFirst && setUp != null) {
       await setUp(timings);
     } else {
-      await widget.onRegenerateDraft(timings);
+      await widget.onRegenerateDraft?.call(timings);
     }
   }
 
@@ -339,10 +389,27 @@ class _GraphicalScheduleViewState extends State<GraphicalScheduleView> {
     // The status clause stays as the fallback for seasons locked before the
     // field existed: they have the old status and no flag, and treating them
     // as unpublished would re-open a schedule that has already gone out.
-    final isLocked = widget.tournament.isScheduleLocked ||
-        widget.tournament.status == TournamentStatus.scheduled ||
-        widget.tournament.status == TournamentStatus.inProgress ||
-        widget.tournament.status == TournamentStatus.completed;
+    //
+    // `scheduled` is not in that fallback. Generating a draft used to write
+    // it, so a season showed "Published" the moment a draft existed and hid
+    // the button that would have published it.
+    //
+    // With a sport, the question is that sport's own publication. Both
+    // questions keep the fallback for seasons published season-wide, on a
+    // sport page too: without it such a season, already running, opened as
+    // a draft there and its unplayed matches could be moved again. See
+    // `Tournament.publishedSeasonWide`.
+    final t = widget.tournament;
+    final sportId = widget.sportId;
+    final isLocked = sportId != null
+        ? t.isSportScheduleLocked(sportId)
+        : t.isWholeScheduleLocked({
+            for (final e in widget.events)
+              if (e.status != CompetitionStatus.cancelled &&
+                  !e.format.isPerformanceFormat &&
+                  e.archetype != CompetitionArchetype.performance)
+                e.sportId,
+          });
 
     final dayKeys = _dayKeys;
     if (_selectedDateKey == null || !dayKeys.contains(_selectedDateKey)) {
@@ -455,8 +522,9 @@ class _GraphicalScheduleViewState extends State<GraphicalScheduleView> {
   ({String text, bool isProblem}) get _nextStep {
     if (widget.fixtures.isEmpty) {
       return (
-        text: widget.onSetUpWholeSeason != null
-            ? 'Draw every event and place every match in one pass.'
+        text: widget.onDrawAndSchedule != null
+            ? 'Draw every ${widget.sportName ?? 'event'} event and place '
+                'its matches around the rest of the season in one pass.'
             : 'Make the draws first, then place them on the courts.',
         isProblem: false,
       );
@@ -531,7 +599,13 @@ class _GraphicalScheduleViewState extends State<GraphicalScheduleView> {
                           borderRadius: BorderRadius.circular(20),
                         ),
                         child: Text(
-                          isLocked ? 'Published' : 'Draft',
+                          isLocked
+                              ? 'Published'
+                              : widget.sportId == null &&
+                                      widget.tournament.sportSchedulesReleasedAt
+                                          .isNotEmpty
+                                  ? 'Partly published'
+                                  : 'Draft',
                           style: theme.textTheme.labelSmall?.copyWith(
                             color: stateColour,
                             fontWeight: FontWeight.w700,
@@ -569,6 +643,8 @@ class _GraphicalScheduleViewState extends State<GraphicalScheduleView> {
               style: theme.textTheme.bodySmall?.copyWith(color: stateColour),
             ),
           ],
+        ] else if (!widget._hasActions) ...[
+          _sportLinks(theme),
         ] else ...[
           const SizedBox(height: 10),
           Container(
@@ -601,7 +677,8 @@ class _GraphicalScheduleViewState extends State<GraphicalScheduleView> {
                     // sentence becomes the record of what went out.
                     isLocked
                         ? 'Published — courts and times are final. Everyone '
-                            'entered has been told.'
+                            'entered in ${widget.sportName ?? 'it'} has been '
+                            'told.'
                         : step.text,
                     style: theme.textTheme.bodySmall,
                   ),
@@ -622,12 +699,12 @@ class _GraphicalScheduleViewState extends State<GraphicalScheduleView> {
                   FilledButton.icon(
                     icon: const Icon(Icons.auto_awesome, size: 18),
                     label: Text(
-                      widget.onSetUpWholeSeason != null
-                          ? 'Draw & schedule everything'
+                      widget.onDrawAndSchedule != null
+                          ? 'Draw & schedule ${widget.sportName ?? 'this sport'}'
                           : 'Place the matches on courts',
                     ),
                     onPressed: () => _promptScheduleParamsAndRegenerate(
-                      wholeSeason: widget.onSetUpWholeSeason != null,
+                      drawFirst: widget.onDrawAndSchedule != null,
                     ),
                   )
                 else if (_unplaced > 0 || _placeholders > 0)
@@ -635,13 +712,14 @@ class _GraphicalScheduleViewState extends State<GraphicalScheduleView> {
                     icon: const Icon(Icons.auto_awesome, size: 18),
                     label: const Text('Fix the gaps & reschedule'),
                     onPressed: () => _promptScheduleParamsAndRegenerate(
-                      wholeSeason: widget.onSetUpWholeSeason != null,
+                      drawFirst: widget.onDrawAndSchedule != null,
                     ),
                   )
                 else
                   FilledButton.icon(
                     icon: const Icon(Icons.lock_outline, size: 18),
-                    label: const Text('Lock & publish'),
+                    label: Text('Publish ${widget.sportName ?? ''} schedule'
+                        .replaceAll('  ', ' ')),
                     onPressed: widget.onLockSchedule,
                   ),
                 if (widget.fixtures.isNotEmpty)
@@ -669,6 +747,63 @@ class _GraphicalScheduleViewState extends State<GraphicalScheduleView> {
           // together and says so.
         ],
       ],
+    );
+  }
+
+  /// The season-wide view's organizer box: no actions, one way into each
+  /// sport's own schedule, and whether that sport is published yet.
+  ///
+  /// Season-wide "Draw & schedule everything" and "Lock & publish" used to
+  /// sit here. They redrew and published every sport from one press, and
+  /// on a page filtered to one sport they still acted on the whole season.
+  /// Scheduling is per sport now, so this box only points the way.
+  Widget _sportLinks(ThemeData theme) {
+    final sports = <String, String>{};
+    for (final e in widget.events) {
+      if (e.status == CompetitionStatus.cancelled) continue;
+      sports.putIfAbsent(e.sportId, () => e.sportName);
+    }
+    if (sports.isEmpty || widget.onOpenSport == null) {
+      return const SizedBox.shrink();
+    }
+    final entries = sports.entries.toList()
+      ..sort((a, b) => a.value.compareTo(b.value));
+    return Padding(
+      padding: const EdgeInsets.only(top: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'Timetables are drawn, scheduled and published one sport at a '
+            'time. Each sport is fitted around the courts and players the '
+            'others already use.',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final e in entries)
+                ActionChip(
+                  avatar: Icon(
+                    widget.tournament.isSportScheduleLocked(e.key)
+                        ? Icons.check_circle_outline
+                        : Icons.edit_calendar_outlined,
+                    size: 18,
+                  ),
+                  label: Text(
+                    widget.tournament.isSportScheduleLocked(e.key)
+                        ? '${e.value} · published'
+                        : 'Schedule ${e.value}',
+                  ),
+                  onPressed: () => widget.onOpenSport!(e.key),
+                ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 

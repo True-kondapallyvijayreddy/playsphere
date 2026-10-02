@@ -103,6 +103,17 @@ class AuctionLotScreen extends ConsumerWidget {
                 const SizedBox(height: 12),
 
                 _BidsCard(auction: auction, lot: lot, bids: bids, myUid: myUid),
+
+                // The organizer's two levers on a lot: its floor, while nobody
+                // can have bid against it yet, and taking it out of the pool.
+                if (ref.watch(myAuctionPlaceProvider(auctionId)).valueOrNull
+                            ?.isOrganizer ==
+                        true &&
+                    (lot.isBiddable ||
+                        lot.status == AuctionLotStatus.withdrawn)) ...[
+                  const SizedBox(height: 12),
+                  _OrganizerLotCard(auction: auction, lot: lot),
+                ],
               ],
             ),
           ),
@@ -568,5 +579,98 @@ class _CareerLineRow extends StatelessWidget {
     if (days < 30) return '${days}d ago';
     if (days < 365) return '${(days / 30).round()}mo ago';
     return '${(days / 365).round()}y ago';
+  }
+}
+
+
+class _OrganizerLotCard extends ConsumerWidget {
+  const _OrganizerLotCard({required this.auction, required this.lot});
+
+  final Auction auction;
+  final AuctionLot lot;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final repo = ref.read(auctionRepositoryProvider);
+    final canReprice =
+        auction.status == AuctionStatus.registration && lot.isBiddable;
+
+    Future<void> reprice() async {
+      final field = TextEditingController(
+        text: (lot.basePricePaise ~/ 100).toString(),
+      );
+      final rupees = await showDialog<int>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Base price'),
+          content: TextField(
+            controller: field,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(prefixText: '₹ '),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () =>
+                  Navigator.of(ctx).pop(int.tryParse(field.text.trim())),
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      );
+      field.dispose();
+      if (rupees == null || rupees < 0) return;
+      try {
+        await repo.setBasePrice(
+          auctionId: auction.id,
+          lotId: lot.playerUid,
+          basePricePaise: rupees * 100,
+        );
+      } catch (e) {
+        if (context.mounted) showError(context, e);
+      }
+    }
+
+    return PsCard(
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text(
+            'Organizer',
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              OutlinedButton.icon(
+                onPressed: canReprice ? reprice : null,
+                icon: const Icon(Icons.sell_outlined, size: 18),
+                label: Text(canReprice
+                    ? 'Base price ${AuctionMoney.format(lot.basePricePaise)}'
+                    : 'Price fixed once bidding opens'),
+              ),
+              if (lot.isBiddable && lot.bidCount == 0)
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    try {
+                      await repo.withdrawLot(auction.id, lot.playerUid);
+                    } catch (e) {
+                      if (context.mounted) showError(context, e);
+                    }
+                  },
+                  icon: const Icon(Icons.remove_circle_outline, size: 18),
+                  label: const Text('Take out of the pool'),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 }

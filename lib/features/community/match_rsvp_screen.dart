@@ -14,8 +14,9 @@ import '../../shared/app_scaffold.dart';
 import '../../shared/ui_kit.dart';
 import '../home/home_providers.dart';
 import '../notifications/notifications_screen.dart'
-    show ActionCard, ActionTone, TournamentInviteCard;
+    show ActionCard, ActionTone;
 import '../../domain/scoring/scoring_registry.dart';
+import '../invitations/widgets/invitation_card.dart';
 import 'widgets/match_rsvp_card.dart';
 import 'widgets/match_rsvp_section.dart';
 import 'widgets/squad_invite_card.dart';
@@ -73,12 +74,12 @@ class MatchRsvpScreen extends ConsumerWidget {
     final challenges = challengesAsync.valueOrNull ?? const <Challenge>[];
 
     final organizingOrgIds = <String>[
-      for (final m in ref.watch(myActiveMembershipsProvider).valueOrNull ??
-          const [])
-        if (ref.watch(myCapabilitiesProvider(m.orgId)).any((c) =>
+      // The selected club only — see `scopedOrgIdsProvider`.
+      for (final id in ref.watch(scopedOrgIdsProvider))
+        if (ref.watch(myCapabilitiesProvider(id)).any((c) =>
             c == Capability.manageCompetitions ||
             c == Capability.manageOrganization))
-          m.orgId,
+          id,
     ];
 
     // Unanswered first. The whole point of the screen is the ones still
@@ -174,7 +175,7 @@ class MatchRsvpScreen extends ConsumerWidget {
                   if (invites.isNotEmpty || challenges.isNotEmpty) ...[
                     const _Heading('Another club is asking yours'),
                     for (final i in invites)
-                      TournamentInviteCard(key: ValueKey(i.id), invite: i),
+                      InvitationCard(key: ValueKey(i.id), invite: i),
                     for (final c in challenges)
                       ActionCard(
                         icon: Icons.sports_kabaddi_outlined,

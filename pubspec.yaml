@@ -3,7 +3,7 @@ description: >
   PlaySphere — a sports operating system for schools, colleges, communities
   and associations. One codebase for Android, iOS and the web.
 publish_to: "none"
-version: 1.0.2+10
+version: 1.0.2+11
 
 environment:
   sdk: ">=3.3.0 <4.0.0"

@@ -6,6 +6,7 @@ import '../../../core/models/owner_proposal.dart';
 import '../../../core/providers.dart';
 import '../../../domain/governance/owner_vote.dart';
 import '../../../shared/app_scaffold.dart';
+import 'leave_club_flow.dart';
 
 /// The controls on an owner's row in the member list.
 ///
@@ -29,9 +30,22 @@ class OwnershipActions extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     if (isSelf) {
-      return TextButton(
-        onPressed: () => _stepDown(context, ref),
-        child: const Text('Step down'),
+      // Two different acts. Stepping down keeps you in the club as an admin;
+      // leaving takes you out, and for a sole owner that means naming who
+      // takes over — see `startLeaveClub`.
+      return PopupMenuButton<String>(
+        tooltip: 'Your ownership',
+        icon: const Icon(Icons.more_vert),
+        itemBuilder: (context) => const [
+          PopupMenuItem(value: 'stepDown', child: Text('Step down to admin')),
+          PopupMenuItem(value: 'handOver', child: Text('Hand over the club')),
+          PopupMenuItem(value: 'leave', child: Text('Leave club')),
+        ],
+        onSelected: (choice) => switch (choice) {
+          'stepDown' => _stepDown(context, ref),
+          'handOver' => startHandOverClub(context, ref, orgId: orgId),
+          _ => startLeaveClub(context, ref, orgId: orgId),
+        },
       );
     }
 
@@ -91,7 +105,8 @@ class OwnershipActions extends ConsumerWidget {
         title: const Text('Step down as owner?'),
         content: const Text(
           'You stay in the club as an admin — you can still run events and '
-          'manage members. Only another owner can make you an owner again.',
+          'manage members. Only another owner can make you an owner again. '
+          'If you are the only owner, use Hand over the club instead.',
         ),
         actions: [
           TextButton(

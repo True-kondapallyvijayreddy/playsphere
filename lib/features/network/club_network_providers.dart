@@ -29,22 +29,18 @@ final myOwnedOrgIdsProvider = Provider<List<String>>((ref) {
   ];
 });
 
-/// Which of the owner's clubs the network is being used AS.
+/// The club the network screens act as: the club selected in the app bar,
+/// when this person owns it — and otherwise none.
 ///
-/// Most owners run one club and never see this; the ones who run several are
-/// exactly the people this feature is for — a district association secretary
-/// with three member clubs writes to a school as the association, not as
-/// whichever club happened to sort first. Null means "not chosen yet", which
-/// [actingClubIdProvider] resolves to the first owned club.
-final actingClubOverrideProvider = StateProvider<String?>((ref) => null);
-
-/// The club the network screens act as.
+/// It used to have its own picker and fall back to the first owned club, so
+/// the app bar could say one club while the inbox below spoke as another.
+/// There is one selection in the app, in the app bar, and the network follows
+/// it — see `scopedOrgIdsProvider`. Null for a selected club this person does
+/// not own; the screen says so and points at the switcher.
 final actingClubIdProvider = Provider<String?>((ref) {
-  final owned = ref.watch(myOwnedOrgIdsProvider);
-  if (owned.isEmpty) return null;
-  final chosen = ref.watch(actingClubOverrideProvider);
-  if (chosen != null && owned.contains(chosen)) return chosen;
-  return owned.first;
+  final current = ref.watch(currentClubIdProvider);
+  if (current == null) return null;
+  return ref.watch(myOwnedOrgIdsProvider).contains(current) ? current : null;
 });
 
 /// The acting club's own document — what the composer needs in order to write

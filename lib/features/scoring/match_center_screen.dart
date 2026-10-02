@@ -75,7 +75,7 @@ class MatchCenterScreen extends ConsumerWidget {
           final competition =
               ref.watch(competitionProvider(CompRef(orgId, compId))).valueOrNull;
           final canScore = uid != null &&
-              fixture.canBeScoredBy(uid, isOrgManager: canManage);
+              fixture.canOpenPadBy(uid, isOrgManager: canManage);
 
           return ListView(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
@@ -100,17 +100,19 @@ class MatchCenterScreen extends ConsumerWidget {
               // is filming while it is setting the match up, an hour before
               // anybody is watching — and the spectator screen is the one
               // place the organizer is NOT looking once the ball is in play.
-              // Renders nothing without the rights to set it.
-              if (canManage) ...[
-                LiveStreamPanel(fixture: fixture),
-                const SizedBox(height: 12),
-              ],
+              // Renders nothing without the rights to set it — organizers,
+              // this match's officials and the season's umpire panel; see
+              // [Fixture.canSetStreamBy] — and carries its own spacing.
+              LiveStreamPanel(fixture: fixture),
               _ConfigurationCard(fixture: fixture),
               const SizedBox(height: 20),
               _StartAction(
                 fixture: fixture,
                 canScore: canScore,
                 canManage: canManage,
+                holdReason: competition != null && competition.isSuspended
+                    ? (competition.suspendReason ?? 'This event is on hold.')
+                    : null,
               ),
             ],
           );
@@ -1257,11 +1259,20 @@ class _StartAction extends ConsumerWidget {
     required this.fixture,
     required this.canScore,
     required this.canManage,
+    this.holdReason,
   });
 
   final Fixture fixture;
   final bool canScore;
   final bool canManage;
+
+  /// Why the event is paused, when it is — its own suspension or its
+  /// season's. A paused event starts no new matches: that is the promise
+  /// `TournamentRepository.suspendTournament` makes to everyone who entered
+  /// ("ground waterlogged — back on the 14th"), and a scorer at the ground
+  /// who has not read the message must not be able to break it. A match
+  /// already under way can still be finished and corrected.
+  final String? holdReason;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1276,10 +1287,41 @@ class _StartAction extends ConsumerWidget {
       );
     }
 
+    final notStarted = fixture.lastSeq == 0 &&
+        (fixture.tossWonByEntrantId == null ||
+            fixture.tossWonByEntrantId!.isEmpty);
+    final held = holdReason != null && notStarted;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (canScore)
+        if (held)
+          PsCard(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(Icons.pause_circle_outline, size: 20),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'On hold — this match cannot be started until the '
+                    'organiser resumes the event.\n$holdReason',
+                    style: const TextStyle(fontSize: 13, height: 1.4),
+                  ),
+                ),
+              ],
+            ),
+          )
+        else if (canScore && fixture.status.isDecision)
+          PsPrimaryButton(
+            label: fixture.status == FixtureStatus.disputed
+                ? 'Review the protest'
+                : 'Review the ruling',
+            onPressed: () => context.push(
+              Routes.scoring(fixture.orgId, fixture.compId, fixture.id),
+            ),
+          )
+        else if (canScore)
           PsPrimaryButton(
             label: fixture.isLiveAt(DateTime.now())
                 ? 'Continue scoring'
@@ -1331,6 +1373,18 @@ class _StartAction extends ConsumerWidget {
   }
 
   Future<void> _handleStartMatch(BuildContext context, WidgetRef ref) async {
+    // Nothing downstream of a protest is played until the protest is decided —
+    // see `feederProtestBlock`. Refused here rather than at the final whistle,
+    // because a match played to its end and then rejected is worse than one
+    // that was never started.
+    try {
+      await ref.read(scoringServiceProvider).assertFeedersSettled(fixture);
+    } catch (e) {
+      if (context.mounted) showError(context, e);
+      return;
+    }
+    if (!context.mounted) return;
+
     final scoringPath =
         Routes.scoring(fixture.orgId, fixture.compId, fixture.id);
 

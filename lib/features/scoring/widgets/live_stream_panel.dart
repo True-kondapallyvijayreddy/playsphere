@@ -57,16 +57,19 @@ class LiveStreamPanel extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final link = StreamLink.parse(fixture.streamUrl);
-    final canEdit = ref
-        .watch(myCapabilitiesProvider(fixture.orgId))
-        .contains(Capability.manageCompetitions);
+    final canEdit = canEditStream(ref, fixture);
+    final finished = fixture.status.isResulted;
 
     // Nothing at all, not an empty box with a gap above it. The callers that
     // lay this out do not add spacing around it for exactly that reason —
     // the panel carries its own, so a spectator on a match nobody is filming
     // sees the scoreboard where the scoreboard has always been.
+    //
+    // A finished match gets no prompt either: its page is the result, and
+    // "Streaming this match?" under a final score is a question about the
+    // past. A link already set stays, as the recording.
     if (link == null) {
-      if (!canEdit) return const SizedBox.shrink();
+      if (!canEdit || finished) return const SizedBox.shrink();
       return Padding(
         padding: const EdgeInsets.only(bottom: 12),
         child: _AddStreamPrompt(fixture: fixture),
@@ -93,7 +96,9 @@ class LiveStreamPanel extends ConsumerWidget {
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      'Live on ${link.label}',
+                      finished
+                          ? 'Match video on ${link.label}'
+                          : 'Live on ${link.label}',
                       style: Theme.of(context).textTheme.labelLarge,
                     ),
                   ),
@@ -117,6 +122,36 @@ class LiveStreamPanel extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// Whether the signed-in person may set or change [fixture]'s stream link.
+///
+/// The UI half of `firestore.rules` branch (b3); both defer to
+/// [Fixture.canSetStreamBy] for who that is. Public so a screen deciding
+/// whether to lay the panel out at all asks the same question the panel does.
+bool canEditStream(WidgetRef ref, Fixture fixture) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return false;
+  final isOrganizer = ref
+      .watch(myCapabilitiesProvider(fixture.orgId))
+      .contains(Capability.manageCompetitions);
+  final tournamentId = fixture.tournamentId;
+  // The season's umpire panel, for somebody rostered before this match has
+  // officials of its own. Only read when there is a season to have a panel.
+  final onSeasonPanel = !isOrganizer &&
+      tournamentId != null &&
+      (ref
+              .watch(tournamentOfficialsProvider(
+                (orgId: fixture.orgId, tournamentId: tournamentId),
+              ))
+              .valueOrNull
+              ?.any((o) => o.uid == uid) ??
+          false);
+  return fixture.canSetStreamBy(
+    uid,
+    isOrganizer: isOrganizer,
+    onSeasonPanel: onSeasonPanel,
+  );
 }
 
 Future<void> _open(BuildContext context, String url) async {

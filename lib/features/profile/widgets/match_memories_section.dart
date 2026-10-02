@@ -75,6 +75,18 @@ class MatchMemoriesSection extends ConsumerWidget {
           memories: memories,
           loading: memoriesAsync.isLoading,
           emptyMessage: 'Nothing yet from this match.',
+          editorUid: myUid,
+          onEditCaption: myUid == null
+              ? null
+              : (memory, caption) async {
+                  try {
+                    await ref
+                        .read(memoryRepositoryProvider)
+                        .updateCaption(memory, caption);
+                  } catch (e) {
+                    if (context.mounted) showError(context, e);
+                  }
+                },
           onDelete: myUid == null
               ? null
               : (memory) async {

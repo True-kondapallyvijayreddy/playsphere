@@ -40,7 +40,7 @@
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import { logger } from 'firebase-functions';
 
-import { RESULTED_STATUSES, careerContributions } from './career.js';
+import { RESULTED_STATUSES, careerContributions, registeredSides } from './career.js';
 
 function db() {
   return getFirestore();
@@ -64,6 +64,69 @@ export function careerMovement(contribution, sign) {
     losses: FieldValue.increment(contribution.outcome === 'lost' ? sign : 0),
     ...(Object.keys(tally).length > 0 ? { tally } : {}),
   };
+}
+
+/**
+ * Whether a fixture write could change what career or officiating settlement
+ * decides. Pure, and cheap on purpose: `onMatchSettled` sees every scoring
+ * write, and both settlements are transactions on the fixture being scored.
+ *
+ * Due when the status or the approval state moves, or when a settlement marker
+ * disagrees with whether the match is resulted (a retry after a failed run).
+ */
+export function settlementMayBeDue(before, after) {
+  if (!after) return false;
+  if ((before?.status ?? null) !== (after.status ?? null)) return true;
+  if ((before?.resultState ?? 'none') !== (after.resultState ?? 'none')) return true;
+  const resulted = RESULTED_STATUSES.has(after.status);
+  return resulted !== Boolean(after.careerSettledAt)
+    || resulted !== Boolean(after.officialsSettledAt);
+}
+
+/**
+ * Every account a fixture names as a player, now or in the snapshot before
+ * this write. A reversal only ever takes credit back from these.
+ */
+export function namedPlayers(...fixtures) {
+  const uids = new Set();
+  for (const f of fixtures) {
+    if (!f) continue;
+    const sides = registeredSides(f);
+    for (const p of [...sides.a, ...sides.b]) uids.add(p.uid);
+  }
+  return uids;
+}
+
+/**
+ * The part of a recorded career settlement a reversal may act on.
+ *
+ * The record is server-written and the rules freeze it, but a reversal is an
+ * irreversible subtraction from somebody's career, so it is also held to the
+ * fixture it claims to belong to: the player must be named on it, the sport
+ * must be its sport, and every figure must be a finite number.
+ */
+export function trustedCareerRecord(recorded, fixture, previous) {
+  if (!Array.isArray(recorded)) return [];
+  const players = namedPlayers(fixture, previous);
+  const sports = new Set([fixture?.sportId, previous?.sportId].filter(Boolean));
+  return recorded.filter((c) =>
+    c && typeof c.uid === 'string' && players.has(c.uid)
+    && sports.has(c.sportId)
+    && ['won', 'lost', 'drawn', null, undefined].includes(c.outcome)
+    && Object.values(c.tally ?? {}).every((v) => typeof v === 'number' && Number.isFinite(v)),
+  );
+}
+
+/** Officials a reversal may take a credit back from: those named on the match. */
+export function trustedOfficialsRecord(recorded, fixture, previous) {
+  if (!Array.isArray(recorded)) return [];
+  const named = new Set(
+    [fixture, previous]
+      .flatMap((f) => f?.officials ?? [])
+      .map((o) => o?.uid)
+      .filter(Boolean),
+  );
+  return recorded.filter((uid) => typeof uid === 'string' && named.has(uid));
 }
 
 /** What a credit records about itself, so a reversal can be exact. */
@@ -123,7 +186,7 @@ export async function settleCareer(fixtureRef, { orgId, previous } = {}) {
 
     if (credited && !resulted) {
       const recorded = Array.isArray(fixture.careerSettlement)
-        ? fixture.careerSettlement
+        ? trustedCareerRecord(fixture.careerSettlement, fixture, previous)
         : careerContributions(previous ?? fixture, { orgId });
       for (const c of recorded) {
         tx.set(
@@ -220,7 +283,7 @@ export async function settleOfficials(fixtureRef, { orgId, compId, fixtureId, pr
 
     if (credited && !resulted) {
       const recorded = Array.isArray(fixture.officialsSettlement)
-        ? fixture.officialsSettlement
+        ? trustedOfficialsRecord(fixture.officialsSettlement, fixture, previous)
         : [...new Set(
             ((previous ?? fixture).officials ?? []).map((o) => o?.uid).filter(Boolean),
           )];
@@ -246,29 +309,6 @@ export async function settleOfficials(fixtureRef, { orgId, compId, fixtureId, pr
     }
 
     return null;
-  });
-}
-
-/**
- * Claims the right to settle this fixture's RATINGS, atomically.
- *
- * The rating pass reads a rating document per player and writes one back, which
- * is too much to hold in one transaction against a hot fixture. So the claim is
- * separated from the work: this stamps `ratingSettledAt` only if the fixture is
- * still completed and still unclaimed, and the caller does the arithmetic only
- * if it won the claim. Two invocations racing over the same finished match
- * therefore cannot both pay it, and a match that has already been reopened is
- * never rated on a result that no longer stands.
- */
-export async function claimRatingSettlement(fixtureRef) {
-  return db().runTransaction(async (tx) => {
-    const snap = await tx.get(fixtureRef);
-    if (!snap.exists) return false;
-    const fixture = snap.data();
-    if (fixture.ratingSettledAt) return false;
-    if (fixture.status !== 'completed') return false;
-    tx.set(fixtureRef, { ratingSettledAt: new Date() }, { merge: true });
-    return true;
   });
 }
 

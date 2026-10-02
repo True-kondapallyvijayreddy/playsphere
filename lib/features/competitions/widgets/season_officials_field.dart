@@ -6,7 +6,6 @@ import '../../../core/models/organization.dart';
 import '../../../core/models/tournament_official.dart';
 import '../../../core/models/umpire_profile.dart';
 import '../../../core/providers.dart';
-import '../../../data/tournament_repository.dart';
 import '../../../domain/draw/draft_season_plan.dart';
 import '../../../domain/draw/officials_coverage.dart';
 import '../../../domain/scoring/scoring_registry.dart';
@@ -17,8 +16,8 @@ import '../../../shared/ui_kit.dart';
 ///
 /// Staged for the same reason the grounds and the artwork are: the panel is
 /// decided while the season is being written and the roster lives at
-/// `tournaments/{id}/officials`, which does not exist yet. [commit] writes it
-/// the moment the season has an id.
+/// `tournaments/{id}/officials`, which does not exist yet. The panel is written
+/// in the same atomic commit as the season — `TournamentRepository.createSeason`.
 ///
 /// ## Why the panel is asked for at creation and not afterwards
 ///
@@ -53,36 +52,6 @@ class SeasonOfficialsDraft extends ChangeNotifier {
   void remove(String uid) {
     _officials.removeWhere((o) => o.uid == uid);
     notifyListeners();
-  }
-
-  /// Writes the panel onto the season that now exists.
-  ///
-  /// Reports rather than throws, like the artwork upload: the season and its
-  /// events are already written by the time this runs, and losing them
-  /// because one roster row was refused would be far worse than an organizer
-  /// re-adding a name on the officials screen.
-  Future<String?> commit({
-    required TournamentRepository repo,
-    required String orgId,
-    required String tournamentId,
-    required String addedByUid,
-  }) async {
-    final failed = <String>[];
-    for (final official in _officials) {
-      try {
-        await repo.addOfficialToRoster(
-          orgId: orgId,
-          tournamentId: tournamentId,
-          official: official,
-          addedByUid: addedByUid,
-        );
-      } catch (_) {
-        failed.add(official.name);
-      }
-    }
-    if (failed.isEmpty) return null;
-    return 'The season was created, but ${failed.join(', ')} could not be '
-        'added to the panel. Add them from the season\'s Officials screen.';
   }
 }
 

@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show immutable;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/async_combine.dart';
@@ -10,6 +11,7 @@ import '../../core/models/group_entry.dart';
 import '../../core/models/organization.dart';
 import '../../core/models/scoring_request.dart';
 import '../../core/models/tournament_invite.dart';
+import '../../core/notifications/notification_model.dart';
 import '../../core/l10n/locale_controller.dart';
 import '../../core/permissions/capability.dart';
 import '../../core/providers.dart';
@@ -38,6 +40,18 @@ final myActiveMembershipsProvider =
 final myActiveOrgIdsProvider = Provider<List<String>>((ref) {
   final active = ref.watch(myActiveMembershipsProvider).valueOrNull ?? const [];
   return [for (final m in active) m.orgId];
+});
+
+/// Whether we simply do not know yet which clubs this person is in.
+///
+/// [myActiveOrgIdsProvider] is empty both for somebody who has joined no club
+/// and for everybody during the seconds their memberships are loading, and the
+/// two mean opposite things. The app bar's chip read "No club" to members of
+/// two clubs for as long as that took, which is the same false-empty-state the
+/// register page and the seasons list had.
+final myClubsLoadingProvider = Provider<bool>((ref) {
+  final memberships = ref.watch(myActiveMembershipsProvider);
+  return memberships.isLoading && (memberships.valueOrNull ?? const []).isEmpty;
 });
 
 /// Which club the person is *in* right now, and the persistence behind it.
@@ -112,6 +126,42 @@ final currentClubIdProvider =
 final primaryOrgIdProvider =
     Provider<String?>((ref) => ref.watch(currentClubIdProvider));
 
+/// The clubs a club-derived list may read from: the one selected in the app
+/// bar, and nothing else.
+///
+/// ## Why one club and never all of them
+///
+/// A person who owns or belongs to several clubs picks one in the app bar,
+/// and every screen after that is about THAT club. Lists used to fan out over
+/// every membership instead — invitations, challenges, join requests, match
+/// calls, live matches — so somebody who had chosen "Nizampet High School"
+/// opened Invitations and found one addressed to their academy, answered it,
+/// and could not tell afterwards which club had said yes. Mixing clubs on one
+/// screen is not a convenience; it is how a decision gets made in the wrong
+/// club's name. (User rule, 2026-09-13: "if I choose a club on top, we need to
+/// see everything about that club only.")
+///
+/// So every list that is ABOUT a club reads this, not
+/// [myActiveOrgIdsProvider]. That one stays for questions about the person —
+/// "is this one of my clubs", the club picker itself, the club count — and
+/// must not be used to gather a club's data.
+///
+/// A list for the old shape, so the fan-out code keeps working unchanged and
+/// a future "compare my clubs" screen is a deliberate choice, not a default.
+final scopedOrgIdsProvider = Provider<List<String>>((ref) {
+  final id = ref.watch(currentClubIdProvider);
+  return id == null ? const [] : [id];
+});
+
+/// Whether [orgId] belongs on a club-scoped screen: it is the selected club,
+/// or it is not one of this person's clubs at all (another club's public
+/// season, a host that invited them). Only the person's OTHER clubs are kept
+/// out — see [scopedOrgIdsProvider].
+final inClubScopeProvider = Provider.family<bool, String>((ref, orgId) {
+  if (orgId == ref.watch(currentClubIdProvider)) return true;
+  return !ref.watch(myActiveOrgIdsProvider).contains(orgId);
+});
+
 /// The club a global "start something" button should act in, given what that
 /// action needs the person to be allowed to do.
 ///
@@ -128,21 +178,20 @@ final primaryOrgIdProvider =
 ///
 /// So the selection comes first, always, and the capability only decides
 /// whether it can stand: pass `null` for the actions any member can take, or
-/// the capability the destination screen actually enforces. Falling back to
-/// another club — rather than showing nothing — is deliberate for the case
-/// where the selected club genuinely cannot host the action; the create
-/// screens all name the club they are creating as, so a fallback is stated
-/// rather than silent. See `ClubContextBanner`.
+/// the capability the destination screen actually enforces.
+///
+/// There is no fallback to another club. There used to be — a member of the
+/// selected club pressing New event landed in a form creating for a different
+/// club they happened to run — and that is exactly the mixing
+/// [scopedOrgIdsProvider] exists to end. Null means the selected club cannot
+/// host this action, and the button is hidden; the person switches club in
+/// the app bar if they meant another one.
 final actingOrgIdProvider = Provider.family<String?, Capability?>((ref, needs) {
   bool allowed(String id) =>
       needs == null || ref.watch(myCapabilitiesProvider(id)).contains(needs);
 
   final current = ref.watch(currentClubIdProvider);
   if (current != null && allowed(current)) return current;
-
-  for (final id in ref.watch(myActiveOrgIdsProvider)) {
-    if (allowed(id)) return id;
-  }
   return null;
 });
 
@@ -159,7 +208,7 @@ final actingOrgIdProvider = Provider.family<String?, Capability?>((ref, needs) {
 /// [myLiveFixtureFailuresProvider], which the dashboard renders as a notice
 /// beside the matches that did load.
 final myLiveFixturesPartialProvider = Provider<PartialAsync<Fixture>>((ref) {
-  final orgIds = ref.watch(myActiveOrgIdsProvider);
+  final orgIds = ref.watch(scopedOrgIdsProvider);
   if (orgIds.isEmpty) {
     return const PartialAsync(items: [], failures: [], isLoading: false);
   }
@@ -236,7 +285,7 @@ final myScoringFixturesProvider = Provider<List<Fixture>>((ref) {
 final clubmateLiveFixturesProvider =
     StreamProvider<List<Fixture>>((ref) {
   final members = <String>{};
-  for (final orgId in ref.watch(myActiveOrgIdsProvider)) {
+  for (final orgId in ref.watch(scopedOrgIdsProvider)) {
     for (final m in ref.watch(orgMembersProvider(orgId)).valueOrNull ??
         const <Membership>[]) {
       if (m.isActive) members.add(m.uid);
@@ -268,10 +317,10 @@ final clubmateLiveFixturesProvider =
 /// does. A club is listed once even if both apply, because a member who also
 /// followed would otherwise see every event twice.
 final myFeedOrgIdsProvider = Provider<List<String>>((ref) {
-  final mine = ref.watch(myActiveOrgIdsProvider);
-  final followed = ref.watch(myFollowedOrgIdsProvider).valueOrNull ?? const [];
-  // Membership first, so the dashboard still leads with your own clubs.
-  return <String>{...mine, ...followed}.toList();
+  // The selected club only. Followed clubs used to be merged in here, which
+  // put another club's events in a list headed by the club in the app bar —
+  // see [scopedOrgIdsProvider]. A club you follow is on its own page.
+  return ref.watch(scopedOrgIdsProvider);
 });
 
 /// Every competition across every club on the feed, newest first.
@@ -311,7 +360,7 @@ final myUpcomingEventsProvider = Provider<AsyncValue<List<Competition>>>((ref) {
 final myIncomingChallengesProvider =
     Provider<AsyncValue<List<Challenge>>>((ref) {
   final orgIds = [
-    for (final id in ref.watch(myActiveOrgIdsProvider))
+    for (final id in ref.watch(scopedOrgIdsProvider))
       if (ref
           .watch(myCapabilitiesProvider(id))
           .contains(Capability.manageCompetitions))
@@ -331,7 +380,7 @@ final myIncomingChallengesProvider =
 final myTournamentInvitesProvider =
     Provider<AsyncValue<List<TournamentInvite>>>((ref) {
   final orgIds = [
-    for (final id in ref.watch(myActiveOrgIdsProvider))
+    for (final id in ref.watch(scopedOrgIdsProvider))
       if (ref
           .watch(myCapabilitiesProvider(id))
           .contains(Capability.manageCompetitions))
@@ -351,7 +400,7 @@ final myTournamentInvitesProvider =
 final myPendingApprovalsProvider =
     Provider<AsyncValue<List<Membership>>>((ref) {
   final orgIds = [
-    for (final id in ref.watch(myActiveOrgIdsProvider))
+    for (final id in ref.watch(scopedOrgIdsProvider))
       if (ref.watch(myCapabilitiesProvider(id)).contains(Capability.manageMembers))
         id,
   ];
@@ -370,7 +419,7 @@ final myPendingApprovalsProvider =
 final myScoringRequestsProvider =
     Provider<AsyncValue<List<ScoringRequest>>>((ref) {
   final orgIds = [
-    for (final id in ref.watch(myActiveOrgIdsProvider))
+    for (final id in ref.watch(scopedOrgIdsProvider))
       if (ref
           .watch(myCapabilitiesProvider(id))
           .contains(Capability.manageCompetitions))
@@ -394,8 +443,73 @@ final myScoringRequestsProvider =
 final mySquadInvitesProvider = StreamProvider<List<GroupEntry>>((ref) {
   final uid = ref.watch(currentUidProvider);
   if (uid == null) return Stream.value(const <GroupEntry>[]);
-  return ref.watch(competitionRepositoryProvider).watchSquadInvites(uid);
+  // Addressed to the player, but it is still a club's squad: only the
+  // selected club's, or a club that is not one of theirs — see
+  // [inClubScopeProvider].
+  final club = ref.watch(currentClubIdProvider);
+  final mine = ref.watch(myActiveOrgIdsProvider).toSet();
+  return ref.watch(competitionRepositoryProvider).watchSquadInvites(uid).map(
+        (all) => [
+          for (final e in all)
+            if (e.orgId == club || !mine.contains(e.orgId)) e,
+        ],
+      );
 });
+
+/// The matches this person is assigned to score, at the selected club — see
+/// [scopedOrgIdsProvider]. The unscoped stream stays in core for the scoring
+/// screens themselves, which are opened on one match.
+final myScopedScoringAssignmentsProvider =
+    Provider<AsyncValue<List<Fixture>>>((ref) {
+  final club = ref.watch(currentClubIdProvider);
+  final mine = ref.watch(myActiveOrgIdsProvider).toSet();
+  return ref.watch(myScoringAssignmentsProvider).whenData((all) => [
+        for (final f in all)
+          if (f.orgId == club || !mine.contains(f.orgId)) f,
+      ]);
+});
+
+/// The activity feed, without notifications about this person's OTHER clubs.
+///
+/// A notification names its club in its deep link — `clubId` where the
+/// recipient's club differs from the route's, else `orgId`. One that names no
+/// club is about the person, and always shows.
+final myScopedNotificationFeedProvider =
+    Provider<AsyncValue<List<AppNotification>>>((ref) {
+  final club = ref.watch(currentClubIdProvider);
+  final mine = ref.watch(myActiveOrgIdsProvider).toSet();
+  // The seasons the selected club has been invited into, by host club id.
+  //
+  // Without this, somebody who belongs to BOTH clubs lost the host's notices
+  // whenever their chip was on their own club: the host is one of "mine", so
+  // `!mine.contains(c)` no longer waved it through, and `c == club` was false.
+  // A visiting player could only see their own club's season notice by
+  // switching to the host club — which is not their club's season, and is the
+  // last place they would look for it.
+  final invitedHosts = <String>{
+    if (club != null)
+      for (final invite in ref
+              .watch(liveIncomingTournamentInvitesProvider(club))
+              .valueOrNull ??
+          const <TournamentInvite>[])
+        invite.fromOrgId,
+  };
+  return ref.watch(myNotificationFeedProvider).whenData((all) => [
+        for (final n in all)
+          if (_notificationClub(n) case final c
+              when c == null ||
+                  c == club ||
+                  !mine.contains(c) ||
+                  invitedHosts.contains(c))
+            n,
+      ]);
+});
+
+String? _notificationClub(AppNotification n) {
+  final params = n.deepLink?.params ?? const <String, String>{};
+  final id = params['clubId'] ?? params['orgId'];
+  return (id == null || id.isEmpty) ? null : id;
+}
 
 /// How many things are waiting on this person, for the badge on the bell.
 ///
@@ -413,12 +527,16 @@ final mySquadInvitesProvider = StreamProvider<List<GroupEntry>>((ref) {
 /// their club, because every one of the counts above is gated on an
 /// organizer capability they do not hold. The activity feed is not.
 final waitingOnYouCountProvider = Provider<int>((ref) {
-  final scoring = ref.watch(myScoringAssignmentsProvider).valueOrNull ?? const [];
+  final scoring =
+      ref.watch(myScopedScoringAssignmentsProvider).valueOrNull ?? const [];
   final challenges = ref.watch(myIncomingChallengesProvider).valueOrNull ?? const [];
   final approvals = ref.watch(myPendingApprovalsProvider).valueOrNull ?? const [];
   final scoreAsks = ref.watch(myScoringRequestsProvider).valueOrNull ?? const [];
   final invites = ref.watch(myTournamentInvitesProvider).valueOrNull ?? const [];
-  final unreadActivity = ref.watch(unreadNotificationCountProvider);
+  final unreadActivity = (ref.watch(myScopedNotificationFeedProvider).valueOrNull ??
+          const <AppNotification>[])
+      .where((n) => !n.read)
+      .length;
 
   return scoring.length +
       challenges.length +
@@ -502,7 +620,7 @@ final matchCommentsProvider = StreamProvider.family<List<MatchChatMessage>,
 /// interrupt people it was not addressed to.
 final myMatchRsvpsProvider =
     Provider<AsyncValue<List<Announcement>>>((ref) {
-  final orgIds = ref.watch(myActiveOrgIdsProvider);
+  final orgIds = ref.watch(scopedOrgIdsProvider);
   if (orgIds.isEmpty) return const AsyncValue.data([]);
   final uid = ref.watch(currentUidProvider);
   final combined = combineAsyncAll([
@@ -688,6 +806,9 @@ final matchCountProvider = Provider<HomeCount>((ref) {
   for (final f in fixtures) {
     final when = f.scheduledAt;
     if (when == null || when.isBefore(now)) continue;
+    // An unpublished season time is the organizer's draft, not a plan the
+    // player can act on (test run TC-28: "Today 10:00am" before publishing).
+    if (!fixtureTimeConfirmed(ref, f)) continue;
     if (next == null || when.isBefore(next)) next = when;
   }
   return (value: fixtures.length, unknown: false, detail: next == null ? null : _soon(next));
@@ -757,3 +878,76 @@ String _soon(DateTime when) {
     _ => '${local.day}/${local.month}',
   };
 }
+
+// --- Invited seasons --------------------------------------------------------
+
+/// What this profile may do at a season some OTHER club is running, on the
+/// strength of an invitation to a club of theirs.
+///
+/// Null when there is no such invitation, which is the ordinary case and the
+/// one every existing screen already handles: the season is either your own
+/// club's or none of your business.
+///
+/// When it is not null, it carries the two facts the screens need and neither
+/// of them can work out alone — WHICH of this profile's clubs was asked, and
+/// whether this profile is the one who answers for it.
+@immutable
+class InvitedSeasonContext {
+  const InvitedSeasonContext({
+    required this.invite,
+    required this.canEnterForClub,
+  });
+
+  final TournamentInvite invite;
+
+  /// Whether this profile may enter the club into the host's draws.
+  ///
+  /// `manageCompetitions` at the INVITED club — its owner and admins. An
+  /// invitation is addressed to a club, and the club's entry is a commitment
+  /// made on behalf of everybody in it; the people who already carry that
+  /// authority are the people who already run its competitions. Every other
+  /// member gets [SeasonInterest] instead.
+  final bool canEnterForClub;
+
+  String get orgId => invite.toOrgId;
+}
+
+final invitedSeasonContextProvider = Provider.family<InvitedSeasonContext?,
+    ({String hostOrgId, String tournamentId})>((ref, key) {
+  // The selected club first. A person in two invited clubs used to get
+  // whichever membership sorted first — so the season page could say
+  // "Adibatla Strikers has been invited" while the app bar said Nizampet —
+  // see `scopedOrgIdsProvider`.
+  //
+  // But the scope alone hid the invitation outright in the one case that
+  // matters most: a visiting club's owner who is ALSO a member of the host
+  // club. Opening the host's season adopts the host as the selected club (see
+  // `AppScaffold`), the invited club drops out of scope, and the page stops
+  // offering "Enter <your club>" at all — the owner has to find their own
+  // club's page and enter from there, which nothing tells them. So when the
+  // scoped clubs hold no invitation to this season, the person's other clubs
+  // are asked too, in a stable order so two invited clubs still cannot swap
+  // places between builds.
+  final scoped = ref.watch(scopedOrgIdsProvider);
+  final others = [
+    for (final id in ref.watch(myActiveOrgIdsProvider))
+      if (id != key.hostOrgId && !scoped.contains(id)) id,
+  ]..sort();
+  for (final orgId in [...scoped, ...others]) {
+    final invites =
+        ref.watch(liveIncomingTournamentInvitesProvider(orgId)).valueOrNull ??
+            const <TournamentInvite>[];
+    for (final invite in invites) {
+      if (invite.fromOrgId != key.hostOrgId) continue;
+      if (invite.tournamentId != key.tournamentId) continue;
+      return InvitedSeasonContext(
+        invite: invite,
+        canEnterForClub: ref
+            .watch(myCapabilitiesProvider(orgId))
+            .contains(Capability.manageCompetitions),
+      );
+    }
+  }
+  return null;
+});
+

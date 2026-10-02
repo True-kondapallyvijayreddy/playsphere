@@ -3,16 +3,21 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
+import '../../core/l10n/result_labels.dart';
 import '../../core/layout/responsive.dart';
+import '../../core/models/enums.dart';
 import '../../core/models/fixture.dart';
+import '../../core/permissions/capability.dart';
 import '../../core/router/app_router.dart';
 import '../../domain/scoring/match_award.dart';
 import '../../core/providers.dart';
+import '../../domain/schedule/match_phase.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
 import '../profile/widgets/match_memories_section.dart';
 import 'widgets/ask_to_score.dart';
 import 'widgets/cheer_bar.dart';
+import 'widgets/dispute_card.dart';
 import 'widgets/live_stream_panel.dart';
 import 'widgets/box_score_table.dart';
 import 'widgets/share_match_button.dart';
@@ -49,7 +54,14 @@ class SpectatorScreen extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('Live match'),
+            // What the page is, from what the match is: a finished match's
+            // page is its result, not a "live match" that ended hours ago.
+            Text(switch (fixtureAsync.valueOrNull) {
+              final f? when f.status.isResulted || f.status.isDecision =>
+                'Result',
+              final f? when !f.status.acceptsScoring => 'Match',
+              _ => 'Live match',
+            }),
             if (org != null)
               Text(org.name, style: Theme.of(context).textTheme.bodySmall),
           ],
@@ -82,6 +94,40 @@ class SpectatorScreen extends ConsumerWidget {
             status: plugin.statusLine(fixture.scoreState, ctx),
             summary: plugin.summary(fixture.scoreState, ctx),
           );
+
+          // A finished match is a result to read, not a match to follow: the
+          // score, the scorecard with every player's figures, and — for the
+          // people who may — the way to correct it. Nothing that invites
+          // taking part (cheering, asking to score, "streaming this match?"),
+          // and the ball-by-ball folded away rather than filling the page.
+          // Abandoned and disputed matches are over too, and belong here: a
+          // protest is raised and argued on the result, not on a live board.
+          if (fixture.status.isResulted || fixture.status.isDecision) {
+            final finished = [
+              board,
+              const SizedBox(height: 16),
+              MatchScorecard(fixture: fixture),
+              const SizedBox(height: 12),
+              _CorrectResultLink(fixture: fixture),
+              DisputeCard(fixture: fixture),
+              _FoldedLog(fixture: fixture),
+              const SizedBox(height: 12),
+              // The recording, when a link was set; nothing otherwise.
+              LiveStreamPanel(fixture: fixture),
+              MatchMemoriesSection(fixture: fixture),
+            ];
+            return ListView(
+              children: [
+                ContentBounds(
+                  maxWidth: 900,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: finished,
+                  ),
+                ),
+              ],
+            );
+          }
 
           // The same log the scorer sees, so a spectator arguing a point
           // and the scorer checking it are reading one record rather than
@@ -286,9 +332,14 @@ class _BigScoreboard extends StatelessWidget {
                 // the app days ago — must not echo its stored status label,
                 // which is the word "Live". Show "PAUSED" instead so the
                 // spectator knows the scoreboard has gone quiet.
-                fixture.isStaleLiveAt(DateTime.now())
-                    ? 'PAUSED'
-                    : fixture.status.label.toUpperCase(),
+                switch (MatchPhase.of(fixture, DateTime.now())) {
+                  MatchPhase.paused => 'PAUSED',
+                  MatchPhase.finished
+                      when fixture.resultType != MatchResultType.normal =>
+                    'RESULT · ${fixture.resultType.label.toUpperCase()}',
+                  MatchPhase.finished => 'RESULT',
+                  _ => fixture.status.label.toUpperCase(),
+                },
                 style: theme.textTheme.labelMedium
                     ?.copyWith(color: theme.hintColor, letterSpacing: 1),
               ),
@@ -336,10 +387,36 @@ class _BigScoreboard extends StatelessWidget {
             if (summary != headline) ...[
               const SizedBox(height: 8),
               Text(
-                summary,
+                // Marked the way every list marks it — "21-15, 8-3 (R)" — so
+                // the score a ruling stopped reads as exactly that.
+                switch (fixture.resultType.marker) {
+                  final m? when fixture.lastSeq > 0 &&
+                          summary.trim().isNotEmpty =>
+                    '$summary ($m)',
+                  _ => summary,
+                },
                 textAlign: TextAlign.center,
                 style: theme.textTheme.bodyMedium,
               ),
+            ],
+            if (fixture.status.isResulted) ...[
+              const SizedBox(height: 10),
+              Text(
+                _verdict(fixture),
+                textAlign: TextAlign.center,
+                style: theme.textTheme.titleMedium
+                    ?.copyWith(fontWeight: FontWeight.w800),
+              ),
+              if (fixture.resultNote case final note?
+                  when note.trim().isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text(
+                  note,
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.hintColor),
+                ),
+              ],
             ],
             // The best performer, once there is a result to attach it to.
             // This is the part of a finished match people actually talk about
@@ -359,6 +436,90 @@ class _BigScoreboard extends StatelessWidget {
             ],
           ],
         ),
+      ),
+    );
+  }
+}
+
+String _verdict(Fixture f) {
+  if (f.isDraw) return 'Match drawn';
+  final winner = switch (f.winnerEntrantId) {
+    final id? when id == f.entrantAId => f.entrantAName,
+    final id? when id == f.entrantBId => f.entrantBName,
+    _ => null,
+  };
+  if (winner == null) return 'No winner';
+  return switch (f.resultType) {
+    MatchResultType.retired => '$winner won — opponent retired',
+    MatchResultType.disqualified => '$winner won — opponent disqualified',
+    MatchResultType.walkover => '$winner won by walkover',
+    MatchResultType.conceded => '$winner won — opponent withdrew',
+    _ => '$winner won',
+  };
+}
+
+/// "Correct this result", for the people who could.
+///
+/// The spectator view is where every tap on a finished match now lands —
+/// the season page, the event board, the public link — which makes it the
+/// only road back to the pad for an umpire who retired the wrong player or
+/// tapped the last point by mistake. The pad itself offers the withdrawal
+/// and the reopen; this only has to lead there, and only for the people
+/// `firestore.rules` lets through: organizers, and this match's scorers and
+/// officials.
+class _CorrectResultLink extends ConsumerWidget {
+  const _CorrectResultLink({required this.fixture});
+
+  final Fixture fixture;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final uid = ref.watch(currentUidProvider);
+    if (uid == null) return const SizedBox.shrink();
+    final isOrganizer = ref
+        .watch(myCapabilitiesProvider(fixture.orgId))
+        .contains(Capability.manageCompetitions);
+    final onMatch = fixture.scorerUids.contains(uid) ||
+        fixture.officials.any((o) => o.uid == uid);
+    if (!isOrganizer && !onMatch) return const SizedBox.shrink();
+    // A certified result is argued through a dispute, not edited — see
+    // `firestore.rules` (b4).
+    if (fixture.resultState == MatchResultState.finalized) {
+      return const SizedBox.shrink();
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: TextButton.icon(
+          icon: const Icon(Icons.edit_note_outlined, size: 18),
+          label: const Text('Correct this result'),
+          onPressed: () => context.push(
+            Routes.scoring(fixture.orgId, fixture.compId, fixture.id),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The ball-by-ball of a finished match, shut until asked for.
+class _FoldedLog extends StatelessWidget {
+  const _FoldedLog({required this.fixture});
+
+  final Fixture fixture;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: ExpansionTile(
+        leading: const Icon(Icons.format_list_numbered),
+        title: const Text('How it was scored'),
+        subtitle: Text(localizedScoreLine(context, fixture)),
+        childrenPadding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+        children: [PointLog(fixture: fixture, initiallyShown: 20)],
       ),
     );
   }

@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
+import '../../core/l10n/result_labels.dart';
 import '../../core/layout/responsive.dart';
 import '../../core/models/competition.dart';
 import '../../core/models/enums.dart';
@@ -504,7 +505,7 @@ class _MatchRow extends StatelessWidget {
                   ConstrainedBox(
                     constraints: const BoxConstraints(maxWidth: 160),
                     child: Text(
-                      f.summary,
+                      localizedScoreLine(context, f),
                       textAlign: TextAlign.end,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,

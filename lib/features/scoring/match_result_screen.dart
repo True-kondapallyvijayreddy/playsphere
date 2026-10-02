@@ -147,7 +147,11 @@ class _ResultHero extends StatelessWidget {
           if (summary.trim().isNotEmpty) ...[
             const SizedBox(height: 6),
             Text(
-              summary,
+              // Marked as every list marks it — see [MatchResultType.marker].
+              switch (fixture.resultType.marker) {
+                final m? when fixture.lastSeq > 0 => '$summary ($m)',
+                _ => summary,
+              },
               textAlign: TextAlign.center,
               style: const TextStyle(fontSize: 13.5, color: Ps.muted),
             ),
@@ -498,8 +502,54 @@ class _ResultActions extends ConsumerWidget {
         ),
         const SizedBox(height: 10),
         Center(child: ShareMatchButton(fixture: fixture)),
+        // The dispute tool: replay the event log and compare it to the score
+        // on the board. Organizers only; a mismatch on a live match is written
+        // back, on a finished one it says how to reopen it.
+        if (canManage) ...[
+          const SizedBox(height: 6),
+          Center(
+            child: TextButton.icon(
+              onPressed: () => _checkAgainstLog(context, ref),
+              icon: const Icon(Icons.fact_check_outlined, size: 18),
+              label: const Text('Check the score against the match log'),
+            ),
+          ),
+        ],
       ],
     );
+  }
+
+  Future<void> _checkAgainstLog(BuildContext context, WidgetRef ref) async {
+    try {
+      final report = await ref.read(scoringServiceProvider).rebuildMatch(
+            fixture: fixture,
+            context: fixture.scoringContext(),
+          );
+      if (!context.mounted) return;
+      final message = report.matchedStoredProjection
+          ? 'The score matches all ${report.eventCount} events in the log.'
+          : report.written
+              ? 'The score did not match the log and has been rebuilt from '
+                  'its ${report.eventCount} events.'
+              : report.blockedReason ?? 'The score does not match the log.';
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text(report.needsAttention
+              ? 'Needs attention'
+              : 'Score check'),
+          content: Text(message),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      if (context.mounted) showError(context, e);
+    }
   }
 
   Future<void> _finalize(BuildContext context, WidgetRef ref) async {

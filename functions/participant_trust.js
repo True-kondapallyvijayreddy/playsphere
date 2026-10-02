@@ -70,11 +70,10 @@ const TRUSTED_MEMBER_STATUSES = new Set(['active']);
  *   - `selfRegistered`   true when a registration for this uid exists on this
  *                        competition and was NOT written by an organizer
  *                        (`preselected !== true`).
- *   - `namedInTeamEntry` true when the uid appears in the `memberUids` of a
- *                        team registration on this competition. A squad player
- *                        has no registration of their own — the document id is
- *                        the team's — and whoever runs the team put them on it,
- *                        which is a relationship of the same kind.
+ *   - `namedInTeamEntry` true when a TEAM entry on this competition vouches
+ *                        for the uid — see [teamEntryVouchesFor]. A squad player
+ *                        has no registration of their own; the document id is
+ *                        the team's.
  */
 export function ratingWithheldForParticipant(facts) {
   if (!facts) return 'unknown';
@@ -82,6 +81,32 @@ export function ratingWithheldForParticipant(facts) {
   if (facts.namedInTeamEntry === true) return null;
   if (TRUSTED_MEMBER_STATUSES.has(facts.memberStatus)) return null;
   return facts.memberStatus ? `member_${facts.memberStatus}` : 'no_relationship';
+}
+
+/**
+ * Whether one team registration vouches for `uid` being a real squad player.
+ *
+ * Being listed is not enough. Whoever writes an entry or runs a team decides
+ * who is named on it — a captain can add anybody by player code — so a list of
+ * uids is exactly what a forger writes. Three things must hold:
+ *
+ *  - it really is a team entry: its `teamId` is its own document id;
+ *  - the team's own roster names the uid (not just the entry's copy of it);
+ *  - the uid has a relationship with the team that is THEIR act: they founded
+ *    it, or they are an active member of the club it belongs to (a membership
+ *    only its member, or their guardian, can create).
+ *
+ * Pure: the caller reads the entry, the team and, when the team has a club, the
+ * uid's membership status there.
+ */
+export function teamEntryVouchesFor({ entryId, entry, team, uid, clubMemberStatus }) {
+  if (!entry || !team || typeof uid !== 'string') return false;
+  if (entry.teamId !== entryId) return false;
+  if (!Array.isArray(entry.memberUids) || !entry.memberUids.includes(uid)) return false;
+  if (!Array.isArray(team.memberUids) || !team.memberUids.includes(uid)) return false;
+  if (team.createdByUid === uid) return true;
+  return typeof team.clubId === 'string' && team.clubId.length > 0
+    && TRUSTED_MEMBER_STATUSES.has(clubMemberStatus);
 }
 
 /** The positive form, for callers that only want the yes/no. */

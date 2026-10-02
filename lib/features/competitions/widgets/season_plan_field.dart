@@ -2,12 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
+import '../../../core/firebase/firestore_refs.dart';
 import '../../../core/models/billing.dart';
 import '../../../core/models/ground.dart';
 import '../../../core/models/venue.dart';
 import '../../../core/models/venue_plan.dart';
 import '../../../core/providers.dart';
-import '../../../data/tournament_repository.dart';
 import '../../../domain/draw/draft_season_plan.dart';
 import '../../../shared/app_scaffold.dart';
 import '../../../shared/ui_kit.dart';
@@ -19,9 +19,9 @@ import '../../tournaments/widgets/venue_selector_dialog.dart'
 /// Mutable and held by the form, like `SeasonBranding`: the grounds are
 /// chosen before the season document exists, some of them are venues that do
 /// not exist yet either, and none of it can be written until Create is
-/// pressed. [ensureVenues] and [savePlans] are the two halves of committing
-/// it, in that order, because a tournament is created with venue ids and a
-/// venue plan is written under a tournament id.
+/// pressed. [allocateIds] then `TournamentRepository.createSeason` commit it,
+/// in that order, because a tournament is created with venue ids and a venue
+/// plan is written under a tournament id.
 class SeasonGroundsDraft extends ChangeNotifier {
   final List<SeasonGround> _grounds = [];
 
@@ -66,61 +66,53 @@ class SeasonGroundsDraft extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Creates every ground that does not exist yet, and reports which local
-  /// ids became which real ones.
+  /// Gives every ground typed on the form its real Firestore id, and reports
+  /// which local keys became which ids. Writes nothing.
   ///
-  /// Runs before the tournament is created, because the tournament document
-  /// carries the ids. A ground typed on the form is a real venue afterwards —
-  /// the club will play there again, and re-typing it next season is exactly
-  /// the friction this whole flow exists to remove.
+  /// Ids are allocated on the phone — `doc()` needs no network — so that the
+  /// grounds, the season that names them and the events pinned to them can
+  /// all go up in one atomic commit (`TournamentRepository.createSeason`).
+  /// Creating the grounds first, as this used to, left real venue documents
+  /// behind whenever anything after them failed.
   ///
   /// The returned map is not a convenience: a category pinned to a ground
-  /// added on this form holds the local id, and a restriction naming an id
-  /// nothing has is a restriction that confines that draw to no courts at
-  /// all. The caller has to re-point them, so it is handed what changed.
-  Future<Map<String, String>> ensureVenues({
-    required TournamentRepository repo,
-    required String orgId,
-  }) async {
+  /// added on this form holds the local key, and a restriction naming a key
+  /// nothing has confines that draw to no courts at all. The caller re-points
+  /// its categories with it. Grounds stay [SeasonGround.isNew] — they still
+  /// have to be written, by the commit.
+  Map<String, String> allocateIds({required String orgId}) {
     final remap = <String, String>{};
     for (var i = 0; i < _grounds.length; i++) {
       final ground = _grounds[i];
       if (!ground.isNew && ground.venue.id.isNotEmpty) continue;
-      // The id on the draft is a local key; `createVenue` allocates the real
-      // one. Everything else on the venue — its courts and its hours, which
-      // the rules check — goes up exactly as the organizer set it.
-      final id = await repo.createVenue(ground.venue);
+      if (ground.isNew && _allocated.contains(ground.venue.id)) continue;
+      final id = Refs.venues(orgId).doc().id;
       remap[ground.venue.id] = id;
+      _allocated.add(id);
       _grounds[i] = SeasonGround(
         venue: ground.venue.withId(id),
         plan: ground.plan.rekeyed(id),
         hourlyRatePaise: ground.hourlyRatePaise,
         marketGroundId: ground.marketGroundId,
+        isNew: true,
       );
     }
     if (remap.isNotEmpty) notifyListeners();
     return remap;
   }
 
-  /// Writes the per-ground terms under the season, once it has an id.
+  /// Ids this draft has already allocated, so pressing Create twice after a
+  /// validation message does not hand the same ground a second id.
+  final Set<String> _allocated = {};
+
+  /// Keeps only the ids of grounds still on this season.
   ///
-  /// Only for grounds the organizer actually set something on: a plan that
-  /// says nothing is a document that changes nothing, and the venue's own
-  /// hours already say it.
-  Future<void> savePlans({
-    required TournamentRepository repo,
-    required String orgId,
-    required String tournamentId,
-  }) async {
-    for (final ground in _grounds) {
-      if (ground.plan.isUnrestricted) continue;
-      await repo.saveVenuePlan(
-        orgId: orgId,
-        tournamentId: tournamentId,
-        plan: ground.plan.copyWith(venueName: ground.venue.name),
-      );
-    }
-  }
+  /// Categories pin themselves to grounds by id. Removing a ground from the
+  /// season has to remove it from every category too — otherwise the event
+  /// stores a ground the season no longer holds, and the scheduler, which
+  /// builds its pool from the season's grounds PLUS every event's own, puts
+  /// matches back on the ground the organizer just took away.
+  void prunePins(Set<String> pins) => pins.retainWhere(contains);
 }
 
 /// A named pattern of playing hours, offered instead of two time pickers.

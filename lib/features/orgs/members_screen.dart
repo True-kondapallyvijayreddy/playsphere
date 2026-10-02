@@ -15,7 +15,10 @@ import '../../shared/club_context_banner.dart';
 import '../../shared/identity.dart';
 import '../../shared/ui_kit.dart';
 import '../../shared/invite_card.dart';
+import '../../shared/member_since.dart';
+import '../../shared/same_name.dart';
 import 'widgets/applicant_review_sheet.dart';
+import 'widgets/leave_club_flow.dart';
 import 'widgets/ownership_actions.dart';
 import 'widgets/member_grouping_sheet.dart';
 
@@ -49,6 +52,13 @@ class MembersScreen extends ConsumerWidget {
         builder: (all) {
           final pending = all.where((m) => m.isPending).toList();
           final active = all.where((m) => m.isActive).toList();
+          // Which names repeat, per list. Two members called the same thing
+          // are identical rows otherwise, and the roster is where a squad gets
+          // picked — see `nameWithTag`.
+          final repeatedApplicantNames =
+              repeatedNames(pending.map((m) => m.displayName));
+          final repeatedMemberNames =
+              repeatedNames(active.map((m) => m.displayName));
 
           return ListView(
             children: [
@@ -80,6 +90,7 @@ class MembersScreen extends ConsumerWidget {
                           orgId: orgId,
                           member: m,
                           canManage: canManage,
+                          repeats: repeatedApplicantNames,
                         ),
                     ],
                     const SizedBox(height: 20),
@@ -109,6 +120,7 @@ class MembersScreen extends ConsumerWidget {
                         orgId: orgId,
                         member: m,
                         canManage: canManage,
+                        repeats: repeatedMemberNames,
                       ),
                   ],
                 ),
@@ -210,11 +222,17 @@ class _PendingTile extends ConsumerWidget {
     required this.orgId,
     required this.member,
     required this.canManage,
+    required this.repeats,
   });
 
   final String orgId;
   final Membership member;
   final bool canManage;
+
+  /// The names carried by more than one person in this list — see
+  /// [repeatedNames]. Two applicants with the same name are otherwise
+  /// indistinguishable on the row an admin approves from.
+  final Set<String> repeats;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -252,7 +270,7 @@ class _PendingTile extends ConsumerWidget {
           photoUrl: member.photoUrl,
           seed: member.uid,
         ),
-        title: Text(member.displayName),
+        title: Text(nameWithTag(member.displayName, member.uid, repeats)),
         subtitle: Text(summary.isEmpty ? 'Wants to join' : summary),
         // Deciding on a stranger takes a look first, so the row opens the
         // review sheet and the approve/decline buttons live inside it. The
@@ -290,30 +308,36 @@ class _PendingTile extends ConsumerWidget {
 /// Menu sentinel, so one `PopupMenuButton` can carry both the role picks and
 /// the grouping edit without inventing an enum for a single extra item.
 const String _kEditGrouping = '__edit_grouping__';
+const String _kRemoveMember = '__remove_member__';
 
 class _MemberTile extends ConsumerWidget {
   const _MemberTile({
     required this.orgId,
     required this.member,
     required this.canManage,
+    required this.repeats,
   });
 
   final String orgId;
   final Membership member;
   final bool canManage;
 
+  /// The names carried by more than one member of this club — see
+  /// [repeatedNames].
+  final Set<String> repeats;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final myUid = ref.watch(currentUidProvider);
-    final myRole =
-        ref.watch(myMembershipProvider(orgId)).valueOrNull?.role;
+    final myRole = ref.watch(myMembershipProvider(orgId)).valueOrNull?.role;
     final isSelf = member.uid == myUid;
 
     // Nobody edits their own role, and nobody edits someone at or above their
     // own rank. Both rules are enforced again in the security rules — this
     // just avoids offering an action that would be rejected.
-    final assignable =
-        myRole == null ? <MembershipRole>[] : PermissionMatrix.assignableBy(myRole);
+    final assignable = myRole == null
+        ? <MembershipRole>[]
+        : PermissionMatrix.assignableBy(myRole);
     final iAmOwner = myRole == MembershipRole.owner;
     final targetIsOwner = member.role == MembershipRole.owner;
 
@@ -321,15 +345,14 @@ class _MemberTile extends ConsumerWidget {
     // ordinary (it is in `assignable` now), but removing one takes a vote —
     // see `OwnerVote` — and stepping down is the person's own decision. So an
     // owner row gets its own controls rather than the role dropdown.
-    final editable = canManage &&
-        !isSelf &&
-        !targetIsOwner &&
-        assignable.isNotEmpty;
+    final editable =
+        canManage && !isSelf && !targetIsOwner && assignable.isNotEmpty;
 
     // Only another owner can move a motion, and only against somebody who is
     // actually an owner.
     final canProposeRemoval = iAmOwner && targetIsOwner && !isSelf;
     final canStepDown = iAmOwner && targetIsOwner && isSelf;
+    final since = member.memberSince;
 
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
@@ -339,23 +362,37 @@ class _MemberTile extends ConsumerWidget {
           photoUrl: member.photoUrl,
           seed: member.uid,
         ),
-        title: Text(member.displayName + (isSelf ? ' (you)' : '')),
-        subtitle: Row(
+        title: Text(nameWithTag(member.displayName, member.uid, repeats) +
+            (isSelf ? ' (you)' : '')),
+        isThreeLine: since != null,
+        subtitle: Column(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _RoleDot(isOwner: targetIsOwner),
-            const SizedBox(width: 6),
-            // The grouping wins the line where there is one. Scanning a
-            // roster to check who still has no house is the actual task, and
-            // "Member" repeated four hundred times does not help with it.
-            Flexible(
-              child: Text(
-                member.grouping.isEmpty
-                    ? member.role.label
-                    : member.grouping.summary,
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _RoleDot(isOwner: targetIsOwner),
+                const SizedBox(width: 6),
+                // The grouping wins the line where there is one. Scanning a
+                // roster to check who still has no house is the actual task,
+                // and "Member" repeated four hundred times does not help.
+                Flexible(
+                  child: Text(
+                    member.grouping.isEmpty
+                        ? member.role.label
+                        : member.grouping.summary,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            if (since != null)
+              Text(
+                memberSinceLabel(since),
+                style: Theme.of(context).textTheme.bodySmall,
                 overflow: TextOverflow.ellipsis,
               ),
-            ),
           ],
         ),
         trailing: canProposeRemoval || canStepDown
@@ -364,49 +401,113 @@ class _MemberTile extends ConsumerWidget {
                 member: member,
                 isSelf: isSelf,
               )
-            : !editable
-            ? Chip(
-                label: Text(member.role.label),
-                visualDensity: VisualDensity.compact,
-              )
-            : PopupMenuButton<Object>(
-                tooltip: 'Manage member',
-                icon: const Icon(Icons.more_vert),
-                itemBuilder: (context) => [
-                  const PopupMenuItem(
-                    value: _kEditGrouping,
-                    child: Text('Set house & class'),
-                  ),
-                  const PopupMenuDivider(),
-                  for (final r in assignable)
-                    PopupMenuItem(
-                      value: r,
-                      child: Text('Make ${r.label}'),
-                    ),
-                ],
-                onSelected: (choice) async {
-                  if (choice == _kEditGrouping) {
-                    await MemberGroupingSheet.show(
-                      context,
-                      orgId: orgId,
-                      only: member,
-                    );
-                    return;
-                  }
-                  try {
-                    await ref.read(orgRepositoryProvider).changeRole(
-                          orgId: orgId,
-                          uid: member.uid,
-                          role: choice as MembershipRole,
-                        );
-                  } catch (e) {
-                    if (context.mounted) showError(context, e);
-                  }
-                },
-              ),
+            : isSelf && !targetIsOwner
+                ? PopupMenuButton<String>(
+                    tooltip: 'Your membership',
+                    icon: const Icon(Icons.more_vert),
+                    itemBuilder: (context) => const [
+                      PopupMenuItem(value: 'leave', child: Text('Leave club')),
+                    ],
+                    onSelected: (_) =>
+                        startLeaveClub(context, ref, orgId: orgId),
+                  )
+                : !editable
+                    ? Chip(
+                        label: Text(member.role.label),
+                        visualDensity: VisualDensity.compact,
+                      )
+                    : PopupMenuButton<Object>(
+                        tooltip: 'Manage member',
+                        icon: const Icon(Icons.more_vert),
+                        itemBuilder: (context) => [
+                          const PopupMenuItem(
+                            value: _kEditGrouping,
+                            child: Text('Set house & class'),
+                          ),
+                          const PopupMenuDivider(),
+                          for (final r in assignable)
+                            PopupMenuItem(
+                              value: r,
+                              child: Text('Make ${r.label}'),
+                            ),
+                          const PopupMenuDivider(),
+                          const PopupMenuItem(
+                            value: _kRemoveMember,
+                            child: Text('Remove from club'),
+                          ),
+                        ],
+                        onSelected: (choice) async {
+                          if (choice == _kRemoveMember) {
+                            await _remove(context, ref);
+                            return;
+                          }
+                          if (choice == _kEditGrouping) {
+                            await MemberGroupingSheet.show(
+                              context,
+                              orgId: orgId,
+                              only: member,
+                            );
+                            return;
+                          }
+                          try {
+                            await ref.read(orgRepositoryProvider).changeRole(
+                                  orgId: orgId,
+                                  uid: member.uid,
+                                  role: choice as MembershipRole,
+                                );
+                          } catch (e) {
+                            if (context.mounted) showError(context, e);
+                          }
+                        },
+                      ),
         onTap: () => context.push(Routes.profile(member.uid)),
       ),
     );
+  }
+}
+
+extension on _MemberTile {
+  Future<bool> _confirm(
+    BuildContext context, {
+    required String title,
+    required String message,
+    required String action,
+  }) async =>
+      await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text(title),
+          content: Text(message),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: Text(action),
+            ),
+          ],
+        ),
+      ) ==
+      true;
+
+  Future<void> _remove(BuildContext context, WidgetRef ref) async {
+    final ok = await _confirm(
+      context,
+      title: 'Remove ${member.displayName}?',
+      message: 'They lose access to the club\'s events, notices and files. '
+          'Their past matches stay on their record. They can apply again.',
+      action: 'Remove',
+    );
+    if (!ok) return;
+    try {
+      await ref
+          .read(orgRepositoryProvider)
+          .removeMember(orgId: orgId, uid: member.uid);
+    } catch (e) {
+      if (context.mounted) showError(context, e);
+    }
   }
 }
 

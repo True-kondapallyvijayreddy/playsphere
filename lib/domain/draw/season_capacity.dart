@@ -1,3 +1,4 @@
+import '../../core/models/draw_config.dart';
 import '../../core/models/venue.dart';
 import '../../core/models/venue_plan.dart';
 import 'tournament_scheduler.dart';
@@ -19,6 +20,30 @@ import 'tournament_scheduler.dart';
 class SeasonCapacity {
   const SeasonCapacity._();
 
+  /// The hours the season as a whole plays between — the widest window its
+  /// events ask for, which is the only window every match in it fits inside.
+  ///
+  /// Taken from the events rather than the season document because that is
+  /// where the answer lives: the wizard writes the season's playing hours onto
+  /// each event's [ScheduleConfig], and an event may narrow them further. The
+  /// widest of them is therefore the season's own window, and capacity worked
+  /// out over anything wider — the ground's opening hours, say — counts slots
+  /// no match may ever be placed in.
+  ///
+  /// Null for no events, which means "do not narrow anything".
+  static ({int startHour, int endHour})? hoursOf(
+    Iterable<ScheduleConfig> configs,
+  ) {
+    int? start;
+    int? end;
+    for (final c in configs) {
+      if (start == null || c.dayStartHour < start) start = c.dayStartHour;
+      if (end == null || c.dayEndHour > end) end = c.dayEndHour;
+    }
+    if (start == null || end == null || end <= start) return null;
+    return (startHour: start, endHour: end);
+  }
+
   /// Builds one [CourtCalendar] per usable playing area.
   ///
   /// Every venue without a plan behaves as it always did — its own opening
@@ -31,6 +56,8 @@ class SeasonCapacity {
     Map<String, VenuePlan> plans = const {},
     int defaultMatchMinutes = 30,
     int defaultTurnaroundMinutes = 5,
+    int? dayStartHour,
+    int? dayEndHour,
   }) {
     final out = <CourtCalendar>[];
     final firstDay =
@@ -51,14 +78,32 @@ class SeasonCapacity {
       for (var i = 0; i < dayCount; i++) {
         final day = DateTime(firstDay.year, firstDay.month, firstDay.day + i);
         if (!plan.servesDay(day)) continue;
+        final typedSessions = plan.sessions.isNotEmpty;
         for (final session in plan.sessionsFor(venue)) {
           final span = session.on(day);
+          // The season's own playing hours bound the default session.
+          //
+          // `sessionsFor` falls back to the VENUE's opening hours, which is
+          // the right default for a venue nobody has planned — and it ignored
+          // the season entirely. A season set to run 08:00–20:00 had its
+          // capacity worked out over a ground open 06:00–22:00, so the planner
+          // reported sixteen-hour days and a field that fitted when it did
+          // not: no match may be placed outside the season's window anyway.
+          //
+          // Only the fallback is clipped. Sessions an organizer typed into the
+          // planner are their deliberate answer — an evening session that runs
+          // past the season's nominal close is a decision, not a mistake.
+          final bounded = typedSessions
+              ? ScheduleWindow(start: span.start, end: span.end)
+              : _clipToHours(
+                  ScheduleWindow(start: span.start, end: span.end),
+                  day,
+                  dayStartHour,
+                  dayEndHour,
+                );
+          if (bounded == null) continue;
           periods.addAll(
-            _subtractBlackouts(
-              ScheduleWindow(start: span.start, end: span.end),
-              plan.blackouts,
-              day,
-            ),
+            _subtractBlackouts(bounded, plan.blackouts, day),
           );
         }
       }
@@ -88,6 +133,7 @@ class SeasonCapacity {
           openPeriods: periods,
           maxPerDay: plan.maxMatchesPerCourtPerDay,
           sportIds: plan.sportIds,
+          turnaround: Duration(minutes: turnaround),
         ));
       }
     }
@@ -104,6 +150,8 @@ class SeasonCapacity {
     required int dayCount,
     int defaultMatchMinutes = 30,
     int defaultTurnaroundMinutes = 5,
+    int? dayStartHour,
+    int? dayEndHour,
   }) {
     final matchMinutes = plan.matchMinutes ?? defaultMatchMinutes;
     final turnaround = plan.turnaroundMinutes ?? defaultTurnaroundMinutes;
@@ -114,6 +162,11 @@ class SeasonCapacity {
       plans: {venue.id: plan},
       defaultMatchMinutes: defaultMatchMinutes,
       defaultTurnaroundMinutes: defaultTurnaroundMinutes,
+      // The planner's own capacity strip must agree with what the scheduler
+      // will actually do — this is the number an organizer reads before
+      // pressing Generate.
+      dayStartHour: dayStartHour,
+      dayEndHour: dayEndHour,
     );
 
     // The best single day, which is what "matches per day" means to the
@@ -275,6 +328,34 @@ class SeasonCapacity {
       match: (matchMinutes / matches).round(),
       turnaround: (turnaround / matches).round(),
     );
+  }
+
+  /// [window] narrowed to the season's playing hours on [day], or null when
+  /// the two do not overlap at all — a ground open only in the morning lent to
+  /// a season that plays in the evening contributes no capacity, and saying so
+  /// is the point.
+  ///
+  /// Either bound may be absent, which means "the season does not say", and an
+  /// unspecified bound never narrows anything.
+  static ScheduleWindow? _clipToHours(
+    ScheduleWindow window,
+    DateTime day,
+    int? startHour,
+    int? endHour,
+  ) {
+    if (startHour == null && endHour == null) return window;
+    var start = window.start;
+    var end = window.end;
+    if (startHour != null) {
+      final floor = DateTime(day.year, day.month, day.day, startHour);
+      if (floor.isAfter(start)) start = floor;
+    }
+    if (endHour != null) {
+      final ceiling = DateTime(day.year, day.month, day.day, endHour);
+      if (ceiling.isBefore(end)) end = ceiling;
+    }
+    if (!end.isAfter(start)) return null;
+    return ScheduleWindow(start: start, end: end);
   }
 
   /// [window] with every blackout on [day] cut out of it.

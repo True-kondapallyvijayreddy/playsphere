@@ -428,7 +428,7 @@ class _QuickMatchScreenState extends ConsumerState<QuickMatchScreen> {
   bool get _ready => _blocker == null && !_busy;
 
   Future<void> _start() async {
-    final uid = ref.read(currentUidProvider);
+    final uid = ref.read(authUidProvider);
     if (uid == null || !_ready) return;
 
     setState(() => _busy = true);

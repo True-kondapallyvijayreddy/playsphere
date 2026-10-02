@@ -412,8 +412,11 @@ describe('lots', () => {
     );
   });
 
-  it('lets the player withdraw themselves', async () => {
-    await assertSucceeds(updateDoc(lotRef(as(PLAYER)), { status: 'withdrawn' }));
+  it('refuses the player withdrawing from under a sealed bid', async () => {
+    // The seeded lot carries a bid. The reveal only opens lots in the pool, so
+    // a withdrawn lot would lock that bid's money forever. With no bids the
+    // player may still withdraw (review_fixes.test.mjs).
+    await assertFails(updateDoc(lotRef(as(PLAYER)), { status: 'withdrawn' }));
   });
 
   it('refuses a bidder withdrawing somebody else', async () => {

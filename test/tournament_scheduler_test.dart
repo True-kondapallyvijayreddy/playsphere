@@ -49,6 +49,100 @@ void main() {
         matchMinutes: minutes,
       );
 
+  group('one sport scheduled around another', () {
+    Placement at(int court, int hour, {int minutes = 30}) => Placement(
+          court: courts(2)[court - 1],
+          window: ScheduleWindow(
+            start: DateTime(2026, 9, 12, hour),
+            end: DateTime(2026, 9, 12, hour).add(Duration(minutes: minutes)),
+          ),
+        );
+
+    test('a court held by another sport is not handed out', () {
+      final result = scheduler.schedule(
+        matches: [match('badminton', 0, ['p1', 'p2'])],
+        courts: courts(1),
+        slots: slots(hours: 2),
+        fixed: [
+          (match: match('cricket', 0, ['c1', 'c2']), placement: at(1, 9)),
+        ],
+      );
+      final placed = result.placements['badminton#0']!;
+      expect(placed.window.start, DateTime(2026, 9, 12, 9, 30));
+      // The fixed match is in the way, not in the answer.
+      expect(result.placements.containsKey('cricket#0'), isFalse);
+    });
+
+    test('a player in both sports keeps their rest gap', () {
+      final result = scheduler.schedule(
+        matches: [match('badminton', 0, ['shared', 'p2'])],
+        courts: courts(2),
+        slots: slots(hours: 3),
+        minRestBetweenMatches: const Duration(minutes: 30),
+        fixed: [
+          (match: match('cricket', 0, ['shared', 'c2']), placement: at(1, 9)),
+        ],
+      );
+      final placed = result.placements['badminton#0']!;
+      // Court 2 is free at 9:00, but the player isn't until 10:00.
+      expect(placed.window.start, DateTime(2026, 9, 12, 10));
+    });
+
+    test('with nothing fixed, the result is what it always was', () {
+      final plain = scheduler.schedule(
+        matches: [match('badminton', 0, ['p1', 'p2'])],
+        courts: courts(1),
+        slots: slots(hours: 2),
+      );
+      expect(
+        plain.placements['badminton#0']!.window.start,
+        DateTime(2026, 9, 12, 9),
+      );
+    });
+  });
+
+  group('a court needs its changeover after a long match', () {
+    test('a cricket-length match is followed on the same court only after '
+        'the turnaround', () {
+      final result = scheduler.schedule(
+        matches: [
+          match('cricket', 0, ['a1', 'a2'], minutes: 180),
+          match('cricket', 1, ['b1', 'b2'], minutes: 180),
+        ],
+        courts: courts(1),
+        slots: TournamentScheduler.buildSlots(
+          firstDay: day,
+          dayCount: 1,
+          openHour: 8,
+          closeHour: 20,
+          slotMinutes: 30,
+        ),
+        minRestBetweenMatches: Duration.zero,
+        courtTurnaround: const Duration(minutes: 30),
+      );
+      expect(result.isComplete, isTrue);
+      final first = result.placements['cricket#0']!.window;
+      final second = result.placements['cricket#1']!.window;
+      expect(second.start.difference(first.end).inMinutes,
+          greaterThanOrEqualTo(30));
+    });
+
+    test('no turnaround keeps back-to-back placement', () {
+      final result = scheduler.schedule(
+        matches: [
+          match('bad', 0, ['a1', 'a2']),
+          match('bad', 1, ['b1', 'b2']),
+        ],
+        courts: courts(1),
+        slots: slots(),
+        minRestBetweenMatches: Duration.zero,
+      );
+      final first = result.placements['bad#0']!.window;
+      final second = result.placements['bad#1']!.window;
+      expect(second.start, first.end);
+    });
+  });
+
   group('courts are shared across events', () {
     test('two events cannot both take the only court at once', () {
       final result = scheduler.schedule(

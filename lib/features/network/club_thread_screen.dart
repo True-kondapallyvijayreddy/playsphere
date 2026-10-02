@@ -12,6 +12,7 @@ import '../../data/club_network_repository.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/identity.dart';
+import '../home/home_providers.dart';
 import 'club_network_providers.dart';
 import 'widgets/club_plan_gate.dart';
 import 'widgets/share_to_club_sheet.dart';
@@ -131,6 +132,17 @@ class _ClubThreadScreenState extends ConsumerState<ClubThreadScreen> {
     final owned = ref.watch(myOwnedOrgIdsProvider);
     final pair = _pair;
     final myOrgId = _myOrgId(owned);
+
+    // A conversation opened from a link or a notification belongs to one of
+    // this person's clubs, and the app bar must name that club — so the
+    // selection follows the thread, the way opening a club page does.
+    if (myOrgId != null && ref.watch(currentClubIdProvider) != myOrgId) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          ref.read(currentClubIdProvider.notifier).switchTo(myOrgId);
+        }
+      });
+    }
 
     if (pair.isEmpty || myOrgId == null) {
       return const Scaffold(

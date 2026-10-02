@@ -35,6 +35,9 @@ enum NotificationType {
   membershipApproved('membership_approved', isCritical: false),
   challengeReceived('challenge_received', isCritical: false),
 
+  /// A result has been protested; only an organizer can decide it.
+  disputeRaised('dispute_raised', isCritical: false),
+
   /// An event somebody entered has been called off.
   ///
   /// Critical, and the clearest case for it in the enum: everything else here
@@ -168,8 +171,13 @@ class DeepLink {
         for (final entry in params.entries) 'deepLinkParam_${entry.key}': entry.value,
       };
 
+  /// Reads `deepLinkRouteV2` before `deepLinkRoute`. The server puts a route
+  /// to a newer screen in V2 and keeps one every installed build knows in
+  /// `deepLinkRoute`, which older builds read alone (see `notification()` in
+  /// `functions/index.js`).
   static DeepLink? fromDataPayload(Map<String, dynamic> data) {
-    final route = data['deepLinkRoute'];
+    final v2 = data['deepLinkRouteV2'];
+    final route = v2 is String && v2.isNotEmpty ? v2 : data['deepLinkRoute'];
     if (route is! String || route.isEmpty) return null;
     final params = <String, String>{};
     for (final entry in data.entries) {

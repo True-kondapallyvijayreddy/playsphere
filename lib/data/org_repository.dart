@@ -15,6 +15,7 @@ import '../core/models/firestore_codec.dart';
 import '../core/models/player_code.dart';
 import '../core/models/organization.dart';
 import '../core/models/owner_proposal.dart';
+import '../domain/governance/club_exit.dart';
 import '../domain/governance/owner_vote.dart';
 import 'media_uploader.dart';
 
@@ -637,7 +638,8 @@ class OrgRepository {
     );
   }
 
-  Stream<List<Membership>> watchMembers(String orgId, {MembershipStatus? status}) {
+  Stream<List<Membership>> watchMembers(String orgId,
+      {MembershipStatus? status}) {
     Query<Map<String, dynamic>> q = Refs.members(orgId);
     if (status != null) q = q.where('status', isEqualTo: status.wire);
     return guardStream(
@@ -707,8 +709,25 @@ class OrgRepository {
         return orgRef.id;
       });
 
-  Future<void> updateOrganization(Organization org) =>
-      guard(() => Refs.org(org.id).update(org.toUpdate()));
+  Future<void> updateOrganization(Organization org) => guard(() async {
+        final name = org.name.trim();
+        if (name.length < 3 || name.length > 120) {
+          throw const ValidationException(
+            'A club name needs between 3 and 120 characters.',
+          );
+        }
+        await Refs.org(org.id).update(org.toUpdate());
+      });
+
+  /// Lists a club publicly, or takes it off the directory.
+  ///
+  /// Its own write, and an owner's: `firestore.rules` keeps visibility out of
+  /// what an admin may change, because it decides who can read the whole club.
+  Future<void> setVisibility(String orgId, OrgVisibility visibility) =>
+      guard(() => Refs.org(orgId).update({
+            'visibility': visibility.wire,
+            'updatedAt': FieldValue.serverTimestamp(),
+          }));
 
   /// Sets or clears the club's own ground — see [Organization.homeGroundId].
   ///
@@ -1072,8 +1091,7 @@ class OrgRepository {
         }
 
         final existing = await Refs.ownerProposal(orgId, targetUid).get();
-        if (existing.exists &&
-            OwnerProposal.fromDoc(existing).isOpen) {
+        if (existing.exists && OwnerProposal.fromDoc(existing).isOpen) {
           throw const ValidationException(
             'There is already an open motion about this owner.',
           );
@@ -1121,26 +1139,90 @@ class OrgRepository {
             'resolvedAt': FieldValue.serverTimestamp(),
           }));
 
+  /// An admin taking somebody off the roster.
+  ///
+  /// The row is deleted rather than marked, so a removed person can apply
+  /// again from scratch. `memberCount` is not touched here: the
+  /// `onMemberRosterChanged` Cloud Function recounts it from the active rows
+  /// whenever one stops being active, which is the one way every path — a
+  /// removal, a leaver, an approval — agrees about the number.
   Future<void> removeMember({
     required String orgId,
     required String uid,
   }) =>
+      guard(() => Refs.member(orgId, uid).delete());
+
+  /// Leaving a club, as yourself or for a managed child.
+  ///
+  /// An owner who shares the club with other owners steps down on the way out
+  /// — see [ClubExit]. The sole owner is refused and pointed at
+  /// [handOverClub]; the rules refuse an owner's own delete too, so a club
+  /// is never left without one by a stray tap.
+  Future<void> leaveClub({
+    required String orgId,
+    required String uid,
+  }) =>
       guard(() async {
-        // Only an active member was ever counted. Decrementing for a pending
-        // applicant drove memberCount below the number of actual members and,
-        // with enough declines, below zero.
         final doc = await Refs.member(orgId, uid).get();
-        final wasActive = doc.exists &&
-            Membership.fromDoc(doc).status == MembershipStatus.active;
+        if (!doc.exists) return;
+        if (Membership.fromDoc(doc).role == MembershipRole.owner) {
+          // Throws for the last owner, before anything is written.
+          await resignOwnership(orgId: orgId, uid: uid);
+        }
+        await Refs.member(orgId, uid).delete();
+      });
+
+  /// An owner giving the club to [toUid] — and, unless [stayAsAdmin], leaving
+  /// it.
+  ///
+  /// Two steps, and the order is the whole point. The successor becomes owner
+  /// and the leaver drops to admin in ONE batch, so the club always has an
+  /// owner — the rules check the promotion against the leaver's rank before
+  /// the batch, when they still hold it. Only then is the leaver's row
+  /// deleted, as an admin, which the ordinary self-leave rule allows. If that
+  /// last write fails the handover has still happened and the person is an
+  /// admin who can press Leave again; nothing is half-owned.
+  ///
+  /// The successor's portfolios are cleared in the same write: an owner holds
+  /// every brief by rank and the rules refuse an owner row that stores any.
+  Future<void> handOverClub({
+    required String orgId,
+    required String fromUid,
+    required String toUid,
+    bool stayAsAdmin = false,
+  }) =>
+      guard(() async {
+        if (fromUid == toUid) {
+          throw const ValidationException(
+            'Choose somebody else to take over the club.',
+          );
+        }
+        final me = await Refs.member(orgId, fromUid).get();
+        final next = await Refs.member(orgId, toUid).get();
+        if (!me.exists || Membership.fromDoc(me).role != MembershipRole.owner) {
+          throw const ValidationException(
+            'Only an owner can hand a club over.',
+          );
+        }
+        if (!next.exists || !Membership.fromDoc(next).isActive) {
+          throw const ValidationException(
+            'That person is no longer a member of this club.',
+          );
+        }
 
         final batch = Refs.db.batch();
-        batch.delete(Refs.member(orgId, uid));
-        if (wasActive) {
-          batch.update(Refs.org(orgId), {
-            'memberCount': FieldValue.increment(-1),
+        if (Membership.fromDoc(next).role != MembershipRole.owner) {
+          batch.update(Refs.member(orgId, toUid), {
+            'role': MembershipRole.owner.wire,
+            'portfolios': <String>[],
           });
         }
+        batch.update(Refs.member(orgId, fromUid), {
+          'role': MembershipRole.admin.wire,
+        });
         await batch.commit();
+
+        if (!stayAsAdmin) await Refs.member(orgId, fromUid).delete();
       });
 
   /// Public organizations, for the discovery/browse screen.

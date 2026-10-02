@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import 'enums.dart';
 import 'firestore_codec.dart';
 
 enum TournamentStatus {
@@ -86,6 +87,44 @@ enum SeasonFeeMode {
       );
 }
 
+/// Whether a season document is a multi-sport season or a one-sport
+/// tournament.
+///
+/// ## Why a tournament is stored as a season at all
+///
+/// A tournament is a season with one sport in it — the badminton
+/// championship with its U-13, U-17 and senior draws is exactly the shape a
+/// sports week has, minus the other sports. It used to be stored as a bare
+/// event instead, and so every season feature — sport panels, leaderboard,
+/// umpire panel, venue planner, memory book, club invitations — had to be
+/// built a second time for it or, in practice, never reached it. Storing both
+/// under the one container makes "whatever a season has, a tournament has"
+/// structural rather than a promise somebody has to keep.
+///
+/// This field only decides what the thing is CALLED and which sports may be
+/// added to it. Nothing about scheduling, entries or scoring reads it.
+enum SeasonKind {
+  season('season', 'Season'),
+  tournament('tournament', 'Tournament');
+
+  const SeasonKind(this.wire, this.label);
+
+  final String wire;
+
+  /// "Season" / "Tournament" — titles and chips.
+  final String label;
+
+  /// "season" / "tournament" — inside a sentence.
+  String get noun => wire;
+
+  /// Absent means season: every document written before this field existed
+  /// was created by a season form.
+  static SeasonKind fromWire(String? w) => SeasonKind.values.firstWhere(
+        (e) => e.wire == w,
+        orElse: () => SeasonKind.season,
+      );
+}
+
 /// How much a tournament counts — the grade every federation uses to weight
 /// what winning it is worth.
 ///
@@ -152,8 +191,11 @@ class Tournament {
     required this.orgId,
     required this.name,
     required this.status,
+    this.kind = SeasonKind.season,
     this.grade = TournamentGrade.club,
     this.description,
+    this.shortName,
+    this.organizerName,
     this.bannerUrl,
     this.logoUrl,
     this.venueIds = const [],
@@ -174,6 +216,8 @@ class Tournament {
     this.suspendReason,
     this.suspendedAt,
     this.suspendedBy,
+    this.sportLeads = const {},
+    this.sportSchedulesReleasedAt = const {},
     this.createdBy,
     this.createdAt,
   });
@@ -182,8 +226,24 @@ class Tournament {
   final String orgId;
   final String name;
   final TournamentStatus status;
+
+  /// A multi-sport season or a one-sport tournament — see [SeasonKind].
+  /// Set at creation and never edited: a sports week does not turn into a
+  /// championship halfway through.
+  final SeasonKind kind;
+
   final TournamentGrade grade;
   final String? description;
+
+  /// What the season is called on a scoreboard, a WhatsApp forward or a
+  /// banner too narrow for its full name — "HSS 2026" for "Hyderabad Sports
+  /// Season 2026". Null means the full name is used everywhere.
+  final String? shortName;
+
+  /// Who is putting the season on, when that is not simply the club hosting
+  /// it — a district association, a school's PE department, a sponsor. Shown
+  /// as "Organised by …" on the season and its public link.
+  final String? organizerName;
 
   /// The artwork across the top of the season's page and its public link.
   ///
@@ -267,7 +327,23 @@ class Tournament {
   /// After this, entries close. Every federation publishes one, and a
   /// tournament without one cannot seed, because seeding needs a settled
   /// field.
+  ///
+  /// Read it through [entriesCloseAt], never directly: the stored value is
+  /// whatever a date picker returned, and midnight on the closing day is the
+  /// wrong end of it.
   final DateTime? entryDeadline;
+
+  /// When entries actually stop — [entryDeadline] read as the end of the day
+  /// it names when it carries no time of its own. See [endOfDeadlineDay] for
+  /// the "Active seasons 0 on the first morning" bug this is the fix for.
+  DateTime? get entriesCloseAt => endOfDeadlineDay(entryDeadline);
+
+  /// Whether this season is past its entry deadline at [now].
+  bool entryDeadlinePassed([DateTime? now]) {
+    final closes = entriesCloseAt;
+    if (closes == null) return false;
+    return (now ?? DateTime.now()).isAfter(closes);
+  }
 
   /// How many competitions hang off this tournament. Denormalized so a list
   /// of tournaments does not need a subquery per row.
@@ -311,10 +387,89 @@ class Tournament {
   /// runs late from its first clash onward.
   final int venueTransitionMinutes;
 
+  /// Who is in charge of each sport in this season, by sport id.
+  ///
+  /// A season is several tournaments under one roof — the cricket, the
+  /// badminton, the kho-kho — and on the day each has somebody the organizer
+  /// sends people to. This names them, so the season page can say "Cricket:
+  /// Ravi" instead of listing every admin of the club under every sport.
+  ///
+  /// It grants nothing. Leads are chosen from the people who already run the
+  /// club's competitions (owner, admin, event manager — see
+  /// `SportLead.eligible`), so it assigns responsibility, never authority;
+  /// a club's rank ladder stays the only thing the rules read.
+  ///
+  /// Names are stored beside the uids because the season page is public and
+  /// a spectator cannot read the member list to resolve them.
+  ///
+  /// Absent from [toCreate] and [toUpdate] for the same reason the artwork
+  /// is: the edit sheet does not show it, so writing it there would wipe the
+  /// assignments whenever somebody fixed a typo in the name.
+  /// `TournamentRepository.setSportLeads` owns the field.
+  final Map<String, List<SportLead>> sportLeads;
+
+  /// sportId → when that sport's timetable was published.
+  ///
+  /// A season's timetable is built and published one sport at a time. The
+  /// cricket can be locked and announced while the badminton is still
+  /// taking entries, and publishing one sport never touches another's
+  /// matches. [isScheduleLocked] becomes true once every sport that plays
+  /// matches is in here.
+  ///
+  /// `TournamentRepository.lockSchedule` owns the field; it is absent from
+  /// [toCreate] and [toUpdate] for the reason [sportLeads] is.
+  final Map<String, DateTime> sportSchedulesReleasedAt;
+
   final String? createdBy;
   final DateTime? createdAt;
 
+  /// The people in charge of [sportId], or nobody.
+  List<SportLead> leadsFor(String sportId) =>
+      sportLeads[sportId] ?? const <SportLead>[];
+
+  /// Whether this season's timetable went out the season-wide way, before
+  /// sports were published one at a time.
+  ///
+  /// Such a season has no [sportSchedulesReleasedAt] at all. It has the
+  /// [isScheduleLocked] flag, or — locked before that flag existed — only a
+  /// status that got past publishing. Nothing writes `in_progress` any more,
+  /// so that clause is reached by old documents alone.
+  bool get publishedSeasonWide =>
+      sportSchedulesReleasedAt.isEmpty &&
+      (isScheduleLocked ||
+          status == TournamentStatus.inProgress ||
+          status == TournamentStatus.completed);
+
+  /// Whether [sportId]'s timetable is published.
+  ///
+  /// Once any sport has been published on its own, the per-sport map is the
+  /// whole answer and [isScheduleLocked] is not consulted. That flag only
+  /// says every sport was published at the time, and a sport added since —
+  /// kho-kho after the cricket and badminton went out, or a new category of
+  /// the cricket — is a draft whatever the flag still says. Reading the flag
+  /// here showed such a sport as published, with no way to draw, schedule
+  /// or announce it.
+  ///
+  /// A season published season-wide ([publishedSeasonWide]) counts every
+  /// sport as published, so a running season is not reopened for moving.
+  /// A completed season is a record and is never reopened.
+  bool isSportScheduleLocked(String sportId) {
+    if (status == TournamentStatus.completed) return true;
+    if (sportSchedulesReleasedAt.isEmpty) return publishedSeasonWide;
+    return sportSchedulesReleasedAt.containsKey(sportId);
+  }
+
+  /// Whether every sport in [sportIds] is published — the season-wide
+  /// view's "Published" badge.
+  bool isWholeScheduleLocked(Iterable<String> sportIds) {
+    if (status == TournamentStatus.completed) return true;
+    if (sportSchedulesReleasedAt.isEmpty) return publishedSeasonWide;
+    return sportIds.isNotEmpty && sportIds.every(isSportScheduleLocked);
+  }
+
   int get slotMinutes => matchMinutesDefault + changeoverMinutes;
+
+  bool get isSingleSportTournament => kind == SeasonKind.tournament;
 
   /// Days the tournament runs over, inclusive. One when no end date is set.
   int get dayCount {
@@ -336,8 +491,11 @@ class Tournament {
       orgId: Fs.str(d['orgId']),
       name: Fs.str(d['name'], 'Tournament'),
       status: TournamentStatus.fromWire(Fs.strOrNull(d['status'])),
+      kind: SeasonKind.fromWire(Fs.strOrNull(d['kind'])),
       grade: TournamentGrade.fromWire(Fs.strOrNull(d['grade'])),
       description: Fs.strOrNull(d['description']),
+      shortName: Fs.strOrNull(d['shortName']),
+      organizerName: Fs.strOrNull(d['organizerName']),
       bannerUrl: Fs.strOrNull(d['bannerUrl']),
       logoUrl: Fs.strOrNull(d['logoUrl']),
       venueIds: Fs.strList(d['venueIds']),
@@ -358,6 +516,11 @@ class Tournament {
       suspendReason: Fs.strOrNull(d['suspendReason']),
       suspendedAt: Fs.dateOrNull(d['suspendedAt']),
       suspendedBy: Fs.strOrNull(d['suspendedBy']),
+      sportLeads: SportLead.mapFrom(d['sportLeads']),
+      sportSchedulesReleasedAt: {
+        for (final e in Fs.map(d['sportSchedulesReleasedAt']).entries)
+          if (Fs.dateOrNull(e.value) != null) e.key: Fs.dateOrNull(e.value)!,
+      },
       createdBy: Fs.strOrNull(d['createdBy']),
       createdAt: Fs.dateOrNull(d['createdAt']),
     );
@@ -366,17 +529,24 @@ class Tournament {
   Map<String, Object?> toCreate() => {
         'orgId': orgId,
         'name': name,
-        'nameLower': name.toLowerCase(),
+        'nameLower': _nameKey(name),
         'status': status.wire,
+        'kind': kind.wire,
         'grade': grade.wire,
         'description': description,
+        'shortName': shortName,
+        'organizerName': organizerName,
         'bannerUrl': bannerUrl,
         'logoUrl': logoUrl,
         'venueIds': venueIds,
         'startDate': Fs.ts(startDate),
         'endDate': Fs.ts(endDate),
         'entryDeadline': Fs.ts(entryDeadline),
-        'eventCount': 0,
+        // The events written in the same batch as this document, and zero
+        // for a tournament created empty. `TournamentRepository.createSeason`
+        // writes the season and all of its events atomically, so the count is
+        // true from the first moment the document exists — see the rule.
+        'eventCount': eventCount,
         'contactPhone': contactPhone,
         'entryFeeRupees': entryFeeRupees,
         'feeMode': feeMode.wire,
@@ -390,8 +560,7 @@ class Tournament {
 
   Map<String, Object?> toUpdate() => {
         'name': name,
-        'nameLower': name.toLowerCase(),
-        'status': status.wire,
+        'nameLower': _nameKey(name),
         'grade': grade.wire,
         'description': description,
         'venueIds': venueIds,
@@ -413,6 +582,15 @@ class Tournament {
   // the artwork somebody else uploaded. `TournamentRepository.uploadSeasonBanner`
   // and `uploadSeasonLogo` own those two fields.
   //
+  // `status` is absent from `toUpdate` too. The edit sheet holds the snapshot
+  // it opened with, and writing that back would undo whatever moved the
+  // season on in the meantime — entries opened, a timetable published. The
+  // lifecycle has its own writers (`openEntriesForSeason`, `lockSchedule`,
+  // the event status paths), and only they move it.
+  //
+  // `shortName` and `organizerName` are set at creation and are not on the
+  // edit sheet, so they are absent here for the artwork's reason.
+  //
   // The suspension fields are deliberately absent from both maps above.
   // `TournamentRepository.suspendTournament` and `resumeTournament` own them,
   // and an organizer opening the edit sheet to fix a typo in the name must not
@@ -423,6 +601,8 @@ class Tournament {
     TournamentStatus? status,
     TournamentGrade? grade,
     String? description,
+    String? shortName,
+    String? organizerName,
     String? bannerUrl,
     String? logoUrl,
     List<String>? venueIds,
@@ -449,8 +629,11 @@ class Tournament {
         orgId: orgId,
         name: name ?? this.name,
         status: status ?? this.status,
+        kind: kind,
         grade: grade ?? this.grade,
         description: description ?? this.description,
+        shortName: shortName ?? this.shortName,
+        organizerName: organizerName ?? this.organizerName,
         bannerUrl: bannerUrl ?? this.bannerUrl,
         logoUrl: logoUrl ?? this.logoUrl,
         venueIds: venueIds ?? this.venueIds,
@@ -472,7 +655,53 @@ class Tournament {
         suspendReason: suspendReason ?? this.suspendReason,
         suspendedAt: suspendedAt ?? this.suspendedAt,
         suspendedBy: suspendedBy ?? this.suspendedBy,
+        sportLeads: sportLeads,
+        sportSchedulesReleasedAt: sportSchedulesReleasedAt,
         createdBy: createdBy,
         createdAt: createdAt,
       );
 }
+
+/// One person in charge of one sport in a season. See [Tournament.sportLeads].
+class SportLead {
+  const SportLead({required this.uid, required this.name});
+
+  final String uid;
+  final String name;
+
+  /// Ranks a lead may be chosen from — the ones that already run the club's
+  /// competitions. Naming anyone else would suggest an authority the rules
+  /// do not give them.
+  static const Set<MembershipRole> eligible = {
+    MembershipRole.owner,
+    MembershipRole.admin,
+    MembershipRole.eventManager,
+  };
+
+  Map<String, Object?> toMap() => {'uid': uid, 'name': name};
+
+  static Map<String, List<SportLead>> mapFrom(Object? value) {
+    if (value is! Map) return const {};
+    final out = <String, List<SportLead>>{};
+    for (final entry in value.entries) {
+      final list = entry.value;
+      if (list is! List) continue;
+      final leads = [
+        for (final item in list)
+          if (item is Map && item['uid'] is String)
+            SportLead(
+              uid: item['uid'] as String,
+              name: item['name'] is String ? item['name'] as String : 'Admin',
+            ),
+      ];
+      if (leads.isNotEmpty) out[entry.key.toString()] = leads;
+    }
+    return out;
+  }
+}
+
+/// What `nameLower` holds: the name lower-cased with its spacing collapsed,
+/// the same key `SeasonName.key` compares by — so a season whose stored name
+/// kept a double space is still found by the uniqueness query.
+String _nameKey(String name) =>
+    name.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase();

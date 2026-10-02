@@ -12,6 +12,7 @@ import '../../domain/draw/officials_roster.dart';
 import '../../domain/scoring/scoring_registry.dart';
 import '../../domain/tournament/officiating_demand.dart';
 import '../../shared/app_scaffold.dart';
+import 'widgets/season_organizer_gate.dart';
 import '../competitions/widgets/season_officials_field.dart'
     show AddOfficialSheet;
 
@@ -37,18 +38,26 @@ class OfficialsScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final key = (orgId: orgId, tournamentId: tournamentId);
     final tAsync = ref.watch(tournamentProvider(key));
+    final canManage = ref.watch(seasonAccessProvider(key)).canManage;
 
     return AppScaffold(
       orgId: orgId,
       title: 'Officials',
       actions: [
-        IconButton(
-          icon: const Icon(Icons.person_add_alt_outlined),
-          tooltip: 'Add an official',
-          onPressed: () => _addOfficial(context, ref),
-        ),
+        if (canManage)
+          IconButton(
+            icon: const Icon(Icons.person_add_alt_outlined),
+            tooltip: 'Add an official',
+            onPressed: () => _addOfficial(context, ref),
+          ),
       ],
-      body: AsyncView(
+      // Every control on this screen changes the season's staffing, so the
+      // whole screen is the organizers'. See [SeasonOrganizerGate].
+      body: SeasonOrganizerGate(
+        orgId: orgId,
+        tournamentId: tournamentId,
+        what: 'the umpire panel',
+        child: AsyncView(
         value: tAsync,
         builder: (tournament) {
           if (tournament == null) {
@@ -164,6 +173,7 @@ class OfficialsScreen extends ConsumerWidget {
             ],
           );
         },
+        ),
       ),
     );
   }
@@ -860,6 +870,7 @@ class _AssignToFixtureSheetState extends ConsumerState<_AssignToFixtureSheet> {
               grantedScoringAccess: o.scoringRightsGranted,
             ),
             grantScoringAccess: o.scoringRightsGranted,
+            maxMatchesPerDay: o.maxMatchesPerDay,
           );
       if (!mounted) return;
       Navigator.of(context).pop();

@@ -54,6 +54,21 @@ import 'package:flutter/foundation.dart';
 /// step 1; without it a debug build reports as unverified and pollutes the
 /// metrics you are about to make a decision from.
 Future<void> activateAppCheck() async {
+  // On the web with no site key there is nothing to activate, and ASKING is
+  // worse than not asking: the web plugin has no provider to hand the call to,
+  // so it threw `MissingPluginException` and every single page load logged
+  // "App Check activation failed" — an error that looks like a broken
+  // integration and is in fact the configured state. Saying so plainly leaves
+  // one honest line in the console instead, and the day the key exists this
+  // returns to the normal path with no other change.
+  if (kIsWeb && kRecaptchaSiteKey == null) {
+    debugPrint(
+      '[PlaySphere] App Check: no web site key set, so this client sends no '
+      'attestation token. Create a reCAPTCHA Enterprise key and set '
+      'kRecaptchaSiteKey to turn web attestation on.',
+    );
+    return;
+  }
   try {
     await FirebaseAppCheck.instance.activate(
       // Play Integrity on Android and Device Check on iOS in release; the
