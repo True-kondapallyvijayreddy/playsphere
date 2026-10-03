@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../core/models/enums.dart';
 import '../../core/models/fixture.dart';
 import '../../core/models/match_player.dart';
 import '../../core/permissions/capability.dart';
@@ -178,27 +178,51 @@ class _LineupEditorState extends ConsumerState<LineupEditor> {
   }
 
   /// Null when [uid] may be added to the lineup; the ineligibility reason
-  /// otherwise. Returns null (lets the add through) whenever there's nothing
-  /// to check against — an event with no age bound, or a uid whose profile
-  /// can't be read — since this is a client-side courtesy check, not the
-  /// authoritative gate.
+  /// otherwise.
+  ///
+  /// Asked of the server (`checkLineupEligibility`), because the profiles this
+  /// check exists for are exactly the ones nobody at the ground can read: a
+  /// minor's is closed to the club, and so is an adult's private one. Reading
+  /// them here used to come back empty, and an empty answer let the player
+  /// through — in an Under-19 event, almost everybody (TC-ADM-069/073).
+  ///
+  /// When the server cannot be reached the local check runs instead, on what
+  /// this device can read. Whatever gets through, the `onLineupChanged`
+  /// trigger re-checks the saved line-up and flags it on the match.
   Future<String?> _ageRejectionFor(String uid) async {
     final f = widget.fixture;
     final competition = await ref
         .read(competitionProvider(CompRef(f.orgId, f.compId)).future);
-    final category = competition?.category;
-    if (competition == null ||
-        category == null ||
-        !category.dimensions.contains(CategoryDimension.age) ||
-        (category.minAge == null && category.maxAge == null)) {
+    if (competition == null || !competition.category.restrictsEntry) {
       return null;
+    }
+
+    try {
+      final response =
+          await FirebaseFunctions.instanceFor(region: 'asia-south1')
+              .httpsCallable('checkLineupEligibility')
+              .call<Map<Object?, Object?>>({
+        'orgId': f.orgId,
+        'compId': f.compId,
+        'fixtureId': f.id,
+        'uids': [uid],
+      });
+      final problems = response.data['problems'] as List<Object?>? ?? const [];
+      for (final p in problems) {
+        if (p is Map && p['reason'] is String) return p['reason'] as String;
+      }
+      return null;
+    } on FirebaseFunctionsException catch (e) {
+      if (e.code == 'permission-denied') return e.message;
+      // Offline or unreachable: fall through to what this device can see.
+    } catch (_) {
+      // Same.
     }
 
     final user = await ref.read(userProfileProvider(uid).future);
     if (user == null) return null;
-
     final eligibility =
-        category.check(user, competitionStart: competition.startDate);
+        competition.category.check(user, competitionStart: competition.startDate);
     return eligibility.isEligible ? null : eligibility.reason;
   }
 
@@ -287,6 +311,32 @@ class _LineupEditorState extends ConsumerState<LineupEditor> {
         height: 460,
         child: Column(
           children: [
+            // The server's verdict on the saved line-ups — the players this
+            // device could not check itself (`onLineupChanged`). Read live, so
+            // it appears while the dialog is open.
+            ...[
+              for (final issue in ref
+                      .watch(fixtureProvider(
+                          FixtureRef(f.orgId, f.compId, f.id)))
+                      .valueOrNull
+                      ?.lineupIssues ??
+                  f.lineupIssues)
+                Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.errorContainer,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    issue.reason,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onErrorContainer,
+                    ),
+                  ),
+                ),
+            ],
             SegmentedButton<int>(
               segments: [
                 ButtonSegment(

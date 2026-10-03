@@ -26,7 +26,7 @@
  */
 
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
-import { onDocumentCreated } from 'firebase-functions/v2/firestore';
+import { onDocumentCreated, onDocumentUpdated } from 'firebase-functions/v2/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
 import { logger } from 'firebase-functions';
 
@@ -332,5 +332,137 @@ export const onTeamRegistrationCreated = onDocumentCreated(
     };
     const unique = await persistNotifications([to], payload);
     await pushToUids(unique, payload);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Line-ups: the match-day half of the same check (TC-ADM-069 / TC-ADM-073).
+// ---------------------------------------------------------------------------
+//
+// A line-up is picked from the whole club, not only the squad that entered —
+// a substitute on the day is normal. The app used to check each pick against
+// the player's own profile, which it cannot read for a minor or for an adult
+// with a private profile, and so it waved those players through: in an
+// Under-19 event, nearly everybody. These ask the server, which can read them.
+
+const LINEUP_ROLES = ['owner', 'admin', 'event_manager', 'judge_scorer'];
+const MAX_LINEUP_CHECK = 40;
+
+/** The account uids on a stored line-up. Pure. */
+export function lineupUids(lineup) {
+  if (!Array.isArray(lineup)) return [];
+  return [...new Set(lineup
+    .map((p) => (p && typeof p.uid === 'string' ? p.uid : null))
+    .filter(Boolean))];
+}
+
+/** Whether [caller] may pick players for [fixture]. */
+async function mayPickFor(caller, orgId, fixture) {
+  if ((fixture.scorerUids ?? []).includes(caller)) return true;
+  if ((fixture.officials ?? []).some((o) => o?.uid === caller)) return true;
+  const orgs = [orgId, ...(Array.isArray(fixture.participantOrgIds) ? fixture.participantOrgIds : [])];
+  for (const org of new Set(orgs)) {
+    if (LINEUP_ROLES.includes(await roleAt(org, caller))) return true;
+  }
+  return false;
+}
+
+export const checkLineupEligibility = onCall(
+  { ...CALLABLE_OPTS },
+  async (request) => {
+    const caller = request.auth?.uid;
+    if (!caller) throw new HttpsError('unauthenticated', 'Sign in first.');
+    const { orgId, compId, fixtureId, uids } = request.data ?? {};
+    for (const [key, value] of Object.entries({ orgId, compId, fixtureId })) {
+      if (typeof value !== 'string' || !value || value.includes('/')) {
+        throw new HttpsError('invalid-argument', `Missing ${key}.`);
+      }
+    }
+    if (!Array.isArray(uids) || uids.length === 0 || uids.length > MAX_LINEUP_CHECK
+        || uids.some((u) => typeof u !== 'string' || !u || u.includes('/'))) {
+      throw new HttpsError('invalid-argument', 'Name between 1 and 40 players.');
+    }
+
+    const compRef = db().doc(`orgs/${orgId}/competitions/${compId}`);
+    const [compSnap, fxSnap] = await Promise.all([
+      compRef.get(),
+      compRef.collection('fixtures').doc(fixtureId).get(),
+    ]);
+    if (!compSnap.exists || !fxSnap.exists) {
+      throw new HttpsError('not-found', 'That match no longer exists.');
+    }
+    if (!(await mayPickFor(caller, orgId, fxSnap.data()))) {
+      throw new HttpsError('permission-denied', 'Only the people running this match can pick its players.');
+    }
+
+    const comp = compSnap.data();
+    if (!categoryRestricts(comp.category)) return { problems: [] };
+    const problems = teamProblems(comp.category, toDate(comp.startDate), await loadMembers([...new Set(uids)]));
+    return { problems: problems.map(({ uid, name, reason }) => ({ uid, name, reason })) };
+  },
+);
+
+/**
+ * The backstop: whatever wrote the line-up — an older app, an offline edit,
+ * a write that went around the check — the match carries `lineupIssues`, which
+ * the line-up editor and the match centre show, and the people running the
+ * match are told the moment a new problem appears. Not refused: the toss may
+ * be minutes away, and taking a player off the sheet is a decision for the
+ * ground.
+ */
+export const onLineupChanged = onDocumentUpdated(
+  { region: 'asia-south1', document: 'orgs/{orgId}/competitions/{compId}/fixtures/{fixtureId}' },
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (!before || !after) return;
+    const uidsBefore = [...lineupUids(before.lineupA), ...lineupUids(before.lineupB)].sort();
+    const uidsAfter = [...lineupUids(after.lineupA), ...lineupUids(after.lineupB)].sort();
+    if (uidsBefore.join() === uidsAfter.join()) return;
+
+    const { orgId, compId } = event.params;
+    const comp = await db().doc(`orgs/${orgId}/competitions/${compId}`).get();
+    if (!comp.exists) return;
+
+    let problems = [];
+    if (categoryRestricts(comp.get('category')) && uidsAfter.length > 0) {
+      problems = teamProblems(
+        comp.get('category'),
+        toDate(comp.get('startDate')),
+        await loadMembers([...new Set(uidsAfter)].slice(0, MAX_LINEUP_CHECK)),
+      );
+    }
+    const issues = problems.map(({ uid, name, reason }) => ({ uid, name, reason }));
+    const previous = Array.isArray(after.lineupIssues) ? after.lineupIssues : [];
+    if (issues.length === 0 && previous.length === 0) return;
+    await event.data.after.ref.update({
+      lineupIssues: issues.length > 0 ? issues : FieldValue.delete(),
+    });
+
+    const known = new Set(previous.map((p) => p?.uid));
+    const fresh = issues.filter((p) => !known.has(p.uid));
+    if (fresh.length === 0) return;
+
+    const organizers = await db().collection(`orgs/${orgId}/members`)
+      .where('status', '==', 'active')
+      .where('role', 'in', COMPETITION_ROLES)
+      .get();
+    const to = [...new Set([
+      ...organizers.docs.map((d) => d.id),
+      ...(after.scorerUids ?? []),
+    ])].filter(Boolean);
+    if (to.length === 0) return;
+    const payload = {
+      id: `lineup_ineligible_${event.params.fixtureId}_${fresh.map((p) => p.uid).join('_')}`.slice(0, 200),
+      type: 'event_reminder',
+      title: `${after.entrantAName ?? 'Side A'} v ${after.entrantBName ?? 'Side B'}: check the line-up`,
+      body: `${fresh.map((p) => p.reason).join(' ')}`.slice(0, 400),
+      deepLinkRoute: '/org/:orgId/event/:compId',
+      deepLinkParam_orgId: orgId,
+      deepLinkParam_compId: compId,
+    };
+    const unique = await persistNotifications(to, payload);
+    await pushToUids(unique, payload);
+    logger.info(`Line-up issues on ${event.params.fixtureId}: ${payload.body}`);
   },
 );

@@ -24,6 +24,7 @@ import '../core/models/tournament_invite.dart';
 import '../core/models/tournament_official.dart';
 import '../core/models/venue.dart';
 import '../core/models/venue_plan.dart';
+import '../domain/draw/court_delay.dart';
 import '../domain/draw/draft_season_plan.dart';
 import '../domain/draw/match_count.dart';
 import '../domain/draw/officials_roster.dart';
@@ -919,10 +920,23 @@ class TournamentRepository {
   /// `sportSchedulesReleasedAt`, which the server announces to that sport's
   /// entrants. It locks the season as a whole only once every sport that
   /// plays matches has been published.
+  ///
+  /// ## Clashes are checked before anything is announced
+  ///
+  /// A generated timetable is sound by construction, but a timetable does not
+  /// stay sound: a match forced onto a busy court, a ground withdrawn, a
+  /// season's dates moved. Publishing used to announce whatever was stored
+  /// (TC-ADM-021). Now it runs the same guarantees as Schedule Health over the
+  /// whole season and refuses with [ScheduleConflictsException] when any
+  /// clash involves this sport's matches — including a clash with a sport
+  /// already published, which is exactly the one nobody is looking at.
+  /// [publishDespiteConflicts] is the organizer's deliberate second press, as
+  /// on a manual move: they may know something the data does not.
   Future<void> lockSchedule({
     required String orgId,
     required String tournamentId,
     required String sportId,
+    bool publishDespiteConflicts = false,
   }) =>
       guard(() async {
         final seasonSnap = await Refs.tournament(orgId, tournamentId).get();
@@ -973,6 +987,17 @@ class TournamentRepository {
             '${placeholderEvents.join(', ')}. Generate the draw for each '
             'before publishing, or their entrants go out as "Team A".',
           );
+        }
+
+        if (!publishDespiteConflicts) {
+          final conflicts = await _conflictsInvolving(
+            orgId: orgId,
+            tournamentId: tournamentId,
+            compIds: {for (final e in inSport) e.id},
+          );
+          if (conflicts.isNotEmpty) {
+            throw ScheduleConflictsException(sportName, conflicts);
+          }
         }
 
         // Every sport that plays matches. Track and field, recorded as marks,
@@ -1036,6 +1061,31 @@ class TournamentRepository {
         // entitled to know it landed.
         await batch.commitAll();
       });
+
+  /// The Schedule Health violations that touch any match of [compIds], in
+  /// words. Empty when there are none, and also when the season cannot be
+  /// read as a timetable at all (no courts, nothing left to play) — that is
+  /// not a clash, and the other checks on the publish path cover it.
+  Future<List<String>> _conflictsInvolving({
+    required String orgId,
+    required String tournamentId,
+    required Set<String> compIds,
+  }) async {
+    final ScheduleHealthReport report;
+    try {
+      final plan = await _loadPlan(orgId: orgId, tournamentId: tournamentId);
+      report = _healthOf(plan, overrides: const {});
+    } on ValidationException {
+      return const [];
+    } on NotFoundException {
+      return const [];
+    }
+    return [
+      for (final v in report.violations)
+        if (v.matchKeys.any((k) => compIds.contains(k.split('#').first)))
+          v.detail,
+    ];
+  }
 
   /// Regenerates the tournament schedule draft with non-overlapping timings
   /// across available courts and rest intervals.
@@ -3158,6 +3208,101 @@ class TournamentRepository {
         return health;
       });
 
+  /// One court running late: [fixtureId] and every later unplayed match on
+  /// its court that day move back by [by] — see [courtDelayMoves] for why
+  /// only that court (TC-ADM-024).
+  ///
+  /// The whole season is re-checked first, as for a hand move: pushing Court
+  /// 2 back half an hour can land one of its players on Court 5 at the same
+  /// time. A move that creates a NEW clash is refused with it named, unless
+  /// [force]; clashes that were already there are not this delay's doing and
+  /// do not block it.
+  ///
+  /// Each moved match is stamped with `lateNotice`, and `onCourtRunningLate`
+  /// tells the people in it their new time. Returns how many moved.
+  Future<int> delayCourt({
+    required String orgId,
+    required String tournamentId,
+    required String compId,
+    required String fixtureId,
+    required Duration by,
+    bool force = false,
+  }) =>
+      guard(() async {
+        if (by.inMinutes <= 0 || by.inMinutes > 240) {
+          throw const ValidationException(
+            'A delay is between 1 minute and 4 hours. For more, move the day.',
+          );
+        }
+        final plan = await _loadPlan(orgId: orgId, tournamentId: tournamentId);
+        final target = plan.fixturesByKey.values
+            .where((f) => f.id == fixtureId && f.compId == compId)
+            .firstOrNull;
+        if (target == null) {
+          throw const NotFoundException(
+            'That match has already started or finished, so its time stays.',
+          );
+        }
+        if (courtKeyOf(target) == null || target.scheduledAt == null) {
+          throw const ValidationException(
+            'This match has no court and time yet, so there is nothing to '
+            'push back.',
+          );
+        }
+
+        final moves = courtDelayMoves(
+          target: target,
+          fixtures: plan.fixturesByKey.values,
+          by: by,
+        );
+        final keyOf = {
+          for (final e in plan.fixturesByKey.entries) e.value.id: e.key,
+        };
+        final overrides = {
+          for (final m in moves.entries)
+            if (keyOf[m.key] != null)
+              keyOf[m.key]!: (start: m.value, court: null),
+        };
+
+        if (!force) {
+          final before = {
+            for (final v in _healthOf(plan, overrides: const {}).violations)
+              v.detail,
+          };
+          final after = _healthOf(plan, overrides: overrides);
+          final fresh = [
+            for (final v in after.violations)
+              if (v.matchKeys.any(overrides.containsKey) &&
+                  !before.contains(v.detail))
+                v.detail,
+          ];
+          if (fresh.isNotEmpty) {
+            throw CourtDelayClashException(
+              'Pushing this court back causes a clash, so nothing was moved. '
+              '${fresh.take(3).join('; ')}',
+            );
+          }
+        }
+
+        final byId = {for (final f in plan.fixturesByKey.values) f.id: f};
+        final batch = ChunkedBatch(Refs.db);
+        for (final m in moves.entries) {
+          final f = byId[m.key]!;
+          batch.update(Refs.fixture(orgId, f.compId, f.id), {
+            'scheduledAt': Timestamp.fromDate(m.value),
+            'lateNotice': {
+              'minutes': by.inMinutes,
+              'at': FieldValue.serverTimestamp(),
+            },
+            'updatedAt': FieldValue.serverTimestamp(),
+          });
+        }
+        // Awaited: the organizer is standing at the court and needs to know
+        // the new times are real before they announce them.
+        await batch.commitAll();
+        return moves.length;
+      });
+
   /// Where [matches] stand in the stored timetable, with [overrides] applied.
   ///
   /// A match with no time is left out. One placed by hand, or before court
@@ -3405,6 +3550,30 @@ class TournamentRepository {
 /// that nobody is double-booked before they send the schedule to two hundred
 /// people. Zeroes across the board is the whole point — a health check that
 /// only ever appears when something is wrong teaches nobody to trust it.
+/// A court delay refused because it would create a new clash — see
+/// [TournamentRepository.delayCourt]. Separate from its other refusals so the
+/// screen can offer "delay anyway" for this one only.
+class CourtDelayClashException extends ValidationException {
+  const CourtDelayClashException(super.message);
+}
+
+/// Publishing refused because the timetable has clashes involving the sport
+/// being published — see [TournamentRepository.lockSchedule].
+class ScheduleConflictsException extends ValidationException {
+  ScheduleConflictsException(this.sportName, this.conflicts)
+      : super(
+          '$sportName cannot be published yet: its timetable has '
+          '${conflicts.length} ${conflicts.length == 1 ? 'clash' : 'clashes'}. '
+          'Fix ${conflicts.length == 1 ? 'it' : 'them'} in Schedule Health, '
+          'or publish anyway if you know why.',
+        );
+
+  final String sportName;
+
+  /// Each clash in words, as Schedule Health shows it.
+  final List<String> conflicts;
+}
+
 class ScheduleHealthReport {
   const ScheduleHealthReport({
     required this.scheduled,

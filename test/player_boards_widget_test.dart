@@ -66,7 +66,7 @@ void main() {
       ]),
     );
 
-    expect(find.text('Player charts'), findsOneWidget);
+    expect(find.text('Top performers'), findsOneWidget);
     // Counter keys reach the screen as people read them, not as camelCase.
     expect(find.widgetWithText(ChoiceChip, 'Runs'), findsOneWidget);
     expect(find.widgetWithText(ChoiceChip, 'Wickets'), findsOneWidget);
@@ -149,10 +149,10 @@ void main() {
     // Normal for a chess draw, and for a tournament on its first morning. An
     // empty card explaining itself would be noise on both.
     await pump(t, PlayerBoards.from(const []));
-    expect(find.text('Player charts'), findsNothing);
+    expect(find.text('Top performers'), findsNothing);
 
     await pump(t, null);
-    expect(find.text('Player charts'), findsNothing);
+    expect(find.text('Top performers'), findsNothing);
   });
 
   testWidgets('a multi-sport season splits its charts by sport', (t) async {
@@ -220,7 +220,7 @@ void main() {
       ),
     );
 
-    expect(find.text('Player charts'), findsOneWidget);
+    expect(find.text('Top performers'), findsOneWidget);
     // One option is not a choice, so no control offers it.
     expect(find.widgetWithText(ChoiceChip, 'Cricket'), findsNothing);
     expect(find.widgetWithText(ChoiceChip, 'Runs'), findsOneWidget);

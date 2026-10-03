@@ -159,6 +159,9 @@ class TournamentDetailScreen extends ConsumerWidget {
                     // club confirmed by the host was still being asked to
                     // register, and the natural next move is to press it
                     // again.
+                    // Their house, for anybody who has one — an organizer
+                    // who also plays included (TC-CLUB-001).
+                    _MyHouseBanner(orgId: orgId, tournamentId: tournamentId),
                     if (!canManage)
                       _RegistrationStanding(
                         orgId: orgId,
@@ -257,6 +260,43 @@ class TournamentDetailScreen extends ConsumerWidget {
             ],
           );
         },
+      ),
+    );
+  }
+}
+
+/// "Your house: Charminar Strikers" — the first thing a student looks for on
+/// a school season's page, and previously visible only inside each event.
+class _MyHouseBanner extends ConsumerWidget {
+  const _MyHouseBanner({required this.orgId, required this.tournamentId});
+
+  final String orgId;
+  final String tournamentId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final houses = ref.watch(mySeasonHousesProvider(
+      (orgId: orgId, tournamentId: tournamentId),
+    ));
+    if (houses.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: PsCard(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        child: Row(
+          children: [
+            const Icon(Icons.shield_outlined, color: Ps.primary, size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                houses.length == 1
+                    ? 'Your house: ${houses.single}'
+                    : 'Your houses: ${houses.join(', ')}',
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -20,3 +20,13 @@ test('sameRoster ignores order but not membership', () => {
   assert.equal(sameRoster(['a', 'b'], ['a', 'c']), false);
   assert.equal(sameRoster(undefined, []), true);
 });
+
+import { lineupUids } from './team_eligibility.js';
+
+test('lineupUids: account holders only, once each — guests have no uid', () => {
+  assert.deepEqual(
+    lineupUids([{ id: 'a', uid: 'a' }, { id: 'g', name: 'Guest', uid: null }, { id: 'a', uid: 'a' }, null]),
+    ['a'],
+  );
+  assert.deepEqual(lineupUids(undefined), []);
+});

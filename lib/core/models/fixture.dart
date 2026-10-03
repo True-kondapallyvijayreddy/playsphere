@@ -76,6 +76,7 @@ class Fixture {
     this.qualifierB,
     this.courtId,
     this.venueId,
+    this.lineupIssues = const [],
     this.courtRefId,
     this.tournamentId,
     this.resultType = MatchResultType.normal,
@@ -566,6 +567,13 @@ class Fixture {
   /// Null for every fixture placed by hand or before this existed, and every
   /// reader treats null as "cannot check", never as "no venue".
   final String? venueId;
+
+  /// Players on either line-up who may not play in this event, with the
+  /// reason in words ("Ravi Kumar is 20 on 01/10/2026 — Under-19 allows 19
+  /// or under."). Written only by the `onLineupChanged` Cloud Function, which
+  /// can read the birth dates nobody at the ground can (TC-ADM-069/073).
+  /// Empty when the line-ups are clean or the event has no age/gender limit.
+  final List<({String uid, String reason})> lineupIssues;
   final String? courtRefId;
 
   /// What to show on a side with no entrant yet — the qualifier it is waiting
@@ -957,6 +965,11 @@ class Fixture {
       qualifierB: QualifierSource.fromWire(Fs.strOrNull(d['qualifierB'])),
       courtId: Fs.strOrNull(d['courtId']),
       venueId: Fs.strOrNull(d['venueId']),
+      lineupIssues: [
+        for (final i in (d['lineupIssues'] as List<Object?>? ?? const []))
+          if (i is Map && i['uid'] is String && i['reason'] is String)
+            (uid: i['uid'] as String, reason: i['reason'] as String),
+      ],
       courtRefId: Fs.strOrNull(d['courtRefId']),
       tournamentId: Fs.strOrNull(d['tournamentId']),
       resultType: MatchResultType.fromWire(Fs.strOrNull(d['resultType'])),
@@ -1155,6 +1168,7 @@ class Fixture {
       qualifierB: qualifierB,
       courtId: courtId ?? this.courtId,
       venueId: venueId ?? this.venueId,
+      lineupIssues: lineupIssues,
       courtRefId: courtRefId ?? this.courtRefId,
       tournamentId: tournamentId,
       resultType: resultType ?? this.resultType,

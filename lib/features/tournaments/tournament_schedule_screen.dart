@@ -7,6 +7,7 @@ import '../../core/models/fixture.dart';
 import '../../core/providers.dart';
 import '../../core/router/app_router.dart';
 import '../../data/tournament_repository.dart';
+import '../../domain/draw/court_delay.dart';
 import '../../domain/schedule/schedule_view_model.dart';
 import '../../shared/app_scaffold.dart';
 import '../../shared/ui_kit.dart';
@@ -532,6 +533,19 @@ Future<void> moveMatchByHand({
   );
   if (choice == null || !context.mounted) return;
 
+  final lateBy = choice.lateBy;
+  if (lateBy != null) {
+    await _delayCourt(
+      context: context,
+      ref: ref,
+      orgId: orgId,
+      tournamentId: tournamentId,
+      fixture: fixture,
+      by: lateBy,
+    );
+    return;
+  }
+
   Future<void> attempt({required bool force}) async {
     await ref.read(tournamentRepositoryProvider).moveFixture(
           orgId: orgId,
@@ -584,7 +598,67 @@ Future<void> moveMatchByHand({
   }
 }
 
-typedef _MoveChoice = ({DateTime? start, String? venueId, String? courtRefId});
+/// Pushes one court back by [by], re-offering it as a deliberate override if
+/// it would cause a clash — the same shape as a hand move.
+Future<void> _delayCourt({
+  required BuildContext context,
+  required WidgetRef ref,
+  required String orgId,
+  required String tournamentId,
+  required Fixture fixture,
+  required Duration by,
+}) async {
+  final messenger = ScaffoldMessenger.of(context);
+  final repo = ref.read(tournamentRepositoryProvider);
+  Future<int> attempt({required bool force}) => repo.delayCourt(
+        orgId: orgId,
+        tournamentId: tournamentId,
+        compId: fixture.compId,
+        fixtureId: fixture.id,
+        by: by,
+        force: force,
+      );
+  String done(int n) => '$n ${n == 1 ? 'match' : 'matches'} on this court '
+      'moved ${by.inMinutes} min later. Their players are being told.';
+
+  try {
+    messenger.showSnackBar(SnackBar(content: Text(done(await attempt(force: false)))));
+  } on CourtDelayClashException catch (e) {
+    if (!context.mounted) return;
+    final anyway = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('That delay causes a clash'),
+        content: SingleChildScrollView(child: Text(e.message)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Leave the times'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delay anyway'),
+          ),
+        ],
+      ),
+    );
+    if (anyway != true) return;
+    try {
+      messenger.showSnackBar(SnackBar(content: Text(done(await attempt(force: true)))));
+    } catch (e2) {
+      if (context.mounted) showError(context, e2);
+    }
+  } catch (e) {
+    if (context.mounted) showError(context, e);
+  }
+}
+
+typedef _MoveChoice = ({
+  DateTime? start,
+  String? venueId,
+  String? courtRefId,
+  Duration? lateBy,
+});
 
 /// Where and when, asked in the two questions an organizer actually has.
 class _MoveMatchSheet extends ConsumerStatefulWidget {
@@ -642,7 +716,40 @@ class _MoveMatchSheetState extends ConsumerState<_MoveMatchSheet> {
             '${widget.fixture.displayNameB()}',
             style: theme.textTheme.bodySmall,
           ),
-          const SizedBox(height: 16),
+          // The everyday match-day case: this court overran. Pushes this
+          // match and the later ones on the same court back, and tells their
+          // players — see `TournamentRepository.delayCourt` (TC-ADM-024).
+          if (courtKeyOf(widget.fixture) != null &&
+              widget.fixture.scheduledAt != null) ...[
+            const SizedBox(height: 16),
+            Text('Running late on this court?',
+                style: theme.textTheme.labelLarge),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: [
+                for (final m in const [15, 30, 45, 60])
+                  OutlinedButton(
+                    onPressed: () => Navigator.of(context).pop((
+                      start: null,
+                      venueId: null,
+                      courtRefId: null,
+                      lateBy: Duration(minutes: m),
+                    )),
+                    child: Text('+$m min'),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Moves this match and the later ones on its court today, and '
+              'tells their players the new times.',
+              style: theme.textTheme.bodySmall,
+            ),
+            const Divider(height: 28),
+          ] else
+            const SizedBox(height: 16),
           ListTile(
             contentPadding: EdgeInsets.zero,
             leading: const Icon(Icons.event_outlined),
@@ -725,6 +832,7 @@ class _MoveMatchSheetState extends ConsumerState<_MoveMatchSheet> {
                             start: _when,
                             venueId: _venueId,
                             courtRefId: _courtRefId,
+                            lateBy: null,
                           )),
                   child: const Text('Move'),
                 ),
@@ -771,19 +879,68 @@ Future<void> lockTournamentSchedule({
   );
   if (confirm != true) return;
 
+  final repo = ref.read(tournamentRepositoryProvider);
   try {
-    await ref.read(tournamentRepositoryProvider).lockSchedule(
-          orgId: orgId,
-          tournamentId: tournamentId,
-          sportId: sportId,
-        );
+    try {
+      await repo.lockSchedule(
+        orgId: orgId,
+        tournamentId: tournamentId,
+        sportId: sportId,
+      );
+    } on ScheduleConflictsException catch (e) {
+      // Clashes found (TC-ADM-021). Show them, and let the organizer decide:
+      // fix them first, or publish knowingly.
+      if (!context.mounted) return;
+      final anyway = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text('$sportName has timetable clashes'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(e.message),
+                const SizedBox(height: 12),
+                for (final c in e.conflicts.take(8))
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Text('• $c'),
+                  ),
+                if (e.conflicts.length > 8)
+                  Text('…and ${e.conflicts.length - 8} more.'),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Fix them first'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Publish anyway'),
+            ),
+          ],
+        ),
+      );
+      if (anyway != true) return;
+      await repo.lockSchedule(
+        orgId: orgId,
+        tournamentId: tournamentId,
+        sportId: sportId,
+        publishDespiteConflicts: true,
+      );
+    }
     if (!context.mounted) return;
     messenger.showSnackBar(
       SnackBar(content: Text('$sportName schedule published.')),
     );
   } catch (e) {
     if (!context.mounted) return;
-    messenger.showSnackBar(SnackBar(content: Text('Could not publish: $e')));
+    messenger.showSnackBar(
+      SnackBar(content: Text('Could not publish: ${errorMessage(e)}')),
+    );
   }
 }
 

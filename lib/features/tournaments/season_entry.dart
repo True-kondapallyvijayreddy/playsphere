@@ -42,3 +42,30 @@ final competitionEnteredProvider =
       .watch(profileEntryRefsProvider)
       .contains('${key.orgId}/${key.compId}');
 });
+
+/// The house (or houses) the profile in use plays for in this season — the
+/// "Your house" line on the season page (TC-CLUB-001).
+///
+/// A house is recorded on each event entry (`Registration.houseName`), not on
+/// the season, because that is where the organizer allocates it. So this reads
+/// the profile's own live entries in the season's events. Usually one name;
+/// more than one only when a student is in different houses for different
+/// events, which the banner then says plainly rather than picking one.
+final mySeasonHousesProvider = Provider.family<List<String>,
+    ({String orgId, String tournamentId})>((ref, key) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return const [];
+  final events = ref.watch(tournamentEventsProvider(key)).valueOrNull;
+  if (events == null) return const [];
+  final ids = {for (final e in events) e.id};
+  final entries = ref.watch(userEntriesProvider(uid)).valueOrNull ?? const [];
+  final houses = <String>{
+    for (final e in entries)
+      if (e.orgId == key.orgId &&
+          ids.contains(e.compId) &&
+          e.registration.status.occupiesSlot &&
+          (e.registration.houseName ?? '').trim().isNotEmpty)
+        e.registration.houseName!.trim(),
+  };
+  return houses.toList()..sort();
+});

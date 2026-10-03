@@ -88,6 +88,8 @@ export {
 // themselves — see team_eligibility.js.
 export {
   checkTeamEligibility,
+  checkLineupEligibility,
+  onLineupChanged,
   onTeamRegistrationCreated,
 } from './team_eligibility.js';
 // A club telling a member it has picked them for a draw the club cannot enter
@@ -1126,6 +1128,53 @@ function officialRoleLabel(role) {
     default: return 'umpire';
   }
 }
+
+/**
+ * A court running late (TC-ADM-024): the people in each moved match are told
+ * their new time — and only them. `TournamentRepository.delayCourt` stamps
+ * `lateNotice` on exactly the matches it moved, so a match whose time changed
+ * for any other reason (a hand move, a rain shift) is not announced as "late".
+ */
+export const onCourtRunningLate = onDocumentUpdated(
+  'orgs/{orgId}/competitions/{compId}/fixtures/{fixtureId}',
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    const at = after?.lateNotice?.at;
+    if (!before || !after || !at) return;
+    if (before.lateNotice?.at && before.lateNotice.at.isEqual?.(at)) return;
+    if (after.status !== 'scheduled') return;
+
+    const people = [...new Set([
+      after.entrantAUid,
+      after.entrantBUid,
+      ...(after.playerUids ?? []),
+      ...(after.squadUids ?? []),
+      ...((after.officials ?? []).map((o) => o?.uid)),
+    ].filter((u) => typeof u === 'string' && u))];
+    if (people.length === 0) return;
+
+    const start = after.scheduledAt?.toDate?.();
+    const time = start
+      ? new Intl.DateTimeFormat('en-IN', {
+        timeZone: 'Asia/Kolkata', hour: 'numeric', minute: '2-digit',
+      }).format(start)
+      : null;
+    const minutes = Number(after.lateNotice.minutes) || 0;
+    const where = [after.venue, after.courtId].filter(Boolean).join(', ');
+    const { orgId, compId, fixtureId } = event.params;
+
+    await sendToUsers(people, notification({
+      id: `court_late_${fixtureId}_${at.toMillis?.() ?? Date.now()}`,
+      type: 'event_reminder',
+      title: `${after.entrantAName ?? 'Your match'} v ${after.entrantBName ?? ''}`.trim(),
+      body: `Running ${minutes} min late${where ? ` on ${where}` : ''}.`
+        + (time ? ` New start: ${time}.` : ''),
+      route: '/org/:orgId/event/:compId/watch/:fixtureId',
+      params: { orgId, compId, fixtureId },
+    }));
+  },
+);
 
 /**
  * An official being assigned to a match — the ICC-style "you have this one"
