@@ -575,6 +575,57 @@ service cloud.firestore {
             && request.resource.data[field] == resource.data[field]);
     }
 
+    // Absent-safe equality between the stored and the requested value of [field].
+    function sameValue(field) {
+      return request.resource.data.get(field, null) == resource.data.get(field, null);
+    }
+
+    // Rules branch (d), a scorer advancing an entrant into the next round, used to
+    // accept ANY entrant into an empty slot. A scorer could seat somebody in a final
+    // whose semi had not been played, and `onFixtureDecidedAdvance` then refused to
+    // overwrite the slot because it did not hold one of its feeder's entrants — the
+    // bracket stayed wrong for good. So the write must now name the match it comes
+    // from (`advancedFromFixtureId`), and that match must be finished, must feed THIS
+    // fixture, and must have produced exactly the entrant being seated, in the slot
+    // the draw says.
+    function advancesFromItsFeeder(orgId, compId, fixtureId) {
+      return request.resource.data.get('advancedFromFixtureId', '') is string
+        && request.resource.data.get('advancedFromFixtureId', '').size() > 0
+        && feederVouches(
+             get(/databases/$(database)/documents/orgs/$(orgId)/competitions/$(compId)/fixtures/$(request.resource.data.advancedFromFixtureId)).data,
+             fixtureId);
+    }
+
+    function feederVouches(src, fixtureId) {
+      return src.status in ['completed', 'walkover']
+        && src.get('isDraw', false) != true
+        && src.get('winnerEntrantId', '') is string
+        && src.get('winnerEntrantId', '') != ''
+        && (
+          (src.get('feedsWinnerToFixtureId', '') == fixtureId
+            && seatsFromFeeder(src, src.get('feedsWinnerToSlot', ''),
+                 src.winnerEntrantId == src.entrantAId))
+          || (src.get('feedsLoserToFixtureId', '') == fixtureId
+            && seatsFromFeeder(src, src.get('feedsLoserToSlot', ''),
+                 src.winnerEntrantId != src.entrantAId))
+        );
+    }
+
+    // [fromA]: the entrant being handed on is the feeder's side A.
+    function seatsFromFeeder(src, slot, fromA) {
+      return (slot == 'a' || slot == 'b')
+        && request.resource.data.get(slot == 'a' ? 'entrantAId' : 'entrantBId', '')
+             == (fromA ? src.entrantAId : src.entrantBId)
+        && request.resource.data.get(slot == 'a' ? 'entrantAUid' : 'entrantBUid', null)
+             == (fromA ? src.get('entrantAUid', null) : src.get('entrantBUid', null))
+        && request.resource.data.get(slot == 'a' ? 'entrantAName' : 'entrantBName', '')
+             == (fromA ? src.get('entrantAName', '') : src.get('entrantBName', ''))
+        // The other slot is not this write's business.
+        && sameValue(slot == 'a' ? 'entrantBId' : 'entrantAId')
+        && sameValue(slot == 'a' ? 'entrantBUid' : 'entrantAUid')
+        && sameValue(slot == 'a' ? 'entrantBName' : 'entrantAName');
+    }
+
     // Stricter than unchangedIfPresent: the field may not be CHANGED, and may not be
     // ADDED either.
     function frozen(field) {
@@ -594,6 +645,16 @@ service cloud.firestore {
     // True age check for minor-safety gates.
     function isAdult(dob) {
       return dob is timestamp && dob + duration.value(6575, 'd') <= request.time;
+    }
+
+    // Whether [userId]'s profile is known to be a child's: a birth date under 18,
+    // or the denormalised `isMinor` flag. A profile with neither (an account from
+    // before birth dates were asked for) is not presumed to be a child.
+    function profileIsMinor(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId))
+        && (get(/databases/$(database)/documents/users/$(userId)).data.get('isMinor', false) == true
+            || (get(/databases/$(database)/documents/users/$(userId)).data.get('dateOfBirth', null) is timestamp
+                && !isAdult(get(/databases/$(database)/documents/users/$(userId)).data.dateOfBirth)));
     }
 
     // A profile the caller created on behalf of a child with no device or
@@ -2392,8 +2453,23 @@ service cloud.firestore {
             // would then admit their side into the host's draws — an entry the
             // host had explicitly taken back.
             : (canManageCompetitions(resource.data.toOrgId)
-               && resource.data.status == 'pending'
-               && request.resource.data.status in ['accepted', 'declined'])
+               && (
+                 (resource.data.status == 'pending'
+                   && request.resource.data.status in ['accepted', 'declined'])
+                 // A change of mind (TC-CLUB-011): the invited club may take a
+                 // "no" back — to unanswered, or straight to yes — for a day
+                 // after giving it. Never a withdrawn invitation: that stays
+                 // the host's decision. `TournamentInvite.changeOfMindWindow`.
+                 || (resource.data.status == 'declined'
+                   && request.resource.data.status in ['pending', 'accepted']
+                   && resource.data.get('respondedAt', null) is timestamp
+                   && request.time < resource.data.respondedAt + duration.value(24, 'h'))
+               )
+               // The club's reason for saying no, carried only on a no.
+               && (!('declineReason' in request.resource.data)
+                   || (request.resource.data.status == 'declined'
+                       && request.resource.data.declineReason is string
+                       && request.resource.data.declineReason.size() <= 300)))
         );
 
       allow delete: if false;
@@ -2899,6 +2975,12 @@ service cloud.firestore {
             && unchanged('joinedAt')
             // Only the owner may create another owner.
             && (request.resource.data.role != 'owner' || canManageOrg(orgId))
+            // And never a child: an owner answers for the club's money, its
+            // members' data and its seasons, and a handed-over club would be
+            // run by a minor (or, for a managed profile, by their guardian
+            // under the child's name).
+            && (request.resource.data.role != 'owner'
+                || !profileIsMinor(memberUid))
             // Unmaking an owner NEVER happens through a direct client write —
             // not even by a fellow owner. It is the one demotion the product
             // routes through a two-thirds vote of the other owners
@@ -4093,11 +4175,14 @@ service cloud.firestore {
                    'entrantAName', 'entrantBName',
                    'entrantAUid', 'entrantBUid',
                    'playerUids',
+                   'advancedFromFixtureId',
                    'updatedAt',
                  ])
             // Additions only.
             && request.resource.data.get('playerUids', [])
                  .hasAll(resource.data.get('playerUids', []))
+            // The entrant really came through the match that feeds this slot.
+            && advancesFromItsFeeder(orgId, compId, fixtureId)
             && unchanged('compId')
             && unchanged('orgId')
             && unchanged('scorerUids')

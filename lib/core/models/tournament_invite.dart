@@ -47,6 +47,7 @@ class TournamentInvite {
     this.invitedBy,
     this.createdAt,
     this.respondedAt,
+    this.declineReason,
   });
 
   final String id;
@@ -105,6 +106,22 @@ class TournamentInvite {
   final String? invitedBy;
   final DateTime? createdAt;
   final DateTime? respondedAt;
+
+  /// Why the invited club said no, in their words — the feedback the host
+  /// needs to plan the next season (TC-CLUB-011). Null on any other answer.
+  final String? declineReason;
+
+  /// How long a club has to change a "no" — see [canChangeAnswer].
+  static const changeOfMindWindow = Duration(hours: 24);
+
+  /// A decline can be taken back for a day: a secretary who tapped "Not this
+  /// time" on the wrong season, or whose committee changed its mind that
+  /// evening, should not have to ask the host to re-send. After that the host
+  /// has planned around the answer. `firestore.rules` holds the same window.
+  bool canChangeAnswer(DateTime now) =>
+      isDeclined &&
+      respondedAt != null &&
+      now.difference(respondedAt!) < changeOfMindWindow;
 
   // --- What one invitation may carry --------------------------------------
   //
@@ -204,6 +221,7 @@ class TournamentInvite {
       invitedBy: Fs.strOrNull(d['invitedBy']),
       createdAt: Fs.dateOrNull(d['createdAt']),
       respondedAt: Fs.dateOrNull(d['respondedAt']),
+      declineReason: Fs.strOrNull(d['declineReason']),
     );
   }
 

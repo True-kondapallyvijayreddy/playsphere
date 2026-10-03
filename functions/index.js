@@ -93,6 +93,8 @@ export {
 // A club telling a member it has picked them for a draw the club cannot enter
 // them into — see nominations.js.
 export { onSeasonNominated } from './nominations.js';
+// A team's squad changing after it has entered — see team_roster.js.
+export { onTeamRosterChanged } from './team_roster.js';
 export {
   placeAuctionBid,
   openAuctionBidding,
@@ -599,6 +601,14 @@ export const onTournamentInvite = onDocumentWritten(
     if (!data || data.status !== 'pending') return;
     if (previous && previous.status === 'pending') return;
     if (!data.toOrgId) return;
+    // The invited club taking back its own decline (TC-CLUB-011) also lands on
+    // `pending`, but it is not a new invitation. A host asking again always
+    // stamps a fresh `createdAt` (firestore.rules), so an unchanged one means
+    // this is the undo.
+    if (previous && previous.createdAt && data.createdAt
+        && previous.createdAt.isEqual?.(data.createdAt)) {
+      return;
+    }
 
     const dates = tournamentDates(data);
     const sports = Array.isArray(data.sportNames)
@@ -671,6 +681,46 @@ async function entrantUids(orgId, compId, { includeWithdrawn = false } = {}) {
     .filter((d) => !skip.includes(d.data().status ?? ''))
     .map((d) => d.id);
 }
+
+/**
+ * The invited club's answer, told to whoever sent the invitation — with the
+ * club's reason when it is a no (TC-CLUB-011). The host is planning a draw
+ * around these answers; finding them only by reopening the Sent list is how a
+ * season is drawn for clubs that are not coming.
+ */
+export const onTournamentInviteAnswered = onDocumentUpdated(
+  'tournamentInvites/{inviteId}',
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (!before || !after || before.status === after.status) return;
+    if (!['accepted', 'declined'].includes(after.status)) return;
+    const to = after.invitedBy;
+    if (typeof to !== 'string' || !to) return;
+
+    const club = after.toOrgName ?? 'A club';
+    const season = after.tournamentName ?? 'your season';
+    const reason = typeof after.declineReason === 'string'
+      ? after.declineReason.trim()
+      : '';
+    await sendToUsers([to], notification({
+      id: `tournament_invite_answer_${event.params.inviteId}_${after.status}`,
+      type: 'event_reminder',
+      title: after.status === 'accepted'
+        ? `${club} is coming to ${season}`
+        : `${club} cannot come to ${season}`,
+      body: after.status === 'accepted'
+        ? 'They accepted your invitation and can now enter their sides.'
+        : (reason ? `Their reason: ${reason}` : 'They declined your invitation.')
+          .slice(0, 400),
+      route: '/org/:orgId/tournaments/:tournamentId',
+      params: {
+        orgId: after.fromOrgId ?? '',
+        tournamentId: after.tournamentId ?? '',
+      },
+    }));
+  },
+);
 
 /**
  * An event being called off.
@@ -1378,11 +1428,72 @@ export const onRegistrationPromotion = onDocumentUpdated(
       .collection('competitions').doc(compId)
       .get();
 
-    await sendToUsers([memberUid], notification({
+    // A team's registration is filed under the TEAM's id, not a person's
+    // (see `Registration.teamId`), so `memberUid` is not somebody who can be
+    // told anything — the notice went to a users/{teamId} document nobody
+    // reads. The person who entered the team is the one who needs to know.
+    const isTeam = typeof after.teamId === 'string' && after.teamId.length > 0;
+    const to = isTeam ? after.registeredByUid : memberUid;
+    if (typeof to !== 'string' || !to) return;
+
+    await sendToUsers([to], notification({
       id: `reg_promoted_${compId}_${memberUid}`,
       type: 'event_reminder',
       title: comp.get('name') ?? 'You are in',
-      body: 'A place opened up and you were next on the waitlist. You are in.',
+      body: isTeam
+        ? `A place opened up and ${after.teamName ?? 'your team'} was next on `
+          + 'the waitlist. They are in.'
+        : 'A place opened up and you were next on the waitlist. You are in.',
+      route: '/org/:orgId/event/:compId',
+      params: { orgId, compId },
+    }));
+  },
+);
+
+/**
+ * An organizer turning an entry away — rejecting an application, or
+ * withdrawing an entry that held a place — told to the person it concerns,
+ * with the organizer's reason (TC-ADM-064).
+ *
+ * Only an organizer's decision: that is what stamps a fresh `decidedAt`. A
+ * player withdrawing themselves moves the status without touching it, and the
+ * eligibility backstop (`onTeamRegistrationCreated`) sends its own notice.
+ */
+export const onRegistrationDecided = onDocumentUpdated(
+  'orgs/{orgId}/competitions/{compId}/registrations/{regId}',
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (!before || !after) return;
+    if (before.status === after.status) return;
+    if (!['rejected', 'withdrawn'].includes(after.status)) return;
+    if (!['pending', 'confirmed', 'waitlisted'].includes(before.status)) return;
+    if (after.decidedBy === 'system:eligibility') return;
+    const decidedNow = after.decidedAt
+      && !(before.decidedAt && before.decidedAt.isEqual?.(after.decidedAt));
+    if (!decidedNow) return;
+
+    const { orgId, compId, regId } = event.params;
+    const isTeam = typeof after.teamId === 'string' && after.teamId.length > 0;
+    const to = isTeam ? after.registeredByUid : regId;
+    if (typeof to !== 'string' || !to || to === after.decidedBy) return;
+
+    const comp = await db
+      .collection('orgs').doc(orgId)
+      .collection('competitions').doc(compId)
+      .get();
+    const who = isTeam ? (after.teamName ?? 'Your team') : 'Your entry';
+    const verb = after.status === 'rejected' ? 'was not accepted' : 'was withdrawn';
+    const reason = typeof after.eligibilityNote === 'string'
+      ? after.eligibilityNote.trim()
+      : '';
+
+    await sendToUsers([to], notification({
+      id: `reg_${after.status}_${compId}_${regId}`,
+      type: 'event_reminder',
+      title: comp.get('name') ?? 'Your entry',
+      body: `${who} ${verb} by the organizer.${reason ? ` Reason: ${reason}` : ''}`
+        .slice(0, 400),
       route: '/org/:orgId/event/:compId',
       params: { orgId, compId },
     }));

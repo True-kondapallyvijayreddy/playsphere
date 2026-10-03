@@ -545,13 +545,44 @@ class _OfficialTile extends ConsumerWidget {
               tooltip: 'Remove from panel',
               onPressed: () async {
                 try {
-                  await ref
-                      .read(tournamentRepositoryProvider)
-                      .removeOfficialFromRoster(
-                        orgId: orgId,
-                        tournamentId: tournamentId,
-                        uid: o.uid,
-                      );
+                  final repo = ref.read(tournamentRepositoryProvider);
+                  final assigned = await repo.upcomingAssignmentsOf(
+                    orgId: orgId,
+                    tournamentId: tournamentId,
+                    uid: o.uid,
+                  );
+                  if (!context.mounted) return;
+                  final n = assigned.length;
+                  final confirmed = await showDialog<bool>(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      title: Text('Remove ${o.name}?'),
+                      content: Text(n == 0
+                          ? 'They are not assigned to any upcoming match.'
+                          : 'They are assigned to $n upcoming '
+                              '${n == 1 ? 'match' : 'matches'}. Removing them '
+                              'takes them off ${n == 1 ? 'it' : 'those'} too, '
+                              'and ${n == 1 ? 'it' : 'they'} will need another '
+                              'official.'),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.of(ctx).pop(false),
+                          child: const Text('Keep'),
+                        ),
+                        FilledButton(
+                          onPressed: () => Navigator.of(ctx).pop(true),
+                          child:
+                              Text(n == 0 ? 'Remove' : 'Unassign and remove'),
+                        ),
+                      ],
+                    ),
+                  );
+                  if (confirmed != true) return;
+                  await repo.removeOfficialFromRoster(
+                    orgId: orgId,
+                    tournamentId: tournamentId,
+                    uid: o.uid,
+                  );
                 } catch (e) {
                   if (context.mounted) showError(context, e);
                 }

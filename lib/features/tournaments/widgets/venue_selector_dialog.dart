@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/models/tournament.dart';
 import '../../../core/models/venue.dart';
 import '../../../core/providers.dart';
+import '../../../shared/app_scaffold.dart' show errorMessage;
 
 /// Modal dialog allowing the tournament organizer to select which venues and
 /// courts are attached to this tournament for smart scheduling, or add new ones on the fly.
@@ -69,9 +70,22 @@ class _VenueSelectorDialogState extends ConsumerState<VenueSelectorDialog> {
           );
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
+      // Shown over this dialog, not as a snackbar beneath it: the refusal
+      // names the matches still booked on the venue, and the organizer has
+      // to be able to read it before deciding what to do.
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to update venues: $e')),
+        await showDialog<void>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Venue not removed'),
+            content: Text(errorMessage(e)),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
         );
       }
     } finally {

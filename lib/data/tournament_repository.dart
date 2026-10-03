@@ -35,6 +35,7 @@ import '../domain/tournament/house_roster.dart';
 import '../domain/tournament/season_blueprint.dart';
 import '../domain/tournament/season_date_shift.dart';
 import '../domain/tournament/season_name.dart';
+import '../domain/tournament/venue_retirement.dart';
 import 'competition_repository.dart';
 import 'media_uploader.dart';
 import 'org_repository.dart' show guard, guardStream;
@@ -675,15 +676,60 @@ class TournamentRepository {
           }));
 
   /// Updates the list of assigned venue IDs for this tournament.
+  ///
+  /// Adding a venue always goes through. Removing one is refused while a match
+  /// that has not been played is still booked on it — see
+  /// [venueRetirementBlock] for why, and for what the organizer is told.
   Future<void> updateTournamentVenues({
     required String orgId,
     required String tournamentId,
     required List<String> venueIds,
   }) =>
-      guard(() => Refs.tournament(orgId, tournamentId).update({
-            'venueIds': venueIds,
-            'updatedAt': FieldValue.serverTimestamp(),
-          }));
+      guard(() async {
+        final tDoc = await Refs.tournament(orgId, tournamentId).get();
+        if (!tDoc.exists) {
+          throw const NotFoundException('That tournament no longer exists.');
+        }
+        final removed = Tournament.fromDoc(tDoc)
+            .venueIds
+            .toSet()
+            .difference(venueIds.toSet());
+
+        if (removed.isNotEmpty) {
+          final events = (await Refs.competitions(orgId)
+                  .where('tournamentId', isEqualTo: tournamentId)
+                  .get())
+              .docs
+              .map(Competition.fromDoc)
+              .where((e) => !e.isCancelled)
+              .toList();
+          final fixtures = <Fixture>[
+            for (final event in events)
+              ...(await Refs.fixtures(orgId, event.id).get())
+                  .docs
+                  .map(Fixture.fromDoc),
+          ];
+          final names = <String, String>{};
+          for (final id in removed) {
+            final v = await Refs.venue(orgId, id).get();
+            if (v.exists) names[id] = Venue.fromDoc(v).name;
+          }
+          final block = venueRetirementBlock(
+            removedVenueIds: removed,
+            fixtures: fixtures,
+            eventVenueIds: {
+              for (final e in events) e.id: e.scheduleConfig.venueIds.toSet(),
+            },
+            venueNames: names,
+          );
+          if (block != null) throw ValidationException(block);
+        }
+
+        await Refs.tournament(orgId, tournamentId).update({
+          'venueIds': venueIds,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      });
 
   /// Puts a season on hold, reversibly, and says why.
   ///
@@ -1688,13 +1734,34 @@ class TournamentRepository {
   /// is the reply to a question, not a registration, and conflating the two
   /// would let one admin's tap commit a club to a draw nobody has picked a
   /// squad for.
+  /// The invited club's answer. A decline carries [reason], which the host is
+  /// told (`onTournamentInviteAnswered`).
   Future<void> respondToInvite({
     required String inviteId,
     required String status,
+    String? reason,
   }) =>
+      guard(() async {
+        final text = reason?.trim() ?? '';
+        if (status == 'declined' && text.length > 300) {
+          throw const ValidationException(
+              'Keep the reason under 300 characters.');
+        }
+        await Refs.tournamentInvite(inviteId).update({
+          'status': status,
+          'respondedAt': FieldValue.serverTimestamp(),
+          'declineReason': status == 'declined' && text.isNotEmpty
+              ? text
+              : FieldValue.delete(),
+        });
+      });
+
+  /// Takes back a decline within [TournamentInvite.changeOfMindWindow],
+  /// putting the invitation back to unanswered.
+  Future<void> undoDecline({required String inviteId}) =>
       guard(() => Refs.tournamentInvite(inviteId).update({
-            'status': status,
-            'respondedAt': FieldValue.serverTimestamp(),
+            'status': 'pending',
+            'declineReason': FieldValue.delete(),
           }));
 
   // --- Club registration requests (uninvited club asking to enter) -------
@@ -1981,14 +2048,106 @@ class TournamentRepository {
             .update(official.toUpdate());
       });
 
+  /// The matches [uid] is named on that have not been played yet — what
+  /// taking them off the panel would leave without an official.
+  ///
+  /// Asked before [removeOfficialFromRoster] so the organizer is shown the
+  /// number ("assigned to 3 matches") before they confirm, rather than finding
+  /// three unstaffed matches on Saturday morning (TC-ADM-049).
+  Future<List<Fixture>> upcomingAssignmentsOf({
+    required String orgId,
+    required String tournamentId,
+    required String uid,
+  }) =>
+      guard(() async => [
+            for (final f in await _seasonFixtures(orgId, tournamentId))
+              if (f.status.acceptsScoring &&
+                  f.officials.any((o) => o.uid == uid))
+                f,
+          ]);
+
+  /// Takes [uid] off the season's officials panel AND off every match they
+  /// were named on that has not been played.
+  ///
+  /// Deleting only the panel row (the old behaviour) left their name on the
+  /// matches: the sport still read "1/1 staffed", the auto-assigner treated
+  /// the match as covered, and the person kept scoring access to a match they
+  /// were no longer officiating. Played matches keep their official — that is
+  /// the record of who stood there.
+  ///
+  /// Refused while they are officiating a match that is under way: pulling the
+  /// umpire out of a live match is a decision for the ground, made by
+  /// replacing them on that match, not a side effect of tidying the panel.
   Future<void> removeOfficialFromRoster({
     required String orgId,
     required String tournamentId,
     required String uid,
   }) =>
-      guard(
-        () => Refs.tournamentOfficial(orgId, tournamentId, uid).delete(),
-      );
+      guard(() async {
+        final assigned = await upcomingAssignmentsOf(
+          orgId: orgId,
+          tournamentId: tournamentId,
+          uid: uid,
+        );
+        final live = assigned
+            .where((f) => f.status == FixtureStatus.live || f.lastSeq > 0)
+            .toList();
+        if (live.isNotEmpty) {
+          final f = live.first;
+          throw ValidationException(
+            'They are officiating ${f.displayNameA()} v ${f.displayNameB()}, '
+            'which is under way. Replace them on that match first, or remove '
+            'them once it has finished.',
+          );
+        }
+
+        final writes = <void Function(WriteBatch)>[
+          for (final f in assigned)
+            (batch) {
+              final remaining = f.officials.where((o) => o.uid != uid).toList();
+              batch.update(Refs.fixture(f.orgId, f.compId, f.id), {
+                'officials': MatchOfficial.listTo(remaining),
+                // Scoring access goes with the role — the same rule as
+                // `UmpireRepository.removeOfficialFromFixture`.
+                'scorerUids': f.scorerUids.where((u) => u != uid).toList(),
+                if (remaining.isEmpty &&
+                    f.readiness == MatchReadiness.officialsAssigned)
+                  'readiness': MatchReadiness.scheduled.wire,
+              });
+            },
+          // Last, so a failure part-way leaves them on the panel, where the
+          // organizer can see them and press Remove again.
+          (batch) =>
+              batch.delete(Refs.tournamentOfficial(orgId, tournamentId, uid)),
+        ];
+        const chunk = 400;
+        for (var i = 0; i < writes.length; i += chunk) {
+          final batch = Refs.db.batch();
+          for (final w in writes.skip(i).take(chunk)) {
+            w(batch);
+          }
+          await batch.commit();
+        }
+      });
+
+  /// Every fixture of the season's live (not cancelled) events.
+  Future<List<Fixture>> _seasonFixtures(
+    String orgId,
+    String tournamentId,
+  ) async {
+    final events = (await Refs.competitions(orgId)
+            .where('tournamentId', isEqualTo: tournamentId)
+            .get())
+        .docs
+        .map(Competition.fromDoc)
+        .where((e) => !e.isCancelled);
+    return [
+      for (final event in events)
+        ...(await Refs.fixtures(orgId, event.id).get())
+            .docs
+            .map(Fixture.fromDoc),
+    ];
+  }
 
   /// Runs [OfficialsAssigner] across every scheduled, not-yet-officiated
   /// fixture in the tournament, using the roster built by
@@ -2537,7 +2696,14 @@ class TournamentRepository {
     final eventSnap = await Refs.competitions(orgId)
         .where('tournamentId', isEqualTo: tournamentId)
         .get();
-    final events = eventSnap.docs.map(Competition.fromDoc).toList();
+    // A cancelled event is off the timetable for good — there is no way to
+    // reinstate one — so its matches neither hold a court nor clash with
+    // anybody. Counting them is how a cancelled Chess event kept Court 1 at
+    // 9:00 and showed up as a conflict in Schedule Health (TC-ADM-012).
+    final events = eventSnap.docs
+        .map(Competition.fromDoc)
+        .where((e) => !e.isCancelled)
+        .toList();
     if (events.isEmpty) {
       throw const ValidationException(
         'This tournament has no events yet.',

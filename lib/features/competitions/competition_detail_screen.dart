@@ -1712,30 +1712,50 @@ class _Entries extends ConsumerWidget {
                             _EntrantGlicko(uid: r.uid, sportId: c.sportId),
                           ],
                         ),
-                  subtitle: Text(
-                    [
-                      if (r.status == RegistrationStatus.waitlisted &&
-                          r.waitlistPosition != null)
-                        'Waitlist #${r.waitlistPosition}'
-                      else
-                        r.status.label,
-                      // How many are in the squad that entered. The one
-                      // number an organizer checks a team entry against, and
-                      // the one a captain needs to see is wrong before the
-                      // draw rather than at the toss.
-                      if (r.isTeamEntry)
-                        '${r.memberUids.length} '
-                            '${r.memberUids.length == 1 ? 'player' : 'players'}',
-                      // The house is the whole point of a school event —
-                      // an entries list that does not show it cannot be
-                      // checked against the roster, and the organizer has no
-                      // way to spot the student who picked the wrong one
-                      // until the house table comes out wrong.
-                      if (r.houseName != null) r.houseName!,
-                      // Marked so the open registrants can see which slots
-                      // were ever really available to them.
-                      if (r.preselected) 'picked by organizer',
-                    ].join(' · '),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        [
+                          if (r.status == RegistrationStatus.waitlisted &&
+                              r.waitlistPosition != null)
+                            'Waitlist #${r.waitlistPosition}'
+                          else
+                            r.status.label,
+                          // How many are in the squad that entered. The one
+                          // number an organizer checks a team entry against, and
+                          // the one a captain needs to see is wrong before the
+                          // draw rather than at the toss.
+                          if (r.isTeamEntry)
+                            '${r.memberUids.length} '
+                                '${r.memberUids.length == 1 ? 'player' : 'players'}',
+                          // The house is the whole point of a school event —
+                          // an entries list that does not show it cannot be
+                          // checked against the roster, and the organizer has no
+                          // way to spot the student who picked the wrong one
+                          // until the house table comes out wrong.
+                          if (r.houseName != null) r.houseName!,
+                          // Marked so the open registrants can see which slots
+                          // were ever really available to them.
+                          if (r.preselected) 'picked by organizer',
+                        ].join(' · '),
+                      ),
+                      // A squad changed after entry with somebody who
+                      // cannot play in this event (`onTeamRosterChanged`),
+                      // or an organizer's reason for turning it away.
+                      if ((r.eligibilityNote ?? '').isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Text(
+                            r.eligibilityNote!,
+                            style: TextStyle(
+                              color: r.status.occupiesSlot
+                                  ? Theme.of(context).colorScheme.error
+                                  : null,
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                   trailing: !canManage
                       ? null
@@ -1922,6 +1942,24 @@ class _Entries extends ConsumerWidget {
   ) async {
     final me = ref.read(currentUidProvider);
     if (me == null) return;
+
+    // Turning somebody away needs a reason (TC-ADM-064). It is stored on the
+    // entry and sent to them by `onRegistrationDecided`; a bare "rejected"
+    // with nothing attached reads as a fault in the app, and invites the
+    // argument at the ground it was meant to prevent.
+    String? note;
+    if (status == RegistrationStatus.rejected ||
+        status == RegistrationStatus.withdrawn) {
+      note = await _askReason(
+        context,
+        title: status == RegistrationStatus.rejected
+            ? 'Reject this entry?'
+            : 'Withdraw this entry?',
+        action: status == RegistrationStatus.rejected ? 'Reject' : 'Withdraw',
+      );
+      if (note == null) return;
+    }
+
     try {
       await ref.read(competitionRepositoryProvider).decideRegistration(
             orgId: c.orgId,
@@ -1929,10 +1967,64 @@ class _Entries extends ConsumerWidget {
             uid: uid,
             status: status,
             decidedByUid: me,
+            note: note,
           );
     } catch (e) {
       if (context.mounted) showError(context, e);
     }
+  }
+
+  /// A required, short reason. Null when the organizer backs out.
+  static Future<String?> _askReason(
+    BuildContext context, {
+    required String title,
+    required String action,
+  }) {
+    final controller = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setState) {
+          final text = controller.text.trim();
+          return AlertDialog(
+            title: Text(title),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('They will be told, with your reason.'),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: controller,
+                  autofocus: true,
+                  maxLength: 300,
+                  maxLines: 3,
+                  minLines: 1,
+                  decoration: const InputDecoration(
+                    labelText: 'Reason',
+                    hintText: 'e.g. Entries for this age group are full',
+                  ),
+                  onChanged: (_) => setState(() {}),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed:
+                    text.isEmpty ? null : () => Navigator.of(ctx).pop(text),
+                child: Text(action),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    // The controller is not disposed here: the dialog is still animating out
+    // when this future completes, and disposing it then throws.
   }
 }
 

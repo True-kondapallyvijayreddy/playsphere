@@ -164,7 +164,7 @@ export function teamProblems(category, competitionStart, members, now = new Date
 }
 
 /** The squad's profiles, in roster order. Unreadable/missing profiles fail. */
-async function loadMembers(memberUids) {
+export async function loadMembers(memberUids) {
   if (!memberUids.length) return [];
   const refs = memberUids.map((uid) => db().collection('users').doc(uid));
   const snaps = await db().getAll(...refs);
@@ -279,10 +279,10 @@ export const onTeamRegistrationCreated = onDocumentCreated(
       // Handing a confirmed slot on to the first reserve, in the same commit,
       // for the reason `_moveRegistration` does: never a window where the
       // field is a side short while somebody is queued for it.
-      // Ordered in memory rather than with `orderBy('waitlistPosition')`,
-      // which would need a (status, waitlistPosition) composite index this
-      // project does not have — and an index the trigger silently fails on is
-      // worse here than reading a short queue and sorting it.
+      // Ordered in memory rather than with `orderBy('waitlistPosition')`: the
+      // (status, waitlistPosition) index now exists, but a trigger that fails
+      // silently whenever an index is missing in some environment is worse
+      // here than reading a short queue and sorting it.
       let promote = null;
       if (before === 'confirmed') {
         const queue = await tx.get(

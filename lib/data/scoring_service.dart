@@ -2026,6 +2026,10 @@ class ScoringService {
           'entrant${slot}Uid': entrantUid,
           if (entrantUid != null)
             'playerUids': FieldValue.arrayUnion([entrantUid]),
+          // The match this entrant came through. `firestore.rules` checks
+          // that it is finished, feeds this slot and produced this entrant,
+          // which is what stops a scorer seating anybody they like.
+          'advancedFromFixtureId': fixture.id,
         },
       );
       writes++;

@@ -7,6 +7,7 @@ import '../../../core/permissions/capability.dart';
 import '../../../core/providers.dart';
 import '../../../core/router/app_router.dart';
 import '../../../domain/tournament/invitation_letter.dart';
+import '../../../shared/app_messenger.dart' show showAppMessage;
 import '../../../shared/app_scaffold.dart' show showError;
 import '../../../shared/identity.dart';
 import '../../../shared/ui_kit.dart';
@@ -61,7 +62,7 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
   Future<void> _register({required bool canAnswer}) async {
     final i = widget.invite;
     if (_busy) return;
-    if (canAnswer && i.isPending) {
+    if (canAnswer && (i.isPending || i.canChangeAnswer(DateTime.now()))) {
       setState(() => _busy = true);
       try {
         await ref
@@ -83,18 +84,37 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
 
   Future<void> _decline() async {
     if (_busy) return;
+    // The host plans next season around the answers it gets, so a "no" asks
+    // why (TC-CLUB-011). One tap on a common reason, or their own words.
+    final reason = await _askDeclineReason(context, widget.invite.fromOrgName);
+    if (reason == null || !mounted) return;
+
     setState(() => _busy = true);
+    // Held here, not read again in the Undo: the card may have rebuilt or
+    // left the list by the time somebody presses it.
+    final repo = ref.read(tournamentRepositoryProvider);
+    final inviteId = widget.invite.id;
     try {
-      await ref
-          .read(tournamentRepositoryProvider)
-          .respondToInvite(inviteId: widget.invite.id, status: 'declined');
+      await repo.respondToInvite(
+        inviteId: inviteId,
+        status: 'declined',
+        reason: reason,
+      );
       if (mounted) {
         ScaffoldMessenger.of(context)
           ..hideCurrentSnackBar()
           ..showSnackBar(
             SnackBar(
+              duration: const Duration(seconds: 8),
               content: Text(
-                'Declined. ${widget.invite.fromOrgName} will see your answer.',
+                'Declined. ${widget.invite.fromOrgName} will see your answer. '
+                'You can change it for 24 hours.',
+              ),
+              action: SnackBarAction(
+                label: 'Undo',
+                onPressed: () => repo
+                    .undoDecline(inviteId: inviteId)
+                    .catchError(showAppMessage),
               ),
             ),
           );
@@ -104,6 +124,72 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  static const _commonReasons = [
+    'The dates clash with our own fixtures',
+    'We do not have enough players',
+    'The venue is too far for us',
+    'Our members are in exams',
+  ];
+
+  static Future<String?> _askDeclineReason(BuildContext context, String host) {
+    final controller = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setState) {
+          final text = controller.text.trim();
+          return AlertDialog(
+            title: const Text('Not this time?'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Tell $host why — it helps them plan the next one.'),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      for (final r in _commonReasons)
+                        ChoiceChip(
+                          label: Text(r),
+                          selected: text == r,
+                          onSelected: (_) => setState(() {
+                            controller.text = r;
+                          }),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: controller,
+                    maxLength: 300,
+                    maxLines: 3,
+                    minLines: 1,
+                    decoration: const InputDecoration(labelText: 'Reason'),
+                    onChanged: (_) => setState(() {}),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Back'),
+              ),
+              FilledButton(
+                onPressed:
+                    text.isEmpty ? null : () => Navigator.of(ctx).pop(text),
+                child: const Text('Decline'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
   }
 
   @override
@@ -222,6 +308,19 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
               ),
             ),
 
+            if (i.isDeclined && (i.declineReason ?? '').isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                child: Text(
+                  '${i.toOrgName} declined: “${i.declineReason}”',
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontStyle: FontStyle.italic,
+                    color: Ps.ink,
+                  ),
+                ),
+              ),
+
             // ---- The answer ------------------------------------------
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
@@ -235,6 +334,13 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
                     TextButton(
                       onPressed: _busy ? null : _decline,
                       child: const Text('Not this time'),
+                    ),
+                  if (canAnswer && i.canChangeAnswer(DateTime.now()))
+                    FilledButton.icon(
+                      onPressed:
+                          _busy ? null : () => _register(canAnswer: canAnswer),
+                      icon: const Icon(Icons.undo, size: 18),
+                      label: const Text('Changed our mind — accept'),
                     ),
                   if (!i.isDeclined && !i.isWithdrawn)
                     FilledButton.icon(

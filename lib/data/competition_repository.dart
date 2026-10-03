@@ -518,13 +518,39 @@ class CompetitionRepository {
           );
         }
 
-        await Refs.competition(orgId, compId).update({
-          'status': CompetitionStatus.cancelled.wire,
-          'cancelReason': text,
-          'cancelledBy': byUid,
-          'cancelledAt': FieldValue.serverTimestamp(),
-          'updatedAt': FieldValue.serverTimestamp(),
-        });
+        // The matches nobody has started come off the timetable with the
+        // event, in the same commit as the status, so there is no moment at
+        // which the event reads cancelled while its matches still hold a
+        // court, sit on a player's "Up next", or count as a clash for
+        // another sport (TC-ADM-012). Anything played or under way stays:
+        // that is somebody's record, and the event page still shows it.
+        final unplayed = (await Refs.fixtures(orgId, compId).get())
+            .docs
+            .where((d) {
+              final f = Fixture.fromDoc(d);
+              return f.status == FixtureStatus.scheduled && f.lastSeq == 0;
+            })
+            .map((d) => d.reference)
+            .toList();
+
+        // One batch holds 500 writes; the status rides in the first.
+        const chunk = 450;
+        for (var i = 0; i == 0 || i < unplayed.length; i += chunk) {
+          final batch = Refs.db.batch();
+          if (i == 0) {
+            batch.update(Refs.competition(orgId, compId), {
+              'status': CompetitionStatus.cancelled.wire,
+              'cancelReason': text,
+              'cancelledBy': byUid,
+              'cancelledAt': FieldValue.serverTimestamp(),
+              'updatedAt': FieldValue.serverTimestamp(),
+            });
+          }
+          for (final ref in unplayed.skip(i).take(chunk)) {
+            batch.delete(ref);
+          }
+          await batch.commit();
+        }
       });
 
   /// Removes an event outright, for the case [cancelCompetition] deliberately
@@ -912,6 +938,18 @@ class CompetitionRepository {
       guard(() async {
         final ref = Refs.groupEntry(orgId, compId, groupId);
 
+        // One person, one side per event (TC-CLUB-039). Asked before saying
+        // yes rather than only at approval, so the player hears it while the
+        // leader can still find somebody else.
+        if (accept) {
+          await _refuseSecondSide(
+            orgId: orgId,
+            compId: compId,
+            uid: uid,
+            exceptGroupId: groupId,
+          );
+        }
+
         await Refs.db.runTransaction((tx) async {
           final snap = await tx.get(ref);
           if (!snap.exists) {
@@ -951,8 +989,9 @@ class CompetitionRepository {
 
   /// The organizer's decision on a complete group.
   ///
-  /// Approving writes one registration per member, in the same batch as the
-  /// status change. Separate writes would let a group be marked approved while
+  /// Approving writes one registration per member, in the same transaction
+  /// as the status change, and is refused if any member already holds a place
+  /// in this event. Separate writes would let a group be marked approved while
   /// half its members never reached the entry list — and the half that did
   /// would be holding slots the organizer never agreed to give them.
   ///
@@ -981,41 +1020,109 @@ class CompetitionRepository {
           );
         }
 
-        final batch = Refs.db.batch();
-        batch.update(Refs.groupEntry(orgId, compId, groupId), {
-          'status': approve
-              ? GroupEntryStatus.approved.wire
-              : GroupEntryStatus.rejected.wire,
-          'decidedBy': byUid,
-          if (note != null && note.trim().isNotEmpty)
-            'decisionNote': note.trim(),
-        });
-
-        if (approve) {
-          for (final uid in group.memberUids) {
-            batch.set(
-              Refs.registration(orgId, compId, uid),
-              Registration(
-                uid: uid,
-                displayName: group.nameFor(uid),
-                status: RegistrationStatus.confirmed,
-                // The group's name, so the draw shows "Ravi's XI" rather than
-                // five unrelated individuals who happen to have entered.
-                teamName: group.name,
-                // Names the approval this write belongs to — the only thing the
-                // rules let an organizer write a member's registration on.
-                groupId: groupId,
-              ).toCreate(status: RegistrationStatus.confirmed),
+        final groupRef = Refs.groupEntry(orgId, compId, groupId);
+        await Refs.db.runTransaction((tx) async {
+          // Re-read inside the transaction: two organizers approving two
+          // groups that share a player at the same moment must not both win.
+          final fresh = await tx.get(groupRef);
+          if (!fresh.exists ||
+              GroupEntry.fromDoc(fresh).status !=
+                  GroupEntryStatus.pendingApproval) {
+            throw const ValidationException(
+              'This group has already been decided.',
             );
           }
-          batch.update(Refs.competition(orgId, compId), {
-            'confirmedCount': FieldValue.increment(group.size),
-            'entrantCount': FieldValue.increment(group.size),
-          });
-        }
 
-        await batch.commit();
+          if (approve) {
+            // Approving used to `set` each member's registration blind, so a
+            // player already in another squad for this event was silently
+            // moved out of it — and counted twice (TC-CLUB-039).
+            for (final uid in group.memberUids) {
+              final existing =
+                  await tx.get(Refs.registration(orgId, compId, uid));
+              if (!existing.exists) continue;
+              final reg = Registration.fromDoc(existing);
+              if (!reg.status.occupiesSlot) continue;
+              final side = reg.teamName;
+              throw ValidationException(
+                '${group.nameFor(uid)} is already entered in this event'
+                '${side != null && side.isNotEmpty && side != group.name ? ' with $side' : ''}. '
+                'A player can be on one side only — ask ${group.name} to '
+                'replace them, or reject this group.',
+              );
+            }
+          }
+
+          tx.update(groupRef, {
+            'status': approve
+                ? GroupEntryStatus.approved.wire
+                : GroupEntryStatus.rejected.wire,
+            'decidedBy': byUid,
+            if (note != null && note.trim().isNotEmpty)
+              'decisionNote': note.trim(),
+          });
+
+          if (approve) {
+            for (final uid in group.memberUids) {
+              tx.set(
+                Refs.registration(orgId, compId, uid),
+                Registration(
+                  uid: uid,
+                  displayName: group.nameFor(uid),
+                  status: RegistrationStatus.confirmed,
+                  // The group's name, so the draw shows "Ravi's XI" rather
+                  // than five unrelated individuals who happen to have
+                  // entered.
+                  teamName: group.name,
+                  // Names the approval this write belongs to — the only thing
+                  // the rules let an organizer write a member's registration
+                  // on.
+                  groupId: groupId,
+                ).toCreate(status: RegistrationStatus.confirmed),
+              );
+            }
+            tx.update(Refs.competition(orgId, compId), {
+              'confirmedCount': FieldValue.increment(group.size),
+              'entrantCount': FieldValue.increment(group.size),
+            });
+          }
+        });
       });
+
+  /// Refuses [uid] joining a side in [compId] when they already have one:
+  /// an entry that holds a place, or a yes to another group still alive.
+  Future<void> _refuseSecondSide({
+    required String orgId,
+    required String compId,
+    required String uid,
+    required String exceptGroupId,
+  }) async {
+    final reg = await Refs.registration(orgId, compId, uid).get();
+    if (reg.exists && Registration.fromDoc(reg).status.occupiesSlot) {
+      final side = Registration.fromDoc(reg).teamName;
+      throw ValidationException(
+        'You are already entered in this event'
+        '${side != null && side.isNotEmpty ? ' with $side' : ''}. '
+        'A player can be on one side only.',
+      );
+    }
+    final others = await Refs.groupEntries(orgId, compId)
+        .where('memberUids', arrayContains: uid)
+        .get();
+    for (final doc in others.docs) {
+      if (doc.id == exceptGroupId) continue;
+      final g = GroupEntry.fromDoc(doc);
+      final alive = g.status == GroupEntryStatus.forming ||
+          g.status == GroupEntryStatus.pendingApproval ||
+          g.status == GroupEntryStatus.approved;
+      if (alive && g.acceptedUids.contains(uid)) {
+        throw ValidationException(
+          'You have already said yes to ${g.name} for this event. A player '
+          'can be on one side only — leave that group first.',
+        );
+      }
+    }
+  }
 
   // --- Registration -----------------------------------------------------
 

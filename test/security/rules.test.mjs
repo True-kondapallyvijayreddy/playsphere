@@ -835,6 +835,22 @@ describe('scoring writes', () => {
     return batch;
   };
 
+  // A finished semi-final whose winner (Alice, side A) goes to slot a of
+  // 'final' and whose loser (Chitra, side B) is out.
+  const finishedSemi = () => ({
+    ...fixture(PUBLIC_ORG, 'comp1', [SCORER], 'completed'),
+    entrantAId: 'entrant_a',
+    entrantAName: 'Alice',
+    entrantAUid: null,
+    entrantBId: 'entrant_c',
+    entrantBName: 'Chitra',
+    entrantBUid: 'uid_chitra',
+    winnerEntrantId: 'entrant_a',
+    isDraw: false,
+    feedsWinnerToFixtureId: 'final',
+    feedsWinnerToSlot: 'a',
+  });
+
   it('lets the assigned scorer append an event and advance the projection', async () => {
     const db = testEnv.authenticatedContext(SCORER).firestore();
     await assertSucceeds(scoreBatch(db, 1).commit());
@@ -864,15 +880,115 @@ describe('scoring writes', () => {
           entrantBName: 'To be decided',
         },
       );
+      await setDoc(
+        doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'semi'),
+        finishedSemi(),
+      );
     });
     const db = testEnv.authenticatedContext(SCORER).firestore();
     await assertSucceeds(
       setDoc(
         doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'final'),
-        { entrantAId: 'entrant_a', entrantAName: 'Alice' },
+        {
+          entrantAId: 'entrant_a',
+          entrantAName: 'Alice',
+          advancedFromFixtureId: 'semi',
+        },
         { merge: true },
       ),
     );
+  });
+
+  // Branch (d) used to accept any entrant into an empty slot, which let a
+  // scorer seat somebody in a final whose semi had not been played — and the
+  // server's advancement then refused to correct it. The write must now name a
+  // finished match that feeds this slot and produced exactly this entrant.
+  describe('advancement must come from the feeding match', () => {
+    const seedFinal = async (semiOverrides) => {
+      await seed(async (db) => {
+        await setDoc(
+          doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'final'),
+          {
+            ...fixture(PUBLIC_ORG, 'comp1', [SCORER], 'scheduled'),
+            entrantAId: '',
+            entrantAName: 'To be decided',
+            entrantBId: '',
+            entrantBName: 'To be decided',
+          },
+        );
+        if (semiOverrides !== null) {
+          await setDoc(
+            doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'semi'),
+            { ...finishedSemi(), ...semiOverrides },
+          );
+        }
+      });
+    };
+    const advance = (db, data) => setDoc(
+      doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'final'),
+      data,
+      { merge: true },
+    );
+
+    it('refuses a write that names no source match', async () => {
+      await seedFinal({});
+      const db = testEnv.authenticatedContext(SCORER).firestore();
+      await assertFails(advance(db, { entrantAId: 'entrant_a', entrantAName: 'Alice' }));
+    });
+
+    it('refuses seating somebody the source match did not produce', async () => {
+      await seedFinal({});
+      const db = testEnv.authenticatedContext(SCORER).firestore();
+      await assertFails(advance(db, {
+        entrantAId: 'entrant_x', entrantAName: 'Xavier', advancedFromFixtureId: 'semi',
+      }));
+    });
+
+    it('refuses advancing from a match that is not finished', async () => {
+      await seedFinal({ status: 'live' });
+      const db = testEnv.authenticatedContext(SCORER).firestore();
+      await assertFails(advance(db, {
+        entrantAId: 'entrant_a', entrantAName: 'Alice', advancedFromFixtureId: 'semi',
+      }));
+    });
+
+    it('refuses advancing from a match under protest', async () => {
+      await seedFinal({ status: 'disputed' });
+      const db = testEnv.authenticatedContext(SCORER).firestore();
+      await assertFails(advance(db, {
+        entrantAId: 'entrant_a', entrantAName: 'Alice', advancedFromFixtureId: 'semi',
+      }));
+    });
+
+    it('refuses a source match that feeds a different fixture', async () => {
+      await seedFinal({ feedsWinnerToFixtureId: 'some_other_final' });
+      const db = testEnv.authenticatedContext(SCORER).firestore();
+      await assertFails(advance(db, {
+        entrantAId: 'entrant_a', entrantAName: 'Alice', advancedFromFixtureId: 'semi',
+      }));
+    });
+
+    it('refuses the wrong slot', async () => {
+      await seedFinal({});
+      const db = testEnv.authenticatedContext(SCORER).firestore();
+      await assertFails(advance(db, {
+        entrantBId: 'entrant_a', entrantBName: 'Alice', advancedFromFixtureId: 'semi',
+      }));
+    });
+
+    it('lets the loser go where the draw sends the loser', async () => {
+      await seedFinal({
+        feedsWinnerToFixtureId: 'elsewhere',
+        feedsLoserToFixtureId: 'final',
+        feedsLoserToSlot: 'b',
+      });
+      const db = testEnv.authenticatedContext(SCORER).firestore();
+      await assertSucceeds(advance(db, {
+        entrantBId: 'entrant_c', entrantBName: 'Chitra', entrantBUid: 'uid_chitra',
+        playerUids: ['uid_chitra'],
+        advancedFromFixtureId: 'semi',
+      }));
+    });
   });
 
   it('refuses replacing an entrant already placed in the next round', async () => {
@@ -915,6 +1031,10 @@ describe('scoring writes', () => {
             playerUids: ['uid_bhavya'],
           },
         );
+        await setDoc(
+          doc(db, 'orgs', PUBLIC_ORG, 'competitions', 'comp1', 'fixtures', 'semi'),
+          { ...finishedSemi(), entrantAUid: 'uid_alice' },
+        );
       });
       const db = testEnv.authenticatedContext(SCORER).firestore();
       await assertSucceeds(
@@ -925,6 +1045,7 @@ describe('scoring writes', () => {
             entrantAName: 'Alice',
             entrantAUid: 'uid_alice',
             playerUids: ['uid_bhavya', 'uid_alice'],
+            advancedFromFixtureId: 'semi',
           },
           { merge: true },
         ),

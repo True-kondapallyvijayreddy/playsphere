@@ -29,6 +29,14 @@ const OWNER = 'uid_owner';
 const ADMIN = 'uid_admin';
 const PLAYER = 'uid_player';
 const TREASURER = 'uid_treasurer';
+const CHILD = 'uid_child';
+
+// Owners must be adults (firestore.rules reads the successor's birth date).
+const born = (yearsAgo) => {
+  const d = new Date();
+  d.setFullYear(d.getFullYear() - yearsAgo);
+  return d;
+};
 const ORG = 'org_exit';
 
 const membership = (uid, role, portfolios = [], status = 'active') => ({
@@ -73,6 +81,10 @@ beforeEach(async () => {
       doc(db, 'orgs', ORG, 'members', TREASURER),
       membership(TREASURER, 'member', ['finance']),
     );
+    await setDoc(doc(db, 'orgs', ORG, 'members', CHILD), membership(CHILD, 'member'));
+    for (const [uid, age] of [[OWNER, 40], [ADMIN, 35], [PLAYER, 25], [TREASURER, 30], [CHILD, 12]]) {
+      await setDoc(doc(db, 'users', uid), { uid, displayName: uid, dateOfBirth: born(age) });
+    }
   });
 });
 
@@ -133,6 +145,14 @@ describe('handing the club over', () => {
   it('an admin cannot hand the club to anybody', async () => {
     const db = dbAs(ADMIN);
     await assertFails(updateDoc(member(db, PLAYER), { role: 'owner', portfolios: [] }));
+  });
+
+  it('the club cannot be handed to a child', async () => {
+    const db = dbAs(OWNER);
+    const batch = writeBatch(db);
+    batch.update(member(db, CHILD), { role: 'owner', portfolios: [] });
+    batch.update(member(db, OWNER), { role: 'admin' });
+    await assertFails(batch.commit());
   });
 
   it('a member cannot take the club by promoting themselves', async () => {

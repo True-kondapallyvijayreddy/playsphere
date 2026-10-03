@@ -1052,15 +1052,29 @@ class OrgRepository {
             .where('status', isEqualTo: MembershipStatus.active.wire)
             .get();
 
-        if (!OwnerVote.canResign(owners.docs.length)) {
-          throw const ValidationException(
-            'You are this club\'s only owner. Make someone else an owner '
-            'first — a club with no owner cannot appoint one.',
-          );
-        }
-
-        await Refs.member(orgId, uid).update({
-          'role': MembershipRole.admin.wire,
+        // The count is re-read inside a transaction over every owner's own
+        // row. Two co-owners stepping down at the same moment each saw "2
+        // owners" in the query above; with only that check both went
+        // through and the club was left with nobody who could ever appoint
+        // an owner again. Here each transaction reads the other's row, so
+        // whichever commits second is retried, sees one owner, and stops.
+        await Refs.db.runTransaction((tx) async {
+          var active = 0;
+          for (final doc in owners.docs) {
+            final fresh = await tx.get(doc.reference);
+            if (!fresh.exists) continue;
+            final m = Membership.fromDoc(fresh);
+            if (m.isActive && m.role == MembershipRole.owner) active++;
+          }
+          if (!OwnerVote.canResign(active)) {
+            throw const ValidationException(
+              'You are this club\'s only owner. Make someone else an owner '
+              'first — a club with no owner cannot appoint one.',
+            );
+          }
+          tx.update(Refs.member(orgId, uid), {
+            'role': MembershipRole.admin.wire,
+          });
         });
       });
 
@@ -1220,7 +1234,20 @@ class OrgRepository {
         batch.update(Refs.member(orgId, fromUid), {
           'role': MembershipRole.admin.wire,
         });
-        await batch.commit();
+        try {
+          await batch.commit();
+        } on FirebaseException catch (e) {
+          // The rules refuse an owner who is under 18, and that is the one
+          // refusal this write can meet that the checks above cannot see —
+          // a minor's profile is closed to the club, birth date included.
+          if (e.code == 'permission-denied') {
+            throw ValidationException(
+              '${Membership.fromDoc(next).displayName} cannot take over the '
+              'club. An owner has to be 18 or over — choose an adult member.',
+            );
+          }
+          rethrow;
+        }
 
         if (!stayAsAdmin) await Refs.member(orgId, fromUid).delete();
       });
